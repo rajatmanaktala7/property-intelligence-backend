@@ -1,0 +1,8 @@
+Table,Purpose,Main User
+pi_properties,Master organized property inventory,Property team and matcher
+pi_requirements,Client or retailer requirements,Sales or leasing team
+pi_contacts,Owners brokers retailers and contacts,Internal team
+pi_sources,Tracks WhatsApp magazine newspaper photo manual and API ingestion,AI ingestion agent
+pi_media,Images videos brochures and maps,Matcher and sales team
+pi_matches,AI match score rank reasons and exclusions,Property matcher
+pi_verification_log,Audit and verification history,Admin or manager
