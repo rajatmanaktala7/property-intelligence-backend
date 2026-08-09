@@ -1,43 +1,28 @@
-# Property Intelligence Backend - FINAL FIX
+# Property Intelligence ONE-TIME Self-Initializing Fix
 
-This version fixes the Railway runtime error:
+This version fixes the exact database page error:
 
-`SyntaxError: unexpected character after line continuation character`
+`Unexpected token 'I', "Internal S..." is not valid JSON`
 
-## Replace these files completely in GitHub
+## One-time fixes included
+- Automatically creates all 7 PostgreSQL tables on application startup.
+- No manual `schema.sql` execution is required for the first deployment.
+- API errors are always returned as JSON.
+- The database page safely handles unexpected backend responses.
+- `/api/database/status` shows table counts.
+
+## Replace completely in GitHub
 - app.py
 - Dockerfile
 
-Keep your existing:
-- schema.sql
-- seed.sql
-- DATABASE_URL Railway variable
-- Postgres service
+Keep your Railway variable:
+`DATABASE_URL=${{Postgres.DATABASE_URL}}`
 
-Do not create another Railway project.
+Do not create a new Railway project, service, database, or domain.
 
-## Expected health result
-`/health`
+After deployment test:
+1. `/health`
+2. `/api/database/status`
+3. `/database`
 
-```json
-{
-  "status": "ok",
-  "service": "property-intelligence-backend",
-  "version": "1.0.1",
-  "database": "connected"
-}
-```
-
-## Visible database
-Open:
-
-`/database`
-
-Tabs:
-- Properties
-- Requirements
-- Contacts
-- Sources
-- Media
-- Matches
-- Verification
+Expected version: `2.1.0`
