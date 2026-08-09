@@ -17,7 +17,7 @@ from sqlalchemy import create_engine, text
 from google import genai
 from google.genai import types
 
-APP_VERSION = "4.0.0"
+APP_VERSION = "4.0.1"
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite")
@@ -202,9 +202,70 @@ CREATE INDEX IF NOT EXISTS idx_pi_sources_status ON pi_sources(ingestion_status)
 CREATE INDEX IF NOT EXISTS idx_pi_matches_req_score ON pi_matches(requirement_id, match_score DESC);
 '''
 
+MIGRATION_SQL = [
+    "ALTER TABLE pi_properties ADD COLUMN IF NOT EXISTS fingerprint VARCHAR(64)",
+    "ALTER TABLE pi_properties ADD COLUMN IF NOT EXISTS source_id BIGINT",
+    "ALTER TABLE pi_properties ADD COLUMN IF NOT EXISTS extraction_confidence NUMERIC(5,2)",
+    "ALTER TABLE pi_properties ADD COLUMN IF NOT EXISTS verification_status VARCHAR(50) DEFAULT 'UNVERIFIED'",
+    "ALTER TABLE pi_properties ADD COLUMN IF NOT EXISTS micro_market VARCHAR(255)",
+    "ALTER TABLE pi_properties ADD COLUMN IF NOT EXISTS address TEXT",
+    "ALTER TABLE pi_properties ADD COLUMN IF NOT EXISTS google_maps_pin TEXT",
+    "ALTER TABLE pi_properties ADD COLUMN IF NOT EXISTS area_sqft NUMERIC(14,2)",
+    "ALTER TABLE pi_properties ADD COLUMN IF NOT EXISTS asking_rent_per_sqft NUMERIC(14,2)",
+    "ALTER TABLE pi_properties ADD COLUMN IF NOT EXISTS asking_sale_price NUMERIC(18,2)",
+    "ALTER TABLE pi_properties ADD COLUMN IF NOT EXISTS ceiling_height VARCHAR(100)",
+    "ALTER TABLE pi_properties ADD COLUMN IF NOT EXISTS power_load VARCHAR(100)",
+    "ALTER TABLE pi_properties ADD COLUMN IF NOT EXISTS cam_per_sqft NUMERIC(14,2)",
+    "ALTER TABLE pi_properties ADD COLUMN IF NOT EXISTS security_deposit VARCHAR(100)",
+    "ALTER TABLE pi_properties ADD COLUMN IF NOT EXISTS frontage VARCHAR(100)",
+    "ALTER TABLE pi_properties ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW()",
+
+    "ALTER TABLE pi_requirements ADD COLUMN IF NOT EXISTS fingerprint VARCHAR(64)",
+    "ALTER TABLE pi_requirements ADD COLUMN IF NOT EXISTS source_id BIGINT",
+    "ALTER TABLE pi_requirements ADD COLUMN IF NOT EXISTS extraction_confidence NUMERIC(5,2)",
+    "ALTER TABLE pi_requirements ADD COLUMN IF NOT EXISTS requirement_type VARCHAR(100)",
+    "ALTER TABLE pi_requirements ADD COLUMN IF NOT EXISTS property_type VARCHAR(100)",
+    "ALTER TABLE pi_requirements ADD COLUMN IF NOT EXISTS budget_min NUMERIC(18,2)",
+    "ALTER TABLE pi_requirements ADD COLUMN IF NOT EXISTS budget_max NUMERIC(18,2)",
+    "ALTER TABLE pi_requirements ADD COLUMN IF NOT EXISTS floor_preference VARCHAR(100)",
+    "ALTER TABLE pi_requirements ADD COLUMN IF NOT EXISTS parking_requirement TEXT",
+    "ALTER TABLE pi_requirements ADD COLUMN IF NOT EXISTS possession_timeline VARCHAR(100)",
+    "ALTER TABLE pi_requirements ADD COLUMN IF NOT EXISTS assigned_to VARCHAR(255)",
+    "ALTER TABLE pi_requirements ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW()",
+
+    "ALTER TABLE pi_sources ADD COLUMN IF NOT EXISTS mime_type VARCHAR(150)",
+    "ALTER TABLE pi_sources ADD COLUMN IF NOT EXISTS extracted_record_type VARCHAR(50)",
+    "ALTER TABLE pi_sources ADD COLUMN IF NOT EXISTS duplicate_records INTEGER DEFAULT 0",
+    "ALTER TABLE pi_sources ADD COLUMN IF NOT EXISTS ai_provider VARCHAR(50)",
+
+    "ALTER TABLE pi_contacts ADD COLUMN IF NOT EXISTS source_id BIGINT",
+    "ALTER TABLE pi_media ADD COLUMN IF NOT EXISTS source_id BIGINT"
+]
+
+INDEX_SQL = [
+    "CREATE INDEX IF NOT EXISTS idx_pi_properties_fingerprint ON pi_properties(fingerprint)",
+    "CREATE INDEX IF NOT EXISTS idx_pi_properties_location ON pi_properties(city, location)",
+    "CREATE INDEX IF NOT EXISTS idx_pi_properties_type ON pi_properties(property_type)",
+    "CREATE INDEX IF NOT EXISTS idx_pi_requirements_fingerprint ON pi_requirements(fingerprint)",
+    "CREATE INDEX IF NOT EXISTS idx_pi_sources_status ON pi_sources(ingestion_status)",
+    "CREATE INDEX IF NOT EXISTS idx_pi_matches_req_score ON pi_matches(requirement_id, match_score DESC)"
+]
+
 def initialize_database():
+    create_statements = [
+        s.strip()
+        for s in SCHEMA_SQL.split(";")
+        if s.strip() and not s.strip().upper().startswith("CREATE INDEX")
+    ]
+
     with engine.begin() as conn:
-        for statement in [s.strip() for s in SCHEMA_SQL.split(";") if s.strip()]:
+        for statement in create_statements:
+            conn.execute(text(statement))
+
+        for statement in MIGRATION_SQL:
+            conn.execute(text(statement))
+
+        for statement in INDEX_SQL:
             conn.execute(text(statement))
 
 @app.on_event("startup")
