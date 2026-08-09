@@ -1,30 +1,43 @@
-# Property Intelligence Backend Database Starter
+# Property Intelligence Backend - FINAL FIX
 
-## Rating
-- Simplicity: 9.2/10
-- Organization: 9.6/10
-- AI-agent readiness: 9.4/10
-- Railway suitability: 9.5/10
+This version fixes the Railway runtime error:
 
-## Tables
-- pi_properties
-- pi_requirements
-- pi_contacts
-- pi_sources
-- pi_media
-- pi_matches
-- pi_verification_log
+`SyntaxError: unexpected character after line continuation character`
 
-## Visible database screen
-After deployment, open:
-`https://YOUR-DOMAIN/database`
+## Replace these files completely in GitHub
+- app.py
+- Dockerfile
 
-## Railway
-1. Use PostgreSQL.
-2. Add `DATABASE_URL=${{Postgres.DATABASE_URL}}`.
-3. Run `schema.sql` once.
-4. Optional: run `seed.sql`.
-5. Deploy this app.
-6. Open `/health`, then `/database`.
+Keep your existing:
+- schema.sql
+- seed.sql
+- DATABASE_URL Railway variable
+- Postgres service
 
-Sensitive property fields remain stored in PostgreSQL but are hidden from the standard properties API response.
+Do not create another Railway project.
+
+## Expected health result
+`/health`
+
+```json
+{
+  "status": "ok",
+  "service": "property-intelligence-backend",
+  "version": "1.0.1",
+  "database": "connected"
+}
+```
+
+## Visible database
+Open:
+
+`/database`
+
+Tabs:
+- Properties
+- Requirements
+- Contacts
+- Sources
+- Media
+- Matches
+- Verification
