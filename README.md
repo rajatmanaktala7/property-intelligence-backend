@@ -1,37 +1,42 @@
-# Property Intelligence Connected V1
+# Property Intelligence Agent - ALL LAYERS V1
 
-## Rating
-- Simplicity: 9.3/10
-- Operational usefulness: 9.7/10
-- Railway suitability: 9.5/10
-- Best next step: 10/10
+Single Railway service + single Postgres database.
 
-## Included
-- Auto-initialized PostgreSQL tables
-- Manual property entry
-- Manual requirement entry
-- CSV property import
-- WhatsApp / pasted-text source storage
-- Rule-based property matcher
-- Organized `/database` view
-- Working `/workspace` operations screen
-- Sensitive property fields stay hidden from the normal property API
+Layers included:
+1. Manual property & requirement entry
+2. WhatsApp/email/text ingestion
+3. Photo/newspaper/magazine/PDF ingestion
+4. CSV import
+5. Gemini structured extraction
+6. Normalization and source lineage
+7. Deduplication
+8. PostgreSQL organized database
+9. Verification/review layer
+10. Rule-based property matcher
+11. Generic webhook intake
+12. Searchable database UI
+13. CSV export
+14. AI job audit log
+15. Swagger API docs
 
-## Deploy
-Replace your current `app.py` and `Dockerfile` completely with these files.
-Keep:
+Railway variables:
+DATABASE_URL=${{Postgres.DATABASE_URL}}
+GEMINI_API_KEY=your real key
+GEMINI_MODEL=gemini-3.1-flash-lite
+MAX_UPLOAD_MB=25
 
-`DATABASE_URL=${{Postgres.DATABASE_URL}}`
+Replace the current repo root with:
+app.py
+Dockerfile
+requirements.txt
+.env.example
+README.md
 
-Do not create a new Railway project, Postgres database, or domain.
+Keep the SAME Railway service, Postgres and domain.
 
 After deployment:
-- `/health`
-- `/workspace`
-- `/database`
-- `/api/database/status`
-
-## Important
-The WhatsApp/text endpoint stores raw text as a source and marks it
-`READY_FOR_AI_EXTRACTION`. Gemini extraction can be connected next without
-changing the database structure.
+- /health
+- /api/status
+- /workspace
+- /database
+- /docs
