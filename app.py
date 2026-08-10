@@ -12,7 +12,7 @@ from google import genai
 from google.genai import types
 from pypdf import PdfReader, PdfWriter
 
-VERSION="5.4.0"
+VERSION="5.5.0"
 DATABASE_URL=os.getenv("DATABASE_URL","")
 GEMINI_API_KEY=os.getenv("GEMINI_API_KEY","")
 GEMINI_MODEL=os.getenv("GEMINI_MODEL","gemini-3.1-flash-lite")
@@ -97,7 +97,28 @@ MIGRATIONS=[
 "ALTER TABLE pi_sources ADD COLUMN IF NOT EXISTS mime_type VARCHAR(150)",
 "ALTER TABLE pi_sources ADD COLUMN IF NOT EXISTS extracted_record_type VARCHAR(50)",
 "ALTER TABLE pi_sources ADD COLUMN IF NOT EXISTS duplicate_records INTEGER DEFAULT 0",
-"ALTER TABLE pi_sources ADD COLUMN IF NOT EXISTS ai_provider VARCHAR(50)"
+"ALTER TABLE pi_sources ADD COLUMN IF NOT EXISTS ai_provider VARCHAR(50)",
+"ALTER TABLE pi_properties ALTER COLUMN property_name TYPE TEXT",
+"ALTER TABLE pi_properties ALTER COLUMN property_type TYPE TEXT",
+"ALTER TABLE pi_properties ALTER COLUMN city TYPE TEXT",
+"ALTER TABLE pi_properties ALTER COLUMN location TYPE TEXT",
+"ALTER TABLE pi_properties ALTER COLUMN floor TYPE TEXT",
+"ALTER TABLE pi_properties ALTER COLUMN rent_or_sale TYPE TEXT",
+"ALTER TABLE pi_properties ALTER COLUMN possession TYPE TEXT",
+"ALTER TABLE pi_properties ALTER COLUMN owner_name TYPE TEXT",
+"ALTER TABLE pi_properties ALTER COLUMN owner_contact TYPE TEXT",
+"ALTER TABLE pi_properties ALTER COLUMN broker_name TYPE TEXT",
+"ALTER TABLE pi_properties ALTER COLUMN broker_contact TYPE TEXT",
+"ALTER TABLE pi_properties ALTER COLUMN source TYPE TEXT",
+"ALTER TABLE pi_requirements ALTER COLUMN client_name TYPE TEXT",
+"ALTER TABLE pi_requirements ALTER COLUMN company_name TYPE TEXT",
+"ALTER TABLE pi_requirements ALTER COLUMN contact_phone TYPE TEXT",
+"ALTER TABLE pi_requirements ALTER COLUMN contact_email TYPE TEXT",
+"ALTER TABLE pi_requirements ALTER COLUMN requirement_type TYPE TEXT",
+"ALTER TABLE pi_requirements ALTER COLUMN property_type TYPE TEXT",
+"ALTER TABLE pi_requirements ALTER COLUMN city TYPE TEXT",
+"ALTER TABLE pi_requirements ALTER COLUMN rent_or_sale TYPE TEXT",
+"ALTER TABLE pi_requirements ALTER COLUMN source TYPE TEXT"
 ]
 
 @app.on_event("startup")
