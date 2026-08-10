@@ -12,7 +12,7 @@ from google import genai
 from google.genai import types
 from pypdf import PdfReader, PdfWriter
 
-VERSION="5.6.0"
+VERSION="6.0.0"
 DATABASE_URL=os.getenv("DATABASE_URL","")
 GEMINI_API_KEY=os.getenv("GEMINI_API_KEY","")
 GEMINI_MODEL=os.getenv("GEMINI_MODEL","gemini-3.1-flash-lite")
@@ -81,7 +81,39 @@ CREATE TABLE IF NOT EXISTS pi_ai_jobs(
  status VARCHAR(50) DEFAULT 'PENDING', provider VARCHAR(50), model VARCHAR(100),
  input_summary TEXT, output_summary TEXT, error_message TEXT,
  started_at TIMESTAMPTZ, completed_at TIMESTAMPTZ, created_at TIMESTAMPTZ DEFAULT NOW()
+
 );
+
+CREATE SEQUENCE IF NOT EXISTS pi_property_code_seq START 1;
+CREATE SEQUENCE IF NOT EXISTS pi_requirement_code_seq START 1;
+
+CREATE TABLE IF NOT EXISTS pi_extraction_batches(
+ id BIGSERIAL PRIMARY KEY,
+ source_id BIGINT NOT NULL,
+ start_page INTEGER NOT NULL,
+ end_page INTEGER NOT NULL,
+ status VARCHAR(50) DEFAULT 'PENDING',
+ attempts INTEGER DEFAULT 0,
+ records_created INTEGER DEFAULT 0,
+ duplicates INTEGER DEFAULT 0,
+ error_message TEXT,
+ updated_at TIMESTAMPTZ DEFAULT NOW(),
+ UNIQUE(source_id,start_page,end_page)
+);
+
+CREATE TABLE IF NOT EXISTS pi_message_drafts(
+ id BIGSERIAL PRIMARY KEY,
+ requirement_id TEXT NOT NULL,
+ recipient_name TEXT,
+ recipient_phone TEXT,
+ channel VARCHAR(30) DEFAULT 'WHATSAPP',
+ message_text TEXT NOT NULL,
+ status VARCHAR(50) DEFAULT 'READY_FOR_REVIEW',
+ ai_provider VARCHAR(50),
+ ai_model VARCHAR(100),
+ created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
 '''
 
 MIGRATIONS=[
@@ -214,8 +246,24 @@ class TextInput(BaseModel):
     source_name:Optional[str]=None
     text_content:str=Field(min_length=1)
 
-def make_id(prefix):
-    return prefix+"-"+datetime.utcnow().strftime("%Y%m%d")+"-"+uuid.uuid4().hex[:6].upper()
+
+class WhatsAppDraftResult(BaseModel):
+    message: str
+
+
+def make_id(prefix,conn=None):
+    sequence="pi_property_code_seq" if prefix=="PROP" else "pi_requirement_code_seq"
+    def get_value(c):
+        return c.execute(text("SELECT nextval(:seq::regclass)"),{"seq":sequence}).scalar_one()
+    # PostgreSQL does not allow a bind parameter directly in nextval(regclass) on all drivers,
+    # so use a fixed allow-listed sequence name.
+    sql=f"SELECT nextval('{sequence}')"
+    if conn is not None:
+        number=conn.execute(text(sql)).scalar_one()
+    else:
+        with engine.begin() as c:
+            number=c.execute(text(sql)).scalar_one()
+    return f"{prefix}-{datetime.utcnow().strftime('%Y%m%d')}-{int(number):010d}"
 
 def fingerprint(values, minimum_identity_fields=3):
     cleaned=[str(v or "").lower().strip() for v in values]
@@ -235,7 +283,7 @@ def save_property(data,sid=None):
     with engine.begin() as c:
         old=c.execute(text("SELECT property_id FROM pi_properties WHERE fingerprint=:f LIMIT 1"),{"f":fp}).first()
         if old:return {"status":"duplicate","property_id":old[0]}
-        pid=make_id("PROP")
+        pid=make_id("PROP",c)
         p={"pid":pid,"fp":fp,"sid":sid,**{k:d.get(k) for k in Property.model_fields}}
         sql='''INSERT INTO pi_properties(property_id,fingerprint,property_name,property_type,city,location,available_area_sqft,minimum_area_sqft,maximum_area_sqft,floor,rent_or_sale,nearby_brands,suitable_category,parking,owner_name,owner_contact,broker_name,broker_contact,remarks,source,source_id,extraction_confidence)
         VALUES(:pid,:fp,:property_name,:property_type,:city,:location,:available_area_sqft,:minimum_area_sqft,:maximum_area_sqft,:floor,:rent_or_sale,:nearby_brands,:suitable_category,:parking,:owner_name,:owner_contact,:broker_name,:broker_contact,:remarks,:source,:sid,:extraction_confidence)'''
@@ -249,7 +297,7 @@ def save_requirement(data,sid=None):
     with engine.begin() as c:
         old=c.execute(text("SELECT requirement_id FROM pi_requirements WHERE fingerprint=:f LIMIT 1"),{"f":fp}).first()
         if old:return {"status":"duplicate","requirement_id":old[0]}
-        rid=make_id("REQ")
+        rid=make_id("REQ",c)
         p={"rid":rid,"fp":fp,"sid":sid,**{k:d.get(k) for k in Requirement.model_fields}}
         sql='''INSERT INTO pi_requirements(requirement_id,fingerprint,client_name,company_name,contact_phone,contact_email,requirement_type,property_type,city,preferred_locations,minimum_area_sqft,maximum_area_sqft,rent_or_sale,nearby_brands,suitable_category,additional_points,source,source_id,extraction_confidence)
         VALUES(:rid,:fp,:client_name,:company_name,:contact_phone,:contact_email,:requirement_type,:property_type,:city,:preferred_locations,:minimum_area_sqft,:maximum_area_sqft,:rent_or_sale,:nearby_brands,:suitable_category,:additional_points,:source,:sid,:extraction_confidence)'''
@@ -368,14 +416,55 @@ def write_pdf_range(reader,start_idx,end_idx):
         writer.write(f)
     return temp_path
 
+
+def batch_state(source_id,start_page,end_page):
+    with engine.connect() as c:
+        row=c.execute(
+            text("""SELECT status,attempts,records_created,duplicates,error_message
+                    FROM pi_extraction_batches
+                    WHERE source_id=:sid AND start_page=:sp AND end_page=:ep"""),
+            {"sid":source_id,"sp":start_page,"ep":end_page}
+        ).first()
+    return dict(row._mapping) if row else None
+
+def mark_batch(source_id,start_page,end_page,status,created=0,duplicates=0,error=None):
+    with engine.begin() as c:
+        c.execute(
+            text("""INSERT INTO pi_extraction_batches(
+                        source_id,start_page,end_page,status,attempts,records_created,duplicates,error_message,updated_at
+                    ) VALUES(:sid,:sp,:ep,:status,1,:created,:dup,:err,NOW())
+                    ON CONFLICT(source_id,start_page,end_page)
+                    DO UPDATE SET
+                        status=EXCLUDED.status,
+                        attempts=pi_extraction_batches.attempts+1,
+                        records_created=EXCLUDED.records_created,
+                        duplicates=EXCLUDED.duplicates,
+                        error_message=EXCLUDED.error_message,
+                        updated_at=NOW()"""),
+            {"sid":source_id,"sp":start_page,"ep":end_page,"status":status,
+             "created":created,"dup":duplicates,"err":error}
+        )
+
 def extract_pdf_range_recursive(reader,start_idx,end_idx,total_pages,sid,jid,progress):
     """
     Extract a page range. If Gemini returns truncated/invalid JSON,
     split the range in half and retry automatically.
     """
+    start_page=start_idx+1
+    end_page=end_idx
+    previous=batch_state(sid,start_page,end_page)
+    if previous and previous.get("status")=="COMPLETED":
+        return {
+            "created":int(previous.get("records_created") or 0),
+            "duplicates":int(previous.get("duplicates") or 0),
+            "property_outputs":0,
+            "requirement_outputs":0
+        }
+
+    mark_batch(sid,start_page,end_page,"RUNNING")
     temp_path=write_pdf_range(reader,start_idx,end_idx)
     try:
-        label=f"PDF pages {start_idx+1}-{end_idx} of {total_pages}. Extract every distinct listing."
+        label=f"PDF pages {start_page}-{end_page} of {total_pages}. Extract every distinct listing."
 
         try:
             env=extract_gemini_batch(
@@ -396,9 +485,12 @@ def extract_pdf_range_recursive(reader,start_idx,end_idx,total_pages,sid,jid,pro
                 right=extract_pdf_range_recursive(
                     reader,mid,end_idx,total_pages,sid,jid,progress
                 )
+                combined_created=left["created"]+right["created"]
+                combined_duplicates=left["duplicates"]+right["duplicates"]
+                mark_batch(sid,start_page,end_page,"COMPLETED",combined_created,combined_duplicates,None)
                 return {
-                    "created":left["created"]+right["created"],
-                    "duplicates":left["duplicates"]+right["duplicates"],
+                    "created":combined_created,
+                    "duplicates":combined_duplicates,
                     "property_outputs":left["property_outputs"]+right["property_outputs"],
                     "requirement_outputs":left["requirement_outputs"]+right["requirement_outputs"]
                 }
@@ -478,12 +570,17 @@ def extract_pdf_range_recursive(reader,start_idx,end_idx,total_pages,sid,jid,pro
                 }
             )
 
+        mark_batch(sid,start_page,end_page,"COMPLETED",created,duplicates,None)
         return {
             "created":created,
             "duplicates":duplicates,
             "property_outputs":len(props),
             "requirement_outputs":len(reqs)
         }
+
+    except Exception as exc:
+        mark_batch(sid,start_page,end_page,"FAILED",0,0,str(exc))
+        raise
 
     finally:
         try:
@@ -522,20 +619,27 @@ def run_file_job(sid,jid,path,mime):
             for start in range(0,total_pages,PDF_PAGES_PER_BATCH):
                 end=min(start+PDF_PAGES_PER_BATCH,total_pages)
 
-                result=extract_pdf_range_recursive(
-                    reader,
-                    start,
-                    end,
-                    total_pages,
-                    sid,
-                    jid,
-                    progress
-                )
-
-                created+=result["created"]
-                duplicates+=result["duplicates"]
-                property_outputs+=result["property_outputs"]
-                requirement_outputs+=result["requirement_outputs"]
+                try:
+                    result=extract_pdf_range_recursive(
+                        reader,
+                        start,
+                        end,
+                        total_pages,
+                        sid,
+                        jid,
+                        progress
+                    )
+                    created+=result["created"]
+                    duplicates+=result["duplicates"]
+                    property_outputs+=result["property_outputs"]
+                    requirement_outputs+=result["requirement_outputs"]
+                except Exception as batch_error:
+                    with engine.begin() as c:
+                        c.execute(
+                            text("UPDATE pi_ai_jobs SET output_summary=:o WHERE id=:id"),
+                            {"o":f"Continuing after failed pages {start+1}-{end}: {batch_error}","id":jid}
+                        )
+                    continue
 
         else:
             env=extract_gemini_batch(
@@ -571,10 +675,18 @@ def run_file_job(sid,jid,path,mime):
             property_outputs=len(props)
             requirement_outputs=len(reqs)
 
+        with engine.connect() as c:
+            failed_batches=c.execute(
+                text("SELECT COUNT(*) FROM pi_extraction_batches WHERE source_id=:sid AND status='FAILED'"),
+                {"sid":sid}
+            ).scalar_one()
+
+        final_ingestion_status="PROCESSED_WITH_ERRORS" if failed_batches else "PROCESSED"
+
         with engine.begin() as c:
             c.execute(
                 text("""UPDATE pi_sources
-                        SET ingestion_status='PROCESSED',
+                        SET ingestion_status=:final_status,
                             processed_records=:n,
                             duplicate_records=:d,
                             ai_provider='gemini',
@@ -582,6 +694,7 @@ def run_file_job(sid,jid,path,mime):
                             processed_at=NOW()
                         WHERE id=:id"""),
                 {
+                    "final_status":final_ingestion_status,
                     "n":created,
                     "d":duplicates,
                     "m":GEMINI_MODEL,
@@ -915,14 +1028,14 @@ async def ingest_file(
         except: pass
         raise
 
-TABLES={"properties":"pi_properties","requirements":"pi_requirements","matches":"pi_matches","sources":"pi_sources","ai_jobs":"pi_ai_jobs","verification":"pi_verification_log"}
+TABLES={"properties":"pi_properties","requirements":"pi_requirements","matches":"pi_matches","whatsapp_drafts":"pi_message_drafts","sources":"pi_sources","ai_jobs":"pi_ai_jobs","verification":"pi_verification_log","batches":"pi_extraction_batches"}
 PRIVATE={"fingerprint","owner_name","owner_contact","broker_name","broker_contact","remarks","verified_by","verified_date","source"}
 
 @app.get("/api/database/{name}")
 def database(name:str,req:Request,limit:int=Query(500,ge=1,le=2000)):
     role=need_login(req)
     if name not in TABLES:raise HTTPException(404,"Unknown table")
-    if role!="admin" and name in {"sources","ai_jobs","verification"}:raise HTTPException(403,"Admin only")
+    if role!="admin" and name in {"sources","ai_jobs","verification","batches"}:raise HTTPException(403,"Admin only")
     with engine.connect() as c:
         result=c.execute(text("SELECT * FROM "+TABLES[name]+" ORDER BY id DESC LIMIT :n"),{"n":limit})
         rows=[]
@@ -935,28 +1048,192 @@ def database(name:str,req:Request,limit:int=Query(500,ge=1,le=2000)):
         rows=[{k:v for k,v in x.items() if k not in PRIVATE} for x in rows]
     return {"status":"ok","table":name,"count":len(rows),"rows":rows}
 
+
+def fallback_whatsapp_message(requirement,top_properties):
+    name=requirement.get("client_name") or requirement.get("company_name") or "there"
+    lines=[f"Hi {name}, we found a few property options matching your requirement:"]
+    for i,p in enumerate(top_properties[:3],1):
+        bits=[f"{i}. {p.get('property_name') or p.get('property_id')}"]
+        if p.get("location"): bits.append(str(p["location"]))
+        if p.get("available_area_sqft") is not None: bits.append(f"{p['available_area_sqft']} sq ft")
+        if p.get("rent_or_sale"): bits.append(str(p["rent_or_sale"]))
+        lines.append(" | ".join(bits))
+    lines.append("Please let me know which option you would like to review in detail or schedule a site visit for.")
+    return "\\n".join(lines)
+
+def generate_whatsapp_message(requirement,top_properties):
+    fallback=fallback_whatsapp_message(requirement,top_properties)
+    if not client:
+        return fallback,"fallback"
+
+    safe_properties=[]
+    for p in top_properties[:5]:
+        safe_properties.append({
+            "property_id":p.get("property_id"),
+            "property_name":p.get("property_name"),
+            "city":p.get("city"),
+            "location":p.get("location"),
+            "available_area_sqft":float(p["available_area_sqft"]) if p.get("available_area_sqft") is not None else None,
+            "floor":p.get("floor"),
+            "rent_or_sale":p.get("rent_or_sale"),
+            "nearby_brands":p.get("nearby_brands"),
+            "suitable_category":p.get("suitable_category"),
+        })
+
+    prompt=f"""Write one concise professional WhatsApp message for a real-estate client.
+Use ONLY the supplied requirement and matched property facts.
+Do not reveal owner names, broker names, owner contacts, broker contacts, internal remarks or source data.
+Do not invent rent, price, amenities or availability details.
+Mention no more than the best 3 options.
+End with a simple call to action for details or a site visit.
+
+Requirement:
+{json.dumps({k:v for k,v in requirement.items() if k not in {'fingerprint','source_id'}},default=str)}
+
+Matched properties:
+{json.dumps(safe_properties,default=str)}
+"""
+
+    try:
+        response=client.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=WhatsAppDraftResult,
+                temperature=0.3
+            )
+        )
+        parsed=WhatsAppDraftResult.model_validate(response.parsed) if getattr(response,"parsed",None) is not None else WhatsAppDraftResult.model_validate_json(response.text)
+        message=(parsed.message or "").strip()
+        return (message if message else fallback),"gemini"
+    except Exception:
+        return fallback,"fallback"
+
+def store_whatsapp_draft(requirement,message,provider):
+    with engine.begin() as c:
+        did=c.execute(
+            text("""INSERT INTO pi_message_drafts(
+                        requirement_id,recipient_name,recipient_phone,channel,message_text,status,ai_provider,ai_model
+                    ) VALUES(
+                        :rid,:name,:phone,'WHATSAPP',:msg,'READY_FOR_REVIEW',:provider,:model
+                    ) RETURNING id"""),
+            {
+                "rid":requirement.get("requirement_id"),
+                "name":requirement.get("client_name") or requirement.get("company_name"),
+                "phone":requirement.get("contact_phone"),
+                "msg":message,
+                "provider":provider,
+                "model":GEMINI_MODEL if provider=="gemini" else None
+            }
+        ).scalar_one()
+    return did
+
 @app.post("/api/match/{rid}")
 def match(rid:str,req:Request):
     need_login(req)
+
     with engine.begin() as c:
-        q=c.execute(text("SELECT * FROM pi_requirements WHERE requirement_id=:id"),{"id":rid}).first()
-        if not q:raise HTTPException(404,"Requirement not found")
-        q=dict(q._mapping);props=c.execute(text("SELECT * FROM pi_properties WHERE availability_status='Available'")).fetchall()
-        c.execute(text("DELETE FROM pi_matches WHERE requirement_id=:id"),{"id":rid})
+        qrow=c.execute(
+            text("SELECT * FROM pi_requirements WHERE requirement_id=:id"),
+            {"id":rid}
+        ).first()
+        if not qrow:
+            raise HTTPException(404,"Requirement not found")
+
+        requirement=dict(qrow._mapping)
+
+        props=c.execute(
+            text("SELECT * FROM pi_properties WHERE availability_status='Available'")
+        ).fetchall()
+
+        c.execute(
+            text("DELETE FROM pi_matches WHERE requirement_id=:id"),
+            {"id":rid}
+        )
+
         out=[]
+        property_map={}
+
         for row in props:
-            p=dict(row._mapping);score=0;reasons=[]
-            if q.get("city") and str(q["city"]).lower()==str(p.get("city") or "").lower():score+=30;reasons.append("City")
-            if q.get("preferred_locations") and str(p.get("location") or "").lower() in str(q["preferred_locations"]).lower():score+=30;reasons.append("Location")
-            a=p.get("available_area_sqft");mn=q.get("minimum_area_sqft");mx=q.get("maximum_area_sqft")
-            if a is not None and (mn is None or a>=mn) and (mx is None or a<=mx):score+=30;reasons.append("Area")
-            if q.get("rent_or_sale") and str(q["rent_or_sale"]).lower()==str(p.get("rent_or_sale") or "").lower():score+=10;reasons.append("Rent/Sale")
-            out.append({"property_id":p["property_id"],"score":score,"reasons":reasons})
+            p=dict(row._mapping)
+            property_map[p["property_id"]]=p
+            score=0
+            reasons=[]
+
+            if requirement.get("city") and str(requirement["city"]).lower()==str(p.get("city") or "").lower():
+                score+=30;reasons.append("City")
+
+            if requirement.get("preferred_locations") and str(p.get("location") or "").lower() in str(requirement["preferred_locations"]).lower():
+                score+=30;reasons.append("Location")
+
+            a=p.get("available_area_sqft")
+            mn=requirement.get("minimum_area_sqft")
+            mx=requirement.get("maximum_area_sqft")
+            if a is not None and (mn is None or a>=mn) and (mx is None or a<=mx):
+                score+=30;reasons.append("Area")
+
+            if requirement.get("rent_or_sale") and str(requirement["rent_or_sale"]).lower()==str(p.get("rent_or_sale") or "").lower():
+                score+=10;reasons.append("Rent/Sale")
+
+            out.append({
+                "property_id":p["property_id"],
+                "property_name":p.get("property_name"),
+                "city":p.get("city"),
+                "location":p.get("location"),
+                "available_area_sqft":float(a) if a is not None else None,
+                "rent_or_sale":p.get("rent_or_sale"),
+                "score":score,
+                "reasons":reasons
+            })
+
         out.sort(key=lambda x:x["score"],reverse=True)
+
         for i,x in enumerate(out,1):
-            sql="INSERT INTO pi_matches(requirement_id,property_id,match_score,rank,match_reasons,status) VALUES(:r,:p,:s,:i,CAST(:m AS JSONB),'READY_FOR_REVIEW')"
-            c.execute(text(sql),{"r":rid,"p":x["property_id"],"s":x["score"],"i":i,"m":json.dumps(x["reasons"])})
-    return {"status":"READY_FOR_REVIEW","matches":out[:50]}
+            c.execute(
+                text("""INSERT INTO pi_matches(
+                            requirement_id,property_id,match_score,rank,match_reasons,status
+                        ) VALUES(
+                            :r,:p,:s,:i,CAST(:m AS JSONB),'READY_FOR_REVIEW'
+                        )"""),
+                {
+                    "r":rid,
+                    "p":x["property_id"],
+                    "s":x["score"],
+                    "i":i,
+                    "m":json.dumps(x["reasons"])
+                }
+            )
+
+    top_property_rows=[]
+    for x in out[:5]:
+        p=property_map.get(x["property_id"])
+        if p:
+            top_property_rows.append(p)
+
+    whatsapp_message,provider=generate_whatsapp_message(
+        requirement,
+        top_property_rows
+    )
+
+    draft_id=store_whatsapp_draft(
+        requirement,
+        whatsapp_message,
+        provider
+    )
+
+    return {
+        "status":"READY_FOR_REVIEW",
+        "matches":out[:50],
+        "whatsapp_draft":{
+            "id":draft_id,
+            "status":"READY_FOR_REVIEW",
+            "recipient_name":requirement.get("client_name") or requirement.get("company_name"),
+            "recipient_phone":requirement.get("contact_phone"),
+            "message":whatsapp_message,
+            "generated_by":provider
+        }
+    }
 
 WORKSPACE='''<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Property Intelligence</title>
 <style>*{box-sizing:border-box}body{font-family:Arial;margin:0;background:#f5f7fb}header{background:#111827;color:white;padding:18px 24px;display:flex;justify-content:space-between}nav{background:white;padding:10px 20px;border-bottom:1px solid #ddd}button{padding:9px 12px;margin:3px;border:0;border-radius:7px;background:#111827;color:white}.wrap{padding:20px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(330px,1fr));gap:15px}.card{background:white;padding:16px;border:1px solid #ddd;border-radius:10px}input,select,textarea{width:100%;padding:9px;margin:5px 0}.hidden{display:none}pre{background:#f8fafc;padding:9px;max-height:250px;overflow:auto}table{border-collapse:collapse;width:100%;font-size:12px}th,td{padding:8px;border-bottom:1px solid #eee;text-align:left;white-space:nowrap}.tablebox{overflow:auto;max-height:65vh}</style></head>
@@ -986,7 +1263,7 @@ WORKSPACE='''<!doctype html><html><head><meta charset="utf-8"><meta name="viewpo
 <div class="card"><h3>Paste WhatsApp / Email</h3><input id="tn" placeholder="Source name"><textarea id="tc" rows="7"></textarea><button onclick="txt()">Process</button><pre id="to"></pre></div>
 <div class="card"><h3>Add Property</h3><input id="pc" placeholder="City"><input id="pl" placeholder="Location"><input id="pa" type="number" placeholder="Available sqft"><select id="px"><option>Rent</option><option>Sale</option></select><button onclick="prop()">Save</button><pre id="po"></pre></div>
 <div class="card"><h3>Add Requirement</h3><input id="rc" placeholder="Client"><input id="rci" placeholder="City"><input id="rl" placeholder="Preferred locations"><input id="rmin" type="number" placeholder="Min sqft"><input id="rmax" type="number" placeholder="Max sqft"><select id="rx"><option>Rent</option><option>Sale</option></select><button onclick="req()">Save</button><pre id="ro"></pre></div>
-<div class="card"><h3>Run Matcher</h3><input id="rid" placeholder="Requirement ID"><button onclick="mt()">Match</button><pre id="mo"></pre></div>
+<div class="card"><h3>Run Matcher + WhatsApp Draft</h3><input id="rid" placeholder="Requirement ID"><button onclick="mt()">Match + Create WhatsApp</button><pre id="mo"></pre><div id="waBox" style="display:none;margin-top:10px"><b>WhatsApp Draft</b><textarea id="waText" rows="9" readonly></textarea><small>READY_FOR_REVIEW. Nothing is sent automatically.</small></div></div>
 </div></section>
 <section id="db" class="hidden"><div class="card"><h3>Database</h3><div id="tabs"></div><p id="meta"></p><div class="tablebox"><table id="grid"></table></div></div></section>
 <section id="status" class="hidden"><div class="card"><button onclick="stat()">Refresh</button><pre id="so"></pre></div></section>
@@ -1104,12 +1381,12 @@ function up(){
 async function txt(){try{s("to",await jf("/api/ingest/text",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({source_type:"WHATSAPP",source_name:v("tn"),text_content:v("tc")})}))}catch(x){s("to",x)}}
 async function prop(){try{s("po",await jf("/api/properties",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({city:v("pc"),location:v("pl"),available_area_sqft:Number(v("pa"))||null,rent_or_sale:v("px")})}))}catch(x){s("po",x)}}
 async function req(){try{const d=await jf("/api/requirements",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({client_name:v("rc"),city:v("rci"),preferred_locations:v("rl"),minimum_area_sqft:Number(v("rmin"))||null,maximum_area_sqft:Number(v("rmax"))||null,rent_or_sale:v("rx")})});s("ro",d);if(d.requirement_id)e("rid").value=d.requirement_id}catch(x){s("ro",x)}}
-async function mt(){try{s("mo",await jf("/api/match/"+encodeURIComponent(v("rid")),{method:"POST"}))}catch(x){s("mo",x)}}
+async function mt(){try{const d=await jf("/api/match/"+encodeURIComponent(v("rid")),{method:"POST"});s("mo",{status:d.status,matches:d.matches});if(d.whatsapp_draft){e("waBox").style.display="block";e("waText").value=d.whatsapp_draft.message||""}}catch(x){s("mo",x)}}
 async function stat(){try{s("so",await jf("/api/status"))}catch(x){s("so",x)}}
 function render(rows,target){const g=e(target);if(!rows.length){g.innerHTML="<tr><td>No records yet</td></tr>";return}const c=Object.keys(rows[0]);g.innerHTML="<thead><tr>"+c.map(x=>"<th>"+x+"</th>").join("")+"</tr></thead><tbody>"+rows.map(r=>"<tr>"+c.map(x=>"<td>"+String(r[x]??"")+"</td>").join("")+"</tr>").join("")+"</tbody>"}
 async function load(n,target="grid",meta="meta"){try{const d=await jf("/api/database/"+n);e(meta).innerText=d.count+" records";render(d.rows,target)}catch(x){e(meta).innerText=x.detail||x.message||"Error"}}
-e("tabs").innerHTML=["properties","requirements","matches"].map(x=>'<button onclick="load(\\''+x+'\\')">'+x+"</button>").join("");
-if(ROLE=="admin")e("atabs").innerHTML=["sources","ai_jobs","verification"].map(x=>'<button onclick="load(\\''+x+'\\',\\'agrid\\',\\'ameta\\')">'+x+"</button>").join("");
+e("tabs").innerHTML=["properties","requirements","matches","whatsapp_drafts"].map(x=>'<button onclick="load(\\''+x+'\\')">'+x+"</button>").join("");
+if(ROLE=="admin")e("atabs").innerHTML=["sources","ai_jobs","verification","batches"].map(x=>'<button onclick="load(\\''+x+'\\',\\'agrid\\',\\'ameta\\')">'+x+"</button>").join("");
 </script></body></html>'''
 
 @app.get("/workspace",response_class=HTMLResponse)
