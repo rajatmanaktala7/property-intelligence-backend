@@ -1,20 +1,24 @@
-# Property Intelligence V15 - Exhaustive Scanner
-Version 7.2.0
+# Property Intelligence V16 - Searchable Database
+Version 7.3.0
 
-High-recall scanner for newspapers and magazines:
-- full-page scan
-- 3x3 overlapping tile scan
-- 12% overlap
-- PDF pages rendered at 220 DPI
-- every tile audited in pi_scan_tiles
-- failed tiles do not stop the rest of the source
-- overlap duplicates are deduplicated by the existing database layer
-- Database Edit links now use stable internal row IDs and self-heal legacy rows with missing property IDs
+Database edits and verifications update the SAME property record.
 
-Railway variables to add:
-SCAN_TILE_COLS=3
-SCAN_TILE_ROWS=3
-SCAN_TILE_OVERLAP=0.12
-PDF_RENDER_DPI=220
+New:
+- Search box in Database > Properties
+- Search box in Database > Requirements
+- Quick Find a Property box on Operations
+- Search results retain Edit button
+- Last Verified and verification_due remain visible
 
-Keep the same repo, Railway service, Postgres and domain. /health must show 7.2.0.
+Properties search:
+Property ID, property name, type, city, location, floor, rent/sale,
+nearby brands, suitable category, owner, owner contact, broker,
+broker contact and remarks.
+
+Requirements search:
+Requirement ID, client, company, phone, email, city,
+preferred location, rent/sale and status.
+
+Deploy all files into the SAME GitHub backend repository.
+Keep the SAME Railway service, PostgreSQL database, domain and variables.
+After deployment /health must show version 7.3.0.
