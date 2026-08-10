@@ -1,30 +1,25 @@
-# Property Intelligence V13 - No-JavaScript Core Workspace
-Version 7.0.0
+# Property Intelligence V14 - Direct Database Edit
+Version 7.1.0
 
-This version fixes the repeated dead-link problem by removing JavaScript as a dependency for core navigation and actions.
+## Simple team workflow
+Database > Properties > Edit > change details > Save Changes.
 
-Core pages are normal server routes:
-- /workspace
-- /database-page
-- /status-page
-- /admin-page
+Each property row now has an Edit button.
 
-Core navigation uses ordinary HTML links.
-Core actions use ordinary HTML forms:
-- Upload
-- Add Property
-- Add Requirement
-- Verify Property
-- Run Matcher + Create WhatsApp Draft
+Editing:
+- keeps the same Property ID
+- loads existing values into the form
+- saves only to the same property record
+- records changed values in the audit/verification log
+- does NOT automatically change Last Verified
 
-So even if browser JavaScript fails, the core system still works.
+Verification:
+Use Verify Today only after the property has actually been reconfirmed.
 
-Deploy all files into the SAME backend GitHub repository.
-Keep the SAME Railway service, Postgres database and public domain.
+Core pages and actions remain server-rendered, so JavaScript is not required.
 
-After deployment:
-1. /health must show version 7.0.0
-2. Open root domain
-3. Login
-4. Test Operations, Database, Status, Admin
-5. Upload one small image
+## Deployment
+Replace ALL files from this ZIP in the SAME backend GitHub repository.
+Do not create a new repository, Railway service, Postgres database or domain.
+
+After deployment, /health must show version 7.1.0.
