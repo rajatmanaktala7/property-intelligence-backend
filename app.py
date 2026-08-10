@@ -11,7 +11,7 @@ from sqlalchemy import create_engine, text
 from google import genai
 from google.genai import types
 
-VERSION="5.0.0"
+VERSION="5.1.0"
 DATABASE_URL=os.getenv("DATABASE_URL","")
 GEMINI_API_KEY=os.getenv("GEMINI_API_KEY","")
 GEMINI_MODEL=os.getenv("GEMINI_MODEL","gemini-3.1-flash-lite")
@@ -123,8 +123,15 @@ def get_role(req):
 
 def need_login(req):
     role=get_role(req)
-    if not role:raise HTTPException(401,"Login required")
+    if not role:
+        raise HTTPException(401,"Login required")
     return role
+
+def page_role_or_redirect(req):
+    role=get_role(req)
+    if role:
+        return role
+    return None
 
 @app.exception_handler(Exception)
 async def all_errors(req,exc):
@@ -268,8 +275,44 @@ def create_job(sid,kind,summary):
         return c.execute(text(sql),{"s":sid,"k":kind,"m":GEMINI_MODEL,"x":summary}).scalar_one()
 
 @app.get("/login",response_class=HTMLResponse)
-def login_page():
-    html="<html><body style='font-family:Arial;background:#f4f6f8'><form method='post' action='/login' style='max-width:420px;margin:12vh auto;background:white;padding:25px;border-radius:12px'><h2>Property Intelligence</h2><select name='role' style='width:100%;padding:10px;margin:6px 0'><option value='team'>Team</option><option value='admin'>Admin</option></select><input name='code' type='password' placeholder='Access code' style='width:100%;padding:10px;margin:6px 0'><button style='width:100%;padding:10px'>Login</button></form></body></html>"
+def login_page(req:Request):
+    existing=get_role(req)
+    if existing:
+        return RedirectResponse("/workspace",status_code=303)
+
+    html="""<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
+<title>Property Intelligence Login</title>
+<style>
+*{box-sizing:border-box}
+body{font-family:Arial,sans-serif;background:#f4f6f8;margin:0;min-height:100vh;display:grid;place-items:center;padding:18px}
+.card{width:min(430px,100%);background:white;padding:26px;border-radius:14px;border:1px solid #e5e7eb;box-shadow:0 10px 30px rgba(0,0,0,.06)}
+h2{margin:0 0 6px}.muted{color:#6b7280;margin:0 0 18px}
+label{display:block;font-size:13px;font-weight:700;margin-top:10px}
+select,input,button{width:100%;padding:13px;margin:6px 0;border-radius:9px;border:1px solid #d1d5db;font-size:16px}
+button{background:#111827;color:white;border:0;font-weight:700;cursor:pointer;margin-top:14px}
+.note{font-size:12px;color:#6b7280;margin-top:14px;line-height:1.5}
+</style>
+</head>
+<body>
+<form class="card" method="post" action="/login">
+<h2>Property Intelligence</h2>
+<p class="muted">Unified Team & Admin Workspace</p>
+<label>Login as</label>
+<select name="role">
+<option value="team">Team</option>
+<option value="admin">Admin</option>
+</select>
+<label>Access code</label>
+<input name="code" type="password" placeholder="Enter access code" autocomplete="current-password" required>
+<button type="submit">Open Workspace</button>
+<p class="note">Use this same website on Android, iPhone, Windows or Mac. Each device logs in separately.</p>
+</form>
+</body>
+</html>"""
     return HTMLResponse(html)
 
 @app.post("/login")
@@ -277,12 +320,20 @@ def login_post(role:str=Form(...),code:str=Form(...)):
     ok=(role=="team" and hmac.compare_digest(code,TEAM_CODE)) or (role=="admin" and hmac.compare_digest(code,ADMIN_CODE))
     if not ok:return HTMLResponse("Invalid code",401)
     resp=RedirectResponse("/workspace",303)
-    resp.set_cookie("pi_session",signed(role),httponly=True,secure=True,samesite="lax",max_age=43200)
+    resp.set_cookie(
+        "pi_session",
+        signed(role),
+        httponly=True,
+        secure=True,
+        samesite="lax",
+        max_age=60*60*24*7,
+        path="/"
+    )
     return resp
 
 @app.get("/logout")
 def logout():
-    resp=RedirectResponse("/login",303);resp.delete_cookie("pi_session");return resp
+    resp=RedirectResponse("/login",303);resp.delete_cookie("pi_session",path="/");return resp
 
 @app.get("/health")
 def health():
@@ -409,9 +460,16 @@ if(ROLE=="admin")e("atabs").innerHTML=["sources","ai_jobs","verification"].map(x
 
 @app.get("/workspace",response_class=HTMLResponse)
 def workspace(req:Request):
-    role=need_login(req)
+    role=page_role_or_redirect(req)
+    if not role:
+        return RedirectResponse("/login",status_code=303)
     admin_btn="<button onclick=\"sec('admin')\">Admin</button>" if role=="admin" else ""
-    return HTMLResponse(WORKSPACE.replace("__ROLE__",role.upper()).replace("__ROLELOW__",role).replace("__ADMINBTN__",admin_btn))
+    return HTMLResponse(
+        WORKSPACE
+        .replace("__ROLE__",role.upper())
+        .replace("__ROLELOW__",role)
+        .replace("__ADMINBTN__",admin_btn)
+    )
 
 @app.get("/")
 def root(req:Request):
