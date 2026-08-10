@@ -1,44 +1,13 @@
-# Property Intelligence Unified Workspace V4 - Progress Upload Fix
+# Property Intelligence Unified Workspace V5
+Version 5.4.0
 
-Version: 5.3.0
+Fixes the 2-record magazine problem by:
+- splitting PDFs into 5-page AI batches
+- extracting every listing, not summarizing the magazine
+- saving each batch immediately
+- preventing sparse records from collapsing into one false duplicate
+- showing cumulative records during processing
 
-## Changes
-- Removed raw JSON/script-style output from the file upload box.
-- Added a clean upload progress bar: 0% to 100%.
-- Shows friendly messages:
-  - Uploading...
-  - Upload completed
-  - AI is reading and organizing the file
-  - AI processing completed
-  - clear error message if extraction fails
-- Added background job status checking.
-- Improved MIME handling for Android/Windows browsers.
-- Accepts JPG, JPEG, PNG, WEBP, PDF, CSV and TXT.
-- Keeps streamed uploads from V3.
-- Default workspace upload limit remains 100 MB.
-- PDFs remain limited to 50 MB for Gemini processing.
-
-## Railway
-Replace the COMPLETE files in the existing backend repository:
-- app.py
-- Dockerfile
-- requirements.txt
-- .env.example
-- README.md
-
-Keep:
-DATABASE_URL=${{Postgres.DATABASE_URL}}
-GEMINI_API_KEY=your-real-key
-GEMINI_MODEL=gemini-3.1-flash-lite
-MAX_UPLOAD_MB=100
-ADMIN_CODE=your-admin-code
-TEAM_CODE=your-team-code
-SESSION_SECRET=your-long-random-secret
-
-No new repository, database, Railway service or domain is required.
-
-After deploy:
-- /health should show version 5.3.0
-- login
-- choose a small JPG or PNG
-- upload should show percentage progress rather than JSON
+Railway: add PDF_PAGES_PER_BATCH=5.
+Keep the same repo, Railway service, Postgres and domain.
+Replace all files from this ZIP, redeploy, verify /health says 5.4.0, then upload the magazine again.
