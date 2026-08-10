@@ -1,24 +1,26 @@
-# Property Intelligence Unified Workspace V6
-Version 5.5.0
+# Property Intelligence Unified Workspace V7
+Version 5.6.0
 
-ONE-TIME DATABASE SCHEMA FIX
+Fixes:
+Invalid JSON: EOF while parsing a string.
 
-The bulk magazine extractor is working. PostgreSQL rejected a real listing because old columns such as rent_or_sale were VARCHAR(30).
+Why:
+Dense magazine pages can produce more structured JSON than one Gemini response can safely return.
 
-Example:
-rent_or_sale = Sale, Purchase, Renting, Collaboration
+V7:
+- starts PDF extraction at 2 pages per batch
+- automatically splits a failed multi-page batch into smaller ranges
+- retries a single dense page with compact-output instructions
+- increases output allowance
+- strips possible markdown fences before JSON validation
+- preserves earlier schema, mobile, upload and bulk-extraction fixes
 
-V6 automatically widens flexible property and requirement text columns to PostgreSQL TEXT at startup.
-Existing database records are preserved. Do NOT delete Postgres.
-
-Deploy:
-Replace all files from this ZIP in the SAME backend GitHub repository.
-Keep the same Railway service, database, domain and variables.
-After deploy, /health must show 5.5.0.
-Then upload the magazine again.
-
-Keep:
+Railway:
+PDF_PAGES_PER_BATCH=2
 MAX_UPLOAD_MB=100
-PDF_PAGES_PER_BATCH=5
-GEMINI_MODEL=gemini-3.1-flash-lite
-and your existing DATABASE_URL, GEMINI_API_KEY, ADMIN_CODE, TEAM_CODE, SESSION_SECRET.
+
+Keep existing DATABASE_URL, GEMINI_API_KEY, GEMINI_MODEL, ADMIN_CODE, TEAM_CODE and SESSION_SECRET.
+
+Replace the complete files in the SAME backend repository.
+After deployment, /health must show version 5.6.0.
+Then upload the magazine again.
