@@ -11,11 +11,11 @@ from sqlalchemy import create_engine, text
 from google import genai
 from google.genai import types
 
-VERSION="5.1.0"
+VERSION="5.3.0"
 DATABASE_URL=os.getenv("DATABASE_URL","")
 GEMINI_API_KEY=os.getenv("GEMINI_API_KEY","")
 GEMINI_MODEL=os.getenv("GEMINI_MODEL","gemini-3.1-flash-lite")
-MAX_UPLOAD_MB=int(os.getenv("MAX_UPLOAD_MB","25"))
+MAX_UPLOAD_MB=int(os.getenv("MAX_UPLOAD_MB","100"))
 ADMIN_CODE=os.getenv("ADMIN_CODE","admin-change-me")
 TEAM_CODE=os.getenv("TEAM_CODE","team-change-me")
 SESSION_SECRET=os.getenv("SESSION_SECRET","change-this-secret")
@@ -340,6 +340,33 @@ def health():
     with engine.connect() as c:c.execute(text("SELECT 1"))
     return {"status":"ok","service":"property-intelligence-unified","version":VERSION,"database":"connected","gemini_configured":bool(GEMINI_API_KEY)}
 
+
+@app.get("/api/upload-status/{job_id}")
+def upload_status(job_id:int,req:Request):
+    need_login(req)
+    with engine.connect() as c:
+        row=c.execute(
+            text("""SELECT j.id,j.status,j.output_summary,j.error_message,
+                           j.created_at,j.completed_at,
+                           s.id AS source_id,s.ingestion_status,s.processed_records,
+                           s.duplicate_records,s.original_filename
+                    FROM pi_ai_jobs j
+                    LEFT JOIN pi_sources s ON s.id=j.source_id
+                    WHERE j.id=:id"""),
+            {"id":job_id}
+        ).first()
+    if not row:
+        raise HTTPException(404,"Upload job not found")
+    d={}
+    for k,v in dict(row._mapping).items():
+        if isinstance(v,(date,datetime)):
+            d[k]=v.isoformat()
+        elif isinstance(v,Decimal):
+            d[k]=float(v)
+        else:
+            d[k]=v
+    return {"status":"ok","job":d}
+
 @app.get("/api/status")
 def status(req:Request):
     need_login(req)
@@ -365,25 +392,161 @@ def ingest_text(p:TextInput,bg:BackgroundTasks,req:Request):
     return {"status":"ACCEPTED","source_id":sid,"job_id":jid}
 
 @app.post("/api/ingest/file")
-async def ingest_file(bg:BackgroundTasks,req:Request,file:UploadFile=File(...),source_type:str=Query("DOCUMENT"),source_name:Optional[str]=Query(None)):
+async def ingest_file(
+    bg:BackgroundTasks,
+    req:Request,
+    file:UploadFile=File(...),
+    source_type:str=Query("DOCUMENT"),
+    source_name:Optional[str]=Query(None)
+):
     need_login(req)
-    data=await file.read()
-    if len(data)>MAX_UPLOAD_MB*1024*1024:raise HTTPException(413,"File too large")
-    sid=source_row(source_type.upper(),source_name or file.filename,file.filename,file.content_type)
-    if (file.filename or "").lower().endswith(".csv"):
-        reader=csv.DictReader(io.StringIO(data.decode("utf-8-sig",errors="replace")));n=0
-        for row in reader:
-            item={"property_name":row.get("Property name") or row.get("Property Name"),"property_type":row.get("Property type") or "NA","city":row.get("City") or "NA","location":row.get("Location") or "NA","available_area_sqft":row.get("Available area") or None,"floor":row.get("Floor"),"rent_or_sale":row.get("Rent/Sale"),"nearby_brands":row.get("Nearby brand"),"suitable_category":row.get("Suitable category"),"parking":row.get("Parking"),"source":"CSV:"+str(file.filename)}
-            try:item["available_area_sqft"]=float(str(item["available_area_sqft"]).replace(",","")) if item["available_area_sqft"] else None
-            except:item["available_area_sqft"]=None
-            if save_property(item,sid)["status"]=="created":n+=1
-        with engine.begin() as c:c.execute(text("UPDATE pi_sources SET ingestion_status='PROCESSED',processed_records=:n,processed_at=NOW() WHERE id=:id"),{"n":n,"id":sid})
-        return {"status":"PROCESSED","source_id":sid,"inserted":n}
-    fd,path=tempfile.mkstemp(suffix=os.path.splitext(file.filename or "")[1] or ".bin");os.close(fd)
-    with open(path,"wb") as f:f.write(data)
-    jid=create_job(sid,"FILE_EXTRACTION",file.filename or source_type)
-    bg.add_task(run_file_job,sid,jid,path,file.content_type or "application/octet-stream")
-    return {"status":"ACCEPTED","source_id":sid,"job_id":jid,"message":"Upload received; AI processing continues in background"}
+
+    filename=file.filename or "upload.bin"
+    ext=os.path.splitext(filename)[1].lower()
+    mime=file.content_type or "application/octet-stream"
+
+    # Browser/device MIME types can be missing or inconsistent.
+    mime_map={
+        ".jpg":"image/jpeg",
+        ".jpeg":"image/jpeg",
+        ".png":"image/png",
+        ".webp":"image/webp",
+        ".pdf":"application/pdf",
+        ".csv":"text/csv",
+        ".txt":"text/plain"
+    }
+    if mime in {"application/octet-stream",""} or not mime:
+        mime=mime_map.get(ext,"application/octet-stream")
+
+    suffix=ext or ".bin"
+
+    # Gemini PDF processing limit is 50 MB.
+    pdf_limit=50*1024*1024
+    app_limit=MAX_UPLOAD_MB*1024*1024
+
+    fd,path=tempfile.mkstemp(suffix=suffix)
+    os.close(fd)
+
+    total=0
+    try:
+        with open(path,"wb") as out:
+            while True:
+                chunk=await file.read(1024*1024)  # 1 MB chunks
+                if not chunk:
+                    break
+                total += len(chunk)
+
+                if total > app_limit:
+                    raise HTTPException(
+                        413,
+                        f"File too large. Maximum workspace upload is {MAX_UPLOAD_MB} MB."
+                    )
+
+                if (mime=="application/pdf" or filename.lower().endswith(".pdf")) and total > pdf_limit:
+                    raise HTTPException(
+                        413,
+                        "PDF too large for Gemini processing. Maximum PDF size is 50 MB. Please split/compress the PDF."
+                    )
+
+                out.write(chunk)
+
+        sid=source_row(
+            source_type.upper(),
+            source_name or filename,
+            filename,
+            mime
+        )
+
+        # CSV is processed directly after streamed upload.
+        if filename.lower().endswith(".csv"):
+            inserted=0
+            duplicates=0
+            errors=[]
+
+            with open(path,"r",encoding="utf-8-sig",errors="replace",newline="") as csvfile:
+                reader=csv.DictReader(csvfile)
+                for line,row in enumerate(reader,start=2):
+                    item={
+                        "property_name":row.get("Property name") or row.get("Property Name"),
+                        "property_type":row.get("Property type") or row.get("Property Type") or "NA",
+                        "city":row.get("City") or "NA",
+                        "location":row.get("Location") or "NA",
+                        "available_area_sqft":row.get("Available area") or row.get("Available Area") or None,
+                        "minimum_area_sqft":row.get("Minimum area") or row.get("Minimum Area") or None,
+                        "maximum_area_sqft":row.get("Maximum area") or row.get("Maximum Area") or None,
+                        "floor":row.get("Floor"),
+                        "rent_or_sale":row.get("Rent/Sale"),
+                        "nearby_brands":row.get("Nearby brand") or row.get("Nearby brands"),
+                        "suitable_category":row.get("Suitable category"),
+                        "parking":row.get("Parking"),
+                        "owner_name":row.get("Owner name"),
+                        "owner_contact":row.get("Owner contact"),
+                        "broker_name":row.get("Broker name"),
+                        "broker_contact":row.get("Broker contact"),
+                        "remarks":row.get("Remarks"),
+                        "source":"CSV:"+filename
+                    }
+
+                    for numkey in ["available_area_sqft","minimum_area_sqft","maximum_area_sqft"]:
+                        try:
+                            item[numkey]=float(str(item[numkey]).replace(",","")) if item[numkey] not in (None,"") else None
+                        except Exception:
+                            item[numkey]=None
+
+                    try:
+                        result=save_property(item,sid)
+                        if result["status"]=="created":
+                            inserted+=1
+                        else:
+                            duplicates+=1
+                    except Exception as exc:
+                        errors.append({"row":line,"error":str(exc)})
+
+            with engine.begin() as c:
+                c.execute(
+                    text("""UPDATE pi_sources
+                            SET ingestion_status=:status,
+                                processed_records=:n,
+                                duplicate_records=:d,
+                                error_message=:e,
+                                processed_at=NOW()
+                            WHERE id=:id"""),
+                    {
+                        "status":"PROCESSED" if not errors else "PROCESSED_WITH_ERRORS",
+                        "n":inserted,
+                        "d":duplicates,
+                        "e":json.dumps(errors[:20]) if errors else None,
+                        "id":sid
+                    }
+                )
+
+            try: os.unlink(path)
+            except: pass
+
+            return {
+                "status":"PROCESSED" if not errors else "PROCESSED_WITH_ERRORS",
+                "source_id":sid,
+                "inserted":inserted,
+                "duplicates":duplicates,
+                "errors":errors[:20],
+                "file_size_mb":round(total/1024/1024,2)
+            }
+
+        jid=create_job(sid,"FILE_EXTRACTION",filename)
+        bg.add_task(run_file_job,sid,jid,path,mime)
+
+        return {
+            "status":"ACCEPTED",
+            "source_id":sid,
+            "job_id":jid,
+            "file_size_mb":round(total/1024/1024,2),
+            "message":"Upload received. AI processing continues in background."
+        }
+
+    except Exception:
+        try: os.unlink(path)
+        except: pass
+        raise
 
 TABLES={"properties":"pi_properties","requirements":"pi_requirements","matches":"pi_matches","sources":"pi_sources","ai_jobs":"pi_ai_jobs","verification":"pi_verification_log"}
 PRIVATE={"fingerprint","owner_name","owner_contact","broker_name","broker_contact","remarks","verified_by","verified_date","source"}
@@ -433,7 +596,26 @@ WORKSPACE='''<!doctype html><html><head><meta charset="utf-8"><meta name="viewpo
 <body><header><div><b>Property Intelligence Unified Workspace</b><br><small>Team + Admin on one domain</small></div><div>__ROLE__ | <a href="/logout" style="color:white">Logout</a></div></header>
 <nav><button onclick="sec('ops')">Operations</button><button onclick="sec('db')">Database</button><button onclick="sec('status')">Status</button>__ADMINBTN__</nav>
 <div class="wrap"><section id="ops"><div class="grid">
-<div class="card"><h3>Upload Photo / Magazine / PDF / CSV</h3><input id="sn" placeholder="Source name"><select id="st"><option>MAGAZINE</option><option>NEWSPAPER</option><option>PHOTO</option><option>PDF</option><option>CSV</option></select><input id="fu" type="file"><button onclick="up()">Upload</button><pre id="uo"></pre></div>
+<div class="card">
+<h3>Upload Photo / Magazine / PDF / CSV</h3>
+<input id="sn" placeholder="Source name">
+<select id="st">
+<option>MAGAZINE</option><option>NEWSPAPER</option><option>PHOTO</option>
+<option>PDF</option><option>CSV</option>
+</select>
+<input id="fu" type="file" accept=".jpg,.jpeg,.png,.webp,.pdf,.csv,.txt">
+<button id="uploadBtn" onclick="up()">Upload</button>
+<div id="progressWrap" style="display:none;margin-top:14px">
+  <div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:6px">
+    <span id="progressText">Preparing upload...</span>
+    <b id="progressPct">0%</b>
+  </div>
+  <div style="height:14px;background:#e5e7eb;border-radius:999px;overflow:hidden">
+    <div id="progressBar" style="height:100%;width:0%;background:#111827;transition:width .15s"></div>
+  </div>
+</div>
+<div id="uploadResult" style="margin-top:12px;font-size:14px"></div>
+</div>
 <div class="card"><h3>Paste WhatsApp / Email</h3><input id="tn" placeholder="Source name"><textarea id="tc" rows="7"></textarea><button onclick="txt()">Process</button><pre id="to"></pre></div>
 <div class="card"><h3>Add Property</h3><input id="pc" placeholder="City"><input id="pl" placeholder="Location"><input id="pa" type="number" placeholder="Available sqft"><select id="px"><option>Rent</option><option>Sale</option></select><button onclick="prop()">Save</button><pre id="po"></pre></div>
 <div class="card"><h3>Add Requirement</h3><input id="rc" placeholder="Client"><input id="rci" placeholder="City"><input id="rl" placeholder="Preferred locations"><input id="rmin" type="number" placeholder="Min sqft"><input id="rmax" type="number" placeholder="Max sqft"><select id="rx"><option>Rent</option><option>Sale</option></select><button onclick="req()">Save</button><pre id="ro"></pre></div>
@@ -446,7 +628,112 @@ WORKSPACE='''<!doctype html><html><head><meta charset="utf-8"><meta name="viewpo
 const ROLE="__ROLELOW__";const e=i=>document.getElementById(i),v=i=>e(i).value,s=(i,d)=>e(i).textContent=JSON.stringify(d,null,2);
 async function jf(u,o={}){const r=await fetch(u,o),t=await r.text();let d;try{d=JSON.parse(t)}catch{x={};d={message:t}}if(!r.ok)throw d;return d}
 function sec(i){["ops","db","status","admin"].forEach(x=>e(x).classList.add("hidden"));e(i).classList.remove("hidden");if(i=="db")load("properties","grid","meta");if(i=="status")stat()}
-async function up(){try{const f=e("fu").files[0];if(!f)return s("uo",{error:"Choose file"});const fd=new FormData();fd.append("file",f);const q=new URLSearchParams({source_type:v("st"),source_name:v("sn")});s("uo",{status:"uploading"});s("uo",await jf("/api/ingest/file?"+q,{method:"POST",body:fd}))}catch(x){s("uo",x)}}
+function setProgress(pct,text){
+  e("progressWrap").style.display="block";
+  e("progressPct").innerText=pct+"%";
+  e("progressBar").style.width=pct+"%";
+  if(text)e("progressText").innerText=text;
+}
+
+function showUploadMessage(text,ok=true){
+  e("uploadResult").innerHTML='<div style="padding:10px;border-radius:8px;background:'+
+    (ok?'#ecfdf5;color:#065f46':'#fef2f2;color:#991b1b')+'">'+text+'</div>';
+}
+
+function watchJob(jobId){
+  let tries=0;
+  const timer=setInterval(async()=>{
+    tries++;
+    try{
+      const d=await jf("/api/upload-status/"+jobId);
+      const j=d.job||{};
+      if(j.status==="COMPLETED"){
+        clearInterval(timer);
+        setProgress(100,"AI processing completed");
+        showUploadMessage("✓ Upload and AI extraction completed successfully. Processed records: "+
+          (j.processed_records??0)+(j.duplicate_records?(" | Duplicates: "+j.duplicate_records):""));
+      }else if(j.status==="FAILED"){
+        clearInterval(timer);
+        setProgress(100,"Upload completed, AI processing failed");
+        showUploadMessage("Upload succeeded, but AI extraction failed: "+(j.error_message||"Unknown error"),false);
+      }else{
+        e("progressText").innerText="Uploaded. AI is reading and organizing the file...";
+      }
+    }catch(err){}
+    if(tries>120){
+      clearInterval(timer);
+      showUploadMessage("Upload completed. AI processing is continuing in the background.");
+    }
+  },2500);
+}
+
+function up(){
+  const file=e("fu").files[0];
+  if(!file){
+    showUploadMessage("Please choose a file first.",false);
+    return;
+  }
+
+  const fd=new FormData();
+  fd.append("file",file);
+
+  const q=new URLSearchParams({
+    source_type:v("st"),
+    source_name:v("sn")
+  });
+
+  e("uploadBtn").disabled=true;
+  e("uploadResult").innerHTML="";
+  setProgress(0,"Starting upload...");
+
+  const xhr=new XMLHttpRequest();
+  xhr.open("POST","/api/ingest/file?"+q.toString(),true);
+
+  xhr.upload.onprogress=function(ev){
+    if(ev.lengthComputable){
+      const pct=Math.min(99,Math.round((ev.loaded/ev.total)*100));
+      setProgress(pct,"Uploading "+file.name);
+    }
+  };
+
+  xhr.onerror=function(){
+    e("uploadBtn").disabled=false;
+    showUploadMessage("Upload failed because the network connection was interrupted. Please try again.",false);
+  };
+
+  xhr.onload=function(){
+    e("uploadBtn").disabled=false;
+
+    let data={};
+    try{data=JSON.parse(xhr.responseText||"{}")}catch(err){
+      data={detail:xhr.responseText||"Unknown response"};
+    }
+
+    if(xhr.status<200 || xhr.status>=300){
+      setProgress(0,"Upload failed");
+      showUploadMessage(data.detail||data.message||"Upload failed.",false);
+      return;
+    }
+
+    setProgress(100,"Upload completed");
+
+    if(data.status==="PROCESSED"){
+      showUploadMessage("✓ File uploaded and imported successfully. Records added: "+(data.inserted??0));
+      return;
+    }
+
+    if(data.status==="ACCEPTED"){
+      showUploadMessage("✓ File uploaded successfully. AI is now reading and organizing it.");
+      if(data.job_id)watchJob(data.job_id);
+      return;
+    }
+
+    showUploadMessage("✓ Upload completed successfully.");
+  };
+
+  xhr.send(fd);
+}
+
 async function txt(){try{s("to",await jf("/api/ingest/text",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({source_type:"WHATSAPP",source_name:v("tn"),text_content:v("tc")})}))}catch(x){s("to",x)}}
 async function prop(){try{s("po",await jf("/api/properties",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({city:v("pc"),location:v("pl"),available_area_sqft:Number(v("pa"))||null,rent_or_sale:v("px")})}))}catch(x){s("po",x)}}
 async function req(){try{const d=await jf("/api/requirements",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({client_name:v("rc"),city:v("rci"),preferred_locations:v("rl"),minimum_area_sqft:Number(v("rmin"))||null,maximum_area_sqft:Number(v("rmax"))||null,rent_or_sale:v("rx")})});s("ro",d);if(d.requirement_id)e("rid").value=d.requirement_id}catch(x){s("ro",x)}}
