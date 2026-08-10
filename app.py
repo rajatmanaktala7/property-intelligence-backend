@@ -12,7 +12,7 @@ from google import genai
 from google.genai import types
 from pypdf import PdfReader, PdfWriter
 
-VERSION="6.3.0"
+VERSION="6.4.0"
 DATABASE_URL=os.getenv("DATABASE_URL","")
 GEMINI_API_KEY=os.getenv("GEMINI_API_KEY","")
 GEMINI_MODEL=os.getenv("GEMINI_MODEL","gemini-3.1-flash-lite")
@@ -1559,7 +1559,13 @@ def match(rid:str,req:Request):
 WORKSPACE='''<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Property Intelligence</title>
 <style>*{box-sizing:border-box}body{font-family:Arial;margin:0;background:#f5f7fb}header{background:#111827;color:white;padding:18px 24px;display:flex;justify-content:space-between}nav{background:white;padding:10px 20px;border-bottom:1px solid #ddd}button{padding:9px 12px;margin:3px;border:0;border-radius:7px;background:#111827;color:white}.wrap{padding:20px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(330px,1fr));gap:15px}.card{background:white;padding:16px;border:1px solid #ddd;border-radius:10px}input,select,textarea{width:100%;padding:9px;margin:5px 0}.hidden{display:none}pre{background:#f8fafc;padding:9px;max-height:250px;overflow:auto}table{border-collapse:collapse;width:100%;font-size:12px}th,td{padding:8px;border-bottom:1px solid #eee;text-align:left;white-space:nowrap}.tablebox{overflow:auto;max-height:65vh}</style></head>
 <body><header><div><b>Property Intelligence Unified Workspace</b><br><small>Team + Admin on one domain</small></div><div>__ROLE__ | <a href="/logout" style="color:white">Logout</a></div></header>
-<nav><button onclick="sec('ops')">Operations</button><button onclick="sec('db')">Database</button><button onclick="sec('status')">Status</button>__ADMINBTN__</nav>
+<nav>
+<button type="button" onclick="sec('ops')">Operations</button>
+<button type="button" onclick="sec('db')">Database</button>
+<button type="button" onclick="sec('status')">Status</button>
+__ADMINBTN__
+</nav>
+<div id="appErrorBanner" style="display:none;margin:12px 20px 0;padding:10px;border-radius:8px;background:#fef2f2;color:#991b1b;border:1px solid #fecaca"></div>
 <div class="wrap"><section id="ops"><div class="grid">
 <div class="card">
 <h3>Upload Photo / Magazine / PDF / CSV</h3>
@@ -1642,9 +1648,34 @@ WORKSPACE='''<!doctype html><html><head><meta charset="utf-8"><meta name="viewpo
 <section id="status" class="hidden"><div class="card"><button onclick="stat()">Refresh</button><pre id="so"></pre></div></section>
 <section id="admin" class="hidden"><div class="card"><h3>Admin</h3><div id="atabs"></div><p id="ameta"></p><div class="tablebox"><table id="agrid"></table></div></div></section></div>
 <script>
+window.addEventListener("error",function(ev){
+  const banner=document.getElementById("appErrorBanner");
+  if(banner){
+    banner.style.display="block";
+    banner.textContent="Workspace error: "+(ev.message||"Unknown browser error");
+  }
+});
 const ROLE="__ROLELOW__";const e=i=>document.getElementById(i),v=i=>e(i).value,s=(i,d)=>e(i).textContent=JSON.stringify(d,null,2);
-async function jf(u,o={}){const r=await fetch(u,o),t=await r.text();let d;try{d=JSON.parse(t)}catch{x={};d={message:t}}if(!r.ok)throw d;return d}
-function sec(i){["ops","db","status","admin"].forEach(x=>e(x).classList.add("hidden"));e(i).classList.remove("hidden");if(i=="db")load("properties","grid","meta");if(i=="status")stat()}
+async function jf(u,o={}){
+  const r=await fetch(u,o);
+  const t=await r.text();
+  let d;
+  try{ d=JSON.parse(t); }
+  catch(err){ d={message:t||("HTTP "+r.status)}; }
+  if(!r.ok)throw d;
+  return d;
+}
+function sec(i){
+  ["ops","db","status","admin"].forEach(x=>{
+    const el=e(x);
+    if(el)el.classList.add("hidden");
+  });
+  const target=e(i);
+  if(!target)return;
+  target.classList.remove("hidden");
+  if(i==="db")load("properties","grid","meta");
+  if(i==="status")stat();
+}
 function setProgress(pct,text){
   e("progressWrap").style.display="block";
   e("progressPct").innerText=pct+"%";
@@ -1977,8 +2008,22 @@ async function mt(){try{const d=await jf("/api/match/"+encodeURIComponent(v("rid
 async function stat(){try{s("so",await jf("/api/status"))}catch(x){s("so",x)}}
 function render(rows,target){const g=e(target);if(!rows.length){g.innerHTML="<tr><td>No records yet</td></tr>";return}const c=Object.keys(rows[0]);g.innerHTML="<thead><tr>"+c.map(x=>"<th>"+x+"</th>").join("")+"</tr></thead><tbody>"+rows.map(r=>"<tr>"+c.map(x=>{let val=String(r[x]??"");if(x==="last_verified"){const due=!!r.verification_due;return "<td><span style=\"padding:5px 8px;border-radius:999px;font-weight:700;background:"+(due?"#fef2f2;color:#991b1b":"#ecfdf5;color:#065f46")+"\">"+val+"</span></td>"}return "<td>"+val+"</td>"}).join("")+"</tr>").join("")+"</tbody>"}
 async function load(n,target="grid",meta="meta"){try{const d=await jf("/api/database/"+n);e(meta).innerText=d.count+" records";render(d.rows,target)}catch(x){e(meta).innerText=x.detail||x.message||"Error"}}
-e("tabs").innerHTML=["properties","requirements","matches","whatsapp_drafts"].map(x=>'<button onclick="load(\\''+x+'\\')">'+x+"</button>").join("");
-if(ROLE=="admin")e("atabs").innerHTML=["sources","ai_jobs","verification","batches","media"].map(x=>'<button onclick="load(\\''+x+'\\',\\'agrid\\',\\'ameta\\')">'+x+"</button>").join("");
+e("tabs").innerHTML=["properties","requirements","matches","whatsapp_drafts"]
+  .map(name=>`<button type="button" data-table="${name}" class="dbTab">${name}</button>`)
+  .join("");
+
+document.querySelectorAll(".dbTab").forEach(btn=>{
+  btn.addEventListener("click",()=>load(btn.dataset.table,"grid","meta"));
+});
+if(ROLE=="admin"){
+  e("atabs").innerHTML=["sources","ai_jobs","verification","batches","media"]
+    .map(name=>`<button type="button" data-admin-table="${name}" class="adminDbTab">${name}</button>`)
+    .join("");
+
+  document.querySelectorAll(".adminDbTab").forEach(btn=>{
+    btn.addEventListener("click",()=>load(btn.dataset.adminTable,"agrid","ameta"));
+  });
+}
 </script></body></html>'''
 
 @app.get("/workspace",response_class=HTMLResponse)
@@ -1986,7 +2031,7 @@ def workspace(req:Request):
     role=page_role_or_redirect(req)
     if not role:
         return RedirectResponse("/login",status_code=303)
-    admin_btn="<button onclick=\"sec('admin')\">Admin</button>" if role=="admin" else ""
+    admin_btn="<button type=\"button\" onclick=\"sec('admin')\">Admin</button>" if role=="admin" else ""
     return HTMLResponse(
         WORKSPACE
         .replace("__ROLE__",role.upper())
