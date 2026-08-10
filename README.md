@@ -1,40 +1,29 @@
-# Property Intelligence Unified Workspace V11 - Edit + Verification
-Version 6.3.0
+# Property Intelligence Unified Workspace V12 - Navigation Fix
+Version 6.4.0
 
-## New controls
-Team can:
-- load a property by Property ID
-- edit property details
-- update photo/video/brochure links
-- save changes
-- verify a property
+Critical fix:
+V11 had a malformed JavaScript string in the Database/Admin dynamic-tab code.
+That single syntax error stopped the entire browser script, which made Operations,
+Database, Admin, Upload, Edit and other controls appear dead.
 
-Every edit is written to pi_verification_log with:
-- property ID
-- action
-- performed by
-- old JSON
-- new JSON
-- timestamp
+V12:
+- replaces fragile inline onclick string generation with DOM event listeners
+- hardens section navigation
+- hardens API response parsing
+- explicitly sets navigation buttons to type=button
+- adds a visible browser error banner
+- retains all V11 features
 
-## Last Verified
-Every property gets a visible Last Verified indicator.
+Validation completed:
+- Python syntax: PASS
+- Browser JavaScript syntax using node --check: PASS
 
-Default:
-VERIFICATION_DUE_DAYS=30
+Deploy all files from this ZIP into the SAME backend repository.
+Keep the SAME Railway service, database and domain.
 
-Display:
-- Never Verified -> red
-- Verification Due / older than configured days -> red
-- Recently verified -> green
-
-The Database Properties view also shows:
-- last_verified
-- verification_due
-
-## Railway variable
-VERIFICATION_DUE_DAYS=30
-
-Keep all previous variables and deploy to the SAME backend repository/service/Postgres/domain.
-
-After deployment /health must show version 6.3.0.
+After deployment:
+1. /health must show 6.4.0
+2. Log out and log back in
+3. Windows: Ctrl+F5
+4. Android: close old tab and reopen the main domain
+5. Test Operations, Database, Admin, Upload
