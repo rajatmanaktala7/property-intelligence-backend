@@ -12,7 +12,7 @@ from google import genai
 from google.genai import types
 from pypdf import PdfReader, PdfWriter
 
-VERSION="6.2.0"
+VERSION="6.3.0"
 DATABASE_URL=os.getenv("DATABASE_URL","")
 GEMINI_API_KEY=os.getenv("GEMINI_API_KEY","")
 GEMINI_MODEL=os.getenv("GEMINI_MODEL","gemini-3.1-flash-lite")
@@ -20,6 +20,7 @@ MAX_UPLOAD_MB=int(os.getenv("MAX_UPLOAD_MB","100"))
 PDF_PAGES_PER_BATCH=int(os.getenv("PDF_PAGES_PER_BATCH","2"))
 MAX_PROPERTY_IMAGES=int(os.getenv("MAX_PROPERTY_IMAGES","12"))
 MAX_IMAGE_MB=int(os.getenv("MAX_IMAGE_MB","10"))
+VERIFICATION_DUE_DAYS=int(os.getenv("VERIFICATION_DUE_DAYS","30"))
 ADMIN_CODE=os.getenv("ADMIN_CODE","admin-change-me")
 TEAM_CODE=os.getenv("TEAM_CODE","team-change-me")
 SESSION_SECRET=os.getenv("SESSION_SECRET","change-this-secret")
@@ -77,6 +78,7 @@ CREATE TABLE IF NOT EXISTS pi_matches(
 CREATE TABLE IF NOT EXISTS pi_verification_log(
  id BIGSERIAL PRIMARY KEY, property_id VARCHAR(50), requirement_id VARCHAR(50),
  action VARCHAR(100) NOT NULL, performed_by VARCHAR(255), notes TEXT,
+ old_value JSONB, new_value JSONB,
  created_at TIMESTAMPTZ DEFAULT NOW()
 );
 CREATE TABLE IF NOT EXISTS pi_ai_jobs(
@@ -142,6 +144,8 @@ MIGRATIONS=[
 "ALTER TABLE pi_properties ADD COLUMN IF NOT EXISTS image_urls TEXT",
 "ALTER TABLE pi_properties ADD COLUMN IF NOT EXISTS video_urls TEXT",
 "ALTER TABLE pi_properties ADD COLUMN IF NOT EXISTS brochure_url TEXT",
+"ALTER TABLE pi_verification_log ADD COLUMN IF NOT EXISTS old_value JSONB",
+"ALTER TABLE pi_verification_log ADD COLUMN IF NOT EXISTS new_value JSONB",
 "ALTER TABLE pi_requirements ADD COLUMN IF NOT EXISTS fingerprint VARCHAR(64)",
 "ALTER TABLE pi_requirements ADD COLUMN IF NOT EXISTS source_id BIGINT",
 "ALTER TABLE pi_requirements ADD COLUMN IF NOT EXISTS extraction_confidence NUMERIC(5,2)",
@@ -201,6 +205,9 @@ def need_login(req):
     if not role:
         raise HTTPException(401,"Login required")
     return role
+
+def actor_name(req):
+    return (req.headers.get("x-user-name") or get_role(req) or "unknown").strip()[:255]
 
 def page_role_or_redirect(req):
     role=get_role(req)
@@ -878,9 +885,160 @@ def status(req:Request):
         counts={k:c.execute(text("SELECT COUNT(*) FROM "+v)).scalar_one() for k,v in tables.items()}
     return {"status":"ok","role":get_role(req),"records":counts,"gemini_configured":bool(GEMINI_API_KEY)}
 
+
+def serialize_db_value(value):
+    if isinstance(value,(date,datetime)):
+        return value.isoformat()
+    if isinstance(value,Decimal):
+        return float(value)
+    return value
+
+def property_with_verification_status(row):
+    d={k:serialize_db_value(v) for k,v in dict(row._mapping).items()}
+    verified=d.get("verified_date")
+    if not verified:
+        d["last_verified_label"]="Never Verified"
+        d["verification_due"]=True
+        d["verification_age_days"]=None
+        return d
+
+    verified_date=date.fromisoformat(verified) if isinstance(verified,str) else verified
+    age=(date.today()-verified_date).days
+    d["verification_age_days"]=age
+    d["verification_due"]=age>=VERIFICATION_DUE_DAYS
+    d["last_verified_label"]=(
+        f"Verification Due · Last verified {verified}"
+        if d["verification_due"]
+        else f"Last verified {verified}"
+    )
+    return d
+
 @app.post("/api/properties")
 def add_property(p:Property,req:Request):
     need_login(req);return save_property(p.model_dump())
+
+
+@app.get("/api/properties/{property_id}")
+def get_property(property_id:str,req:Request):
+    need_login(req)
+    with engine.connect() as c:
+        row=c.execute(
+            text("SELECT * FROM pi_properties WHERE property_id=:pid"),
+            {"pid":property_id}
+        ).first()
+    if not row:
+        raise HTTPException(404,"Property not found")
+    return {"status":"ok","property":property_with_verification_status(row)}
+
+@app.put("/api/properties/{property_id}")
+def update_property(property_id:str,p:Property,req:Request):
+    need_login(req)
+    actor=actor_name(req)
+    data=p.model_dump()
+
+    with engine.begin() as c:
+        row=c.execute(
+            text("SELECT * FROM pi_properties WHERE property_id=:pid FOR UPDATE"),
+            {"pid":property_id}
+        ).first()
+        if not row:
+            raise HTTPException(404,"Property not found")
+
+        old={k:serialize_db_value(v) for k,v in dict(row._mapping).items()}
+
+        allowed=[
+            "property_name","property_type","city","location","available_area_sqft",
+            "minimum_area_sqft","maximum_area_sqft","floor","rent_or_sale",
+            "nearby_brands","suitable_category","parking","owner_name","owner_contact",
+            "broker_name","broker_contact","remarks","image_urls","video_urls","brochure_url"
+        ]
+
+        params={k:data.get(k) for k in allowed}
+        params["pid"]=property_id
+
+        sets=",".join(f"{k}=:{k}" for k in allowed)
+        c.execute(
+            text(f"UPDATE pi_properties SET {sets},updated_at=NOW() WHERE property_id=:pid"),
+            params
+        )
+
+        newrow=c.execute(
+            text("SELECT * FROM pi_properties WHERE property_id=:pid"),
+            {"pid":property_id}
+        ).first()
+        newd={k:serialize_db_value(v) for k,v in dict(newrow._mapping).items()}
+
+        c.execute(
+            text("""INSERT INTO pi_verification_log(
+                        property_id,action,performed_by,notes,old_value,new_value
+                    ) VALUES(
+                        :pid,'PROPERTY_EDIT',:actor,'Property details edited',
+                        CAST(:old AS JSONB),CAST(:new AS JSONB)
+                    )"""),
+            {
+                "pid":property_id,
+                "actor":actor,
+                "old":json.dumps(old,default=str),
+                "new":json.dumps(newd,default=str)
+            }
+        )
+
+    return {"status":"updated","property_id":property_id,"property":property_with_verification_status(newrow)}
+
+@app.post("/api/properties/{property_id}/verify")
+def verify_property(property_id:str,req:Request):
+    need_login(req)
+    actor=actor_name(req)
+
+    with engine.begin() as c:
+        row=c.execute(
+            text("SELECT verified_date,verified_by FROM pi_properties WHERE property_id=:pid FOR UPDATE"),
+            {"pid":property_id}
+        ).first()
+        if not row:
+            raise HTTPException(404,"Property not found")
+
+        old={
+            "verified_date":serialize_db_value(row._mapping["verified_date"]),
+            "verified_by":row._mapping["verified_by"]
+        }
+
+        c.execute(
+            text("""UPDATE pi_properties
+                    SET verified_date=CURRENT_DATE,
+                        verified_by=:actor,
+                        verification_status='VERIFIED',
+                        updated_at=NOW()
+                    WHERE property_id=:pid"""),
+            {"actor":actor,"pid":property_id}
+        )
+
+        c.execute(
+            text("""INSERT INTO pi_verification_log(
+                        property_id,action,performed_by,notes,old_value,new_value
+                    ) VALUES(
+                        :pid,'VERIFIED',:actor,'Property verified',
+                        CAST(:old AS JSONB),CAST(:new AS JSONB)
+                    )"""),
+            {
+                "pid":property_id,
+                "actor":actor,
+                "old":json.dumps(old,default=str),
+                "new":json.dumps({
+                    "verified_date":date.today().isoformat(),
+                    "verified_by":actor,
+                    "verification_status":"VERIFIED"
+                })
+            }
+        )
+
+    return {
+        "status":"verified",
+        "property_id":property_id,
+        "verified_date":date.today().isoformat(),
+        "verified_by":actor,
+        "next_verification_due_days":VERIFICATION_DUE_DAYS
+    }
 
 
 @app.post("/api/properties/{property_id}/media")
@@ -1181,8 +1339,26 @@ def database(name:str,req:Request,limit:int=Query(500,ge=1,le=2000)):
             for k,v in dict(row._mapping).items():
                 d[k]=v.isoformat() if isinstance(v,(date,datetime)) else float(v) if isinstance(v,Decimal) else v
             rows.append(d)
+    if name=="properties":
+        enhanced=[]
+        for x in rows:
+            verified=x.get("verified_date")
+            if not verified:
+                x["last_verified"]="Never Verified"
+                x["verification_due"]=True
+            else:
+                vd=date.fromisoformat(verified) if isinstance(verified,str) else verified
+                age=(date.today()-vd).days
+                x["last_verified"]=f"{verified} ({age} days ago)"
+                x["verification_due"]=age>=VERIFICATION_DUE_DAYS
+            enhanced.append(x)
+        rows=enhanced
+
     if name=="properties" and role!="admin":
-        rows=[{k:v for k,v in x.items() if k not in PRIVATE} for x in rows]
+        # Team can see verification date/status but not private owner/broker/internal fields.
+        team_private=PRIVATE-{"verified_date","verified_by"}
+        rows=[{k:v for k,v in x.items() if k not in team_private} for x in rows]
+
     return {"status":"ok","table":name,"count":len(rows),"rows":rows}
 
 
@@ -1434,6 +1610,30 @@ WORKSPACE='''<!doctype html><html><head><meta charset="utf-8"><meta name="viewpo
 <button id="savePropertyBtn" onclick="prop()">Save Property + Photos</button>
 <div id="propertySaveStatus" style="margin-top:10px"></div>
 <pre id="po"></pre>
+</div>
+<div class="card"><h3>Edit / Verify Existing Property</h3>
+<input id="epid" placeholder="Property ID e.g. PROP-20260810-0000000123">
+<button onclick="loadEditProperty()">Load Property</button>
+<div id="verifyBadge" style="display:none;padding:10px;border-radius:8px;margin:10px 0;font-weight:700"></div>
+<div id="editFields" style="display:none">
+<input id="epn" placeholder="Property name">
+<input id="ept" placeholder="Property type">
+<input id="epc" placeholder="City">
+<input id="epl" placeholder="Location">
+<input id="epa" type="number" placeholder="Available sqft">
+<input id="epf" placeholder="Floor">
+<select id="epx"><option>Rent</option><option>Sale</option></select>
+<input id="epnb" placeholder="Nearby brands">
+<input id="epsc" placeholder="Suitable category">
+<input id="eppk" placeholder="Parking">
+<input id="epimg" placeholder="Photo links">
+<input id="epvid" placeholder="Video links">
+<input id="epbro" placeholder="Brochure link">
+<textarea id="eprem" rows="3" placeholder="Remarks"></textarea>
+<button onclick="saveEditProperty()">Save Changes</button>
+<button onclick="verifyNow()">Verify Now</button>
+</div>
+<pre id="epo"></pre>
 </div>
 <div class="card"><h3>Add Requirement</h3><input id="rc" placeholder="Client"><input id="rci" placeholder="City"><input id="rl" placeholder="Preferred locations"><input id="rmin" type="number" placeholder="Min sqft"><input id="rmax" type="number" placeholder="Max sqft"><select id="rx"><option>Rent</option><option>Sale</option></select><button onclick="req()">Save</button><pre id="ro"></pre></div>
 <div class="card"><h3>Run Matcher + WhatsApp Draft</h3><input id="rid" placeholder="Requirement ID"><button onclick="mt()">Match + Create WhatsApp</button><pre id="mo"></pre><div id="waBox" style="display:none;margin-top:10px"><b>WhatsApp Draft</b><textarea id="waText" rows="9" readonly></textarea><small>READY_FOR_REVIEW. Nothing is sent automatically.</small></div></div>
@@ -1705,10 +1905,77 @@ async function prop(){
   }
 }
 
+
+async function loadEditProperty(){
+  try{
+    const d=await jf("/api/properties/"+encodeURIComponent(v("epid")));
+    const p=d.property||{};
+    e("editFields").style.display="block";
+    e("epn").value=p.property_name||"";
+    e("ept").value=p.property_type||"";
+    e("epc").value=p.city||"";
+    e("epl").value=p.location||"";
+    e("epa").value=p.available_area_sqft||"";
+    e("epf").value=p.floor||"";
+    e("epx").value=p.rent_or_sale==="Sale"?"Sale":"Rent";
+    e("epnb").value=p.nearby_brands||"";
+    e("epsc").value=p.suitable_category||"";
+    e("eppk").value=p.parking||"";
+    e("epimg").value=p.image_urls||"";
+    e("epvid").value=p.video_urls||"";
+    e("epbro").value=p.brochure_url||"";
+    e("eprem").value=p.remarks||"";
+
+    const badge=e("verifyBadge");
+    badge.style.display="block";
+    badge.innerText=p.last_verified_label||"Never Verified";
+    if(p.verification_due){
+      badge.style.background="#fef2f2";
+      badge.style.color="#991b1b";
+      badge.style.border="1px solid #fecaca";
+    }else{
+      badge.style.background="#ecfdf5";
+      badge.style.color="#065f46";
+      badge.style.border="1px solid #a7f3d0";
+    }
+    s("epo",{status:"loaded",property_id:p.property_id});
+  }catch(x){s("epo",x)}
+}
+
+async function saveEditProperty(){
+  try{
+    const pid=v("epid");
+    const d=await jf("/api/properties/"+encodeURIComponent(pid),{
+      method:"PUT",
+      headers:{"Content-Type":"application/json","x-user-name":ROLE},
+      body:JSON.stringify({
+        property_name:v("epn"),property_type:v("ept")||"NA",city:v("epc")||"NA",location:v("epl")||"NA",
+        available_area_sqft:Number(v("epa"))||null,floor:v("epf")||null,rent_or_sale:v("epx"),
+        nearby_brands:v("epnb")||null,suitable_category:v("epsc")||null,parking:v("eppk")||null,
+        image_urls:v("epimg")||null,video_urls:v("epvid")||null,brochure_url:v("epbro")||null,
+        remarks:v("eprem")||null,source:"Manual"
+      })
+    });
+    s("epo",d);
+    await loadEditProperty();
+  }catch(x){s("epo",x)}
+}
+
+async function verifyNow(){
+  try{
+    const d=await jf("/api/properties/"+encodeURIComponent(v("epid"))+"/verify",{
+      method:"POST",
+      headers:{"x-user-name":ROLE}
+    });
+    s("epo",d);
+    await loadEditProperty();
+  }catch(x){s("epo",x)}
+}
+
 async function req(){try{const d=await jf("/api/requirements",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({client_name:v("rc"),city:v("rci"),preferred_locations:v("rl"),minimum_area_sqft:Number(v("rmin"))||null,maximum_area_sqft:Number(v("rmax"))||null,rent_or_sale:v("rx")})});s("ro",d);if(d.requirement_id)e("rid").value=d.requirement_id}catch(x){s("ro",x)}}
 async function mt(){try{const d=await jf("/api/match/"+encodeURIComponent(v("rid")),{method:"POST"});s("mo",{status:d.status,matches:d.matches});if(d.whatsapp_draft){e("waBox").style.display="block";e("waText").value=d.whatsapp_draft.message||""}}catch(x){s("mo",x)}}
 async function stat(){try{s("so",await jf("/api/status"))}catch(x){s("so",x)}}
-function render(rows,target){const g=e(target);if(!rows.length){g.innerHTML="<tr><td>No records yet</td></tr>";return}const c=Object.keys(rows[0]);g.innerHTML="<thead><tr>"+c.map(x=>"<th>"+x+"</th>").join("")+"</tr></thead><tbody>"+rows.map(r=>"<tr>"+c.map(x=>"<td>"+String(r[x]??"")+"</td>").join("")+"</tr>").join("")+"</tbody>"}
+function render(rows,target){const g=e(target);if(!rows.length){g.innerHTML="<tr><td>No records yet</td></tr>";return}const c=Object.keys(rows[0]);g.innerHTML="<thead><tr>"+c.map(x=>"<th>"+x+"</th>").join("")+"</tr></thead><tbody>"+rows.map(r=>"<tr>"+c.map(x=>{let val=String(r[x]??"");if(x==="last_verified"){const due=!!r.verification_due;return "<td><span style=\"padding:5px 8px;border-radius:999px;font-weight:700;background:"+(due?"#fef2f2;color:#991b1b":"#ecfdf5;color:#065f46")+"\">"+val+"</span></td>"}return "<td>"+val+"</td>"}).join("")+"</tr>").join("")+"</tbody>"}
 async function load(n,target="grid",meta="meta"){try{const d=await jf("/api/database/"+n);e(meta).innerText=d.count+" records";render(d.rows,target)}catch(x){e(meta).innerText=x.detail||x.message||"Error"}}
 e("tabs").innerHTML=["properties","requirements","matches","whatsapp_drafts"].map(x=>'<button onclick="load(\\''+x+'\\')">'+x+"</button>").join("");
 if(ROLE=="admin")e("atabs").innerHTML=["sources","ai_jobs","verification","batches","media"].map(x=>'<button onclick="load(\\''+x+'\\',\\'agrid\\',\\'ameta\\')">'+x+"</button>").join("");
