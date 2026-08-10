@@ -10,12 +10,14 @@ from pydantic import BaseModel, Field
 from sqlalchemy import create_engine, text
 from google import genai
 from google.genai import types
+from pypdf import PdfReader, PdfWriter
 
-VERSION="5.3.0"
+VERSION="5.4.0"
 DATABASE_URL=os.getenv("DATABASE_URL","")
 GEMINI_API_KEY=os.getenv("GEMINI_API_KEY","")
 GEMINI_MODEL=os.getenv("GEMINI_MODEL","gemini-3.1-flash-lite")
 MAX_UPLOAD_MB=int(os.getenv("MAX_UPLOAD_MB","100"))
+PDF_PAGES_PER_BATCH=int(os.getenv("PDF_PAGES_PER_BATCH","5"))
 ADMIN_CODE=os.getenv("ADMIN_CODE","admin-change-me")
 TEAM_CODE=os.getenv("TEAM_CODE","team-change-me")
 SESSION_SECRET=os.getenv("SESSION_SECRET","change-this-secret")
@@ -194,8 +196,12 @@ class TextInput(BaseModel):
 def make_id(prefix):
     return prefix+"-"+datetime.utcnow().strftime("%Y%m%d")+"-"+uuid.uuid4().hex[:6].upper()
 
-def fingerprint(values):
-    return hashlib.sha256("|".join(str(v or "").lower().strip() for v in values).encode()).hexdigest()
+def fingerprint(values, minimum_identity_fields=3):
+    cleaned=[str(v or "").lower().strip() for v in values]
+    meaningful=[v for v in cleaned if v and v not in {"na","n/a","none","null","unknown","0"}]
+    if len(meaningful) < minimum_identity_fields:
+        return hashlib.sha256(("sparse|"+uuid.uuid4().hex).encode()).hexdigest()
+    return hashlib.sha256("|".join(cleaned).encode()).hexdigest()
 
 def source_row(source_type,name=None,filename=None,mime=None,reference=None):
     sql='INSERT INTO pi_sources(source_type,source_name,original_filename,mime_type,source_reference,ingestion_status) VALUES(:t,:n,:f,:m,:r,\'RECEIVED\') RETURNING id'
@@ -204,7 +210,7 @@ def source_row(source_type,name=None,filename=None,mime=None,reference=None):
 
 def save_property(data,sid=None):
     d=dict(data)
-    fp=fingerprint([d.get("city"),d.get("location"),d.get("property_type"),d.get("available_area_sqft"),d.get("floor"),d.get("rent_or_sale")])
+    fp=fingerprint([d.get("property_name"),d.get("city"),d.get("location"),d.get("property_type"),d.get("available_area_sqft"),d.get("floor"),d.get("rent_or_sale"),d.get("owner_contact"),d.get("broker_contact")])
     with engine.begin() as c:
         old=c.execute(text("SELECT property_id FROM pi_properties WHERE fingerprint=:f LIMIT 1"),{"f":fp}).first()
         if old:return {"status":"duplicate","property_id":old[0]}
@@ -218,7 +224,7 @@ def save_property(data,sid=None):
 
 def save_requirement(data,sid=None):
     d=dict(data)
-    fp=fingerprint([d.get("company_name") or d.get("client_name"),d.get("city"),d.get("preferred_locations"),d.get("minimum_area_sqft"),d.get("maximum_area_sqft")])
+    fp=fingerprint([d.get("company_name") or d.get("client_name"),d.get("contact_phone"),d.get("contact_email"),d.get("city"),d.get("preferred_locations"),d.get("minimum_area_sqft"),d.get("maximum_area_sqft")])
     with engine.begin() as c:
         old=c.execute(text("SELECT requirement_id FROM pi_requirements WHERE fingerprint=:f LIMIT 1"),{"f":fp}).first()
         if old:return {"status":"duplicate","requirement_id":old[0]}
@@ -229,7 +235,14 @@ def save_requirement(data,sid=None):
         c.execute(text(sql),p)
     return {"status":"created","requirement_id":rid}
 
-PROMPT="Extract all commercial real-estate property inventory and client/retailer requirements. Do not invent facts. Use null for unknown fields. Return all distinct records with extraction_confidence 0-100."
+PROMPT="""You are a high-recall real-estate magazine data extractor.
+Extract EVERY distinct property listing and EVERY client/retailer requirement visible in the supplied pages.
+Treat each classified advertisement/listing as a separate record.
+Never summarize, sample, merge, or return only the best listings.
+Do not invent facts. Use null for unknown fields. Preserve visible phone/contact details.
+If a page contains 40 listings, return approximately 40 separate records.
+Return all records in the required schema with extraction_confidence from 0 to 100.
+"""
 
 def complete_source(sid,envelope):
     props=[save_property({**p.model_dump(exclude={"record_type"}),"source":"AI_SOURCE_"+str(sid)},sid) for p in envelope.properties]
@@ -252,22 +265,74 @@ def run_text_job(sid,jid,content):
             c.execute(text("UPDATE pi_sources SET ingestion_status='FAILED',error_message=:e WHERE id=:id"),{"e":str(ex),"id":sid})
             c.execute(text("UPDATE pi_ai_jobs SET status='FAILED',error_message=:e,completed_at=NOW() WHERE id=:id"),{"e":str(ex),"id":jid})
 
+def extract_gemini_batch(path,mime,label):
+    if not client: raise RuntimeError("GEMINI_API_KEY missing")
+    uploaded=client.files.upload(file=path,config={"mime_type":mime})
+    resp=client.models.generate_content(
+        model=GEMINI_MODEL,
+        contents=[PROMPT+"\n"+label,uploaded],
+        config=types.GenerateContentConfig(
+            response_mime_type="application/json",
+            response_schema=Envelope,
+            temperature=0.0,
+            max_output_tokens=8192
+        )
+    )
+    return Envelope.model_validate(resp.parsed) if getattr(resp,"parsed",None) is not None else Envelope.model_validate_json(resp.text)
+
+def split_pdf(path):
+    reader=PdfReader(path)
+    total=len(reader.pages)
+    batches=[]
+    for start in range(0,total,PDF_PAGES_PER_BATCH):
+        end=min(start+PDF_PAGES_PER_BATCH,total)
+        writer=PdfWriter()
+        for i in range(start,end): writer.add_page(reader.pages[i])
+        fd,bp=tempfile.mkstemp(suffix=".pdf"); os.close(fd)
+        with open(bp,"wb") as f: writer.write(f)
+        batches.append((bp,start+1,end,total))
+    return batches
+
 def run_file_job(sid,jid,path,mime):
+    temp_batches=[]
     try:
-        if not client:raise RuntimeError("GEMINI_API_KEY missing")
-        uploaded=client.files.upload(file=path,config={"mime_type":mime})
-        resp=client.models.generate_content(model=GEMINI_MODEL,contents=[PROMPT,uploaded],
-            config=types.GenerateContentConfig(response_mime_type="application/json",response_schema=Envelope,temperature=0.1))
-        env=Envelope.model_validate(resp.parsed) if getattr(resp,"parsed",None) is not None else Envelope.model_validate_json(resp.text)
-        p,r=complete_source(sid,env)
-        with engine.begin() as c:c.execute(text("UPDATE pi_ai_jobs SET status='COMPLETED',output_summary=:o,completed_at=NOW() WHERE id=:id"),{"o":f"{len(p)} properties, {len(r)} requirements","id":jid})
+        created=duplicates=prop_outputs=req_outputs=0
+        is_pdf=(mime=="application/pdf" or path.lower().endswith(".pdf"))
+        batches=split_pdf(path) if is_pdf else [(path,1,1,1)]
+        if is_pdf: temp_batches=[x[0] for x in batches]
+
+        for batch_no,(bp,start,end,total) in enumerate(batches,1):
+            label=(f"PDF pages {start}-{end} of {total}. Extract every listing on these pages."
+                   if is_pdf else "Extract every distinct record in this uploaded source.")
+            env=extract_gemini_batch(bp,"application/pdf" if is_pdf else mime,label)
+            props=[save_property({**x.model_dump(exclude={"record_type"}),"source":f"AI_SOURCE_{sid}_PAGES_{start}_{end}"},sid) for x in env.properties]
+            reqs=[save_requirement({**x.model_dump(exclude={"record_type"}),"source":f"AI_SOURCE_{sid}_PAGES_{start}_{end}"},sid) for x in env.requirements]
+            prop_outputs+=len(props); req_outputs+=len(reqs)
+            created+=sum(x["status"]=="created" for x in props+reqs)
+            duplicates+=sum(x["status"]=="duplicate" for x in props+reqs)
+            with engine.begin() as c:
+                c.execute(text("UPDATE pi_sources SET ingestion_status='PROCESSING',processed_records=:n,duplicate_records=:d WHERE id=:id"),
+                          {"n":created,"d":duplicates,"id":sid})
+                c.execute(text("UPDATE pi_ai_jobs SET output_summary=:o WHERE id=:id"),
+                          {"o":f"Batch {batch_no}/{len(batches)} complete; {created} records stored","id":jid})
+
+        with engine.begin() as c:
+            c.execute(text("""UPDATE pi_sources SET ingestion_status='PROCESSED',processed_records=:n,
+                         duplicate_records=:d,ai_provider='gemini',ai_model=:m,processed_at=NOW() WHERE id=:id"""),
+                      {"n":created,"d":duplicates,"m":GEMINI_MODEL,"id":sid})
+            c.execute(text("UPDATE pi_ai_jobs SET status='COMPLETED',output_summary=:o,completed_at=NOW() WHERE id=:id"),
+                      {"o":f"{created} stored; {prop_outputs} property outputs; {req_outputs} requirement outputs; {duplicates} duplicates","id":jid})
     except Exception as ex:
         with engine.begin() as c:
             c.execute(text("UPDATE pi_sources SET ingestion_status='FAILED',error_message=:e WHERE id=:id"),{"e":str(ex),"id":sid})
             c.execute(text("UPDATE pi_ai_jobs SET status='FAILED',error_message=:e,completed_at=NOW() WHERE id=:id"),{"e":str(ex),"id":jid})
     finally:
-        try:os.unlink(path)
-        except:pass
+        for f in temp_batches + ([] if is_pdf else [path]):
+            try: os.unlink(f)
+            except: pass
+        if is_pdf:
+            try: os.unlink(path)
+            except: pass
 
 def create_job(sid,kind,summary):
     sql="INSERT INTO pi_ai_jobs(source_id,job_type,status,provider,model,input_summary,started_at) VALUES(:s,:k,'RUNNING','gemini',:m,:x,NOW()) RETURNING id"
@@ -657,7 +722,7 @@ function watchJob(jobId){
         setProgress(100,"Upload completed, AI processing failed");
         showUploadMessage("Upload succeeded, but AI extraction failed: "+(j.error_message||"Unknown error"),false);
       }else{
-        e("progressText").innerText="Uploaded. AI is reading and organizing the file...";
+        e("progressText").innerText="AI is processing magazine batches... "+(j.processed_records??0)+" records stored so far";
       }
     }catch(err){}
     if(tries>120){
