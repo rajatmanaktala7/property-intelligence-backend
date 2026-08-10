@@ -12,12 +12,12 @@ from google import genai
 from google.genai import types
 from pypdf import PdfReader, PdfWriter
 
-VERSION="5.5.0"
+VERSION="5.6.0"
 DATABASE_URL=os.getenv("DATABASE_URL","")
 GEMINI_API_KEY=os.getenv("GEMINI_API_KEY","")
 GEMINI_MODEL=os.getenv("GEMINI_MODEL","gemini-3.1-flash-lite")
 MAX_UPLOAD_MB=int(os.getenv("MAX_UPLOAD_MB","100"))
-PDF_PAGES_PER_BATCH=int(os.getenv("PDF_PAGES_PER_BATCH","5"))
+PDF_PAGES_PER_BATCH=int(os.getenv("PDF_PAGES_PER_BATCH","2"))
 ADMIN_CODE=os.getenv("ADMIN_CODE","admin-change-me")
 TEAM_CODE=os.getenv("TEAM_CODE","team-change-me")
 SESSION_SECRET=os.getenv("SESSION_SECRET","change-this-secret")
@@ -286,20 +286,63 @@ def run_text_job(sid,jid,content):
             c.execute(text("UPDATE pi_sources SET ingestion_status='FAILED',error_message=:e WHERE id=:id"),{"e":str(ex),"id":sid})
             c.execute(text("UPDATE pi_ai_jobs SET status='FAILED',error_message=:e,completed_at=NOW() WHERE id=:id"),{"e":str(ex),"id":jid})
 
+
+def parse_envelope_response(resp):
+    if getattr(resp,"parsed",None) is not None:
+        return Envelope.model_validate(resp.parsed)
+
+    raw=(resp.text or "").strip()
+
+    try:
+        return Envelope.model_validate_json(raw)
+    except Exception as first_error:
+        # Gemini may wrap JSON in markdown fences.
+        cleaned=raw
+        if cleaned.startswith("```json"):
+            cleaned=cleaned[7:]
+        elif cleaned.startswith("```"):
+            cleaned=cleaned[3:]
+        if cleaned.endswith("```"):
+            cleaned=cleaned[:-3]
+        cleaned=cleaned.strip()
+
+        try:
+            return Envelope.model_validate_json(cleaned)
+        except Exception:
+            raise RuntimeError(
+                "GEMINI_JSON_TRUNCATED_OR_INVALID: "
+                + str(first_error)
+                + f" | response_chars={len(raw)}"
+            )
+
 def extract_gemini_batch(path,mime,label):
-    if not client: raise RuntimeError("GEMINI_API_KEY missing")
-    uploaded=client.files.upload(file=path,config={"mime_type":mime})
+    if not client:
+        raise RuntimeError("GEMINI_API_KEY missing")
+
+    uploaded=client.files.upload(
+        file=path,
+        config={"mime_type":mime}
+    )
+
     resp=client.models.generate_content(
         model=GEMINI_MODEL,
-        contents=[PROMPT+"\n"+label,uploaded],
+        contents=[
+            PROMPT
+            + "\n"
+            + label
+            + "\nReturn compact JSON. Do not repeat source text. Do not add explanations."
+            ,
+            uploaded
+        ],
         config=types.GenerateContentConfig(
             response_mime_type="application/json",
             response_schema=Envelope,
             temperature=0.0,
-            max_output_tokens=8192
+            max_output_tokens=16384
         )
     )
-    return Envelope.model_validate(resp.parsed) if getattr(resp,"parsed",None) is not None else Envelope.model_validate_json(resp.text)
+
+    return parse_envelope_response(resp)
 
 def split_pdf(path):
     reader=PdfReader(path)
@@ -314,46 +357,284 @@ def split_pdf(path):
         batches.append((bp,start+1,end,total))
     return batches
 
-def run_file_job(sid,jid,path,mime):
-    temp_batches=[]
-    try:
-        created=duplicates=prop_outputs=req_outputs=0
-        is_pdf=(mime=="application/pdf" or path.lower().endswith(".pdf"))
-        batches=split_pdf(path) if is_pdf else [(path,1,1,1)]
-        if is_pdf: temp_batches=[x[0] for x in batches]
 
-        for batch_no,(bp,start,end,total) in enumerate(batches,1):
-            label=(f"PDF pages {start}-{end} of {total}. Extract every listing on these pages."
-                   if is_pdf else "Extract every distinct record in this uploaded source.")
-            env=extract_gemini_batch(bp,"application/pdf" if is_pdf else mime,label)
-            props=[save_property({**x.model_dump(exclude={"record_type"}),"source":f"AI_SOURCE_{sid}_PAGES_{start}_{end}"},sid) for x in env.properties]
-            reqs=[save_requirement({**x.model_dump(exclude={"record_type"}),"source":f"AI_SOURCE_{sid}_PAGES_{start}_{end}"},sid) for x in env.requirements]
-            prop_outputs+=len(props); req_outputs+=len(reqs)
-            created+=sum(x["status"]=="created" for x in props+reqs)
-            duplicates+=sum(x["status"]=="duplicate" for x in props+reqs)
-            with engine.begin() as c:
-                c.execute(text("UPDATE pi_sources SET ingestion_status='PROCESSING',processed_records=:n,duplicate_records=:d WHERE id=:id"),
-                          {"n":created,"d":duplicates,"id":sid})
-                c.execute(text("UPDATE pi_ai_jobs SET output_summary=:o WHERE id=:id"),
-                          {"o":f"Batch {batch_no}/{len(batches)} complete; {created} records stored","id":jid})
+def write_pdf_range(reader,start_idx,end_idx):
+    writer=PdfWriter()
+    for i in range(start_idx,end_idx):
+        writer.add_page(reader.pages[i])
+    fd,temp_path=tempfile.mkstemp(suffix=".pdf")
+    os.close(fd)
+    with open(temp_path,"wb") as f:
+        writer.write(f)
+    return temp_path
+
+def extract_pdf_range_recursive(reader,start_idx,end_idx,total_pages,sid,jid,progress):
+    """
+    Extract a page range. If Gemini returns truncated/invalid JSON,
+    split the range in half and retry automatically.
+    """
+    temp_path=write_pdf_range(reader,start_idx,end_idx)
+    try:
+        label=f"PDF pages {start_idx+1}-{end_idx} of {total_pages}. Extract every distinct listing."
+
+        try:
+            env=extract_gemini_batch(
+                temp_path,
+                "application/pdf",
+                label
+            )
+        except Exception as exc:
+            msg=str(exc)
+
+            # If a multi-page range is too large, split and retry.
+            if "GEMINI_JSON_TRUNCATED_OR_INVALID" in msg and (end_idx-start_idx)>1:
+                mid=start_idx + (end_idx-start_idx)//2
+
+                left=extract_pdf_range_recursive(
+                    reader,start_idx,mid,total_pages,sid,jid,progress
+                )
+                right=extract_pdf_range_recursive(
+                    reader,mid,end_idx,total_pages,sid,jid,progress
+                )
+                return {
+                    "created":left["created"]+right["created"],
+                    "duplicates":left["duplicates"]+right["duplicates"],
+                    "property_outputs":left["property_outputs"]+right["property_outputs"],
+                    "requirement_outputs":left["requirement_outputs"]+right["requirement_outputs"]
+                }
+
+            # A single page can still contain a huge classifieds grid.
+            # Retry once with an even stricter compact-output instruction.
+            if "GEMINI_JSON_TRUNCATED_OR_INVALID" in msg and (end_idx-start_idx)==1:
+                strict_label=(
+                    label
+                    + "\nThis single page contains many ads. "
+                    + "Return ONLY the schema fields. "
+                    + "Use null for unknowns. "
+                    + "Keep remarks concise. "
+                    + "Do not copy long advertisement text."
+                )
+                env=extract_gemini_batch(
+                    temp_path,
+                    "application/pdf",
+                    strict_label
+                )
+            else:
+                raise
+
+        props=[
+            save_property(
+                {
+                    **x.model_dump(exclude={"record_type"}),
+                    "source":f"AI_SOURCE_{sid}_PAGES_{start_idx+1}_{end_idx}"
+                },
+                sid
+            )
+            for x in env.properties
+        ]
+
+        reqs=[
+            save_requirement(
+                {
+                    **x.model_dump(exclude={"record_type"}),
+                    "source":f"AI_SOURCE_{sid}_PAGES_{start_idx+1}_{end_idx}"
+                },
+                sid
+            )
+            for x in env.requirements
+        ]
+
+        created=sum(x["status"]=="created" for x in props+reqs)
+        duplicates=sum(x["status"]=="duplicate" for x in props+reqs)
+
+        progress["created"]+=created
+        progress["duplicates"]+=duplicates
+        progress["ranges_done"]+=1
 
         with engine.begin() as c:
-            c.execute(text("""UPDATE pi_sources SET ingestion_status='PROCESSED',processed_records=:n,
-                         duplicate_records=:d,ai_provider='gemini',ai_model=:m,processed_at=NOW() WHERE id=:id"""),
-                      {"n":created,"d":duplicates,"m":GEMINI_MODEL,"id":sid})
-            c.execute(text("UPDATE pi_ai_jobs SET status='COMPLETED',output_summary=:o,completed_at=NOW() WHERE id=:id"),
-                      {"o":f"{created} stored; {prop_outputs} property outputs; {req_outputs} requirement outputs; {duplicates} duplicates","id":jid})
+            c.execute(
+                text("""UPDATE pi_sources
+                        SET ingestion_status='PROCESSING',
+                            processed_records=:n,
+                            duplicate_records=:d
+                        WHERE id=:id"""),
+                {
+                    "n":progress["created"],
+                    "d":progress["duplicates"],
+                    "id":sid
+                }
+            )
+
+            c.execute(
+                text("""UPDATE pi_ai_jobs
+                        SET output_summary=:o
+                        WHERE id=:id"""),
+                {
+                    "o":(
+                        f"{progress['created']} records stored; "
+                        f"processed through page {end_idx} of {total_pages}"
+                    ),
+                    "id":jid
+                }
+            )
+
+        return {
+            "created":created,
+            "duplicates":duplicates,
+            "property_outputs":len(props),
+            "requirement_outputs":len(reqs)
+        }
+
+    finally:
+        try:
+            os.unlink(temp_path)
+        except Exception:
+            pass
+
+def run_file_job(sid,jid,path,mime):
+    try:
+        created=0
+        duplicates=0
+        property_outputs=0
+        requirement_outputs=0
+
+        is_pdf=(mime=="application/pdf" or path.lower().endswith(".pdf"))
+
+        if is_pdf:
+            reader=PdfReader(path)
+            total_pages=len(reader.pages)
+
+            progress={
+                "created":0,
+                "duplicates":0,
+                "ranges_done":0
+            }
+
+            with engine.begin() as c:
+                c.execute(
+                    text("UPDATE pi_ai_jobs SET input_summary=:x WHERE id=:id"),
+                    {
+                        "x":f"Adaptive PDF extraction: {total_pages} pages",
+                        "id":jid
+                    }
+                )
+
+            for start in range(0,total_pages,PDF_PAGES_PER_BATCH):
+                end=min(start+PDF_PAGES_PER_BATCH,total_pages)
+
+                result=extract_pdf_range_recursive(
+                    reader,
+                    start,
+                    end,
+                    total_pages,
+                    sid,
+                    jid,
+                    progress
+                )
+
+                created+=result["created"]
+                duplicates+=result["duplicates"]
+                property_outputs+=result["property_outputs"]
+                requirement_outputs+=result["requirement_outputs"]
+
+        else:
+            env=extract_gemini_batch(
+                path,
+                mime,
+                "Extract every distinct record in this uploaded source."
+            )
+
+            props=[
+                save_property(
+                    {
+                        **x.model_dump(exclude={"record_type"}),
+                        "source":"AI_SOURCE_"+str(sid)
+                    },
+                    sid
+                )
+                for x in env.properties
+            ]
+
+            reqs=[
+                save_requirement(
+                    {
+                        **x.model_dump(exclude={"record_type"}),
+                        "source":"AI_SOURCE_"+str(sid)
+                    },
+                    sid
+                )
+                for x in env.requirements
+            ]
+
+            created=sum(x["status"]=="created" for x in props+reqs)
+            duplicates=sum(x["status"]=="duplicate" for x in props+reqs)
+            property_outputs=len(props)
+            requirement_outputs=len(reqs)
+
+        with engine.begin() as c:
+            c.execute(
+                text("""UPDATE pi_sources
+                        SET ingestion_status='PROCESSED',
+                            processed_records=:n,
+                            duplicate_records=:d,
+                            ai_provider='gemini',
+                            ai_model=:m,
+                            processed_at=NOW()
+                        WHERE id=:id"""),
+                {
+                    "n":created,
+                    "d":duplicates,
+                    "m":GEMINI_MODEL,
+                    "id":sid
+                }
+            )
+
+            c.execute(
+                text("""UPDATE pi_ai_jobs
+                        SET status='COMPLETED',
+                            output_summary=:o,
+                            completed_at=NOW()
+                        WHERE id=:id"""),
+                {
+                    "o":(
+                        f"{created} stored; "
+                        f"{property_outputs} property outputs; "
+                        f"{requirement_outputs} requirement outputs; "
+                        f"{duplicates} duplicates"
+                    ),
+                    "id":jid
+                }
+            )
+
     except Exception as ex:
         with engine.begin() as c:
-            c.execute(text("UPDATE pi_sources SET ingestion_status='FAILED',error_message=:e WHERE id=:id"),{"e":str(ex),"id":sid})
-            c.execute(text("UPDATE pi_ai_jobs SET status='FAILED',error_message=:e,completed_at=NOW() WHERE id=:id"),{"e":str(ex),"id":jid})
+            c.execute(
+                text("""UPDATE pi_sources
+                        SET ingestion_status='FAILED',
+                            error_message=:e
+                        WHERE id=:id"""),
+                {
+                    "e":str(ex),
+                    "id":sid
+                }
+            )
+
+            c.execute(
+                text("""UPDATE pi_ai_jobs
+                        SET status='FAILED',
+                            error_message=:e,
+                            completed_at=NOW()
+                        WHERE id=:id"""),
+                {
+                    "e":str(ex),
+                    "id":jid
+                }
+            )
     finally:
-        for f in temp_batches + ([] if is_pdf else [path]):
-            try: os.unlink(f)
-            except: pass
-        if is_pdf:
-            try: os.unlink(path)
-            except: pass
+        try:
+            os.unlink(path)
+        except Exception:
+            pass
 
 def create_job(sid,kind,summary):
     sql="INSERT INTO pi_ai_jobs(source_id,job_type,status,provider,model,input_summary,started_at) VALUES(:s,:k,'RUNNING','gemini',:m,:x,NOW()) RETURNING id"
