@@ -5,19 +5,21 @@ from decimal import Decimal
 from typing import Optional, Literal
 
 from fastapi import FastAPI, Request, UploadFile, File, Query, BackgroundTasks, Form, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import create_engine, text
 from google import genai
 from google.genai import types
 from pypdf import PdfReader, PdfWriter
 
-VERSION="6.0.0"
+VERSION="6.2.0"
 DATABASE_URL=os.getenv("DATABASE_URL","")
 GEMINI_API_KEY=os.getenv("GEMINI_API_KEY","")
 GEMINI_MODEL=os.getenv("GEMINI_MODEL","gemini-3.1-flash-lite")
 MAX_UPLOAD_MB=int(os.getenv("MAX_UPLOAD_MB","100"))
 PDF_PAGES_PER_BATCH=int(os.getenv("PDF_PAGES_PER_BATCH","2"))
+MAX_PROPERTY_IMAGES=int(os.getenv("MAX_PROPERTY_IMAGES","12"))
+MAX_IMAGE_MB=int(os.getenv("MAX_IMAGE_MB","10"))
 ADMIN_CODE=os.getenv("ADMIN_CODE","admin-change-me")
 TEAM_CODE=os.getenv("TEAM_CODE","team-change-me")
 SESSION_SECRET=os.getenv("SESSION_SECRET","change-this-secret")
@@ -44,6 +46,7 @@ CREATE TABLE IF NOT EXISTS pi_properties(
  possession VARCHAR(100), nearby_brands TEXT, suitable_category TEXT, parking TEXT,
  google_maps_pin TEXT, owner_name VARCHAR(255), owner_contact VARCHAR(100),
  broker_name VARCHAR(255), broker_contact VARCHAR(100), remarks TEXT,
+ image_urls TEXT, video_urls TEXT, brochure_url TEXT,
  verification_status VARCHAR(50) DEFAULT 'UNVERIFIED', verified_by VARCHAR(255),
  verified_date DATE, source VARCHAR(255), source_id BIGINT, extraction_confidence NUMERIC(5,2),
  created_at TIMESTAMPTZ DEFAULT NOW(), updated_at TIMESTAMPTZ DEFAULT NOW()
@@ -114,6 +117,20 @@ CREATE TABLE IF NOT EXISTS pi_message_drafts(
  created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
+
+CREATE TABLE IF NOT EXISTS pi_property_media(
+ id BIGSERIAL PRIMARY KEY,
+ media_id UUID UNIQUE NOT NULL,
+ property_id TEXT NOT NULL,
+ media_type VARCHAR(30) DEFAULT 'IMAGE',
+ filename TEXT,
+ mime_type TEXT,
+ file_size BIGINT,
+ content BYTEA NOT NULL,
+ created_at TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_pi_property_media_property_id ON pi_property_media(property_id);
+
 '''
 
 MIGRATIONS=[
@@ -122,6 +139,9 @@ MIGRATIONS=[
 "ALTER TABLE pi_properties ADD COLUMN IF NOT EXISTS extraction_confidence NUMERIC(5,2)",
 "ALTER TABLE pi_properties ADD COLUMN IF NOT EXISTS verification_status VARCHAR(50) DEFAULT 'UNVERIFIED'",
 "ALTER TABLE pi_properties ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW()",
+"ALTER TABLE pi_properties ADD COLUMN IF NOT EXISTS image_urls TEXT",
+"ALTER TABLE pi_properties ADD COLUMN IF NOT EXISTS video_urls TEXT",
+"ALTER TABLE pi_properties ADD COLUMN IF NOT EXISTS brochure_url TEXT",
 "ALTER TABLE pi_requirements ADD COLUMN IF NOT EXISTS fingerprint VARCHAR(64)",
 "ALTER TABLE pi_requirements ADD COLUMN IF NOT EXISTS source_id BIGINT",
 "ALTER TABLE pi_requirements ADD COLUMN IF NOT EXISTS extraction_confidence NUMERIC(5,2)",
@@ -210,6 +230,9 @@ class Property(BaseModel):
     broker_name:Optional[str]=None
     broker_contact:Optional[str]=None
     remarks:Optional[str]=None
+    image_urls:Optional[str]=None
+    video_urls:Optional[str]=None
+    brochure_url:Optional[str]=None
     source:Optional[str]="Manual"
     extraction_confidence:Optional[float]=None
 
@@ -285,8 +308,8 @@ def save_property(data,sid=None):
         if old:return {"status":"duplicate","property_id":old[0]}
         pid=make_id("PROP",c)
         p={"pid":pid,"fp":fp,"sid":sid,**{k:d.get(k) for k in Property.model_fields}}
-        sql='''INSERT INTO pi_properties(property_id,fingerprint,property_name,property_type,city,location,available_area_sqft,minimum_area_sqft,maximum_area_sqft,floor,rent_or_sale,nearby_brands,suitable_category,parking,owner_name,owner_contact,broker_name,broker_contact,remarks,source,source_id,extraction_confidence)
-        VALUES(:pid,:fp,:property_name,:property_type,:city,:location,:available_area_sqft,:minimum_area_sqft,:maximum_area_sqft,:floor,:rent_or_sale,:nearby_brands,:suitable_category,:parking,:owner_name,:owner_contact,:broker_name,:broker_contact,:remarks,:source,:sid,:extraction_confidence)'''
+        sql='''INSERT INTO pi_properties(property_id,fingerprint,property_name,property_type,city,location,available_area_sqft,minimum_area_sqft,maximum_area_sqft,floor,rent_or_sale,nearby_brands,suitable_category,parking,owner_name,owner_contact,broker_name,broker_contact,remarks,image_urls,video_urls,brochure_url,source,source_id,extraction_confidence)
+        VALUES(:pid,:fp,:property_name,:property_type,:city,:location,:available_area_sqft,:minimum_area_sqft,:maximum_area_sqft,:floor,:rent_or_sale,:nearby_brands,:suitable_category,:parking,:owner_name,:owner_contact,:broker_name,:broker_contact,:remarks,:image_urls,:video_urls,:brochure_url,:source,:sid,:extraction_confidence)'''
         c.execute(text(sql),p)
         c.execute(text("INSERT INTO pi_verification_log(property_id,action,performed_by,notes) VALUES(:p,'CREATED','SYSTEM','Queued for review')"),{"p":pid})
     return {"status":"created","property_id":pid}
@@ -859,6 +882,116 @@ def status(req:Request):
 def add_property(p:Property,req:Request):
     need_login(req);return save_property(p.model_dump())
 
+
+@app.post("/api/properties/{property_id}/media")
+async def upload_property_media(property_id:str,req:Request,file:UploadFile=File(...)):
+    need_login(req)
+
+    filename=file.filename or "property-image.jpg"
+    mime=(file.content_type or "").lower()
+    allowed={"image/jpeg","image/png","image/webp","image/gif"}
+
+    if mime not in allowed:
+        ext=os.path.splitext(filename)[1].lower()
+        extmap={".jpg":"image/jpeg",".jpeg":"image/jpeg",".png":"image/png",".webp":"image/webp",".gif":"image/gif"}
+        mime=extmap.get(ext,mime)
+
+    if mime not in allowed:
+        raise HTTPException(400,"Only JPG, JPEG, PNG, WEBP and GIF images are allowed.")
+
+    data=await file.read()
+    if not data:
+        raise HTTPException(400,"Image file is empty.")
+
+    if len(data) > MAX_IMAGE_MB*1024*1024:
+        raise HTTPException(413,f"Each image must be {MAX_IMAGE_MB} MB or smaller.")
+
+    with engine.begin() as c:
+        exists=c.execute(
+            text("SELECT 1 FROM pi_properties WHERE property_id=:pid"),
+            {"pid":property_id}
+        ).first()
+        if not exists:
+            raise HTTPException(404,"Property not found.")
+
+        count=c.execute(
+            text("SELECT COUNT(*) FROM pi_property_media WHERE property_id=:pid"),
+            {"pid":property_id}
+        ).scalar_one()
+
+        if count >= MAX_PROPERTY_IMAGES:
+            raise HTTPException(413,f"Maximum {MAX_PROPERTY_IMAGES} images per property.")
+
+        media_id=str(uuid.uuid4())
+        c.execute(
+            text("""INSERT INTO pi_property_media(
+                        media_id,property_id,media_type,filename,mime_type,file_size,content
+                    ) VALUES(
+                        CAST(:mid AS UUID),:pid,'IMAGE',:fn,:mime,:size,:content
+                    )"""),
+            {
+                "mid":media_id,
+                "pid":property_id,
+                "fn":filename,
+                "mime":mime,
+                "size":len(data),
+                "content":data
+            }
+        )
+
+    base=str(req.base_url).rstrip("/")
+    public_url=f"{base}/media/{media_id}"
+
+    with engine.begin() as c:
+        old=c.execute(
+            text("SELECT image_urls FROM pi_properties WHERE property_id=:pid"),
+            {"pid":property_id}
+        ).scalar_one_or_none()
+
+        urls=[u.strip() for u in str(old or "").splitlines() if u.strip()]
+        if public_url not in urls:
+            urls.append(public_url)
+
+        c.execute(
+            text("UPDATE pi_properties SET image_urls=:urls,updated_at=NOW() WHERE property_id=:pid"),
+            {"urls":"\n".join(urls),"pid":property_id}
+        )
+
+    return {
+        "status":"uploaded",
+        "property_id":property_id,
+        "media_id":media_id,
+        "url":public_url,
+        "filename":filename
+    }
+
+@app.get("/media/{media_id}")
+def public_property_media(media_id:str):
+    try:
+        uuid.UUID(media_id)
+    except Exception:
+        raise HTTPException(404,"Media not found.")
+
+    with engine.connect() as c:
+        row=c.execute(
+            text("""SELECT mime_type,content,filename
+                    FROM pi_property_media
+                    WHERE media_id=CAST(:mid AS UUID)"""),
+            {"mid":media_id}
+        ).first()
+
+    if not row:
+        raise HTTPException(404,"Media not found.")
+
+    return Response(
+        content=bytes(row._mapping["content"]),
+        media_type=row._mapping["mime_type"] or "application/octet-stream",
+        headers={
+            "Cache-Control":"public, max-age=31536000, immutable",
+            "Content-Disposition":f'inline; filename="{row._mapping["filename"] or "property-image"}"'
+        }
+    )
+
 @app.post("/api/requirements")
 def add_requirement(r:Requirement,req:Request):
     need_login(req);return save_requirement(r.model_dump())
@@ -1028,16 +1161,20 @@ async def ingest_file(
         except: pass
         raise
 
-TABLES={"properties":"pi_properties","requirements":"pi_requirements","matches":"pi_matches","whatsapp_drafts":"pi_message_drafts","sources":"pi_sources","ai_jobs":"pi_ai_jobs","verification":"pi_verification_log","batches":"pi_extraction_batches"}
+TABLES={"properties":"pi_properties","requirements":"pi_requirements","matches":"pi_matches","whatsapp_drafts":"pi_message_drafts","sources":"pi_sources","ai_jobs":"pi_ai_jobs","verification":"pi_verification_log","batches":"pi_extraction_batches","media":"pi_property_media"}
 PRIVATE={"fingerprint","owner_name","owner_contact","broker_name","broker_contact","remarks","verified_by","verified_date","source"}
 
 @app.get("/api/database/{name}")
 def database(name:str,req:Request,limit:int=Query(500,ge=1,le=2000)):
     role=need_login(req)
     if name not in TABLES:raise HTTPException(404,"Unknown table")
-    if role!="admin" and name in {"sources","ai_jobs","verification","batches"}:raise HTTPException(403,"Admin only")
+    if role!="admin" and name in {"sources","ai_jobs","verification","batches","media"}:raise HTTPException(403,"Admin only")
     with engine.connect() as c:
-        result=c.execute(text("SELECT * FROM "+TABLES[name]+" ORDER BY id DESC LIMIT :n"),{"n":limit})
+        if name=="media":
+            result=c.execute(text("""SELECT id,media_id,property_id,media_type,filename,mime_type,file_size,created_at
+                                     FROM pi_property_media ORDER BY id DESC LIMIT :n"""),{"n":limit})
+        else:
+            result=c.execute(text("SELECT * FROM "+TABLES[name]+" ORDER BY id DESC LIMIT :n"),{"n":limit})
         rows=[]
         for row in result:
             d={}
@@ -1058,6 +1195,9 @@ def fallback_whatsapp_message(requirement,top_properties):
         if p.get("available_area_sqft") is not None: bits.append(f"{p['available_area_sqft']} sq ft")
         if p.get("rent_or_sale"): bits.append(str(p["rent_or_sale"]))
         lines.append(" | ".join(bits))
+        if p.get("image_urls"): lines.append("Photos: "+str(p["image_urls"]))
+        if p.get("video_urls"): lines.append("Video: "+str(p["video_urls"]))
+        if p.get("brochure_url"): lines.append("Brochure: "+str(p["brochure_url"]))
     lines.append("Please let me know which option you would like to review in detail or schedule a site visit for.")
     return "\\n".join(lines)
 
@@ -1078,6 +1218,9 @@ def generate_whatsapp_message(requirement,top_properties):
             "rent_or_sale":p.get("rent_or_sale"),
             "nearby_brands":p.get("nearby_brands"),
             "suitable_category":p.get("suitable_category"),
+            "image_urls":p.get("image_urls"),
+            "video_urls":p.get("video_urls"),
+            "brochure_url":p.get("brochure_url"),
         })
 
     prompt=f"""Write one concise professional WhatsApp message for a real-estate client.
@@ -1085,6 +1228,8 @@ Use ONLY the supplied requirement and matched property facts.
 Do not reveal owner names, broker names, owner contacts, broker contacts, internal remarks or source data.
 Do not invent rent, price, amenities or availability details.
 Mention no more than the best 3 options.
+If image_urls, video_urls or brochure_url are available for a selected property, include the relevant links directly under that property.
+Never invent, rewrite or shorten a media URL. Copy supplied URLs exactly.
 End with a simple call to action for details or a site visit.
 
 Requirement:
@@ -1261,7 +1406,35 @@ WORKSPACE='''<!doctype html><html><head><meta charset="utf-8"><meta name="viewpo
 <div id="uploadResult" style="margin-top:12px;font-size:14px"></div>
 </div>
 <div class="card"><h3>Paste WhatsApp / Email</h3><input id="tn" placeholder="Source name"><textarea id="tc" rows="7"></textarea><button onclick="txt()">Process</button><pre id="to"></pre></div>
-<div class="card"><h3>Add Property</h3><input id="pc" placeholder="City"><input id="pl" placeholder="Location"><input id="pa" type="number" placeholder="Available sqft"><select id="px"><option>Rent</option><option>Sale</option></select><button onclick="prop()">Save</button><pre id="po"></pre></div>
+<div class="card"><h3>Add Property Manually</h3>
+<input id="pn" placeholder="Property name / building">
+<input id="pt" placeholder="Property type">
+<input id="pc" placeholder="City">
+<input id="pl" placeholder="Location">
+<input id="pa" type="number" placeholder="Available sqft">
+<input id="pf" placeholder="Floor">
+<select id="px"><option>Rent</option><option>Sale</option></select>
+<input id="pnb" placeholder="Nearby brands">
+<input id="psc" placeholder="Suitable category">
+<input id="ppk" placeholder="Parking">
+
+<div id="dropZone" style="border:2px dashed #9ca3af;border-radius:10px;padding:20px;text-align:center;margin:10px 0;background:#f9fafb;cursor:pointer">
+  <b>Drag & Drop Property Photos Here</b><br>
+  <small>or click to choose multiple photos</small>
+  <input id="pfiles" type="file" accept="image/jpeg,image/png,image/webp,image/gif" multiple style="display:none">
+</div>
+<div id="previewGrid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(90px,1fr));gap:8px;margin-bottom:10px"></div>
+<div id="photoCount" style="font-size:12px;color:#6b7280;margin-bottom:8px">0 photos selected</div>
+
+<input id="pimg" placeholder="Optional external photo links">
+<input id="pvid" placeholder="Video links - YouTube / Drive / other public links">
+<input id="pbro" placeholder="Brochure / presentation link">
+<textarea id="prem" rows="3" placeholder="Remarks"></textarea>
+<small>You can drag up to __MAX_PROPERTY_IMAGES__ photos. Each photo can be up to __MAX_IMAGE_MB__ MB. Photos will be attached to the Property ID and used in WhatsApp drafts.</small><br>
+<button id="savePropertyBtn" onclick="prop()">Save Property + Photos</button>
+<div id="propertySaveStatus" style="margin-top:10px"></div>
+<pre id="po"></pre>
+</div>
 <div class="card"><h3>Add Requirement</h3><input id="rc" placeholder="Client"><input id="rci" placeholder="City"><input id="rl" placeholder="Preferred locations"><input id="rmin" type="number" placeholder="Min sqft"><input id="rmax" type="number" placeholder="Max sqft"><select id="rx"><option>Rent</option><option>Sale</option></select><button onclick="req()">Save</button><pre id="ro"></pre></div>
 <div class="card"><h3>Run Matcher + WhatsApp Draft</h3><input id="rid" placeholder="Requirement ID"><button onclick="mt()">Match + Create WhatsApp</button><pre id="mo"></pre><div id="waBox" style="display:none;margin-top:10px"><b>WhatsApp Draft</b><textarea id="waText" rows="9" readonly></textarea><small>READY_FOR_REVIEW. Nothing is sent automatically.</small></div></div>
 </div></section>
@@ -1379,14 +1552,166 @@ function up(){
 }
 
 async function txt(){try{s("to",await jf("/api/ingest/text",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({source_type:"WHATSAPP",source_name:v("tn"),text_content:v("tc")})}))}catch(x){s("to",x)}}
-async function prop(){try{s("po",await jf("/api/properties",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({city:v("pc"),location:v("pl"),available_area_sqft:Number(v("pa"))||null,rent_or_sale:v("px")})}))}catch(x){s("po",x)}}
+
+let selectedPropertyFiles=[];
+
+function renderPropertyPreviews(){
+  const grid=e("previewGrid");
+  grid.innerHTML="";
+  selectedPropertyFiles.forEach((file,index)=>{
+    const box=document.createElement("div");
+    box.style.position="relative";
+    box.style.border="1px solid #e5e7eb";
+    box.style.borderRadius="8px";
+    box.style.overflow="hidden";
+    box.style.background="#fff";
+
+    const img=document.createElement("img");
+    img.style.width="100%";
+    img.style.height="90px";
+    img.style.objectFit="cover";
+    img.src=URL.createObjectURL(file);
+
+    const btn=document.createElement("button");
+    btn.type="button";
+    btn.innerText="×";
+    btn.style.position="absolute";
+    btn.style.top="3px";
+    btn.style.right="3px";
+    btn.style.width="26px";
+    btn.style.height="26px";
+    btn.style.padding="0";
+    btn.style.borderRadius="50%";
+    btn.onclick=()=>{
+      selectedPropertyFiles.splice(index,1);
+      renderPropertyPreviews();
+    };
+
+    box.appendChild(img);
+    box.appendChild(btn);
+    grid.appendChild(box);
+  });
+  e("photoCount").innerText=selectedPropertyFiles.length+" photos selected";
+}
+
+function addPropertyFiles(fileList){
+  const incoming=Array.from(fileList||[]).filter(f=>f.type.startsWith("image/"));
+  for(const f of incoming){
+    if(selectedPropertyFiles.length>=12) break;
+    const duplicate=selectedPropertyFiles.some(x=>x.name===f.name && x.size===f.size);
+    if(!duplicate) selectedPropertyFiles.push(f);
+  }
+  renderPropertyPreviews();
+}
+
+window.addEventListener("DOMContentLoaded",()=>{
+  const dz=e("dropZone");
+  const input=e("pfiles");
+
+  dz.onclick=()=>input.click();
+  input.onchange=()=>addPropertyFiles(input.files);
+
+  ["dragenter","dragover"].forEach(evt=>{
+    dz.addEventListener(evt,ev=>{
+      ev.preventDefault();
+      dz.style.background="#eef2ff";
+      dz.style.borderColor="#4f46e5";
+    });
+  });
+
+  ["dragleave","drop"].forEach(evt=>{
+    dz.addEventListener(evt,ev=>{
+      ev.preventDefault();
+      dz.style.background="#f9fafb";
+      dz.style.borderColor="#9ca3af";
+    });
+  });
+
+  dz.addEventListener("drop",ev=>{
+    addPropertyFiles(ev.dataTransfer.files);
+  });
+});
+
+async function uploadPropertyImages(propertyId){
+  const uploaded=[];
+  for(let i=0;i<selectedPropertyFiles.length;i++){
+    const file=selectedPropertyFiles[i];
+    e("propertySaveStatus").innerText="Uploading photo "+(i+1)+" of "+selectedPropertyFiles.length+"...";
+    const fd=new FormData();
+    fd.append("file",file);
+    const d=await jf("/api/properties/"+encodeURIComponent(propertyId)+"/media",{
+      method:"POST",
+      body:fd
+    });
+    uploaded.push(d);
+  }
+  return uploaded;
+}
+
+async function prop(){
+  try{
+    e("savePropertyBtn").disabled=true;
+    e("propertySaveStatus").innerText="Saving property...";
+
+    const d=await jf("/api/properties",{
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({
+        property_name:v("pn"),
+        property_type:v("pt")||"NA",
+        city:v("pc")||"NA",
+        location:v("pl")||"NA",
+        available_area_sqft:Number(v("pa"))||null,
+        floor:v("pf")||null,
+        rent_or_sale:v("px"),
+        nearby_brands:v("pnb")||null,
+        suitable_category:v("psc")||null,
+        parking:v("ppk")||null,
+        image_urls:v("pimg")||null,
+        video_urls:v("pvid")||null,
+        brochure_url:v("pbro")||null,
+        remarks:v("prem")||null,
+        source:"Manual"
+      })
+    });
+
+    if(d.status==="duplicate"){
+      s("po",d);
+      e("propertySaveStatus").innerText="This property appears to already exist. Photos were not uploaded.";
+      return;
+    }
+
+    let uploaded=[];
+    if(d.property_id && selectedPropertyFiles.length){
+      uploaded=await uploadPropertyImages(d.property_id);
+    }
+
+    s("po",{
+      status:"saved",
+      property_id:d.property_id,
+      photos_uploaded:uploaded.length,
+      photo_urls:uploaded.map(x=>x.url)
+    });
+
+    e("propertySaveStatus").innerText="✓ Property saved successfully with "+uploaded.length+" photos.";
+    selectedPropertyFiles=[];
+    renderPropertyPreviews();
+
+  }catch(x){
+    s("po",x);
+    e("propertySaveStatus").innerText="Property/photo upload failed: "+(x.detail||x.message||"Unknown error");
+  }finally{
+    e("savePropertyBtn").disabled=false;
+  }
+}
+
 async function req(){try{const d=await jf("/api/requirements",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({client_name:v("rc"),city:v("rci"),preferred_locations:v("rl"),minimum_area_sqft:Number(v("rmin"))||null,maximum_area_sqft:Number(v("rmax"))||null,rent_or_sale:v("rx")})});s("ro",d);if(d.requirement_id)e("rid").value=d.requirement_id}catch(x){s("ro",x)}}
 async function mt(){try{const d=await jf("/api/match/"+encodeURIComponent(v("rid")),{method:"POST"});s("mo",{status:d.status,matches:d.matches});if(d.whatsapp_draft){e("waBox").style.display="block";e("waText").value=d.whatsapp_draft.message||""}}catch(x){s("mo",x)}}
 async function stat(){try{s("so",await jf("/api/status"))}catch(x){s("so",x)}}
 function render(rows,target){const g=e(target);if(!rows.length){g.innerHTML="<tr><td>No records yet</td></tr>";return}const c=Object.keys(rows[0]);g.innerHTML="<thead><tr>"+c.map(x=>"<th>"+x+"</th>").join("")+"</tr></thead><tbody>"+rows.map(r=>"<tr>"+c.map(x=>"<td>"+String(r[x]??"")+"</td>").join("")+"</tr>").join("")+"</tbody>"}
 async function load(n,target="grid",meta="meta"){try{const d=await jf("/api/database/"+n);e(meta).innerText=d.count+" records";render(d.rows,target)}catch(x){e(meta).innerText=x.detail||x.message||"Error"}}
 e("tabs").innerHTML=["properties","requirements","matches","whatsapp_drafts"].map(x=>'<button onclick="load(\\''+x+'\\')">'+x+"</button>").join("");
-if(ROLE=="admin")e("atabs").innerHTML=["sources","ai_jobs","verification","batches"].map(x=>'<button onclick="load(\\''+x+'\\',\\'agrid\\',\\'ameta\\')">'+x+"</button>").join("");
+if(ROLE=="admin")e("atabs").innerHTML=["sources","ai_jobs","verification","batches","media"].map(x=>'<button onclick="load(\\''+x+'\\',\\'agrid\\',\\'ameta\\')">'+x+"</button>").join("");
 </script></body></html>'''
 
 @app.get("/workspace",response_class=HTMLResponse)
@@ -1400,6 +1725,8 @@ def workspace(req:Request):
         .replace("__ROLE__",role.upper())
         .replace("__ROLELOW__",role)
         .replace("__ADMINBTN__",admin_btn)
+        .replace("__MAX_PROPERTY_IMAGES__",str(MAX_PROPERTY_IMAGES))
+        .replace("__MAX_IMAGE_MB__",str(MAX_IMAGE_MB))
     )
 
 @app.get("/")
