@@ -1,64 +1,44 @@
-# Property Intelligence Unified Workspace V2
+# Property Intelligence Unified Workspace V4 - Progress Upload Fix
 
-Version: 5.1.0
+Version: 5.3.0
 
-## Main fix
-Opening `/workspace` on a new Android phone, another laptop, iPhone or Mac now
-redirects automatically to `/login` instead of showing:
+## Changes
+- Removed raw JSON/script-style output from the file upload box.
+- Added a clean upload progress bar: 0% to 100%.
+- Shows friendly messages:
+  - Uploading...
+  - Upload completed
+  - AI is reading and organizing the file
+  - AI processing completed
+  - clear error message if extraction fails
+- Added background job status checking.
+- Improved MIME handling for Android/Windows browsers.
+- Accepts JPG, JPEG, PNG, WEBP, PDF, CSV and TXT.
+- Keeps streamed uploads from V3.
+- Default workspace upload limit remains 100 MB.
+- PDFs remain limited to 50 MB for Gemini processing.
 
-`{"detail":"Login required"}`
-
-## One domain
-Use only your active Railway domain.
-
-Opening the root URL:
-- if not logged in -> `/login`
-- if already logged in -> `/workspace`
-
-## Roles
-TEAM:
-- file/photo/magazine/PDF/CSV upload
-- WhatsApp/email text ingestion
-- add property
-- add requirement
-- run matcher
-- view non-sensitive records
-
-ADMIN:
-- everything Team can do
-- Sources
-- AI Jobs
-- Verification
-- internal/admin records
-
-## Upload behavior
-Uploads are accepted immediately and Gemini processing continues in the background.
-
-## Railway variables
-Keep:
-DATABASE_URL=${{Postgres.DATABASE_URL}}
-GEMINI_API_KEY=your-real-key
-GEMINI_MODEL=gemini-3.1-flash-lite
-MAX_UPLOAD_MB=25
-
-Add/keep:
-ADMIN_CODE=your-admin-code
-TEAM_CODE=your-team-code
-SESSION_SECRET=your-long-random-secret
-
-## Deployment
-Replace the full files in the SAME backend GitHub repository:
+## Railway
+Replace the COMPLETE files in the existing backend repository:
 - app.py
 - Dockerfile
 - requirements.txt
 - .env.example
 - README.md
 
-Keep the SAME Railway service, Postgres and active domain.
-Do not create a new repo, service or database.
+Keep:
+DATABASE_URL=${{Postgres.DATABASE_URL}}
+GEMINI_API_KEY=your-real-key
+GEMINI_MODEL=gemini-3.1-flash-lite
+MAX_UPLOAD_MB=100
+ADMIN_CODE=your-admin-code
+TEAM_CODE=your-team-code
+SESSION_SECRET=your-long-random-secret
+
+No new repository, database, Railway service or domain is required.
 
 After deploy:
-1. /health -> version 5.1.0
-2. open root domain on Android -> login page
-3. Team login -> workspace
-4. Admin login -> same workspace with Admin tab
+- /health should show version 5.3.0
+- login
+- choose a small JPG or PNG
+- upload should show percentage progress rather than JSON
