@@ -1,29 +1,30 @@
-# Property Intelligence Unified Workspace V12 - Navigation Fix
-Version 6.4.0
+# Property Intelligence V13 - No-JavaScript Core Workspace
+Version 7.0.0
 
-Critical fix:
-V11 had a malformed JavaScript string in the Database/Admin dynamic-tab code.
-That single syntax error stopped the entire browser script, which made Operations,
-Database, Admin, Upload, Edit and other controls appear dead.
+This version fixes the repeated dead-link problem by removing JavaScript as a dependency for core navigation and actions.
 
-V12:
-- replaces fragile inline onclick string generation with DOM event listeners
-- hardens section navigation
-- hardens API response parsing
-- explicitly sets navigation buttons to type=button
-- adds a visible browser error banner
-- retains all V11 features
+Core pages are normal server routes:
+- /workspace
+- /database-page
+- /status-page
+- /admin-page
 
-Validation completed:
-- Python syntax: PASS
-- Browser JavaScript syntax using node --check: PASS
+Core navigation uses ordinary HTML links.
+Core actions use ordinary HTML forms:
+- Upload
+- Add Property
+- Add Requirement
+- Verify Property
+- Run Matcher + Create WhatsApp Draft
 
-Deploy all files from this ZIP into the SAME backend repository.
-Keep the SAME Railway service, database and domain.
+So even if browser JavaScript fails, the core system still works.
+
+Deploy all files into the SAME backend GitHub repository.
+Keep the SAME Railway service, Postgres database and public domain.
 
 After deployment:
-1. /health must show 6.4.0
-2. Log out and log back in
-3. Windows: Ctrl+F5
-4. Android: close old tab and reopen the main domain
-5. Test Operations, Database, Admin, Upload
+1. /health must show version 7.0.0
+2. Open root domain
+3. Login
+4. Test Operations, Database, Status, Admin
+5. Upload one small image
