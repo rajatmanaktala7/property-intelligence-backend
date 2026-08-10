@@ -1,20 +1,33 @@
-# Property Intelligence ALL LAYERS V1 - MIGRATION FIX
+# Property Intelligence Unified Workspace V1
 
-Fixes Railway startup crash:
-`psycopg.errors.UndefinedColumn: column "fingerprint" does not exist`
+One Railway service, one Postgres database and one public domain.
 
-Cause:
-Your PostgreSQL database already contained older Property Intelligence tables.
-`CREATE TABLE IF NOT EXISTS` does not add new columns to existing tables.
+Team:
+- upload photo/magazine/PDF/CSV
+- paste WhatsApp/email text
+- add property
+- add requirement
+- run matcher
+- view non-sensitive database
 
-This release:
-- preserves existing PostgreSQL data
-- creates missing tables
-- adds missing columns safely with `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`
-- creates indexes only after the columns exist
-- requires no manual SQL and no new database
+Admin:
+- everything Team can do
+- sources
+- AI jobs
+- verification history
+- internal data controls
 
-Deploy these files to the SAME backend GitHub repository.
-Keep the SAME Railway service, Postgres, domain, DATABASE_URL and Gemini key.
+Upload fix:
+Uploads return immediately with ACCEPTED and are processed by Gemini in FastAPI background tasks.
 
-After deployment, `/health` should show version `4.0.1`.
+Railway variables:
+DATABASE_URL=${{Postgres.DATABASE_URL}}
+GEMINI_API_KEY=your-real-key
+GEMINI_MODEL=gemini-3.1-flash-lite
+MAX_UPLOAD_MB=25
+ADMIN_CODE=choose-strong-admin-code
+TEAM_CODE=choose-team-code
+SESSION_SECRET=choose-long-random-secret
+
+Deploy to your existing backend repository and existing Railway backend service.
+After verifying this service, remove the old separate dashboard service/domain. Keep Postgres.
