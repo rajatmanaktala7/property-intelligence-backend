@@ -16,7 +16,7 @@ from PIL import Image
 import fitz
 from pypdf import PdfReader, PdfWriter
 
-VERSION="7.3.0"
+VERSION="7.4.0-MATCHER-V2"
 DATABASE_URL=os.getenv("DATABASE_URL","")
 GEMINI_API_KEY=os.getenv("GEMINI_API_KEY","")
 GEMINI_MODEL=os.getenv("GEMINI_MODEL","gemini-3.1-flash-lite")
@@ -3639,239 +3639,437 @@ def _type_family(value):
     v=_norm(value)
     if any(x in v for x in ["retail","shop","showroom","store"]):
         toks.update({"retail","shop","showroom","store","commercial"})
-    if any(x in v for x in ["restaurant","cafe","qsr","food","f&b"]):
-        toks.update({"restaurant","cafe","qsr","food","commercial","retail"})
-    if any(x in v for x in ["banquet","wedding","farmhouse"]):
-        toks.update({"banquet","wedding","farmhouse","hospitality","commercial"})
-    if any(x in v for x in ["office","commercial"]):
+    if any(x in v for x in ["restaurant","cafe","café","qsr","food","f&b","fnb","lounge","club"]):
+        toks.update({"restaurant","cafe","qsr","food","f&b","fnb","lounge","club","commercial","retail"})
+    if any(x in v for x in ["banquet","wedding","farmhouse","hotel","hospitality"]):
+        toks.update({"banquet","wedding","farmhouse","hotel","hospitality","commercial"})
+    if any(x in v for x in ["office","commercial","business centre","cowork"]):
         toks.update({"office","commercial"})
+    if any(x in v for x in ["warehouse","industrial","factory","logistics"]):
+        toks.update({"warehouse","industrial","commercial"})
+    if any(x in v for x in ["residential","apartment","flat","villa","house","builder floor","residence"]):
+        toks.update({"residential"})
     return toks
+
+
+def _property_class(*values):
+    v=_norm(" ".join(str(x or "") for x in values))
+    commercial=[
+        "commercial","retail","shop","showroom","office","restaurant","cafe","café",
+        "qsr","food","f&b","fnb","lounge","club","banquet","hotel","hospitality",
+        "warehouse","industrial","factory","business centre","cowork"
+    ]
+    residential=[
+        "residential","apartment","flat","villa","house","builder floor","residence",
+        "residential floor","independent floor"
+    ]
+    if any(x in v for x in commercial):
+        return "COMMERCIAL"
+    if any(x in v for x in residential):
+        return "RESIDENTIAL"
+    return "UNKNOWN"
+
+
+def _canonical_city(value):
+    v=_norm(value)
+    if not v:
+        return None
+    if "delhi ncr" in v or v=="ncr" or "national capital region" in v:
+        return "NCR"
+    if "gurgaon" in v or "gurugram" in v:
+        return "GURUGRAM"
+    if "greater noida" in v:
+        return "GREATER_NOIDA"
+    if "noida" in v:
+        return "NOIDA"
+    if "faridabad" in v:
+        return "FARIDABAD"
+    if "ghaziabad" in v:
+        return "GHAZIABAD"
+    if "new delhi" in v or v=="delhi" or v.endswith(" delhi") or v.startswith("delhi "):
+        return "DELHI"
+    return v.upper().replace(" ","_")
+
+
+_SOUTH_DELHI_ALIASES={
+    "south delhi","greater kailash","gk","gk 1","gk1","gk 2","gk2",
+    "defence colony","defense colony","south extension","south ex",
+    "hauz khas","green park","saket","vasant kunj","lajpat nagar",
+    "new friends colony","nfc","kalkaji","nehru place","malviya nagar",
+    "cr park","chittaranjan park","panchsheel","panchsheel park",
+    "safdarjung","safdarjung enclave","vasant vihar","east of kailash",
+    "greater kailash 1","greater kailash 2"
+}
+
+
+def _south_delhi_match(requirement_location, property_location):
+    rq=_norm(requirement_location)
+    pl=_norm(property_location)
+    if "south delhi" not in rq:
+        return False
+    return any(alias in pl for alias in _SOUTH_DELHI_ALIASES if alias!="south delhi") or "south delhi" in pl
+
 
 def _location_similarity(a,b):
     ta=_tokens(a); tb=_tokens(b)
-    if not ta or not tb: return 0.0,[]
+    if not ta or not tb:
+        return 0.0,[]
     overlap=ta & tb
     union=ta | tb
     score=len(overlap)/max(1,len(union))
-    # Reward substring relationships such as "Golf Course Road" vs "Golf Course Rd Sector 42".
     na=_norm(a); nb=_norm(b)
     if na and nb and (na in nb or nb in na):
-        score=max(score,0.85)
+        score=max(score,0.90)
+    if _south_delhi_match(a,b):
+        score=max(score,0.92)
     return score,sorted(overlap)
 
+
+def _phone_key(value):
+    digits="".join(ch for ch in str(value or "") if ch.isdigit())
+    return digits[-10:] if len(digits)>=10 else digits
+
+
+def _is_restaurant_requirement(q):
+    text_value=" ".join(str(q.get(k) or "") for k in [
+        "property_type","suitable_category","additional_points","requirement_type"
+    ])
+    v=_norm(text_value)
+    return any(x in v for x in [
+        "restaurant","food","f&b","fnb","qsr","cafe","café","lounge","club"
+    ])
+
+
+def _restaurant_compatible(p):
+    text_value=" ".join(str(p.get(k) or "") for k in [
+        "property_type","suitable_category","remarks"
+    ])
+    v=_norm(text_value)
+    if _property_class(text_value)=="RESIDENTIAL":
+        return False
+    return any(x in v for x in [
+        "restaurant","food","f&b","fnb","qsr","cafe","café","lounge","club",
+        "retail","shop","showroom","commercial"
+    ])
+
+
+def _requirement_area_window(q):
+    mn=_float(q.get("minimum_area_sqft"))
+    mx=_float(q.get("maximum_area_sqft"))
+    if mn is None and mx is None:
+        return None,None,None
+    if mn is not None and mx is not None:
+        base_lo=min(mn,mx); base_hi=max(mn,mx); target=(base_lo+base_hi)/2.0
+    else:
+        target=mn if mn is not None else mx
+        base_lo=target; base_hi=target
+    return max(0.0,base_lo*0.80),base_hi*1.20,target
+
+
+def _property_area(p):
+    for key in ["available_area_sqft","area_sqft","maximum_area_sqft","minimum_area_sqft"]:
+        value=_float(p.get(key))
+        if value is not None and value>0:
+            return value
+    return None
+
+
+def _budget_max(q):
+    for key in ["budget_max","monthly_rent","maximum_rent","rent_budget"]:
+        value=_float(q.get(key))
+        if value is not None and value>0:
+            return value
+    return None
+
+
+def _property_monthly_rent(p):
+    value=_float(p.get("monthly_rent"))
+    if value is not None and value>0:
+        return value
+    psf=_float(p.get("asking_rent_per_sqft"))
+    area=_property_area(p)
+    if psf is not None and area is not None and psf>0 and area>0:
+        return psf*area
+    return None
+
+
+def _match_band(score):
+    if score>=90: return "EXCELLENT"
+    if score>=80: return "STRONG"
+    if score>=70: return "GOOD"
+    return "POSSIBLE"
+
+
+def _area_match_score(target,area):
+    if target is None or area is None or target<=0:
+        return 10
+    ratio=abs(area-target)/target
+    if ratio<=0.05: return 25
+    if ratio<=0.10: return 23
+    if ratio<=0.15: return 21
+    if ratio<=0.20: return 18
+    return 0
+
+
+def _location_match_score(q,p):
+    q_city=_canonical_city(q.get("city"))
+    p_city=_canonical_city(p.get("city"))
+    q_loc=q.get("preferred_locations") or ""
+    p_loc=" ".join(str(x or "") for x in [p.get("location"),p.get("micro_market")])
+    city_points=0
+    location_points=0
+    if not q_city:
+        city_points=5
+    elif q_city=="NCR":
+        if p_city in {"DELHI","GURUGRAM","NOIDA","GREATER_NOIDA","FARIDABAD","GHAZIABAD","NCR"}:
+            city_points=10
+    elif p_city==q_city:
+        city_points=10
+    if not q_loc:
+        location_points=10
+    elif _south_delhi_match(q_loc,p_loc):
+        location_points=20
+    else:
+        sim,_overlap=_location_similarity(q_loc,p_loc)
+        if sim>=0.85: location_points=20
+        elif sim>=0.60: location_points=17
+        elif sim>=0.30: location_points=12
+        elif sim>0: location_points=6
+    return min(30,city_points+location_points)
+
+
+def _property_type_score(q,p):
+    q_text=" ".join(str(q.get(k) or "") for k in ["property_type","suitable_category","additional_points"])
+    p_text=" ".join(str(p.get(k) or "") for k in ["property_type","suitable_category","remarks"])
+    q_class=_property_class(q_text)
+    p_class=_property_class(p_text)
+    qt=_type_family(q_text)
+    pt=_type_family(p_text)
+    if q_class!="UNKNOWN" and q_class==p_class:
+        if qt and pt and qt & pt: return 15
+        return 12
+    if qt and pt and qt & pt: return 12
+    if q_class=="UNKNOWN" or p_class=="UNKNOWN": return 6
+    return 0
+
+
+def _suitable_use_score(q,p):
+    if _is_restaurant_requirement(q):
+        return 15 if _restaurant_compatible(p) else 0
+    q_cat=_type_family(q.get("suitable_category"))
+    p_cat=_type_family(" ".join(str(x or "") for x in [
+        p.get("suitable_category"),p.get("property_type"),p.get("remarks")
+    ]))
+    if not q_cat: return 8
+    if q_cat and p_cat and q_cat & p_cat: return 15
+    return 5 if not p_cat else 0
+
+
+def _budget_score(q,p):
+    maximum=_budget_max(q)
+    rent=_property_monthly_rent(p)
+    if maximum is None: return 5
+    if rent is None: return 3
+    ratio=rent/maximum if maximum else 999
+    if ratio<=1.00: return 10
+    if ratio<=1.05: return 9
+    if ratio<=1.10: return 7
+    if ratio<=1.20: return 4
+    return 0
+
+
+def _verification_score(p):
+    return 5 if _norm(p.get("verification_status"))=="verified" else 1
+
+
+def _hard_filter_property(q,p):
+    exclusions=[]
+    request_phone=_phone_key(q.get("contact_phone"))
+    property_phones={
+        _phone_key(p.get("owner_contact")),
+        _phone_key(p.get("broker_contact")),
+        _phone_key(p.get("contact_number"))
+    }
+    property_phones.discard("")
+    if request_phone and request_phone in property_phones:
+        exclusions.append("SELF_INVENTORY")
+
+    availability=_norm(p.get("availability_status") or "available")
+    if any(x in availability for x in [
+        "unavailable","sold","leased","not available","inactive","removed","closed"
+    ]):
+        exclusions.append("NOT_AVAILABLE")
+
+    q_tx=_transaction_family(q.get("rent_or_sale"))
+    p_tx=_transaction_family(p.get("rent_or_sale"))
+    p_tx_raw=_norm(p.get("rent_or_sale"))
+    if q_tx and p_tx:
+        sale_or_rent=any(x in p_tx_raw for x in ["sale or rent","rent or sale","sale/rent","rent/sale"])
+        if q_tx!=p_tx and not sale_or_rent:
+            exclusions.append("TRANSACTION_MISMATCH")
+
+    q_class=_property_class(q.get("property_type"),q.get("suitable_category"),q.get("additional_points"),q.get("requirement_type"))
+    p_class=_property_class(p.get("property_type"),p.get("suitable_category"),p.get("remarks"))
+    if q_class!="UNKNOWN" and p_class!="UNKNOWN" and q_class!=p_class:
+        exclusions.append("PROPERTY_CLASS_MISMATCH")
+
+    if _is_restaurant_requirement(q) and not _restaurant_compatible(p):
+        exclusions.append("USE_MISMATCH")
+
+    q_city=_canonical_city(q.get("city"))
+    p_city=_canonical_city(p.get("city"))
+    if q_city and q_city!="NCR" and p_city and p_city!="NCR" and q_city!=p_city:
+        exclusions.append("CITY_MISMATCH")
+
+    q_loc=q.get("preferred_locations") or ""
+    p_loc=" ".join(str(x or "") for x in [p.get("location"),p.get("micro_market")])
+    if "south delhi" in _norm(q_loc) and p_loc and not _south_delhi_match(q_loc,p_loc):
+        exclusions.append("LOCATION_MISMATCH")
+
+    hard_lo,hard_hi,_target=_requirement_area_window(q)
+    area=_property_area(p)
+    if hard_lo is not None and hard_hi is not None and area is not None:
+        if area<hard_lo or area>hard_hi:
+            exclusions.append("AREA_OUTSIDE_20_PERCENT_RANGE")
+
+    return exclusions
+
+
 def robust_match_requirement(rid,create_whatsapp=False):
-    """
-    V4.1 matcher:
-    - Gurgaon/Gurugram and Delhi-NCR aware
-    - Rent/Lease synonyms
-    - fuzzy/token location matching
-    - area tolerance
-    - category/type compatibility
-    - does not silently fail when data is incomplete
-    - returns diagnostic counts and rejection reasons
-    """
     with engine.begin() as c:
         qrow=c.execute(text("SELECT * FROM pi_requirements WHERE requirement_id=:id"),{"id":rid}).first()
         if not qrow:
             raise HTTPException(404,"Requirement not found")
         q=dict(qrow._mapping)
-
-        all_count=c.execute(text("SELECT COUNT(*) FROM pi_properties")).scalar_one()
-        props=c.execute(text("""SELECT * FROM pi_properties
-            WHERE UPPER(TRIM(COALESCE(availability_status,'AVAILABLE')))
-            NOT IN ('UNAVAILABLE','LEASED','SOLD','INACTIVE','REMOVED','NOT AVAILABLE')""")).fetchall()
-
+        all_rows=c.execute(text("SELECT * FROM pi_properties ORDER BY created_at DESC")).fetchall()
+        all_count=len(all_rows)
         c.execute(text("DELETE FROM pi_matches WHERE requirement_id=:id"),{"id":rid})
 
-        q_city=_city_family(q.get("city"))
-        q_loc=q.get("preferred_locations") or ""
-        q_type=_type_family(q.get("property_type"))
-        q_cat=_type_family(q.get("suitable_category"))
-        q_tx=_transaction_family(q.get("rent_or_sale"))
-        mn=_float(q.get("minimum_area_sqft"))
-        mx=_float(q.get("maximum_area_sqft"))
+        eligible=[]
+        excluded=[]
+        exclusion_counts={}
+        _hard_lo,_hard_hi,target_area=_requirement_area_window(q)
 
-        evaluated=[]
-        reason_counts={"city":0,"location":0,"area":0,"transaction":0,"type":0,"category":0,"verified":0}
-        missing_counts={"property_city":0,"property_location":0,"property_area":0,"property_transaction":0}
-
-        for row in props:
+        for row in all_rows:
             p=dict(row._mapping)
-            score=0
+            exclusion_reasons=_hard_filter_property(q,p)
+            if exclusion_reasons:
+                for reason in exclusion_reasons:
+                    exclusion_counts[reason]=exclusion_counts.get(reason,0)+1
+                excluded.append({
+                    "property_id":p.get("property_id"),
+                    "property_name":p.get("property_name"),
+                    "city":p.get("city"),
+                    "location":p.get("location"),
+                    "property_type":p.get("property_type"),
+                    "available_area_sqft":_property_area(p),
+                    "source":p.get("source"),
+                    "reasons":exclusion_reasons
+                })
+                continue
+
+            area=_property_area(p)
+            breakdown={
+                "location":_location_match_score(q,p),
+                "area":_area_match_score(target_area,area),
+                "property_type":_property_type_score(q,p),
+                "suitable_use":_suitable_use_score(q,p),
+                "budget":_budget_score(q,p),
+                "verification":_verification_score(p)
+            }
+            score=round(sum(breakdown.values()),2)
             reasons=[]
+            if breakdown["location"]>=22: reasons.append("Strong location")
+            elif breakdown["location"]>=15: reasons.append("Location compatible")
+            if breakdown["area"]>=21: reasons.append("Strong area fit")
+            elif breakdown["area"]>=18: reasons.append("Area within 20% tolerance")
+            if breakdown["property_type"]>=12: reasons.append("Property type compatible")
+            if breakdown["suitable_use"]>=12: reasons.append("Suitable use compatible")
+            if breakdown["budget"]>=7: reasons.append("Budget/rent compatible")
+            if breakdown["verification"]==5: reasons.append("Verified")
+
             gaps=[]
+            if not p.get("location"): gaps.append("Property location missing")
+            if area is None: gaps.append("Property area missing")
+            if not p.get("rent_or_sale"): gaps.append("Property Rent/Sale missing")
+            if _property_class(p.get("property_type"),p.get("suitable_category"),p.get("remarks"))=="UNKNOWN":
+                gaps.append("Property class unclear")
+            if _norm(p.get("verification_status"))!="verified":
+                gaps.append("Availability not verified")
 
-            p_city=_city_family(p.get("city"))
-            p_loc=p.get("location") or ""
-            p_type=_type_family(p.get("property_type"))
-            p_cat=_type_family(p.get("suitable_category"))
-            p_tx=_transaction_family(p.get("rent_or_sale"))
-            area=_float(p.get("available_area_sqft"))
-
-            # City: broad NCR-aware match.
-            if q_city:
-                if not p_city:
-                    missing_counts["property_city"]+=1
-                    gaps.append("Property city missing")
-                elif q_city & p_city:
-                    score+=20
-                    reasons.append("City/NCR")
-                    reason_counts["city"]+=1
-                else:
-                    gaps.append("City differs")
-            else:
-                score+=4
-                reasons.append("Requirement city not specified")
-
-            # Location: token/fuzzy match. Do not hard-reject missing location.
-            if q_loc:
-                sim,overlap=_location_similarity(q_loc,p_loc)
-                if not p_loc:
-                    missing_counts["property_location"]+=1
-                    gaps.append("Property location missing")
-                elif sim>=0.65:
-                    score+=25
-                    reasons.append("Strong location"+((" · "+", ".join(overlap[:3])) if overlap else ""))
-                    reason_counts["location"]+=1
-                elif sim>=0.25 or overlap:
-                    score+=14
-                    reasons.append("Partial location"+((" · "+", ".join(overlap[:3])) if overlap else ""))
-                    reason_counts["location"]+=1
-                else:
-                    gaps.append("Location differs")
-            else:
-                score+=4
-                reasons.append("Requirement location not specified")
-
-            # Area with wider tolerance.
-            if mn is not None or mx is not None:
-                if area is None:
-                    missing_counts["property_area"]+=1
-                    gaps.append("Property area missing")
-                else:
-                    lo=mn if mn is not None else 0
-                    hi=mx if mx is not None else float("inf")
-                    if lo<=area<=hi:
-                        score+=25
-                        reasons.append("Area in range")
-                        reason_counts["area"]+=1
-                    else:
-                        low_tolerance=lo*0.70 if lo else 0
-                        high_tolerance=(mx*1.30) if mx is not None else float("inf")
-                        if low_tolerance<=area<=high_tolerance:
-                            score+=12
-                            reasons.append("Area near range")
-                            reason_counts["area"]+=1
-                        else:
-                            gaps.append("Area outside range")
-            else:
-                score+=4
-                reasons.append("Requirement area not specified")
-
-            # Transaction.
-            if q_tx:
-                if not p_tx:
-                    missing_counts["property_transaction"]+=1
-                    gaps.append("Property Rent/Sale missing")
-                elif q_tx==p_tx:
-                    score+=10
-                    reasons.append("Rent/Lease or Sale")
-                    reason_counts["transaction"]+=1
-                else:
-                    gaps.append("Rent/Sale differs")
-            else:
-                score+=3
-
-            # Property type and suitable category.
-            if q_type and p_type and q_type & p_type:
-                score+=10
-                reasons.append("Property type")
-                reason_counts["type"]+=1
-            elif q_type and not p_type:
-                gaps.append("Property type missing")
-
-            if q_cat and p_cat and q_cat & p_cat:
-                score+=5
-                reasons.append("Suitable category")
-                reason_counts["category"]+=1
-
-            if _norm(p.get("verification_status"))=="verified":
-                score+=5
-                reasons.append("Verified")
-                reason_counts["verified"]+=1
-
-            # Keep every active candidate for diagnosis. This prevents a blank matcher.
-            evaluated.append({
-                "property_id":p["property_id"],
+            eligible.append({
+                "property_id":p.get("property_id"),
                 "property_name":p.get("property_name"),
                 "city":p.get("city"),
                 "location":p.get("location"),
+                "micro_market":p.get("micro_market"),
                 "available_area_sqft":area,
-                "monthly_rent":_float(p.get("monthly_rent")),
+                "monthly_rent":_property_monthly_rent(p),
                 "rent_or_sale":p.get("rent_or_sale"),
                 "property_type":p.get("property_type"),
+                "suitable_category":p.get("suitable_category"),
                 "verification_status":p.get("verification_status"),
                 "owner_name":p.get("owner_name"),
                 "owner_contact":p.get("owner_contact"),
                 "broker_name":p.get("broker_name"),
                 "broker_contact":p.get("broker_contact"),
                 "contact_number":p.get("contact_number"),
-                "score":round(score,2),
+                "score":score,
+                "match_band":_match_band(score),
+                "score_breakdown":breakdown,
                 "reasons":reasons,
                 "gaps":gaps
             })
 
-        evaluated.sort(
-            key=lambda x:(x["score"],1 if _norm(x.get("verification_status"))=="verified" else 0),
-            reverse=True
-        )
-
-        # Normal matches. If data is sparse and every score is low, still surface the best candidates
-        # as LOW_CONFIDENCE so the team can see and correct the missing fields.
-        matches=[x for x in evaluated if x["score"]>=20]
-        fallback=False
-        if not matches and evaluated:
-            matches=evaluated[:20]
-            fallback=True
+        eligible.sort(key=lambda x:(x["score"],1 if _norm(x.get("verification_status"))=="verified" else 0),reverse=True)
+        matches=eligible[:50]
 
         for rank,x in enumerate(matches,1):
-            stored_reasons=list(x["reasons"])
-            if fallback:
-                stored_reasons.append("LOW_CONFIDENCE_DATA_REVIEW")
-            c.execute(text("""INSERT INTO pi_matches(requirement_id,property_id,match_score,rank,match_reasons,status)
-                VALUES(:r,:p,:s,:rank,CAST(:reason AS JSONB),:status)"""),
-                {"r":rid,"p":x["property_id"],"s":x["score"],"rank":rank,
-                 "reason":json.dumps(stored_reasons),
-                 "status":"LOW_CONFIDENCE_REVIEW" if fallback else "READY_FOR_REVIEW"})
+            sql_insert="INSERT INTO pi_matches(requirement_id,property_id,match_score,rank,match_reasons,status) VALUES(:r,:p,:s,:rank,CAST(:reason AS JSONB),:status)"
+            c.execute(
+                text(sql_insert),
+                {
+                    "r":rid,
+                    "p":x["property_id"],
+                    "s":x["score"],
+                    "rank":rank,
+                    "reason":json.dumps({
+                        "reasons":x["reasons"],
+                        "score_breakdown":x["score_breakdown"],
+                        "match_band":x["match_band"]
+                    }),
+                    "status":"READY_FOR_REVIEW"
+                }
+            )
 
     if all_count==0:
         msg="No properties exist in the database. Add/upload inventory first."
-    elif len(props)==0:
-        msg="Properties exist, but none are currently treated as available. Check Availability Status."
     elif not matches:
-        msg="No candidates could be evaluated."
-    elif fallback:
-        msg="No strong match found, so the best active properties are shown as LOW CONFIDENCE. Use the Gap column to correct missing/different data."
+        msg="No eligible property passed the mandatory hard filters. Review Excluded Inventory below."
     else:
-        msg=f"{len(matches)} candidate matches found. Review highest scores first."
+        msg=f"{len(matches)} eligible properties found after hard filtering. Highest scores are shown first."
 
     diagnostic={
+        "engine":"MATCHING_V2",
         "database_properties":int(all_count),
-        "active_properties_checked":len(props),
+        "active_properties_checked":int(all_count),
+        "eligible_count":len(eligible),
+        "excluded_count":len(excluded),
         "matches_returned":len(matches),
-        "fallback_low_confidence":fallback,
+        "fallback_low_confidence":False,
+        "area_rule":"Default hard tolerance is 80%-120% of the requirement",
+        "weights":{"location":30,"area":25,"property_type":15,"suitable_use":15,"budget":10,"verification":5},
+        "exclusion_counts":exclusion_counts,
         "requirement":{
             "requirement_id":rid,
             "city":q.get("city"),
             "preferred_locations":q.get("preferred_locations"),
-            "minimum_area_sqft":mn,
-            "maximum_area_sqft":mx,
+            "minimum_area_sqft":_float(q.get("minimum_area_sqft")),
+            "maximum_area_sqft":_float(q.get("maximum_area_sqft")),
             "rent_or_sale":q.get("rent_or_sale"),
             "property_type":q.get("property_type"),
             "suitable_category":q.get("suitable_category")
         },
-        "matched_by":reason_counts,
-        "missing_property_fields":missing_counts,
         "message":msg
     }
 
@@ -3879,18 +4077,26 @@ def robust_match_requirement(rid,create_whatsapp=False):
     if create_whatsapp and matches:
         with engine.connect() as c:
             property_map={}
-            for x in matches[:5]:
+            for x in matches[:10]:
+                if _norm(x.get("verification_status"))!="verified":
+                    continue
                 rr=c.execute(text("SELECT * FROM pi_properties WHERE property_id=:id"),{"id":x["property_id"]}).first()
                 if rr:
                     property_map[x["property_id"]]=dict(rr._mapping)
-        tops=[property_map[x["property_id"]] for x in matches[:10]
-              if x["property_id"] in property_map and _norm(property_map[x["property_id"]].get("verification_status"))=="verified"]
-        message,provider=generate_whatsapp_message(q,tops)
-        did=store_whatsapp_draft(q,message,provider)
-        draft={"id":did,"status":"READY_FOR_REVIEW","message":message,"generated_by":provider}
+        tops=[property_map[x["property_id"]] for x in matches[:10] if x["property_id"] in property_map][:5]
+        if tops:
+            message,provider=generate_whatsapp_message(q,tops)
+            did=store_whatsapp_draft(q,message,provider)
+            draft={"id":did,"status":"READY_FOR_REVIEW","message":message,"generated_by":provider}
 
-    return {"status":"READY_FOR_REVIEW","matches":matches[:50],"diagnostic":diagnostic,"whatsapp_draft":draft}
-
+    return {
+        "status":"READY_FOR_REVIEW",
+        "engine":"MATCHING_V2",
+        "matches":matches,
+        "excluded":excluded[:200],
+        "diagnostic":diagnostic,
+        "whatsapp_draft":draft
+    }
 
 @app.post("/api/v4/properties/{property_id}/availability-verification")
 def set_property_availability_verification(property_id:str, req:Request, status:str=Form(...)):
@@ -3988,7 +4194,7 @@ async function loadDemandSignals(){let d=await api('/api/v4/demand-signals');$('
 async function loadRequirements(){let d=await api('/api/v4/requirements');let sel=$('#reqSelect');sel.innerHTML='<option value="">Select requirement</option>'+d.rows.map(x=>`<option value="${esc(x.requirement_id)}">${esc(x.requirement_id)} · ${esc(x.company_name||x.client_name||'')} · ${esc(x.city||'')} · ${esc(x.preferred_locations||'')}</option>`).join('');$('#reqRows').innerHTML=d.rows.map(x=>`<tr><td>${esc(x.requirement_id)}</td><td>${esc(x.company_name||x.client_name||'')}</td><td>${esc(x.city||'')}</td><td>${esc(x.preferred_locations||'')}</td><td>${x.minimum_area_sqft||''}-${x.maximum_area_sqft||''}</td><td>${esc(x.rent_or_sale||'')}</td><td><button class="btn" onclick="matchReq('${esc(x.requirement_id)}')">Match</button></td></tr>`).join('')}
 async function matchSelected(){let id=$('#reqSelect').value;if(!id)return alert('Select a requirement');await matchReq(id)}
 async function verifyProperty(pid){if(!confirm('Confirm: your team called the owner/broker and the property is currently available?'))return;let fd=new FormData();fd.append('status','VERIFIED');let r=await fetch('/api/v4/properties/'+encodeURIComponent(pid)+'/availability-verification',{method:'POST',body:fd});let d=await r.json();if(!r.ok)throw new Error(d.detail||'Verification failed');alert('VERIFIED. Contact numbers stay internal and will NOT be included in client WhatsApp.');await matchSelected()}
-async function matchReq(id){try{let d=await api('/api/v4/match/'+encodeURIComponent(id),{method:'POST'});$('#matchDiag').innerHTML=`<div class="msg ${d.matches.length?'good':'warn'}"><b>${esc(d.diagnostic.message)}</b><br>Database properties: ${d.diagnostic.database_properties} · Active checked: ${d.diagnostic.active_properties_checked} · Returned: ${d.diagnostic.matches_returned}<br><b>Team flow:</b> Call internal contact → verify availability → Mark Verified → then share with client. Contacts never go into client WhatsApp.</div>`;$('#matchRows').innerHTML=d.matches.map((x,i)=>{let contacts=[x.owner_contact?('Owner: '+(x.owner_name||'')+' '+x.owner_contact):'',x.broker_contact?('Broker: '+(x.broker_name||'')+' '+x.broker_contact):'',(!x.owner_contact&&!x.broker_contact&&x.contact_number)?('Contact: '+x.contact_number):''].filter(Boolean).join('<br>');let verified=String(x.verification_status||'').toUpperCase()==='VERIFIED';return `<tr><td>${i+1}</td><td><b>${esc(x.property_name||x.property_id)}</b><br>${esc(x.property_id)}</td><td>${esc(x.city||'')}</td><td>${esc(x.location||'')}</td><td>${x.available_area_sqft||''}</td><td>${x.monthly_rent?Number(x.monthly_rent).toLocaleString():''}</td><td class="${x.score>=70?'hot':''}">${x.score}</td><td><b>Internal only</b><br>${contacts||'No contact saved'}</td><td>${verified?'<b>✓ VERIFIED</b>':`<button class="btn green" onclick="verifyProperty('${x.property_id}')">Mark Verified</button>`}</td><td>${esc(x.reasons.join(', '))}</td><td>${esc((x.gaps||[]).join(', '))}</td></tr>`}).join('')||'<tr><td colspan="11">No candidates.</td></tr>';await loadOverview()}catch(e){alert(e.message)}}
+async function matchReq(id){try{let d=await api('/api/v4/match/'+encodeURIComponent(id),{method:'POST'});let diag=d.diagnostic||{};let ec=diag.exclusion_counts||{};let exclusions=Object.entries(ec).map(([k,v])=>`${esc(k)}: ${v}`).join(' · ');$('#matchDiag').innerHTML=`<div class="msg ${d.matches.length?'good':'warn'}"><b>${esc(diag.message||'Matching complete')}</b><br><b>Engine:</b> ${esc(d.engine||diag.engine||'MATCHING_V2')} · Database: ${diag.database_properties||0} · Eligible: ${diag.eligible_count||0} · Excluded: ${diag.excluded_count||0} · Returned: ${diag.matches_returned||0}<br><b>Hard-filter exclusions:</b> ${exclusions||'None'}<br><b>Team flow:</b> Call internal contact → verify availability → Mark Verified → then share. Contacts remain internal.</div>`;$('#matchRows').innerHTML=(d.matches||[]).map((x,i)=>{let contacts=[x.owner_contact?('Owner: '+(x.owner_name||'')+' '+x.owner_contact):'',x.broker_contact?('Broker: '+(x.broker_name||'')+' '+x.broker_contact):'',(!x.owner_contact&&!x.broker_contact&&x.contact_number)?('Contact: '+x.contact_number):''].filter(Boolean).join('<br>');let verified=String(x.verification_status||'').toUpperCase()==='VERIFIED';let b=x.score_breakdown||{};let breakdown=`Location ${b.location||0}/30 · Area ${b.area||0}/25 · Type ${b.property_type||0}/15 · Use ${b.suitable_use||0}/15 · Budget ${b.budget||0}/10 · Verification ${b.verification||0}/5`;return `<tr><td>${i+1}</td><td><b>${esc(x.property_name||x.property_id)}</b><br>${esc(x.property_id)}</td><td>${esc(x.city||'')}</td><td>${esc(x.location||'')}</td><td>${x.available_area_sqft||''}</td><td>${x.monthly_rent?Number(x.monthly_rent).toLocaleString():''}</td><td class="${x.score>=80?'hot':''}"><b>${Number(x.score||0).toFixed(0)}%</b></td><td><b>${esc(x.match_band||'')}</b></td><td><b>Internal only</b><br>${contacts||'No contact saved'}</td><td>${verified?'<b>✓ VERIFIED</b>':`<button class="btn green" onclick="verifyProperty('${x.property_id}')">Mark Verified</button>`}</td><td>${esc((x.reasons||[]).join(', '))}</td><td>${esc(breakdown)}</td><td>${esc((x.gaps||[]).join(', '))}</td></tr>`}).join('')||'<tr><td colspan="13">No eligible property passed the hard filters.</td></tr>';$('#excludedRows').innerHTML=(d.excluded||[]).map((x,i)=>`<tr><td>${i+1}</td><td><b>${esc(x.property_name||x.property_id||'')}</b><br>${esc(x.property_id||'')}</td><td>${esc(x.city||'')}</td><td>${esc(x.location||'')}</td><td>${esc(x.property_type||'')}</td><td>${x.available_area_sqft||''}</td><td>${esc(x.source||'')}</td><td><b>${esc((x.reasons||[]).join(', '))}</b></td></tr>`).join('')||'<tr><td colspan="8">No inventory excluded.</td></tr>';await loadOverview()}catch(e){alert(e.message)}}
 async function loadBots(){let d=await api('/api/v4/bot-runs');$('#botRows').innerHTML=d.rows.map(x=>`<tr><td>${esc(x.bot_name)}</td><td>${esc(x.division||'')}</td><td>${esc(x.status)}</td><td>${x.records_found||0}</td><td>${x.records_created||0}</td><td>${fmt(x.started_at)}</td><td>${esc(x.summary||x.error_message||'')}</td></tr>`).join('')}
 async function loadActivity(limit=100){let d=await api('/api/v4/activity?limit='+limit);let h=d.rows.map(x=>`<div class="activity"><b>${esc(x.actor_name)} · ${esc(x.action)}</b><small>${esc(x.division||'')} · ${esc(x.summary||'')} · ${fmt(x.created_at)}</small></div>`).join('')||'No activity yet.';if($('#activityFeed'))$('#activityFeed').innerHTML=h;if($('#activityRows'))$('#activityRows').innerHTML=d.rows.map(x=>`<tr><td>${fmt(x.created_at)}</td><td>${esc(x.actor_name)}</td><td>${esc(x.division||'')}</td><td>${esc(x.action)}</td><td>${esc(x.summary||'')}</td><td>${esc(x.status||'')}</td></tr>`).join('')}
 setupDrop();loadOverview();
@@ -4017,8 +4223,14 @@ def _v4_page(role):
 Owner Name · Owner Contact · Broker Name · Broker Contact · Main Contact Number · Monthly Rent in figures · Team Member · Verified/Unverified · Direct Images/Videos.</div>
 <a class="btn green" href="/property-manual">Open Correct Add Property Form</a>
 </div>
-<div class="card"><h3>Property Matching Centre</h3><select id="reqSelect"><option>Loading requirements...</option></select><div class="toolbar"><button class="btn green" onclick="matchSelected()">Run Smart Match</button><a class="btn gray" href="/legacy-workspace">Add Requirement / Upload Source</a></div><div id="matchDiag"></div>
-<div class="tablewrap"><table><thead><tr><th>#</th><th>Property</th><th>City</th><th>Location</th><th>Area</th><th>Rent</th><th>Score</th><th>Availability Contact (INTERNAL)</th><th>Verification</th><th>Reasons</th><th>Data Gaps</th></tr></thead><tbody id="matchRows"></tbody></table></div></div></div>
+<div class="card"><h3>Property Matching Centre · V2</h3><select id="reqSelect"><option>Loading requirements...</option></select><div class="toolbar"><button class="btn green" onclick="matchSelected()">Run Smart Match V2</button><a class="btn gray" href="/legacy-workspace">Add Requirement / Upload Source</a></div><div id="matchDiag"></div>
+<div class="msg good"><b>Matching order:</b> Self Inventory → Availability → Rent/Sale → Commercial/Residential → Suitable Use → City/Location → 80%-120% Area → 100-point ranking.</div>
+<h4>Ranked Eligible Matches</h4>
+<div class="tablewrap"><table><thead><tr><th>#</th><th>Property</th><th>City</th><th>Location</th><th>Area</th><th>Rent</th><th>Score</th><th>Band</th><th>Availability Contact (INTERNAL)</th><th>Verification</th><th>Why Matched</th><th>Score Breakdown</th><th>Data Gaps</th></tr></thead><tbody id="matchRows"></tbody></table></div>
+<h4 style="margin-top:16px">Excluded Inventory</h4>
+<div class="msg warn">These properties failed one or more mandatory rules and are NOT eligible for client sharing.</div>
+<div class="tablewrap"><table><thead><tr><th>#</th><th>Property</th><th>City</th><th>Location</th><th>Type</th><th>Area</th><th>Source</th><th>Exclusion Reason</th></tr></thead><tbody id="excludedRows"></tbody></table></div></div>
+</div></div>
 <div class="card"><h3>Requirements</h3><div class="tablewrap"><table><thead><tr><th>ID</th><th>Client/Company</th><th>City</th><th>Location</th><th>Area</th><th>Rent/Sale</th><th>Action</th></tr></thead><tbody id="reqRows"></tbody></table></div></div></section>
 
 <section class="page" id="owners"><h1 class="title">Owners Database</h1><div class="sub">Owner data is now normalized separately from properties.</div><div class="card"><div class="tablewrap"><table><thead><tr><th>Owner ID</th><th>Name</th><th>Contact</th><th>Email</th><th>City</th><th>Notes</th></tr></thead><tbody id="ownerRows"></tbody></table></div></div></section>
