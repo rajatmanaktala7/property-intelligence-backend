@@ -7,3 +7,4 @@ __pycache__/
 app-before-matcher-v2-*.py
 schema-before-matcher-v2*.sql
 app-before-property-database-v3-*.py
+app-before-data-organizer-v4-*.py

@@ -16,7 +16,7 @@ from PIL import Image
 import fitz
 from pypdf import PdfReader, PdfWriter
 
-VERSION="7.5.0-PROPERTY-DATABASE-V3"
+VERSION="7.6.0-DATA-ORGANIZER-V4"
 DATABASE_URL=os.getenv("DATABASE_URL","")
 GEMINI_API_KEY=os.getenv("GEMINI_API_KEY","")
 GEMINI_MODEL=os.getenv("GEMINI_MODEL","gemini-3.1-flash-lite")
@@ -3884,14 +3884,16 @@ def _verification_score(p):
 
 def _hard_filter_property(q,p):
     exclusions=[]
-    request_phone=_phone_key(q.get("contact_phone"))
-    property_phones={
-        _phone_key(p.get("owner_contact")),
-        _phone_key(p.get("broker_contact")),
-        _phone_key(p.get("contact_number"))
-    }
-    property_phones.discard("")
-    if request_phone and request_phone in property_phones:
+
+    quality=_organize_property_v4(p)
+    if not quality["match_eligible"]:
+        exclusions.append("MATCH_DATA_INCOMPLETE")
+    request_phones=_contact_number_set(q.get("contact_phone"))
+    property_phones=_contact_number_set(
+        p.get("owner_contact"),p.get("broker_contact"),p.get("contact_number"),
+        p.get("owner_contact_normalized"),p.get("broker_contact_normalized"),p.get("general_contact_normalized")
+    )
+    if request_phones and property_phones and (request_phones & property_phones):
         exclusions.append("SELF_INVENTORY")
 
     availability=_norm(p.get("availability_status") or "available")
@@ -4010,10 +4012,10 @@ def robust_match_requirement(rid,create_whatsapp=False):
                 "suitable_category":p.get("suitable_category"),
                 "verification_status":p.get("verification_status"),
                 "owner_name":p.get("owner_name"),
-                "owner_contact":p.get("owner_contact"),
+                "owner_contact":p.get("owner_contact_normalized") or p.get("owner_contact"),
                 "broker_name":p.get("broker_name"),
-                "broker_contact":p.get("broker_contact"),
-                "contact_number":p.get("contact_number"),
+                "broker_contact":p.get("broker_contact_normalized") or p.get("broker_contact"),
+                "contact_number":p.get("general_contact_normalized") or p.get("contact_number"),
                 "score":score,
                 "match_band":_match_band(score),
                 "score_breakdown":breakdown,
@@ -4187,7 +4189,7 @@ th{{position:sticky;top:0;background:#f8fafc;z-index:1}}.recordlink{{color:#135f
 </style></head>
 <body>
 <header><div><b>Full Property Database</b><br><small style="color:#b9c8d8">Master inventory saved in Property Intelligence</small></div>
-<div><a class="btn gray" href="/workspace">Back to Workspace</a> <a class="btn" href="/property-manual">Add Property</a></div></header>
+<div><a class="btn gray" href="/workspace">Back to Workspace</a> <a class="btn gray" href="/data-quality">Data Quality</a> <a class="btn" href="/property-manual">Add Property</a></div></header>
 <div class="wrap">
 <div class="kpis">
 <div class="kpi"><span>TOTAL PROPERTIES</span><b id="totalCount">{total}</b></div>
@@ -4321,6 +4323,327 @@ table{{width:100%;border-collapse:collapse;font-size:13px}}th,td{{padding:9px;bo
 </div></div></body></html>""")
 
 
+# ============================================================
+# DATA ORGANIZER V4
+# Deterministic cleanup only. Never invents missing phone digits.
+# ============================================================
+
+_PHONE_INVALID_MARKERS={"","na","n/a","none","null","unknown","not available","not specified","-"}
+
+def _dq_text(value):
+    return str(value or "").strip()
+
+def _dq_unknown(value):
+    return _dq_text(value).lower() in _PHONE_INVALID_MARKERS
+
+def _extract_contact_numbers(raw):
+    s=_dq_text(raw)
+    if not s or _dq_unknown(s):
+        return {"mobiles":[],"landlines":[],"invalid_raw":s}
+
+    mobiles=[]
+    landlines=[]
+
+    mobile_pat=re.compile(r'(?<!\d)(?:\+?91[\s\-]*)?([6-9](?:[\s\-]*\d){9})(?!\d)')
+    for m in mobile_pat.finditer(s):
+        digits=re.sub(r'\D','',m.group(1))
+        if len(digits)==10 and digits[0] in "6789" and digits not in mobiles:
+            mobiles.append(digits)
+
+    land_pat=re.compile(r'(?<!\d)(0\d(?:[\s\-]*\d){8,9})(?!\d)')
+    for m in land_pat.finditer(s):
+        digits=re.sub(r'\D','',m.group(1))
+        if len(digits) in (10,11) and digits.startswith("0") and digits not in landlines:
+            landlines.append(digits)
+
+    return {"mobiles":mobiles,"landlines":landlines,"invalid_raw":s}
+
+def _contact_display(info):
+    values=list(info.get("mobiles") or [])+list(info.get("landlines") or [])
+    return ", ".join(values) if values else None
+
+def _contact_number_set(*values):
+    out=set()
+    for value in values:
+        info=_extract_contact_numbers(value)
+        out.update(info["mobiles"])
+        out.update(info["landlines"])
+    return out
+
+def _canonical_city_v4(value):
+    v=_norm(value)
+    if not v or v in {"na","n a","unknown","not specified","none"}:
+        return "UNKNOWN"
+    if "new delhi" in v or v=="delhi" or v.endswith(" delhi") or v.startswith("delhi "):
+        return "DELHI"
+    if "gurgaon" in v or "gurugram" in v:
+        return "GURUGRAM"
+    if "greater noida" in v:
+        return "GREATER NOIDA"
+    if "noida" in v:
+        return "NOIDA"
+    if "faridabad" in v:
+        return "FARIDABAD"
+    if "ghaziabad" in v:
+        return "GHAZIABAD"
+    return _dq_text(value).upper()
+
+def _canonical_property_type_v4(value, suitable=None, remarks=None):
+    raw=" ".join(_dq_text(x) for x in [value,suitable,remarks]).lower()
+    raw=re.sub(r'\s+',' ',raw).strip()
+    if not raw or raw in {"na","n/a","unknown","not specified"}:
+        return "UNKNOWN"
+    if any(x in raw for x in ["residential","3bhk","4bhk","2bhk","1bhk","apartment","flat","villa","builder floor","house"]):
+        return "RESIDENTIAL"
+    if any(x in raw for x in ["industrial","factory","warehouse","mohan co-operative","industrial area"]):
+        return "INDUSTRIAL"
+    if any(x in raw for x in ["office","cowork","business centre"]):
+        return "OFFICE"
+    if any(x in raw for x in ["shop","retail","showroom","commercial center","commercial centre"]):
+        return "RETAIL/COMMERCIAL"
+    if any(x in raw for x in ["restaurant","cafe","café","qsr","food","f&b","fnb","lounge","club"]):
+        return "F&B/COMMERCIAL"
+    if any(x in raw for x in ["banquet","hotel","guest house","hospitality","farmhouse"]):
+        return "HOSPITALITY"
+    if any(x in raw for x in ["mix land","mixland","mixed use","commercial/residential","commercial residential"]):
+        return "MIXED USE"
+    if "commercial" in raw or "comercial" in raw:
+        return "COMMERCIAL"
+    if re.fullmatch(r'[\s+/&\-]*(bmt|basement|gf|ff|sf|tf|terr|floor|unit)[\s+/&\-\w]*',raw,re.I):
+        return "UNKNOWN"
+    return _dq_text(value).upper()
+
+def _canonical_transaction_v4(value):
+    v=_norm(value)
+    if not v or v in {"na","n a","unknown","not specified"}:
+        return "UNKNOWN"
+    has_rent=any(x in v for x in ["rent","lease","leasing"])
+    has_sale=any(x in v for x in ["sale","sell","selling"])
+    if has_rent and has_sale:
+        return "RENT/SALE"
+    if has_rent:
+        return "RENT"
+    if has_sale:
+        return "SALE"
+    return "UNKNOWN"
+
+def _organize_property_v4(p):
+    owner_info=_extract_contact_numbers(p.get("owner_contact"))
+    broker_info=_extract_contact_numbers(p.get("broker_contact"))
+    general_info=_extract_contact_numbers(p.get("contact_number"))
+
+    valid_contacts=[]
+    for info in [owner_info,broker_info,general_info]:
+        valid_contacts.extend(info["mobiles"])
+        valid_contacts.extend(info["landlines"])
+    valid_contacts=list(dict.fromkeys(valid_contacts))
+
+    city=_canonical_city_v4(p.get("city"))
+    ptype=_canonical_property_type_v4(p.get("property_type"),p.get("suitable_category"),p.get("remarks"))
+    transaction=_canonical_transaction_v4(p.get("rent_or_sale"))
+    location=_dq_text(p.get("location") or p.get("micro_market"))
+    area=_property_area(p)
+
+    issues=[]
+    if city=="UNKNOWN":
+        issues.append("MISSING_OR_UNKNOWN_CITY")
+    if not location or _dq_unknown(location):
+        issues.append("MISSING_OR_UNKNOWN_LOCATION")
+    if ptype=="UNKNOWN":
+        issues.append("MISSING_OR_AMBIGUOUS_PROPERTY_TYPE")
+    if area is None or area<=0:
+        issues.append("MISSING_AREA")
+    if transaction=="UNKNOWN":
+        issues.append("MISSING_TRANSACTION")
+
+    raw_contacts=[
+        _dq_text(p.get("owner_contact")),
+        _dq_text(p.get("broker_contact")),
+        _dq_text(p.get("contact_number"))
+    ]
+    raw_contacts=[x for x in raw_contacts if x and not _dq_unknown(x)]
+    if raw_contacts and not valid_contacts:
+        issues.append("INVALID_OR_TRUNCATED_CONTACT")
+    elif not raw_contacts:
+        issues.append("MISSING_CONTACT")
+
+    for raw in raw_contacts:
+        digits=re.sub(r'\D','',raw)
+        parsed=_extract_contact_numbers(raw)
+        if digits and not parsed["mobiles"] and not parsed["landlines"]:
+            if "INVALID_OR_TRUNCATED_CONTACT" not in issues:
+                issues.append("INVALID_OR_TRUNCATED_CONTACT")
+
+    match_eligible=not any(x in issues for x in [
+        "MISSING_OR_UNKNOWN_CITY","MISSING_OR_UNKNOWN_LOCATION",
+        "MISSING_OR_AMBIGUOUS_PROPERTY_TYPE","MISSING_AREA","MISSING_TRANSACTION"
+    ])
+    contact_ready=bool(valid_contacts)
+
+    if match_eligible and contact_ready:
+        status="READY"
+    elif match_eligible:
+        status="MATCH_READY_CONTACT_REVIEW"
+    else:
+        status="NEEDS_REVIEW"
+
+    return {
+        "canonical_city":city,
+        "canonical_property_type":ptype,
+        "canonical_transaction":transaction,
+        "owner_contact_normalized":_contact_display(owner_info),
+        "broker_contact_normalized":_contact_display(broker_info),
+        "general_contact_normalized":_contact_display(general_info),
+        "normalized_contacts":valid_contacts,
+        "quality_issues":issues,
+        "data_quality_status":status,
+        "match_eligible":match_eligible,
+        "contact_ready":contact_ready
+    }
+
+def _ensure_data_quality_columns():
+    statements=[
+        "ALTER TABLE pi_properties ADD COLUMN IF NOT EXISTS raw_owner_contact TEXT",
+        "ALTER TABLE pi_properties ADD COLUMN IF NOT EXISTS raw_broker_contact TEXT",
+        "ALTER TABLE pi_properties ADD COLUMN IF NOT EXISTS raw_contact_number TEXT",
+        "ALTER TABLE pi_properties ADD COLUMN IF NOT EXISTS owner_contact_normalized TEXT",
+        "ALTER TABLE pi_properties ADD COLUMN IF NOT EXISTS broker_contact_normalized TEXT",
+        "ALTER TABLE pi_properties ADD COLUMN IF NOT EXISTS general_contact_normalized TEXT",
+        "ALTER TABLE pi_properties ADD COLUMN IF NOT EXISTS normalized_contacts JSONB DEFAULT '[]'::jsonb",
+        "ALTER TABLE pi_properties ADD COLUMN IF NOT EXISTS canonical_city TEXT",
+        "ALTER TABLE pi_properties ADD COLUMN IF NOT EXISTS canonical_property_type TEXT",
+        "ALTER TABLE pi_properties ADD COLUMN IF NOT EXISTS canonical_transaction TEXT",
+        "ALTER TABLE pi_properties ADD COLUMN IF NOT EXISTS data_quality_status TEXT",
+        "ALTER TABLE pi_properties ADD COLUMN IF NOT EXISTS match_eligible BOOLEAN",
+        "ALTER TABLE pi_properties ADD COLUMN IF NOT EXISTS contact_ready BOOLEAN",
+        "ALTER TABLE pi_properties ADD COLUMN IF NOT EXISTS quality_issues JSONB DEFAULT '[]'::jsonb"
+    ]
+    with engine.begin() as c:
+        for stmt in statements:
+            c.execute(text(stmt))
+
+def _audit_property_database_v4(apply_changes=False):
+    _ensure_data_quality_columns()
+    summary={
+        "total":0,"ready":0,"match_ready_contact_review":0,"needs_review":0,
+        "match_eligible":0,"contact_ready":0,"invalid_or_truncated_contact":0,
+        "missing_contact":0,"missing_location":0,"missing_area":0,
+        "missing_type":0,"missing_city":0,"missing_transaction":0
+    }
+    reviewed=[]
+    with engine.begin() as c:
+        rows=c.execute(text("SELECT * FROM pi_properties ORDER BY created_at DESC")).fetchall()
+        for row in rows:
+            p=dict(row._mapping)
+            q=_organize_property_v4(p)
+            summary["total"]+=1
+            if q["data_quality_status"]=="READY": summary["ready"]+=1
+            elif q["data_quality_status"]=="MATCH_READY_CONTACT_REVIEW": summary["match_ready_contact_review"]+=1
+            else: summary["needs_review"]+=1
+            if q["match_eligible"]: summary["match_eligible"]+=1
+            if q["contact_ready"]: summary["contact_ready"]+=1
+            issues=q["quality_issues"]
+            if "INVALID_OR_TRUNCATED_CONTACT" in issues: summary["invalid_or_truncated_contact"]+=1
+            if "MISSING_CONTACT" in issues: summary["missing_contact"]+=1
+            if "MISSING_OR_UNKNOWN_LOCATION" in issues: summary["missing_location"]+=1
+            if "MISSING_AREA" in issues: summary["missing_area"]+=1
+            if "MISSING_OR_AMBIGUOUS_PROPERTY_TYPE" in issues: summary["missing_type"]+=1
+            if "MISSING_OR_UNKNOWN_CITY" in issues: summary["missing_city"]+=1
+            if "MISSING_TRANSACTION" in issues: summary["missing_transaction"]+=1
+
+            if len(reviewed)<1000 and issues:
+                reviewed.append({
+                    "property_id":p.get("property_id"),
+                    "property_name":p.get("property_name"),
+                    "city":p.get("city"),
+                    "location":p.get("location"),
+                    "property_type":p.get("property_type"),
+                    "area":_property_area(p),
+                    "owner_name":p.get("owner_name"),
+                    "owner_contact_raw":p.get("owner_contact"),
+                    "broker_name":p.get("broker_name"),
+                    "broker_contact_raw":p.get("broker_contact"),
+                    "normalized_contacts":q["normalized_contacts"],
+                    "status":q["data_quality_status"],
+                    "issues":issues
+                })
+
+            if apply_changes:
+                c.execute(text("""UPDATE pi_properties SET
+                    raw_owner_contact=COALESCE(raw_owner_contact,owner_contact),
+                    raw_broker_contact=COALESCE(raw_broker_contact,broker_contact),
+                    raw_contact_number=COALESCE(raw_contact_number,contact_number),
+                    owner_contact_normalized=:ocn,
+                    broker_contact_normalized=:bcn,
+                    general_contact_normalized=:gcn,
+                    normalized_contacts=CAST(:contacts AS JSONB),
+                    canonical_city=:city,
+                    canonical_property_type=:ptype,
+                    canonical_transaction=:tx,
+                    data_quality_status=:status,
+                    match_eligible=:me,
+                    contact_ready=:cr,
+                    quality_issues=CAST(:issues AS JSONB),
+                    updated_at=NOW()
+                    WHERE property_id=:id"""),{
+                        "ocn":q["owner_contact_normalized"],
+                        "bcn":q["broker_contact_normalized"],
+                        "gcn":q["general_contact_normalized"],
+                        "contacts":json.dumps(q["normalized_contacts"]),
+                        "city":q["canonical_city"],
+                        "ptype":q["canonical_property_type"],
+                        "tx":q["canonical_transaction"],
+                        "status":q["data_quality_status"],
+                        "me":q["match_eligible"],
+                        "cr":q["contact_ready"],
+                        "issues":json.dumps(q["quality_issues"]),
+                        "id":p.get("property_id")
+                    })
+    return {"summary":summary,"reviewed":reviewed}
+
+@app.get("/api/v4/data-quality/summary")
+def data_quality_summary_v4(req:Request):
+    need_login(req)
+    return {"status":"ok",**_audit_property_database_v4(False)}
+
+@app.post("/api/v4/data-quality/organize")
+def data_quality_organize_v4(req:Request):
+    need_login(req)
+    result=_audit_property_database_v4(True)
+    return {"status":"ok","message":"Database organized safely. Original contacts preserved; no missing digits were guessed.",**result}
+
+@app.get("/data-quality",response_class=HTMLResponse)
+def data_quality_page_v4(req:Request):
+    role=page_role_or_redirect(req)
+    if not role:
+        return RedirectResponse("/login",status_code=303)
+    return HTMLResponse("""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Property Data Quality</title><style>
+*{box-sizing:border-box}body{margin:0;background:#f4f7fb;font-family:Arial,sans-serif;color:#142033}
+header{background:#0d1d2d;color:#fff;padding:16px 22px;display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}
+.wrap{max-width:1700px;margin:auto;padding:20px}.kpis{display:grid;grid-template-columns:repeat(4,minmax(150px,1fr));gap:10px}.kpi,.card{background:#fff;border:1px solid #e4eaf1;border-radius:12px;padding:14px;margin-bottom:12px}.kpi b{font-size:25px;display:block;margin-top:5px}
+.btn{border:0;border-radius:8px;padding:10px 13px;background:#1677ff;color:white;font-weight:700;cursor:pointer;text-decoration:none;display:inline-block}.btn.orange{background:#df8b13}.btn.gray{background:#edf2f7;color:#24364b}
+.tablewrap{overflow:auto;max-height:65vh;border:1px solid #e4eaf1;border-radius:10px}table{width:100%;border-collapse:collapse;background:#fff;font-size:12px}th,td{padding:9px;border-bottom:1px solid #edf1f5;text-align:left;white-space:nowrap;vertical-align:top}th{position:sticky;top:0;background:#f8fafc}.warn{color:#a35c00;font-weight:700}.good{color:#08734b;font-weight:700}
+@media(max-width:900px){.kpis{grid-template-columns:repeat(2,1fr)}}
+</style></head><body><header><div><b>Property Data Organizer V4</b><br><small>Safe cleanup · multiple contacts · no guessed phone digits</small></div><div><a class="btn gray" href="/workspace">Workspace</a> <a class="btn" href="/property-database">Property Database</a></div></header>
+<div class="wrap"><div class="card"><b>Rule:</b> 10-digit Indian mobiles are normalized. Multiple valid numbers are preserved separately. Full landlines are preserved. Truncated numbers such as 98105 remain in the RAW field and are marked for review. We never invent missing digits.</div>
+<div class="card"><button class="btn orange" onclick="organize()">Organize Entire Database</button> <button class="btn" onclick="load()">Refresh Audit</button><span id="msg"></span></div>
+<div class="kpis" id="kpis"></div>
+<div class="card"><h3>Records Needing Review</h3><div class="tablewrap"><table><thead><tr><th>Property</th><th>City</th><th>Location</th><th>Type</th><th>Area</th><th>Owner / Raw Contact</th><th>Broker / Raw Contact</th><th>Valid Contacts Found</th><th>Status</th><th>Issues</th><th>Open</th></tr></thead><tbody id="rows"></tbody></table></div></div></div>
+<script>
+const esc=x=>String(x??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+async function call(u,o={}){let r=await fetch(u,o),d=await r.json();if(!r.ok)throw new Error(d.detail||d.message||'Request failed');return d}
+async function load(){let d=await call('/api/v4/data-quality/summary'),s=d.summary;document.querySelector('#kpis').innerHTML=[
+['TOTAL',s.total],['READY',s.ready],['MATCH READY / CONTACT REVIEW',s.match_ready_contact_review],['NEEDS REVIEW',s.needs_review],
+['MATCH ELIGIBLE',s.match_eligible],['CONTACT READY',s.contact_ready],['INVALID / TRUNCATED CONTACT',s.invalid_or_truncated_contact],['MISSING CONTACT',s.missing_contact],
+['MISSING LOCATION',s.missing_location],['MISSING AREA',s.missing_area],['MISSING TYPE',s.missing_type],['MISSING TRANSACTION',s.missing_transaction]
+].map(x=>`<div class="kpi"><span>${x[0]}</span><b>${Number(x[1]||0).toLocaleString()}</b></div>`).join('');
+document.querySelector('#rows').innerHTML=(d.reviewed||[]).map(x=>`<tr><td><b>${esc(x.property_name||x.property_id)}</b><br>${esc(x.property_id)}</td><td>${esc(x.city||'')}</td><td>${esc(x.location||'')}</td><td>${esc(x.property_type||'')}</td><td>${esc(x.area||'')}</td><td>${esc(x.owner_name||'')}<br>${esc(x.owner_contact_raw||'')}</td><td>${esc(x.broker_name||'')}<br>${esc(x.broker_contact_raw||'')}</td><td>${esc((x.normalized_contacts||[]).join(', '))}</td><td class="${x.status==='READY'?'good':'warn'}">${esc(x.status)}</td><td>${esc((x.issues||[]).join(', '))}</td><td><a href="/property-record/${encodeURIComponent(x.property_id)}" target="_blank">View</a></td></tr>`).join('')}
+async function organize(){if(!confirm('Organize all properties now? Original contacts will be preserved. Missing digits will NOT be guessed.'))return;document.querySelector('#msg').textContent=' Organizing...';try{let d=await call('/api/v4/data-quality/organize',{method:'POST'});document.querySelector('#msg').textContent=' '+d.message;await load()}catch(e){document.querySelector('#msg').textContent=' '+e.message}}
+load();
+</script></body></html>""")
+
+
 @app.get("/api/v4/requirements")
 def v4_requirements(req:Request,limit:int=Query(300,ge=1,le=1000)):
     need_login(req)
@@ -4417,7 +4740,7 @@ def _v4_page(role):
 <title>AI Deal Intelligence OS V4</title><style>{_V4_CSS}</style></head><body><div class="shell">
 <aside class="side"><div class="brand">AI Deal Intelligence OS<small>V4 · Property · Hospitality · Retail · Demand</small></div>
 <div class="group">COMMAND</div><button class="nav active" data-page="command">▣ Command Centre</button><button class="nav" data-page="activity">◎ AI Activity</button><button class="nav" data-page="bots">⚡ Bot Control Room</button>
-<div class="group">PROPERTY</div><button class="nav" data-page="property">⌂ Add Property + Matcher</button><a class="nav" href="/property-database">▦ Full Property Database</a><button class="nav" data-page="owners">● Owners Database</button><button class="nav" data-page="brokers">● Brokers Database</button><a class="nav" href="/legacy-workspace">Original Upload Workspace</a><a class="nav" href="/database-page">Original Database</a>
+<div class="group">PROPERTY</div><button class="nav" data-page="property">⌂ Add Property + Matcher</button><a class="nav" href="/property-database">▦ Full Property Database</a><a class="nav" href="/data-quality">✓ Data Quality / Organizer</a><button class="nav" data-page="owners">● Owners Database</button><button class="nav" data-page="brokers">● Brokers Database</button><a class="nav" href="/legacy-workspace">Original Upload Workspace</a><a class="nav" href="/database-page">Original Database</a>
 <div class="group">LEAD INTELLIGENCE</div><button class="nav" data-page="hospitality">◆ Hospitality</button><button class="nav" data-page="retail">◈ Retail Expansion</button><button class="nav" data-page="contacts">✉ Marketing Contacts</button><button class="nav" data-page="demand">⌕ Requirement Discovery</button>
 </aside><main class="main"><header class="top"><div><b>Unified Delhi NCR Deal Intelligence</b><div class="sub">Organized database + AI bots + matching</div></div><div>{badge} · <a href="/logout">Logout</a></div></header><div class="content">
 
