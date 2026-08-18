@@ -10189,7 +10189,7 @@ header{background:var(--nav);color:#fff;padding:18px 24px;display:flex;justify-c
   <div class="section">
     <h2>MARKETING & CONTACTS</h2>
     <div class="grid">
-      <a class="card" href="/contacts-directory"><div class="icon">✉</div><b>Marketing Contacts</b><span>Property contacts, AI-generated hospitality/retail contacts and verified database contacts for approved outreach.</span><span class="tag">WhatsApp Ready</span></a>
+      <a class="card" href="/marketing-contacts"><div class="icon">✉</div><b>Marketing Contacts</b><span>Property contacts, AI-generated hospitality/retail contacts and verified database contacts for approved outreach.</span><span class="tag">WhatsApp Ready</span></a>
       <a class="card" href="/legacy-workspace#contacts"><div class="icon">⇧</div><b>Upload Contact List</b><span>Add external contact databases for marketing workflows without mixing them into property inventory.</span><span class="tag">Contact Import</span></a>
       <a class="card" href="/legacy-workspace#bots"><div class="icon">⚡</div><b>Bot Control Room</b><span>Run and review discovery bots and system activity.</span><span class="tag">Automation</span></a>
     </div>
@@ -10275,3 +10275,286 @@ def v15_goa_database(req:Request):
     role=page_role_or_redirect(req)
     if not role:return RedirectResponse("/login",303)
     return _v15_goa_placeholder("Goa Database","Separate searchable Goa property database.")
+
+# ============================================================
+# V15.1 MARKETING CONTACTS + DASHBOARD CACHE/NAVIGATION FIX
+# ============================================================
+
+def _v151_setup():
+    with engine.begin() as c:
+        c.execute(text("""CREATE TABLE IF NOT EXISTS pi_marketing_contacts(
+            id BIGSERIAL PRIMARY KEY,
+            contact_key TEXT UNIQUE NOT NULL,
+            contact_name TEXT,
+            primary_phone TEXT NOT NULL,
+            all_phones JSONB DEFAULT '[]'::jsonb,
+            company_brand TEXT,
+            category TEXT DEFAULT 'OTHER',
+            subcategory TEXT,
+            city TEXT,
+            location TEXT,
+            email TEXT,
+            website TEXT,
+            source TEXT,
+            source_detail TEXT,
+            verified_status TEXT DEFAULT 'UNVERIFIED',
+            whatsapp_status TEXT DEFAULT 'NOT_CONTACTED',
+            opt_out BOOLEAN DEFAULT FALSE,
+            linked_property_count INTEGER DEFAULT 0,
+            linked_properties JSONB DEFAULT '[]'::jsonb,
+            notes TEXT,
+            date_added TIMESTAMPTZ DEFAULT NOW(),
+            last_contacted_at TIMESTAMPTZ,
+            updated_at TIMESTAMPTZ DEFAULT NOW()
+        )"""))
+        c.execute(text("CREATE INDEX IF NOT EXISTS idx_marketing_contacts_phone ON pi_marketing_contacts(primary_phone)"))
+        c.execute(text("CREATE INDEX IF NOT EXISTS idx_marketing_contacts_category ON pi_marketing_contacts(category)"))
+        c.execute(text("CREATE INDEX IF NOT EXISTS idx_marketing_contacts_source ON pi_marketing_contacts(source)"))
+        c.execute(text("CREATE INDEX IF NOT EXISTS idx_marketing_contacts_verified ON pi_marketing_contacts(verified_status)"))
+        c.execute(text("CREATE INDEX IF NOT EXISTS idx_marketing_contacts_whatsapp ON pi_marketing_contacts(whatsapp_status)"))
+
+def _v151_digits(v):
+    d=_re.sub(r"\D","",str(v or ""))
+    if d.startswith("91") and len(d)==12:
+        d=d[2:]
+    if len(d)==10:
+        return d
+    return ""
+
+def _v151_category_from_text(*parts):
+    txt=" ".join(str(x or "") for x in parts).lower()
+    rules=[
+        ("CAFE",["cafe","coffee","bakery"]),
+        ("RESTAURANT",["restaurant","restro","diner"]),
+        ("BANQUET",["banquet","wedding venue"]),
+        ("HOTEL",["hotel","resort"]),
+        ("GUEST_HOUSE",["guest house","guesthouse"]),
+        ("LOUNGE",["lounge"]),
+        ("CLUB",["club"]),
+        ("BAR",["bar","pub"]),
+        ("FARMHOUSE",["farmhouse","farm house"]),
+        ("RETAILER",["retail","store","brand"]),
+        ("BROKER",["broker","property dealer"]),
+        ("OWNER",["owner","landlord","builder"])
+    ]
+    for cat,terms in rules:
+        if any(t in txt for t in terms):
+            return cat
+    return "OTHER"
+
+def _v151_upsert_contact(phone, name=None, company=None, category=None, city=None, location=None,
+                          email=None, website=None, source=None, source_detail=None,
+                          property_ids=None, notes=None):
+    _v151_setup()
+    ph=_v151_digits(phone)
+    if not ph:
+        return False
+    key="91"+ph
+    props=list(dict.fromkeys([str(x) for x in (property_ids or []) if x]))
+    cat=(category or "OTHER").upper()
+    with engine.begin() as c:
+        old=c.execute(text("SELECT * FROM pi_marketing_contacts WHERE contact_key=:k"),{"k":key}).fetchone()
+        if old:
+            o=dict(old._mapping)
+            old_props=o.get("linked_properties") or []
+            merged=list(dict.fromkeys([str(x) for x in old_props]+props))
+            old_sources=[x.strip() for x in str(o.get("source") or "").split(",") if x.strip()]
+            if source and source not in old_sources:
+                old_sources.append(source)
+            c.execute(text("""UPDATE pi_marketing_contacts SET
+                contact_name=COALESCE(NULLIF(:name,''),contact_name),
+                company_brand=COALESCE(NULLIF(:company,''),company_brand),
+                category=CASE WHEN category='OTHER' AND :cat<>'OTHER' THEN :cat ELSE category END,
+                city=COALESCE(NULLIF(:city,''),city),
+                location=COALESCE(NULLIF(:location,''),location),
+                email=COALESCE(NULLIF(:email,''),email),
+                website=COALESCE(NULLIF(:website,''),website),
+                source=:source,
+                source_detail=COALESCE(NULLIF(:detail,''),source_detail),
+                linked_property_count=:cnt,
+                linked_properties=CAST(:props AS jsonb),
+                notes=COALESCE(NULLIF(:notes,''),notes),
+                updated_at=NOW()
+                WHERE contact_key=:k"""),{
+                    "name":name or "","company":company or "","cat":cat,"city":city or "",
+                    "location":location or "","email":email or "","website":website or "",
+                    "source":", ".join(old_sources),"detail":source_detail or "",
+                    "cnt":len(merged),"props":json.dumps(merged),"notes":notes or "","k":key
+                })
+        else:
+            c.execute(text("""INSERT INTO pi_marketing_contacts(
+                contact_key,contact_name,primary_phone,all_phones,company_brand,category,city,location,
+                email,website,source,source_detail,linked_property_count,linked_properties,notes
+            ) VALUES(:k,:name,:ph,CAST(:phones AS jsonb),:company,:cat,:city,:location,:email,:website,
+                :source,:detail,:cnt,CAST(:props AS jsonb),:notes)"""),{
+                    "k":key,"name":name,"ph":ph,"phones":json.dumps([ph]),
+                    "company":company,"cat":cat,"city":city,"location":location,"email":email,
+                    "website":website,"source":source,"detail":source_detail,"cnt":len(props),
+                    "props":json.dumps(props),"notes":notes
+                })
+    return True
+
+def _v151_sync_property_contacts():
+    """
+    Property contacts remain owner/broker verification data.
+    This copies a marketing-safe representation into the Marketing Contacts DB,
+    while preserving source='PROPERTY_DATABASE' or 'MAGAZINE'.
+    """
+    _v151_setup()
+    added=0
+
+    # Prefer full relationship table if present.
+    if _v138_table_exists("pi_property_contact_links"):
+        with engine.connect() as c:
+            rows=c.execute(text("""SELECT pcl.property_id,pcl.normalized_contact,pcl.role_hint,
+                p.property_name,p.city,p.location,p.source,p.owner_name,p.broker_name
+                FROM pi_property_contact_links pcl
+                LEFT JOIN pi_properties p ON p.property_id=pcl.property_id
+                ORDER BY pcl.property_id""")).fetchall()
+        grouped={}
+        for r in rows:
+            d=dict(r._mapping)
+            ph=_v151_digits(d.get("normalized_contact"))
+            if not ph: continue
+            g=grouped.setdefault(ph,{"props":[],"names":[],"cities":[],"locations":[],"sources":[],"roles":[]})
+            if d.get("property_id"):g["props"].append(d["property_id"])
+            for k,outk in [("owner_name","names"),("broker_name","names"),("city","cities"),("location","locations"),("source","sources"),("role_hint","roles")]:
+                if d.get(k):g[outk].append(str(d[k]))
+        for ph,g in grouped.items():
+            source_blob=" ".join(g["sources"]).lower()
+            source="MAGAZINE" if "magazine" in source_blob else "PROPERTY_DATABASE"
+            role_blob=" ".join(g["roles"])
+            cat=_v151_category_from_text(role_blob," ".join(g["names"]))
+            name=(g["names"][0] if g["names"] else None)
+            city=(g["cities"][0] if g["cities"] else None)
+            loc=", ".join(list(dict.fromkeys(g["locations"]))[:5])
+            if _v151_upsert_contact(ph,name=name,category=cat,city=city,location=loc,source=source,
+                                    source_detail="Property contact sync",property_ids=list(dict.fromkeys(g["props"]))):
+                added+=1
+
+    # AI demand/contact sources.
+    if _v138_table_exists("ai_demand_signals"):
+        with engine.connect() as c:
+            ai=[dict(r._mapping) for r in c.execute(text("SELECT * FROM ai_demand_signals ORDER BY created_at DESC LIMIT 5000")).fetchall()]
+        for r in ai:
+            ph=_v151_digits(r.get("contact_phone") or r.get("phone") or r.get("mobile"))
+            if not ph: continue
+            blob=" ".join(str(v or "") for v in r.values())
+            cat=_v151_category_from_text(blob)
+            src="AI_HOSPITALITY" if cat in {"CAFE","RESTAURANT","BANQUET","HOTEL","GUEST_HOUSE","LOUNGE","CLUB","BAR","FARMHOUSE"} else "AI_RETAIL"
+            _v151_upsert_contact(
+                ph,
+                name=r.get("contact_name") or r.get("person_name"),
+                company=r.get("company_name") or r.get("brand_name"),
+                category=cat,
+                city=r.get("city"),
+                location=r.get("location"),
+                email=r.get("contact_email") or r.get("email"),
+                website=r.get("website"),
+                source=src,
+                source_detail=r.get("source_url") or r.get("linkedin_post_url"),
+                notes=r.get("excerpt") or r.get("requirement_text")
+            )
+            added+=1
+    return added
+
+@app.post("/api/v15-1/marketing-contacts/sync")
+def v151_sync_contacts(req:Request):
+    need_login(req)
+    try:
+        n=_v151_sync_property_contacts()
+        return {"status":"ok","processed":n}
+    except Exception as ex:
+        raise HTTPException(500,f"{type(ex).__name__}: {ex}")
+
+@app.get("/api/v15-1/marketing-contacts")
+def v151_contacts(req:Request,category:str=Query("ALL"),source:str=Query("ALL"),
+                  verified:str=Query("ALL"),whatsapp:str=Query("ALL"),q:str=Query("")):
+    need_login(req);_v151_setup()
+    wh=[];params={}
+    if category!="ALL":
+        wh.append("category=:cat");params["cat"]=category
+    if source!="ALL":
+        wh.append("source ILIKE :src");params["src"]="%"+source+"%"
+    if verified!="ALL":
+        wh.append("verified_status=:ver");params["ver"]=verified
+    if whatsapp!="ALL":
+        wh.append("whatsapp_status=:wa");params["wa"]=whatsapp
+    if q.strip():
+        wh.append("""(
+            COALESCE(contact_name,'') ILIKE :q OR COALESCE(primary_phone,'') ILIKE :q OR
+            COALESCE(company_brand,'') ILIKE :q OR COALESCE(location,'') ILIKE :q OR
+            COALESCE(city,'') ILIKE :q OR COALESCE(email,'') ILIKE :q
+        )""");params["q"]="%"+q.strip()+"%"
+    sql="SELECT * FROM pi_marketing_contacts"
+    if wh:sql+=" WHERE "+" AND ".join(wh)
+    sql+=" ORDER BY date_added DESC LIMIT 5000"
+    with engine.connect() as c:
+        rows=[dict(r._mapping) for r in c.execute(text(sql),params).fetchall()]
+    return {"status":"ok","rows":rows}
+
+@app.post("/api/v15-1/marketing-contacts/{cid}/update")
+async def v151_update_contact(cid:int,req:Request):
+    need_login(req);_v151_setup()
+    b=await req.json()
+    allowed={"contact_name","company_brand","category","subcategory","city","location","email","website",
+             "verified_status","whatsapp_status","opt_out","notes"}
+    vals={k:v for k,v in b.items() if k in allowed}
+    if not vals:raise HTTPException(400,"No fields to update")
+    sets=[];params={"id":cid}
+    for i,(k,v) in enumerate(vals.items()):
+        key="v"+str(i);sets.append(f"{k}=:{key}");params[key]=v
+    with engine.begin() as c:
+        c.execute(text("UPDATE pi_marketing_contacts SET "+",".join(sets)+",updated_at=NOW() WHERE id=:id"),params)
+    return {"status":"ok"}
+
+@app.get("/marketing-contacts",response_class=HTMLResponse)
+def v151_marketing_contacts_page(req:Request):
+    role=page_role_or_redirect(req)
+    if not role:return RedirectResponse("/login",303)
+    return HTMLResponse("""<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>Marketing Contacts</title>
+<style>*{box-sizing:border-box}body{font-family:Arial;margin:0;background:#f4f7fb;color:#172437}header{background:#102235;color:white;padding:18px}.w{padding:18px}.bar{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}.bar a,.bar button{padding:8px 10px;border-radius:7px;border:0;background:#e9eef5;color:#203247;text-decoration:none;font-weight:bold}.bar button.primary{background:#1677ff;color:white}select,input{padding:8px;border:1px solid #ccd6e2;border-radius:7px}.stats{margin-left:auto}.tablewrap{overflow:auto;background:white;border-radius:10px}table{width:100%;border-collapse:collapse;font-size:12px}th,td{padding:8px;border-bottom:1px solid #edf1f5;text-align:left;vertical-align:top;white-space:nowrap}th{position:sticky;top:0;background:#f8fafc}.small{font-size:11px;color:#687789}.pill{padding:3px 6px;border-radius:8px;background:#edf4ff}.ready{background:#dcfce7}</style></head>
+<body><header><b>Marketing Contacts Database</b><br><small>Cafe · Restaurant · Banquet · Hotel · Retail · Property · Magazine · AI</small></header><div class=w>
+<div class=bar><a href="/workspace">← Dashboard</a><button class=primary onclick="sync()">Sync Sources</button>
+<select id=category><option>ALL</option><option>CAFE</option><option>RESTAURANT</option><option>BANQUET</option><option>HOTEL</option><option>GUEST_HOUSE</option><option>LOUNGE</option><option>CLUB</option><option>BAR</option><option>FARMHOUSE</option><option>RETAILER</option><option>BROKER</option><option>OWNER</option><option>OTHER</option></select>
+<select id=source><option>ALL</option><option>AI_HOSPITALITY</option><option>AI_RETAIL</option><option>PROPERTY_DATABASE</option><option>MAGAZINE</option></select>
+<select id=verified><option>ALL</option><option>UNVERIFIED</option><option>VERIFIED</option></select>
+<select id=whatsapp><option>ALL</option><option>NOT_CONTACTED</option><option>READY</option><option>SENT</option><option>REPLIED</option><option>OPT_OUT</option></select>
+<input id=q placeholder="Search name, phone, brand, location"><span class=stats id=stats></span></div>
+<div class=tablewrap><table><thead><tr><th>Select</th><th>Name</th><th>Phone</th><th>Brand</th><th>Category</th><th>Location</th><th>Source</th><th>Verified</th><th>WhatsApp</th><th>Properties</th><th>Date Added</th></tr></thead><tbody id=rows></tbody></table></div>
+</div>
+<script>
+const E=x=>String(x??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));let D=[];
+async function A(u,o={}){let r=await fetch(u,o),d=await r.json();if(!r.ok)throw Error(d.detail||'Error');return d}
+async function load(){let u='/api/v15-1/marketing-contacts?category='+category.value+'&source='+source.value+'&verified='+verified.value+'&whatsapp='+whatsapp.value+'&q='+encodeURIComponent(q.value);let d=await A(u);D=d.rows||[];stats.textContent=D.length+' contacts';rows.innerHTML=D.map(x=>`<tr><td><input type=checkbox ${x.opt_out?'disabled':''}></td><td>${E(x.contact_name||'')}</td><td><b>${E(x.primary_phone)}</b><br><span class=small>${E((x.all_phones||[]).join(', '))}</span></td><td>${E(x.company_brand||'')}</td><td><span class="pill">${E(x.category)}</span></td><td>${E(x.city||'')}<br>${E(x.location||'')}</td><td>${E(x.source||'')}</td><td><select onchange="upd(${x.id},'verified_status',this.value)"><option ${x.verified_status==='UNVERIFIED'?'selected':''}>UNVERIFIED</option><option ${x.verified_status==='VERIFIED'?'selected':''}>VERIFIED</option></select></td><td><select onchange="upd(${x.id},'whatsapp_status',this.value)"><option ${x.whatsapp_status==='NOT_CONTACTED'?'selected':''}>NOT_CONTACTED</option><option ${x.whatsapp_status==='READY'?'selected':''}>READY</option><option ${x.whatsapp_status==='SENT'?'selected':''}>SENT</option><option ${x.whatsapp_status==='REPLIED'?'selected':''}>REPLIED</option><option ${x.whatsapp_status==='OPT_OUT'?'selected':''}>OPT_OUT</option></select></td><td>${E(x.linked_property_count||0)}</td><td>${E((x.date_added||'').slice(0,10))}</td></tr>`).join('')||'<tr><td colspan=11>No contacts found.</td></tr>'}
+async function upd(id,k,v){let b={};b[k]=v;await A('/api/v15-1/marketing-contacts/'+id+'/update',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});}
+async function sync(){stats.textContent='Syncing...';try{let d=await A('/api/v15-1/marketing-contacts/sync',{method:'POST'});stats.textContent='Synced '+d.processed;load()}catch(e){alert(e.message)}}
+[category,source,verified,whatsapp].forEach(x=>x.onchange=load);q.oninput=load;load();
+</script></body></html>""")
+
+# Update dashboard Marketing Contacts link to dedicated page.
+# Runtime middleware below also ensures no stale team dashboard is cached.
+
+@app.middleware("http")
+async def v151_no_cache_and_dashboard_router(request,call_next):
+    old_dashboard_paths={
+        "/team-workspace-clean","/simple-dashboard","/v14-dashboard","/data-command-center"
+    }
+    # Only redirect former team dashboards. Admin data-command-center remains available
+    # when explicitly requested with ?admin=1.
+    if request.url.path in {"/team-workspace-clean","/simple-dashboard","/v14-dashboard"}:
+        return RedirectResponse("/v15-dashboard",status_code=307)
+
+    response=await call_next(request)
+
+    if (
+        request.url.path.startswith("/v15")
+        or request.url.path.startswith("/v14")
+        or request.url.path in {"/workspace","/marketing-contacts","/contacts-directory",
+                                "/requirements-workbench","/capture-intelligence"}
+    ):
+        response.headers["Cache-Control"]="no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"]="no-cache"
+        response.headers["Expires"]="0"
+
+    return response
