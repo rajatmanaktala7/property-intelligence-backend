@@ -1930,6 +1930,7 @@ small{{color:#6b7280}}
 </header>
 <nav>
 <a class="navbtn" href="/workspace">Operations</a>
+<a class="navbtn" href="/property-discovery">Find Property</a>
 <a class="navbtn" href="/database-page">Database</a>
 <a class="navbtn" href="/status-page">Status</a>
 {admin_link}
@@ -13341,3 +13342,15 @@ async def v162_final_router(request,call_next):
         response.headers["Pragma"]="no-cache"
         response.headers["Expires"]="0"
     return response
+
+# === PROPERTY DISCOVERY V17 INTEGRATION ===
+from property_discovery import install_property_discovery as _install_property_discovery
+_install_property_discovery(
+    app=app,
+    engine=engine,
+    need_login=need_login,
+    save_property=save_property,
+    actor_name=actor_name,
+)
+# === END PROPERTY DISCOVERY V17 INTEGRATION ===
+
