@@ -10189,7 +10189,7 @@ header{background:var(--nav);color:#fff;padding:18px 24px;display:flex;justify-c
   <div class="section">
     <h2>MARKETING & CONTACTS</h2>
     <div class="grid">
-      <a class="card" href="/marketing-contacts-v2"><div class="icon">✉</div><b>Marketing Contacts</b><span>Property contacts, AI-generated hospitality/retail contacts and verified database contacts for approved outreach.</span><span class="tag">WhatsApp Ready</span></a>
+      <a class="card" href="/marketing-contacts-v3"><div class="icon">✉</div><b>Marketing Contacts</b><span>Property contacts, AI-generated hospitality/retail contacts and verified database contacts for approved outreach.</span><span class="tag">WhatsApp Ready</span></a>
       <a class="card" href="/legacy-workspace#contacts"><div class="icon">⇧</div><b>Upload Contact List</b><span>Add external contact databases for marketing workflows without mixing them into property inventory.</span><span class="tag">Contact Import</span></a>
       <a class="card" href="/legacy-workspace#bots"><div class="icon">⚡</div><b>Bot Control Room</b><span>Run and review discovery bots and system activity.</span><span class="tag">Automation</span></a>
     </div>
@@ -10756,3 +10756,172 @@ def v152_marketing_contacts_v2(req:Request):
 async function syncHosp(){msg.textContent='Syncing AI hospitality contacts...';let r=await fetch('/api/v15-2/marketing-contacts/sync-ai-hospitality',{method:'POST'}),d=await r.json();if(!r.ok){msg.textContent='ERROR: '+(d.detail||'Sync failed');return}msg.textContent=`Done. ${d.processed} contacts synced from ${d.source_rows} hospitality source rows. ${d.skipped_no_phone} rows had no valid 10-digit mobile.`;debug()}
 async function debug(){let d=await(await fetch('/api/v15-2/marketing-contacts/debug-ai-hospitality')).json();rows.innerHTML=(d.sample||[]).map(x=>`<tr><td>${x.source_table||''}</td><td>${x.category||''}</td><td>${(x.phones||[]).join(', ')}</td><td>${x.company||''}</td><td>${x.name||''}</td><td>${x.location||''}</td></tr>`).join('')||'<tr><td colspan=6>No hospitality source rows detected.</td></tr>'}debug()
 </script></body></html>""")
+
+# ============================================================
+# V15.3 FULL HOSPITALITY CONTACT REBUILD
+# Universal schema discovery: finds hospitality/contact/prospect/lead
+# tables dynamically and rebuilds Marketing Contacts from real source rows.
+# ============================================================
+
+def _v153_candidate_tables():
+    with engine.connect() as c:
+        rows=c.execute(text("""SELECT table_name
+            FROM information_schema.tables
+            WHERE table_schema='public'
+              AND table_type='BASE TABLE'
+              AND (
+                   table_name ILIKE '%hospital%'
+                OR table_name ILIKE '%contact%'
+                OR table_name ILIKE '%prospect%'
+                OR table_name ILIKE '%lead%'
+              )
+              AND table_name NOT IN ('pi_marketing_contacts')
+            ORDER BY table_name""")).fetchall()
+    return [r._mapping["table_name"] for r in rows]
+
+def _v153_columns(table):
+    with engine.connect() as c:
+        rows=c.execute(text("""SELECT column_name,data_type
+            FROM information_schema.columns
+            WHERE table_schema='public' AND table_name=:t
+            ORDER BY ordinal_position"""),{"t":table}).fetchall()
+    return [dict(r._mapping) for r in rows]
+
+def _v153_phone_cols(cols):
+    out=[]
+    for c in cols:
+        n=c["column_name"].lower()
+        if any(x in n for x in ["phone","mobile","contact_no","contactnumber","contact_number","whatsapp","telephone","tel_no"]):
+            out.append(c["column_name"])
+    return out
+
+def _v153_is_hospitality_row(row, table):
+    blob=(" "+table+" "+" ".join(str(v or "") for v in row.values())+" ").lower()
+    terms=["hospitality","restaurant","cafe","coffee","banquet","hotel","guest house","guesthouse","lounge","club","bar","pub","farmhouse","farm house","resort"]
+    return any(t in blob for t in terms)
+
+def _v153_extract_phones(row, phone_cols):
+    found=[]
+    for col in phone_cols:
+        v=row.get(col)
+        if v is None: continue
+        vals=v if isinstance(v,(list,tuple)) else _re.split(r"[,;/|]+",str(v))
+        for raw in vals:
+            candidates=[str(raw)] + _re.findall(r"(?:\+?91[\s\-]?)?[6-9]\d{9}",str(raw))
+            for cand in candidates:
+                ph=_v151_digits(cand)
+                if ph and ph not in found:
+                    found.append(ph)
+    return found
+
+def _v153_first(row,*keys):
+    for k in keys:
+        if k in row and row.get(k) not in (None,""):
+            return row.get(k)
+    return None
+
+def _v153_rebuild_hospitality():
+    _v151_setup()
+    tables=_v153_candidate_tables()
+    source_rows=0
+    valid_phone_rows=0
+    synced=0
+    table_stats=[]
+    errors=[]
+
+    for table in tables:
+        try:
+            cols=_v153_columns(table)
+            phone_cols=_v153_phone_cols(cols)
+            if not phone_cols:
+                table_stats.append({"table":table,"rows":0,"phones":0,"synced":0,"note":"no phone-like columns"})
+                continue
+
+            with engine.connect() as c:
+                rows=[dict(r._mapping) for r in c.execute(text(f'SELECT * FROM "{table}" LIMIT 20000')).fetchall()]
+
+            t_rows=t_phone=t_sync=0
+            for r in rows:
+                if not _v153_is_hospitality_row(r,table):
+                    continue
+                t_rows+=1
+                source_rows+=1
+                phones=_v153_extract_phones(r,phone_cols)
+                if not phones:
+                    continue
+                t_phone+=1
+                valid_phone_rows+=1
+
+                name=_v153_first(r,"contact_name","person_name","name","owner_name","manager_name","contact_person")
+                company=_v153_first(r,"company_name","brand_name","brand","venue_name","business_name","company","restaurant_name","hotel_name")
+                city=_v153_first(r,"city","target_city")
+                location=_v153_first(r,"location","address","target_market","area","locality","market")
+                email=_v153_first(r,"contact_email","email","email_id")
+                website=_v153_first(r,"website","website_url")
+                src_url=_v153_first(r,"source_url","linkedin_post_url","linkedin_url","url")
+                notes=_v153_first(r,"excerpt","requirement_text","notes","description","summary","remarks")
+                cat=_v152_detect_hospitality_category(r) or "OTHER"
+
+                for ph in phones:
+                    try:
+                        if _v151_upsert_contact(
+                            ph,
+                            name=name,
+                            company=company,
+                            category=cat,
+                            city=city,
+                            location=location,
+                            email=email,
+                            website=website,
+                            source="AI_HOSPITALITY",
+                            source_detail=f"{table}: {src_url or ''}".strip(),
+                            notes=notes
+                        ):
+                            synced+=1
+                            t_sync+=1
+                    except Exception as ex:
+                        errors.append(f"{table}/{ph}: {type(ex).__name__}: {ex}")
+
+            table_stats.append({"table":table,"rows":t_rows,"phones":t_phone,"synced":t_sync})
+        except Exception as ex:
+            table_stats.append({"table":table,"rows":0,"phones":0,"synced":0,"error":f"{type(ex).__name__}: {ex}"})
+
+    total_contacts=_v15_safe_count("SELECT COUNT(*) FROM pi_marketing_contacts WHERE source ILIKE '%AI_HOSPITALITY%'")
+    return {
+        "candidate_tables":len(tables),
+        "source_rows":source_rows,
+        "rows_with_valid_phone":valid_phone_rows,
+        "synced":synced,
+        "total_ai_hospitality_contacts":total_contacts,
+        "table_stats":table_stats,
+        "errors":errors[:30]
+    }
+
+@app.post("/api/v15-3/marketing-contacts/rebuild-hospitality")
+def v153_rebuild_hospitality_api(req:Request):
+    need_login(req)
+    try:
+        return {"status":"ok",**_v153_rebuild_hospitality()}
+    except Exception as ex:
+        raise HTTPException(500,f"{type(ex).__name__}: {ex}")
+
+@app.get("/marketing-contacts-v3",response_class=HTMLResponse)
+def v153_marketing_contacts_page(req:Request):
+    role=page_role_or_redirect(req)
+    if not role:return RedirectResponse("/login",303)
+    return HTMLResponse("""<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>Marketing Contacts</title>
+<style>*{box-sizing:border-box}body{font-family:Arial;margin:0;background:#f4f7fb;color:#172437}header{background:#102235;color:#fff;padding:18px}.w{padding:18px}.bar{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}.btn,a.btn{padding:8px 10px;border:0;border-radius:7px;background:#1677ff;color:#fff;text-decoration:none;font-weight:bold;cursor:pointer}.gray{background:#e9eef5!important;color:#203247!important}.msg{background:white;border:1px solid #e2e8f0;border-radius:10px;padding:12px;margin-bottom:12px}.kpis{display:grid;grid-template-columns:repeat(4,minmax(150px,1fr));gap:8px;margin-bottom:12px}.k{background:white;border:1px solid #e2e8f0;border-radius:10px;padding:12px}.k b{font-size:22px;display:block}.tablewrap{overflow:auto;background:white;border-radius:10px}table{width:100%;border-collapse:collapse;font-size:12px}th,td{padding:8px;border-bottom:1px solid #edf1f5;text-align:left;white-space:nowrap}th{background:#f8fafc}@media(max-width:700px){.kpis{grid-template-columns:1fr 1fr}}</style></head>
+<body><header><b>Marketing Contacts Database</b><br><small>Full AI Hospitality rebuild + category filters</small></header><div class=w>
+<div class=bar><a class="btn gray" href="/workspace">← Dashboard</a><button class=btn onclick="rebuild()">Rebuild Full AI Hospitality Contacts</button></div>
+<div class=msg id=msg>Click <b>Rebuild Full AI Hospitality Contacts</b>. This scans the real database schema instead of assuming one table name.</div>
+<div class=kpis><div class=k><b id=tables>0</b><span>Source tables found</span></div><div class=k><b id=srows>0</b><span>Hospitality source rows</span></div><div class=k><b id=prows>0</b><span>Rows with valid mobile</span></div><div class=k><b id=total>0</b><span>AI Hospitality contacts</span></div></div>
+<div class=tablewrap><table><thead><tr><th>Source Table</th><th>Hospitality Rows</th><th>Rows With Phone</th><th>Contacts Synced</th><th>Status</th></tr></thead><tbody id=rows></tbody></table></div>
+</div><script>
+async function rebuild(){msg.textContent='Scanning hospitality/contact/prospect/lead tables and rebuilding contacts...';let r=await fetch('/api/v15-3/marketing-contacts/rebuild-hospitality',{method:'POST'}),d=await r.json();if(!r.ok){msg.textContent='ERROR: '+(d.detail||'Rebuild failed');return}tables.textContent=d.candidate_tables||0;srows.textContent=d.source_rows||0;prows.textContent=d.rows_with_valid_phone||0;total.textContent=d.total_ai_hospitality_contacts||0;rows.innerHTML=(d.table_stats||[]).map(x=>`<tr><td>${x.table||''}</td><td>${x.rows||0}</td><td>${x.phones||0}</td><td>${x.synced||0}</td><td>${x.error||x.note||'OK'}</td></tr>`).join('');msg.textContent=`Rebuild complete. Marketing database now has ${d.total_ai_hospitality_contacts||0} AI Hospitality contacts.`;}
+</script></body></html>""")
+
+@app.middleware("http")
+async def v153_marketing_route_fix(request,call_next):
+    if request.url.path in {"/marketing-contacts","/marketing-contacts-v2"}:
+        return RedirectResponse("/marketing-contacts-v3",status_code=307)
+    return await call_next(request)
