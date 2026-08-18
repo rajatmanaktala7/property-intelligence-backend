@@ -17,7 +17,7 @@ from PIL import Image
 import fitz
 from pypdf import PdfReader, PdfWriter
 
-VERSION="7.6.0-DATA-ORGANIZER-V4"
+VERSION="7.7.0-V5-RECOVERY-RETAIL-LINKEDIN"
 DATABASE_URL=os.getenv("DATABASE_URL","")
 GEMINI_API_KEY=os.getenv("GEMINI_API_KEY","")
 GEMINI_MODEL=os.getenv("GEMINI_MODEL","gemini-3.1-flash-lite")
@@ -3353,7 +3353,9 @@ def v4_retail_bot(bg:BackgroundTasks,req:Request):
     need_login(req)
     run=_start_bot("Retail Expansion Bot","RETAIL","Scanning public retail expansion signals")
     bg.add_task(_retail_worker,run)
-    return {"status":"ACCEPTED","run_id":run}
+    req_run=_start_bot("Retail LinkedIn Requirement Bot","DEMAND","Scanning LinkedIn/public-indexed retail leasing requirements")
+    bg.add_task(_retail_linkedin_requirement_worker,req_run)
+    return {"status":"ACCEPTED","run_id":run,"requirement_run_id":req_run}
 
 class CampaignInput(BaseModel):
     campaign_name:str
@@ -4645,6 +4647,321 @@ load();
 </script></body></html>""")
 
 
+# ============================================================
+# DATA ORGANIZER V5 - INTELLIGENT RECOVERY + RETAIL LINKEDIN DEMAND
+# Conservative recovery. Never invents phone digits or unsupported facts.
+# ============================================================
+
+_V5_LOCALITY_MAP = {
+    "greater kailash":"Greater Kailash","gk 1":"Greater Kailash 1","gk1":"Greater Kailash 1",
+    "gk 2":"Greater Kailash 2","gk2":"Greater Kailash 2","kailash colony":"Kailash Colony",
+    "east of kailash":"East of Kailash","new friends colony":"New Friends Colony",
+    "nfc":"New Friends Colony","safdarjung enclave":"Safdarjung Enclave",
+    "safdurjung enclave":"Safdarjung Enclave","green park":"Green Park",
+    "vasant vihar":"Vasant Vihar","vasant kunj":"Vasant Kunj","hauz khas":"Hauz Khas",
+    "panchsheel park":"Panchsheel Park","panchsheel enclave":"Panchsheel Enclave",
+    "defence colony":"Defence Colony","defense colony":"Defence Colony",
+    "lajpat nagar":"Lajpat Nagar","jangpura":"Jangpura","nizamuddin":"Nizamuddin",
+    "saket":"Saket","malviya nagar":"Malviya Nagar","chittaranjan park":"Chittaranjan Park",
+    "cr park":"Chittaranjan Park","nehru place":"Nehru Place","okhla":"Okhla",
+    "mathura road":"Mathura Road","mohan co-operative":"Mohan Co-operative",
+    "mayapuri":"Mayapuri","pitampura":"Pitampura","sainik farm":"Sainik Farm",
+    "gurgaon":"Gurugram","gurugram":"Gurugram","noida":"Noida","faridabad":"Faridabad","ghaziabad":"Ghaziabad"
+}
+
+def _v5_source_text(p):
+    vals=[
+        p.get("property_name"),p.get("property_type"),p.get("city"),p.get("location"),
+        p.get("micro_market"),p.get("address"),p.get("remarks"),p.get("suitable_category"),
+        p.get("nearby_brands"),p.get("source"),p.get("raw_owner_contact"),
+        p.get("raw_broker_contact"),p.get("raw_contact_number")
+    ]
+    return " | ".join(str(x or "") for x in vals if str(x or "").strip())
+
+def _v5_infer_location(text_value):
+    v=_norm(text_value)
+    hits=[]
+    for key,label in _V5_LOCALITY_MAP.items():
+        if key in v:
+            hits.append((len(key),label))
+    if not hits:
+        return None,0
+    hits.sort(reverse=True)
+    return hits[0][1],95
+
+def _v5_infer_city(text_value, location=None):
+    v=_norm((text_value or "")+" "+(location or ""))
+    if any(x in v for x in ["gurgaon","gurugram"]): return "Gurugram",98
+    if "noida" in v: return "Noida",98
+    if "faridabad" in v: return "Faridabad",98
+    if "ghaziabad" in v: return "Ghaziabad",98
+    if location and location not in {"Gurugram","Noida","Faridabad","Ghaziabad"}:
+        return "New Delhi",92
+    if "delhi" in v: return "New Delhi",90
+    return None,0
+
+def _v5_infer_type(text_value):
+    v=_norm(text_value)
+    rules=[
+        (["restaurant","cafe","café","qsr","f&b","fnb","food outlet"],"F&B/COMMERCIAL",98),
+        (["shop","showroom","retail","dda mkt","market shop"],"RETAIL/COMMERCIAL",96),
+        (["office","business centre","cowork"],"OFFICE",96),
+        (["industrial","factory","warehouse"],"INDUSTRIAL",96),
+        (["banquet","hotel","guest house","hospitality","farmhouse"],"HOSPITALITY",94),
+        (["1bhk","2bhk","3bhk","4bhk","5bhk","apartment","flat","villa","builder floor"],"RESIDENTIAL",96),
+        (["commercial"],"COMMERCIAL",92),
+    ]
+    for terms,label,conf in rules:
+        if any(t in v for t in terms):
+            return label,conf
+    return None,0
+
+def _v5_infer_transaction(text_value):
+    v=_norm(text_value)
+    rent_terms=["for rent","on rent","to let","lease","leasing","rented","rental","rent @","rent rs","rent ₹"]
+    sale_terms=["for sale","sale @","sale rs","asking sale","sell","selling","free hold sale","freehold sale"]
+    rent=any(x in v for x in rent_terms)
+    sale=any(x in v for x in sale_terms)
+    if rent and sale:return "RENT/SALE",95
+    if rent:return "RENT",96
+    if sale:return "SALE",96
+    return None,0
+
+def _v5_infer_area(text_value):
+    raw=str(text_value or "")
+    patterns=[
+        (r'(?i)(\d[\d,]{1,6})\s*(?:sq\.?\s*ft|sqft|sft|square\s*feet|ft2)\b',1.0,"SQFT"),
+        (r'(?i)(\d[\d,]{1,5})\s*(?:sq\.?\s*yd|sqyd|sq\.?\s*yard|yards?|yds?)\b',9.0,"SQYD"),
+        (r'(?i)\b(\d[\d,]{2,6})\s*ft\b',1.0,"FT")
+    ]
+    for pat,mult,unit in patterns:
+        m=_re.search(pat,raw)
+        if m:
+            try:
+                val=float(m.group(1).replace(",",""))*mult
+                if 50 <= val <= 500000:
+                    return round(val,2),95,unit
+            except Exception:
+                pass
+    return None,0,None
+
+def _v5_recovery_suggestion(p):
+    base=_organize_property_v4(p)
+    txt=_v5_source_text(p)
+    suggestions={}
+    reasons=[]
+
+    current_location=_dq_text(p.get("location") or p.get("micro_market"))
+    if not current_location or _dq_unknown(current_location):
+        loc,conf=_v5_infer_location(txt)
+        if loc:
+            suggestions["location"]={"value":loc,"confidence":conf,"reason":"Locality found in stored property/source text"}
+            reasons.append("LOCATION_RECOVERABLE")
+
+    current_city=_canonical_city_v4(p.get("city"))
+    if current_city=="UNKNOWN":
+        loc=(suggestions.get("location") or {}).get("value") or current_location
+        city,conf=_v5_infer_city(txt,loc)
+        if city:
+            suggestions["city"]={"value":city,"confidence":conf,"reason":"City inferred from explicit locality/city text"}
+            reasons.append("CITY_RECOVERABLE")
+
+    current_type=_canonical_property_type_v4(p.get("property_type"),p.get("suitable_category"),p.get("remarks"))
+    if current_type=="UNKNOWN":
+        pt,conf=_v5_infer_type(txt)
+        if pt:
+            suggestions["property_type"]={"value":pt,"confidence":conf,"reason":"Explicit use/type keyword in stored text"}
+            reasons.append("TYPE_RECOVERABLE")
+
+    if _property_area(p) is None:
+        area,conf,unit=_v5_infer_area(txt)
+        if area:
+            suggestions["available_area_sqft"]={"value":area,"confidence":conf,"reason":f"Explicit {unit} area found in stored text"}
+            reasons.append("AREA_RECOVERABLE")
+
+    if _canonical_transaction_v4(p.get("rent_or_sale"))=="UNKNOWN":
+        tx,conf=_v5_infer_transaction(txt)
+        if tx:
+            suggestions["rent_or_sale"]={"value":tx,"confidence":conf,"reason":"Explicit rent/lease/sale wording in stored text"}
+            reasons.append("TRANSACTION_RECOVERABLE")
+
+    high_conf={k:v for k,v in suggestions.items() if int(v.get("confidence") or 0)>=92}
+    return {
+        "property_id":p.get("property_id"),
+        "property_name":p.get("property_name"),
+        "source":p.get("source"),
+        "before_status":base["data_quality_status"],
+        "issues":base["quality_issues"],
+        "suggestions":suggestions,
+        "high_confidence_suggestions":high_conf,
+        "recoverable":bool(high_conf),
+        "reasons":reasons
+    }
+
+def _v5_duplicate_key(p):
+    loc=_norm(p.get("location") or p.get("micro_market"))
+    name=_norm(p.get("property_name"))
+    area=_property_area(p)
+    contacts=sorted(_contact_number_set(
+        p.get("owner_contact"),p.get("broker_contact"),p.get("contact_number"),
+        p.get("owner_contact_normalized"),p.get("broker_contact_normalized")
+    ))
+    contact=contacts[0] if contacts else ""
+    if not (loc or name or contact): return None
+    return hashlib.sha256(f"{loc}|{name}|{round(area or 0,1)}|{contact}".encode()).hexdigest()
+
+def _v5_audit_recovery(limit=1000):
+    rows=[]
+    duplicate_groups={}
+    counts={"total":0,"recoverable":0,"high_confidence_fields":0,"possible_duplicates":0}
+    with engine.connect() as c:
+        dbrows=c.execute(text("SELECT * FROM pi_properties ORDER BY created_at DESC")).fetchall()
+    for row in dbrows:
+        p=dict(row._mapping); counts["total"]+=1
+        suggestion=_v5_recovery_suggestion(p)
+        if suggestion["recoverable"]:
+            counts["recoverable"]+=1
+            counts["high_confidence_fields"]+=len(suggestion["high_confidence_suggestions"])
+            if len(rows)<limit: rows.append(suggestion)
+        k=_v5_duplicate_key(p)
+        if k: duplicate_groups.setdefault(k,[]).append(p.get("property_id"))
+    dups=[ids for ids in duplicate_groups.values() if len(ids)>1]
+    counts["possible_duplicates"]=sum(len(x) for x in dups)
+    return {"summary":counts,"recoverable":rows,"duplicate_groups":dups[:300]}
+
+def _v5_apply_recovery():
+    audit=_v5_audit_recovery(100000)
+    updated_records=updated_fields=0
+    with engine.begin() as c:
+        for rec in audit["recoverable"]:
+            sug=rec["high_confidence_suggestions"]
+            if not sug: continue
+            sets=[]; params={"id":rec["property_id"]}
+            for field in ["city","location","property_type","available_area_sqft","rent_or_sale"]:
+                if field in sug:
+                    sets.append(f"{field}=:{field}")
+                    params[field]=sug[field]["value"]
+            if sets:
+                sets.append("updated_at=NOW()")
+                c.execute(text("UPDATE pi_properties SET "+",".join(sets)+" WHERE property_id=:id"),params)
+                updated_records+=1; updated_fields+=len(sets)-1
+    normalized=_audit_property_database_v4(True)
+    return {"updated_records":updated_records,"updated_fields":updated_fields,"post_normalization":normalized["summary"]}
+
+@app.get("/api/v5/data-recovery/audit")
+def v5_data_recovery_audit(req:Request):
+    need_login(req)
+    return {"status":"ok",**_v5_audit_recovery()}
+
+@app.post("/api/v5/data-recovery/apply")
+def v5_data_recovery_apply(req:Request):
+    need_login(req)
+    result=_v5_apply_recovery()
+    return {"status":"ok","message":"High-confidence recoveries applied. No phone digits or unsupported facts were invented.",**result}
+
+@app.get("/data-recovery",response_class=HTMLResponse)
+def v5_data_recovery_page(req:Request):
+    role=page_role_or_redirect(req)
+    if not role:return RedirectResponse("/login",status_code=303)
+    return HTMLResponse("""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Data Recovery V5</title>
+<style>*{box-sizing:border-box}body{margin:0;background:#f4f7fb;font-family:Arial;color:#142033}header{background:#0d1d2d;color:#fff;padding:16px 22px}.wrap{max-width:1700px;margin:auto;padding:20px}.card,.kpi{background:#fff;border:1px solid #e4eaf1;border-radius:12px;padding:14px;margin-bottom:12px}.kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}.kpi b{font-size:26px;display:block}.btn{padding:10px 13px;border:0;border-radius:8px;background:#1677ff;color:white;font-weight:700;text-decoration:none;cursor:pointer}.orange{background:#df8b13}.tablewrap{overflow:auto;max-height:65vh}table{width:100%;border-collapse:collapse;font-size:12px}th,td{padding:8px;border-bottom:1px solid #edf1f5;text-align:left;vertical-align:top;white-space:nowrap}th{position:sticky;top:0;background:#f8fafc}</style></head>
+<body><header><b>Data Organizer V5 · Intelligent Recovery</b></header><div class="wrap">
+<div class="card"><a class="btn" href="/data-quality">Data Quality V4</a> <a class="btn" href="/property-database">Property Database</a> <a class="btn" href="/workspace">Workspace</a></div>
+<div class="card"><b>Safety rule:</b> V5 applies only high-confidence facts explicitly recoverable from stored property/source text. It never completes truncated phone numbers and never defaults unknown transaction/location.</div>
+<div class="card"><button class="btn" onclick="audit()">Run Recovery Audit</button> <button class="btn orange" onclick="apply()">Apply High-Confidence Recovery</button><span id="msg"></span></div>
+<div class="kpis" id="kpis"></div>
+<div class="card"><h3>Recoverable Records</h3><div class="tablewrap"><table><thead><tr><th>Property</th><th>Source</th><th>Current Issues</th><th>Suggested Recovery</th><th>Open</th></tr></thead><tbody id="rows"></tbody></table></div></div>
+</div><script>
+const esc=x=>String(x??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+async function api(u,o={}){let r=await fetch(u,o),d=await r.json();if(!r.ok)throw new Error(d.detail||d.message||'Error');return d}
+async function audit(){let d=await api('/api/v5/data-recovery/audit'),s=d.summary;document.querySelector('#kpis').innerHTML=[['TOTAL',s.total],['RECOVERABLE',s.recoverable],['FIELDS RECOVERABLE',s.high_confidence_fields],['POSSIBLE DUPLICATE RECORDS',s.possible_duplicates]].map(x=>`<div class="kpi"><span>${x[0]}</span><b>${Number(x[1]||0).toLocaleString()}</b></div>`).join('');document.querySelector('#rows').innerHTML=(d.recoverable||[]).map(x=>`<tr><td><b>${esc(x.property_name||x.property_id)}</b><br>${esc(x.property_id)}</td><td>${esc(x.source||'')}</td><td>${esc((x.issues||[]).join(', '))}</td><td>${Object.entries(x.high_confidence_suggestions||{}).map(([k,v])=>`<b>${esc(k)}</b>: ${esc(v.value)} (${v.confidence}%)`).join('<br>')}</td><td><a target="_blank" href="/property-record/${encodeURIComponent(x.property_id)}">View</a></td></tr>`).join('')}
+async function apply(){if(!confirm('Apply only high-confidence recoveries now?'))return;document.querySelector('#msg').textContent=' Working...';let d=await api('/api/v5/data-recovery/apply',{method:'POST'});document.querySelector('#msg').textContent=' '+d.message;await audit()}audit();
+</script></body></html>""")
+
+def _ensure_retail_linkedin_campaign():
+    name="Retail LinkedIn Requirement Watch"
+    with engine.begin() as c:
+        row=c.execute(text("SELECT campaign_id FROM ai_requirement_campaigns WHERE campaign_name=:n ORDER BY created_at DESC LIMIT 1"),{"n":name}).first()
+        if row:return row[0]
+        cid=_new_code("CAM")
+        c.execute(text("""INSERT INTO ai_requirement_campaigns(
+            campaign_id,campaign_name,property_type,city,location,rent_or_sale,suitable_category,additional_points,status
+        ) VALUES(:id,:n,'Retail / Commercial','Delhi NCR','Delhi NCR','Rent','Retail',
+        'Auto-created for public/indexed LinkedIn retail leasing requirement signals','ACTIVE')"""),
+        {"id":cid,"n":name})
+        return cid
+
+def _retail_requirement_score(title,snippet):
+    v=_norm((title or "")+" "+(snippet or ""))
+    score=0
+    intent=["looking for","requirement","required","seeking","need space","needs space","space required","space requirement","looking to lease","want to lease","on lease","for lease"]
+    retail=["retail","store","shop","showroom","outlet","brand","qsr","cafe","restaurant"]
+    geo=["delhi","delhi ncr","gurgaon","gurugram","noida","faridabad","ghaziabad"]
+    role=["business development","bd","expansion","leasing","real estate","property acquisition","projects","store development"]
+    if any(x in v for x in intent):score+=40
+    if any(x in v for x in retail):score+=20
+    if any(x in v for x in geo):score+=20
+    if any(x in v for x in role):score+=10
+    if any(x in v for x in ["lease","rent"]):score+=10
+    return min(100,score)
+
+def _save_retail_linkedin_requirement(item,campaign_id):
+    title=item.get("title") or ""; link=item.get("link") or ""; snippet=item.get("snippet") or ""
+    if "linkedin.com" not in link.lower():return None
+    score=_retail_requirement_score(title,snippet)
+    if score<70:return None
+    with engine.connect() as c:
+        if c.execute(text("SELECT 1 FROM ai_demand_signals WHERE source_url=:u LIMIT 1"),{"u":link}).first():
+            return None
+    phones,emails=_extract_public_contacts(title+" "+snippet)
+    sid=_new_code("DEM")
+    with engine.begin() as c:
+        c.execute(text("""INSERT INTO ai_demand_signals(
+            signal_id,campaign_id,source_type,source_name,source_url,title,excerpt,
+            contact_phone,contact_email,location,intent_score,status,match_breakdown,
+            contact_verification_status,source_contact_text
+        ) VALUES(:sid,:cid,'RETAIL_LINKEDIN_REQUIREMENT','LinkedIn public/indexed',:u,:t,:x,:p,:e,
+        'Delhi NCR',:s,'MANUAL_FOLLOWUP_REQUIRED',CAST(:b AS JSONB),:v,:ct)"""),{
+            "sid":sid,"cid":campaign_id,"u":link,"t":title,"x":snippet,
+            "p":phones[0] if phones else None,"e":emails[0] if emails else None,"s":score,
+            "b":json.dumps({"intent_score":score,"signal":"Retail leasing requirement from LinkedIn/public index"}),
+            "v":"PUBLIC_SOURCE" if (phones or emails) else "NOT_FOUND","ct":(title+" | "+snippet)[:2500]
+        })
+    _log_activity("Retail Requirement Bot","DEMAND","LINKEDIN_RETAIL_REQUIREMENT","demand_signal",sid,f"LinkedIn | score {score} | manual follow-up")
+    return sid
+
+def _retail_linkedin_requirement_worker(run_id):
+    campaign_id=_ensure_retail_linkedin_campaign()
+    queries=[
+        'site:linkedin.com/posts "looking for" retail space lease Delhi NCR',
+        'site:linkedin.com/posts "space requirement" retail lease Delhi NCR',
+        'site:linkedin.com/posts "requirement" showroom lease Delhi Gurgaon Noida',
+        'site:linkedin.com/posts "looking to lease" store Gurgaon Noida Delhi',
+        'site:linkedin.com/posts "business development" "space requirement" retail',
+        'site:linkedin.com/posts "expansion" "looking for space" retail Delhi',
+        'site:linkedin.com/posts "property acquisition" retail lease Delhi NCR',
+        'site:linkedin.com/posts "store development" "requirement" Delhi NCR'
+    ]
+    found=created=0;errors=[]
+    for q in queries:
+        try:
+            for item in _serper_search(q,10).get("organic",[]):
+                found+=1
+                sid=_save_retail_linkedin_requirement(item,campaign_id)
+                if sid:created+=1
+        except Exception as ex:errors.append(str(ex))
+    _finish_bot(run_id,"COMPLETED" if created or not errors else "FAILED",found,created,
+                f"LinkedIn retail requirement scan: {found} reviewed; {created} manual-follow-up signals saved",
+                " | ".join(errors[:5]) or None)
+
+@app.post("/api/v5/retail-linkedin-requirements/start")
+def v5_retail_linkedin_requirements(bg:BackgroundTasks,req:Request):
+    need_login(req)
+    run=_start_bot("Retail LinkedIn Requirement Bot","DEMAND","Scanning public/indexed LinkedIn retail leasing requirements")
+    bg.add_task(_retail_linkedin_requirement_worker,run)
+    return {"status":"ACCEPTED","run_id":run}
+
+
 @app.get("/api/v4/requirements")
 def v4_requirements(req:Request,limit:int=Query(300,ge=1,le=1000)):
     need_login(req)
@@ -4741,7 +5058,7 @@ def _v4_page(role):
 <title>AI Deal Intelligence OS V4</title><style>{_V4_CSS}</style></head><body><div class="shell">
 <aside class="side"><div class="brand">AI Deal Intelligence OS<small>V4 · Property · Hospitality · Retail · Demand</small></div>
 <div class="group">COMMAND</div><button class="nav active" data-page="command">▣ Command Centre</button><button class="nav" data-page="activity">◎ AI Activity</button><button class="nav" data-page="bots">⚡ Bot Control Room</button>
-<div class="group">PROPERTY</div><button class="nav" data-page="property">⌂ Add Property + Matcher</button><a class="nav" href="/property-database">▦ Full Property Database</a><a class="nav" href="/data-quality">✓ Data Quality / Organizer</a><button class="nav" data-page="owners">● Owners Database</button><button class="nav" data-page="brokers">● Brokers Database</button><a class="nav" href="/legacy-workspace">Original Upload Workspace</a><a class="nav" href="/database-page">Original Database</a>
+<div class="group">PROPERTY</div><button class="nav" data-page="property">⌂ Add Property + Matcher</button><a class="nav" href="/property-database">▦ Full Property Database</a><a class="nav" href="/data-quality">✓ Data Quality / Organizer</a><a class="nav" href="/data-recovery">↻ Intelligent Recovery V5</a><button class="nav" data-page="owners">● Owners Database</button><button class="nav" data-page="brokers">● Brokers Database</button><a class="nav" href="/legacy-workspace">Original Upload Workspace</a><a class="nav" href="/database-page">Original Database</a>
 <div class="group">LEAD INTELLIGENCE</div><button class="nav" data-page="hospitality">◆ Hospitality</button><button class="nav" data-page="retail">◈ Retail Expansion</button><button class="nav" data-page="contacts">✉ Marketing Contacts</button><button class="nav" data-page="demand">⌕ Requirement Discovery</button>
 </aside><main class="main"><header class="top"><div><b>Unified Delhi NCR Deal Intelligence</b><div class="sub">Organized database + AI bots + matching</div></div><div>{badge} · <a href="/logout">Logout</a></div></header><div class="content">
 
@@ -4784,7 +5101,7 @@ Owner Name · Owner Contact · Broker Name · Broker Contact · Main Contact Num
 <div class="card"><h3>Hospitality Prospects</h3><div class="tablewrap"><table><thead><tr><th>Brand</th><th>Category</th><th>Contact Name</th><th>Phone</th><th>Email</th><th>Market</th><th>Score</th><th>Team</th></tr></thead><tbody id="hospitalityRows"></tbody></table></div></div></section>
 
 <section class="page" id="retail"><h1 class="title">Retail Expansion Intelligence</h1><div class="sub">Automatic Retail Expansion Bot + manual prospect entry, now with name and contact number.</div>
-<div class="toolbar"><button class="btn green" onclick="runRetail()">Run Retail Expansion Bot</button><span class="badge">Requires SERPER_API_KEY</span></div>
+<div class="toolbar"><button class="btn green" onclick="runRetail()">Run Retail + LinkedIn Requirement Bots</button><span class="badge">Requires SERPER_API_KEY</span></div>
 <div class="card"><h3>Add Retail Expansion Prospect Manually</h3><form class="formgrid" onsubmit="addCompany(event,'RETAIL')">
 <input name="company_name" placeholder="Retail brand/company" required><input name="category" placeholder="Fashion / QSR / Beauty / Electronics">
 <input name="primary_contact_name" placeholder="Contact person name"><input name="primary_contact_phone" placeholder="Contact number">
