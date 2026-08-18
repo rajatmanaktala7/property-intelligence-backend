@@ -17,7 +17,7 @@ from PIL import Image
 import fitz
 from pypdf import PdfReader, PdfWriter
 
-VERSION="8.0.0-V8-SMART-MASTER-DATA"
+VERSION="9.0.0-V9-PROPERTY-RECONSTRUCTION"
 DATABASE_URL=os.getenv("DATABASE_URL","")
 GEMINI_API_KEY=os.getenv("GEMINI_API_KEY","")
 GEMINI_MODEL=os.getenv("GEMINI_MODEL","gemini-3.1-flash-lite")
@@ -3891,7 +3891,10 @@ def _hard_filter_property(q,p):
     quality=_organize_property_v4(p)
     if not quality["match_eligible"]:
         exclusions.append("MATCH_DATA_INCOMPLETE")
-    if p.get("v8_bucket"):
+    if p.get("v9_final_bucket"):
+        if p.get("v9_final_bucket")!="MATCH_READY" or p.get("v9_match_eligible") is False:
+            exclusions.append("NOT_MATCH_READY_V9")
+    elif p.get("v8_bucket"):
         if p.get("v8_bucket")!="MATCH_READY" or p.get("v8_match_eligible") is False:
             exclusions.append("NOT_MATCH_READY_V8")
     elif p.get("matching_bucket") and p.get("matching_bucket")!="MATCH_READY":
@@ -5766,6 +5769,292 @@ audit();
 </script></body></html>""")
 
 
+# ============================================================
+# V9 INTELLIGENT PROPERTY RECONSTRUCTION ENGINE
+# Reconstructs structured property facts from existing raw/source text.
+# Conservative, auditable, reversible-by-source. Never invents contacts.
+# ============================================================
+
+_V9_FLOOR_MAP = [
+    (r'\b(?:bmt|basement|lgf|lower ground)\b',"BASEMENT"),
+    (r'\b(?:gf|ground floor)\b',"GROUND FLOOR"),
+    (r'\b(?:ff|first floor)\b',"FIRST FLOOR"),
+    (r'\b(?:sf|second floor)\b',"SECOND FLOOR"),
+    (r'\b(?:tf|third floor)\b',"THIRD FLOOR"),
+    (r'\b(?:terr|terrace)\b',"TERRACE"),
+]
+
+_V9_TYPE_RULES = [
+    (["shop","showroom","retail","store","dda mkt","market shop"],"RETAIL / COMMERCIAL"),
+    (["restaurant","cafe","qsr","f&b","food outlet","lounge","club"],"F&B / COMMERCIAL"),
+    (["office","business centre","cowork"],"OFFICE"),
+    (["banquet","hotel","guest house","hospitality","farmhouse"],"HOSPITALITY"),
+    (["warehouse","factory","industrial"],"INDUSTRIAL"),
+    (["builder floor","4bhk","3bhk","2bhk","1bhk","apartment","flat","villa","duplex","residential"],"RESIDENTIAL"),
+]
+
+_V9_CITY_FROM_LOCALITY = {
+    "kailash colony":"New Delhi","greater kailash 1":"New Delhi","greater kailash 2":"New Delhi",
+    "new friends colony":"New Delhi","safdarjung enclave":"New Delhi","green park":"New Delhi",
+    "vasant vihar":"New Delhi","vasant kunj":"New Delhi","hauz khas":"New Delhi",
+    "panchsheel park":"New Delhi","panchsheel enclave":"New Delhi","defence colony":"New Delhi",
+    "lajpat nagar":"New Delhi","jangpura":"New Delhi","nizamuddin east":"New Delhi",
+    "nizamuddin west":"New Delhi","saket":"New Delhi","malviya nagar":"New Delhi",
+    "chittaranjan park":"New Delhi","nehru place":"New Delhi","okhla":"New Delhi",
+    "mathura road":"New Delhi","mohan co-operative":"New Delhi","mayapuri":"New Delhi",
+    "pitampura":"New Delhi","sainik farm":"New Delhi","gulmohar park":"New Delhi",
+    "jasola":"New Delhi","taimoor nagar":"New Delhi","niti bagh":"New Delhi",
+    "gurugram":"Gurugram","noida":"Noida","greater noida":"Greater Noida",
+    "faridabad":"Faridabad","ghaziabad":"Ghaziabad"
+}
+
+def _ensure_v9_columns():
+    stmts=[
+        "ALTER TABLE pi_properties ADD COLUMN IF NOT EXISTS v9_property_no TEXT",
+        "ALTER TABLE pi_properties ADD COLUMN IF NOT EXISTS v9_locality TEXT",
+        "ALTER TABLE pi_properties ADD COLUMN IF NOT EXISTS v9_city TEXT",
+        "ALTER TABLE pi_properties ADD COLUMN IF NOT EXISTS v9_floor TEXT",
+        "ALTER TABLE pi_properties ADD COLUMN IF NOT EXISTS v9_property_type TEXT",
+        "ALTER TABLE pi_properties ADD COLUMN IF NOT EXISTS v9_plot_area_sqft DOUBLE PRECISION",
+        "ALTER TABLE pi_properties ADD COLUMN IF NOT EXISTS v9_builtup_area_sqft DOUBLE PRECISION",
+        "ALTER TABLE pi_properties ADD COLUMN IF NOT EXISTS v9_transaction TEXT",
+        "ALTER TABLE pi_properties ADD COLUMN IF NOT EXISTS v9_occupancy TEXT",
+        "ALTER TABLE pi_properties ADD COLUMN IF NOT EXISTS v9_recovery_status TEXT",
+        "ALTER TABLE pi_properties ADD COLUMN IF NOT EXISTS v9_recovery_confidence INTEGER",
+        "ALTER TABLE pi_properties ADD COLUMN IF NOT EXISTS v9_recovery_evidence JSONB DEFAULT '{}'::jsonb",
+        "ALTER TABLE pi_properties ADD COLUMN IF NOT EXISTS v9_final_bucket TEXT",
+        "ALTER TABLE pi_properties ADD COLUMN IF NOT EXISTS v9_match_eligible BOOLEAN",
+        "ALTER TABLE pi_properties ADD COLUMN IF NOT EXISTS v9_updated_at TIMESTAMP"
+    ]
+    with engine.begin() as c:
+        for s in stmts:
+            c.execute(text(s))
+
+def _v9_raw(p):
+    vals=[
+        p.get("property_name"),p.get("address"),p.get("location"),p.get("micro_market"),
+        p.get("city"),p.get("property_type"),p.get("remarks"),p.get("suitable_category"),
+        p.get("source")
+    ]
+    return " | ".join(str(x or "") for x in vals if str(x or "").strip())
+
+def _v9_property_no(p):
+    for raw in [p.get("property_name"),p.get("address")]:
+        s=_v8_clean(raw)
+        if not s:
+            continue
+        m=_re.search(r'\b(?:shop\s*no\s*[- ]?\d+[a-z]?|unit\s*no\s*[- ]?\d+[a-z]?|[a-z]{1,3}\s*[-/]\s*\d+[a-z0-9/-]*|\d+[a-z]?\s+[a-z][a-z ]{2,25}(?:complex|tower|house|market|mkt))\b',s,re.I)
+        if m:
+            return _v8_clean(m.group(0)),98
+    return None,0
+
+def _v9_locality(p):
+    # Never use property number itself as locality.
+    raw_loc=_v8_clean(p.get("location") or p.get("micro_market"))
+    prop_no,_=_v9_property_no(p)
+    if raw_loc and raw_loc not in {"unknown","na","n a","none","not specified"} and raw_loc!=prop_no:
+        return _v8_loc(p),98
+
+    txt=_norm(_v9_raw(p))
+    candidates=sorted(_V9_CITY_FROM_LOCALITY.keys(),key=len,reverse=True)
+    aliases={"kalash colony":"kailash colony","gk 1":"greater kailash 1","gk1":"greater kailash 1",
+             "gk 2":"greater kailash 2","gk2":"greater kailash 2","nfc":"new friends colony",
+             "defense colony":"defence colony","safdurjung enclave":"safdarjung enclave",
+             "chatterpur":"chattarpur","gurgaon":"gurugram"}
+    for a,b in aliases.items():
+        if a in txt:
+            return b,96
+    for loc in candidates:
+        if loc in txt:
+            return loc,96
+    return None,0
+
+def _v9_city(p,locality):
+    c=_canonical_city_v4(p.get("city"))
+    if c!="UNKNOWN":
+        return _dq_text(p.get("city")),99
+    if locality and locality in _V9_CITY_FROM_LOCALITY:
+        return _V9_CITY_FROM_LOCALITY[locality],96
+    txt=_norm(_v9_raw(p))
+    if "delhi" in txt:return "New Delhi",95
+    if "gurugram" in txt or "gurgaon" in txt:return "Gurugram",96
+    if "greater noida" in txt:return "Greater Noida",96
+    if "noida" in txt:return "Noida",96
+    if "faridabad" in txt:return "Faridabad",96
+    if "ghaziabad" in txt:return "Ghaziabad",96
+    return None,0
+
+def _v9_floor(p):
+    txt=_norm(_v9_raw(p))
+    found=[]
+    for pat,label in _V9_FLOOR_MAP:
+        if _re.search(pat,txt,re.I):
+            found.append(label)
+    return " + ".join(dict.fromkeys(found)) if found else None
+
+def _v9_property_type(p):
+    existing=_canonical_property_type_v4(p.get("property_type"),p.get("suitable_category"),p.get("remarks"))
+    if existing!="UNKNOWN":
+        # But floor shorthand accidentally stored as type remains invalid.
+        raw=_norm(p.get("property_type"))
+        if not _re.fullmatch(r'(bmt|basement|lgf|gf|ff|sf|tf|terr|bmt gf|bmt ff|bmt sf|bmt tf|sf terr|tf terr|bmt\+gf|bmt\+ff|bmt\+sf|bmt\+tf|sf\+terr|tf\+terr)',raw):
+            return existing,99
+
+    txt=_norm(_v9_raw(p))
+    for terms,label in _V9_TYPE_RULES:
+        if any(t in txt for t in terms):
+            return label,96
+    return None,0
+
+def _v9_area(p):
+    a=_v8_area(p)
+    plot=a["plot"]
+    built=a["built"]
+    conf=98 if built else (95 if plot else 0)
+    return plot,built,conf,a["reasons"]
+
+def _v9_tx(p):
+    t=_v8_tx(p)
+    return t["offering"],t["occupancy"],(98 if t["offering"] else 0),t["reasons"]
+
+def _v9_reconstruct(p):
+    prop_no,pc=_v9_property_no(p)
+    loc,lc=_v9_locality(p)
+    city,cc=_v9_city(p,loc)
+    ptype,tc=_v9_property_type(p)
+    floor=_v9_floor(p)
+    plot,built,ac,area_reasons=_v9_area(p)
+    tx,occ,xc,tx_reasons=_v9_tx(p)
+    q=_organize_property_v4(p)
+
+    evidence={
+        "property_no_confidence":pc,"locality_confidence":lc,"city_confidence":cc,
+        "type_confidence":tc,"area_confidence":ac,"transaction_confidence":xc,
+        "area_notes":area_reasons,"transaction_notes":tx_reasons
+    }
+
+    recovered=[]
+    if (not p.get("location") or _dq_unknown(p.get("location"))) and loc:recovered.append("LOCALITY")
+    if _canonical_city_v4(p.get("city"))=="UNKNOWN" and city:recovered.append("CITY")
+    if _canonical_property_type_v4(p.get("property_type"),p.get("suitable_category"),p.get("remarks"))=="UNKNOWN" and ptype:recovered.append("PROPERTY_TYPE")
+    if _property_area(p) is None and built:recovered.append("BUILTUP_AREA")
+    if _canonical_transaction_v4(p.get("rent_or_sale"))=="UNKNOWN" and tx:recovered.append("TRANSACTION")
+
+    core_ok=bool(city and loc and ptype and built and tx)
+    if core_ok and q["contact_ready"]:
+        final_bucket="MATCH_READY"
+    elif core_ok:
+        final_bucket="CONTACT_REVIEW"
+    else:
+        final_bucket="HUMAN_REVIEW"
+
+    if p.get("v8_bucket")=="DUPLICATE_REVIEW":
+        final_bucket="CONFIRMED_DUPLICATE"
+    elif p.get("v8_bucket")=="POSSIBLE_DUPLICATE_REVIEW":
+        final_bucket="POSSIBLE_DUPLICATE"
+
+    confs=[x for x in [pc,lc,cc,tc,ac,xc] if x]
+    overall=round(sum(confs)/len(confs)) if confs else 0
+
+    return {
+        "property_no":prop_no,"locality":loc,"city":city,"floor":floor,
+        "property_type":ptype,"plot_area_sqft":plot,"builtup_area_sqft":built,
+        "transaction":tx,"occupancy":occ,
+        "recovered_fields":recovered,"evidence":evidence,
+        "recovery_status":"AUTO_RECOVERED" if recovered else "NO_AUTO_RECOVERY",
+        "recovery_confidence":overall,
+        "final_bucket":final_bucket,
+        "match_eligible":final_bucket=="MATCH_READY"
+    }
+
+def _v9_audit(limit=1500):
+    _ensure_v9_columns()
+    with engine.connect() as c:
+        props=[dict(r._mapping) for r in c.execute(text("SELECT * FROM pi_properties ORDER BY created_at DESC")).fetchall()]
+    s={"total":len(props),"auto_recovered":0,"match_ready":0,"contact_review":0,"human_review":0,
+       "confirmed_duplicate":0,"possible_duplicate":0}
+    rows=[]
+    for p in props:
+        r=_v9_reconstruct(p)
+        if r["recovery_status"]=="AUTO_RECOVERED":s["auto_recovered"]+=1
+        s[r["final_bucket"].lower()]+=1
+        if len(rows)<limit and (r["recovery_status"]=="AUTO_RECOVERED" or r["final_bucket"]!="MATCH_READY"):
+            rows.append({"property_id":str(p.get("property_id")),"property_name":p.get("property_name"),**r})
+    return {"summary":s,"rows":rows}
+
+def _v9_apply():
+    audit=_v9_audit(1500)
+    with engine.connect() as c:
+        props=[dict(r._mapping) for r in c.execute(text("SELECT * FROM pi_properties")).fetchall()]
+    updated=0
+    with engine.begin() as c:
+        for p in props:
+            r=_v9_reconstruct(p)
+            params={
+                "pno":r["property_no"],"loc":r["locality"],"city":r["city"],"floor":r["floor"],"ptype":r["property_type"],
+                "plot":r["plot_area_sqft"],"built":r["builtup_area_sqft"],"tx":r["transaction"],"occ":r["occupancy"],
+                "rs":r["recovery_status"],"rc":r["recovery_confidence"],"ev":json.dumps(r["evidence"]),
+                "bucket":r["final_bucket"],"me":r["match_eligible"],"id":p.get("property_id")
+            }
+            c.execute(text("""UPDATE pi_properties SET
+                v9_property_no=:pno,v9_locality=:loc,v9_city=:city,v9_floor=:floor,v9_property_type=:ptype,
+                v9_plot_area_sqft=:plot,v9_builtup_area_sqft=:built,v9_transaction=:tx,v9_occupancy=:occ,
+                v9_recovery_status=:rs,v9_recovery_confidence=:rc,v9_recovery_evidence=CAST(:ev AS JSONB),
+                v9_final_bucket=:bucket,v9_match_eligible=:me,v9_updated_at=NOW()
+                WHERE property_id=:id"""),params)
+
+            # Apply only conservative 95+ structured recoveries into legacy fields.
+            sets=[];p2={"id":p.get("property_id")}
+            ev=r["evidence"]
+            if (not p.get("location") or _dq_unknown(p.get("location"))) and r["locality"] and ev["locality_confidence"]>=95:
+                sets.append("location=:location");p2["location"]=r["locality"]
+            if _canonical_city_v4(p.get("city"))=="UNKNOWN" and r["city"] and ev["city_confidence"]>=95:
+                sets.append("city=:city");p2["city"]=r["city"]
+            if _canonical_property_type_v4(p.get("property_type"),p.get("suitable_category"),p.get("remarks"))=="UNKNOWN" and r["property_type"] and ev["type_confidence"]>=95:
+                sets.append("property_type=:ptype");p2["ptype"]=r["property_type"]
+            if _property_area(p) is None and r["builtup_area_sqft"] and ev["area_confidence"]>=95:
+                sets.append("available_area_sqft=:area");p2["area"]=r["builtup_area_sqft"]
+            if _canonical_transaction_v4(p.get("rent_or_sale"))=="UNKNOWN" and r["transaction"] and ev["transaction_confidence"]>=95:
+                sets.append("rent_or_sale=:tx");p2["tx"]=r["transaction"]
+            if sets:
+                sets.append("updated_at=NOW()")
+                c.execute(text("UPDATE pi_properties SET "+",".join(sets)+" WHERE property_id=:id"),p2)
+                updated+=1
+    return {"updated_records":updated,**_v9_audit(1500)}
+
+@app.get("/api/v9/reconstruction/audit")
+def v9_reconstruction_audit(req:Request):
+    need_login(req)
+    return {"status":"ok",**_v9_audit()}
+
+@app.post("/api/v9/reconstruction/apply")
+def v9_reconstruction_apply(req:Request):
+    need_login(req)
+    result=_v9_apply()
+    return {"status":"ok","message":"V9 reconstruction applied conservatively. Original records retained; no phone numbers invented.",**result}
+
+@app.get("/property-reconstruction",response_class=HTMLResponse)
+def v9_property_reconstruction_page(req:Request):
+    role=page_role_or_redirect(req)
+    if not role:return RedirectResponse("/login",status_code=303)
+    return HTMLResponse(r"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>V9 Property Reconstruction</title>
+<style>*{box-sizing:border-box}body{margin:0;background:#f4f7fb;font-family:Arial;color:#142033}header{background:#0d1d2d;color:#fff;padding:16px 22px}.wrap{max-width:1950px;margin:auto;padding:18px}.card,.kpi{background:#fff;border:1px solid #e4eaf1;border-radius:12px;padding:14px;margin-bottom:12px}.kpis{display:grid;grid-template-columns:repeat(4,minmax(160px,1fr));gap:10px}.kpi b{display:block;font-size:25px}.btn{display:inline-block;padding:9px 12px;border:0;border-radius:8px;background:#1677ff;color:#fff;text-decoration:none;font-weight:700;cursor:pointer}.orange{background:#df8b13}.gray{background:#edf2f7;color:#24364b}.tablewrap{overflow:auto;max-height:68vh}table{width:100%;border-collapse:collapse;font-size:12px}th,td{padding:8px;border-bottom:1px solid #edf1f5;text-align:left;vertical-align:top;white-space:nowrap}th{position:sticky;top:0;background:#f8fafc}.MATCH_READY{color:#08734b;font-weight:700}.HUMAN_REVIEW,.CONFIRMED_DUPLICATE{color:#b23b00;font-weight:700}.CONTACT_REVIEW,.POSSIBLE_DUPLICATE{color:#9b6a00;font-weight:700}</style></head><body>
+<header><b>V9 Intelligent Property Reconstruction Engine</b><br><small>Property no · locality · city · floor · type · area · transaction · duplicate-aware reconstruction</small></header>
+<div class="wrap"><div class="card"><a class="btn gray" href="/workspace">Workspace</a> <a class="btn gray" href="/property-database">Property Database</a> <a class="btn gray" href="/smart-master-data">V8 Master Data</a> <button class="btn" onclick="audit()">Run V9 Audit</button> <button class="btn orange" onclick="apply()">Apply V9 Reconstruction</button> <span id="msg"></span></div>
+<div class="card"><b>Safety:</b> floor abbreviations are separated from property type. Property numbers are never used as locality. Only 95%+ recoveries write back to core fields. Contacts are never invented.</div>
+<div class="kpis" id="k"></div>
+<div class="card"><div class="tablewrap"><table><thead><tr><th>Property</th><th>Final Bucket</th><th>Recovery</th><th>Confidence</th><th>Property No</th><th>Locality</th><th>City</th><th>Floor</th><th>Type</th><th>Plot</th><th>Built-up</th><th>Transaction</th><th>Occupancy</th><th>Recovered Fields</th><th>Open</th></tr></thead><tbody id="r"></tbody></table></div></div></div>
+<script>
+const E=x=>String(x??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+async function A(u,o={}){let r=await fetch(u,o),d=await r.json();if(!r.ok)throw new Error(d.detail||d.message||'Error');return d}
+function R(d){let s=d.summary;document.querySelector('#k').innerHTML=[['TOTAL',s.total],['AUTO RECOVERED',s.auto_recovered],['MATCH READY',s.match_ready],['CONTACT REVIEW',s.contact_review],['HUMAN REVIEW',s.human_review],['CONFIRMED DUPLICATE',s.confirmed_duplicate],['POSSIBLE DUPLICATE',s.possible_duplicate]].map(x=>`<div class="kpi"><span>${x[0]}</span><b>${Number(x[1]||0).toLocaleString()}</b></div>`).join('');
+document.querySelector('#r').innerHTML=(d.rows||[]).map(x=>`<tr><td><b>${E(x.property_name||x.property_id)}</b><br>${E(x.property_id)}</td><td class="${E(x.final_bucket)}">${E(x.final_bucket)}</td><td>${E(x.recovery_status)}</td><td>${E(x.recovery_confidence)}</td><td>${E(x.property_no||'')}</td><td>${E(x.locality||'')}</td><td>${E(x.city||'')}</td><td>${E(x.floor||'')}</td><td>${E(x.property_type||'')}</td><td>${E(x.plot_area_sqft||'')}</td><td>${E(x.builtup_area_sqft||'')}</td><td>${E(x.transaction||'')}</td><td>${E(x.occupancy||'')}</td><td>${E((x.recovered_fields||[]).join(', '))}</td><td><a target="_blank" href="/property-record/${encodeURIComponent(x.property_id)}">View</a></td></tr>`).join('')}
+async function audit(){document.querySelector('#msg').textContent=' Auditing...';R(await A('/api/v9/reconstruction/audit'));document.querySelector('#msg').textContent=' Audit complete'}
+async function apply(){if(!confirm('Apply V9 conservative reconstruction?'))return;document.querySelector('#msg').textContent=' Applying...';R(await A('/api/v9/reconstruction/apply',{method:'POST'}));document.querySelector('#msg').textContent=' Applied'}
+audit();
+</script></body></html>""")
+
+
 @app.get("/api/v4/requirements")
 def v4_requirements(req:Request,limit:int=Query(300,ge=1,le=1000)):
     need_login(req)
@@ -5862,7 +6151,7 @@ def _v4_page(role):
 <title>AI Deal Intelligence OS V4</title><style>{_V4_CSS}</style></head><body><div class="shell">
 <aside class="side"><div class="brand">AI Deal Intelligence OS<small>V4 · Property · Hospitality · Retail · Demand</small></div>
 <div class="group">COMMAND</div><button class="nav active" data-page="command">▣ Command Centre</button><button class="nav" data-page="activity">◎ AI Activity</button><button class="nav" data-page="bots">⚡ Bot Control Room</button>
-<div class="group">PROPERTY</div><button class="nav" data-page="property">⌂ Add Property + Matcher</button><a class="nav" href="/property-database">▦ Full Property Database</a><a class="nav" href="/data-quality">✓ Data Quality / Organizer</a><a class="nav" href="/data-recovery">↻ Intelligent Recovery V5</a><a class="nav" href="/master-data-cleaner">◆ Master Data Cleaner V7</a><a class="nav" href="/smart-master-data">★ Smart Master Data V8</a><a class="nav" href="/retail-requirements">▤ Retail Requirement Leads</a><button class="nav" data-page="owners">● Owners Database</button><button class="nav" data-page="brokers">● Brokers Database</button><a class="nav" href="/legacy-workspace">Original Upload Workspace</a><a class="nav" href="/database-page">Original Database</a>
+<div class="group">PROPERTY</div><button class="nav" data-page="property">⌂ Add Property + Matcher</button><a class="nav" href="/property-database">▦ Full Property Database</a><a class="nav" href="/data-quality">✓ Data Quality / Organizer</a><a class="nav" href="/data-recovery">↻ Intelligent Recovery V5</a><a class="nav" href="/master-data-cleaner">◆ Master Data Cleaner V7</a><a class="nav" href="/smart-master-data">★ Smart Master Data V8</a><a class="nav" href="/property-reconstruction">✦ Property Reconstruction V9</a><a class="nav" href="/retail-requirements">▤ Retail Requirement Leads</a><button class="nav" data-page="owners">● Owners Database</button><button class="nav" data-page="brokers">● Brokers Database</button><a class="nav" href="/legacy-workspace">Original Upload Workspace</a><a class="nav" href="/database-page">Original Database</a>
 <div class="group">LEAD INTELLIGENCE</div><button class="nav" data-page="hospitality">◆ Hospitality</button><button class="nav" data-page="retail">◈ Retail Expansion</button><button class="nav" data-page="contacts">✉ Marketing Contacts</button><button class="nav" data-page="demand">⌕ Requirement Discovery</button>
 </aside><main class="main"><header class="top"><div><b>Unified Delhi NCR Deal Intelligence</b><div class="sub">Organized database + AI bots + matching</div></div><div>{badge} · <a href="/logout">Logout</a></div></header><div class="content">
 
