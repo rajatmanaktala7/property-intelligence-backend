@@ -8803,3 +8803,154 @@ async function keepReview(i){let x=rows[i];await A('/api/v13-3/inventory/'+encod
 function reload(){page=1;load()}function next(){if(page<Math.ceil(total/size)){page++;load()}}function prev(){if(page>1){page--;load()}}
 status.addEventListener('change',reload);ds.addEventListener('change',reload);q.addEventListener('keydown',e=>{if(e.key==='Enter')reload()});load();
 </script></body></html>""")
+
+# ============================================================
+# V13.4 CLEAN TEAM DASHBOARD
+# Keeps only operational links for the team.
+# Old technical workspace remains available at /legacy-workspace.
+# ============================================================
+
+@app.get("/team-workspace-clean", response_class=HTMLResponse)
+def v134_clean_team_workspace(req: Request):
+    role = page_role_or_redirect(req)
+    if not role:
+        return RedirectResponse("/login", status_code=303)
+
+    admin_tools = ""
+    if role == "admin":
+        admin_tools = """
+        <div class="adminbox">
+          <div><b>Admin tools</b><span>Only for data maintenance and system control.</span></div>
+          <a href="/data-command-center">Data Command Center</a>
+          <a href="/data-doctor">Data Doctor</a>
+          <a href="/magazine-master-import">Magazine Master Import</a>
+        </div>
+        """
+
+    return HTMLResponse(f"""<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AI Deal Intelligence OS</title>
+<style>
+*{{box-sizing:border-box}}
+body{{margin:0;background:#f4f7fb;font-family:Arial,sans-serif;color:#172437}}
+header{{background:#102235;color:#fff;padding:20px 24px;display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap}}
+.brand b{{font-size:20px}} .brand small{{display:block;color:#cbd8e5;margin-top:4px}}
+.logout{{color:#fff;text-decoration:none;font-size:13px}}
+.wrap{{max-width:1450px;margin:auto;padding:22px}}
+.intro{{margin-bottom:16px}}
+.intro h1{{margin:0 0 5px;font-size:25px}} .intro p{{margin:0;color:#66788c}}
+.section{{margin-top:20px}} .section h2{{font-size:14px;letter-spacing:.08em;color:#526579;margin:0 0 10px}}
+.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px}}
+.card{{display:block;background:#fff;border:1px solid #e1e8f0;border-radius:12px;padding:16px;text-decoration:none;color:#172437;min-height:108px}}
+.card:hover{{border-color:#9bb9d8;box-shadow:0 4px 14px rgba(16,34,53,.06)}}
+.card b{{display:block;font-size:16px;margin-bottom:7px}}
+.card span{{display:block;color:#68798c;font-size:13px;line-height:1.4}}
+.tag{{display:inline-block;margin-top:10px;padding:3px 7px;border-radius:10px;background:#edf4ff;color:#275b91;font-size:11px}}
+.adminbox{{margin-top:22px;background:#fff8e8;border:1px solid #efcf8b;border-radius:12px;padding:14px;display:flex;gap:10px;align-items:center;flex-wrap:wrap}}
+.adminbox div{{margin-right:auto}} .adminbox span{{display:block;font-size:12px;color:#7b6a47;margin-top:3px}}
+.adminbox a{{background:#fff;color:#704e05;border:1px solid #e6c36f;padding:8px 10px;border-radius:7px;text-decoration:none;font-size:12px;font-weight:700}}
+.note{{margin-top:20px;background:#edf7f2;border:1px solid #c8e5d6;border-radius:10px;padding:12px;color:#355d48;font-size:13px}}
+@media(max-width:650px){{.wrap{{padding:14px}}.grid{{grid-template-columns:1fr}}}}
+</style>
+</head>
+<body>
+<header>
+  <div class="brand"><b>AI Deal Intelligence OS</b><small>Property · Hospitality · Retail · Demand</small></div>
+  <div>{escape(role.upper())} · <a class="logout" href="/logout">Logout</a></div>
+</header>
+
+<div class="wrap">
+  <div class="intro">
+    <h1>Team Workspace</h1>
+    <p>Only the pages required for daily work.</p>
+  </div>
+
+  <div class="section">
+    <h2>PROPERTY</h2>
+    <div class="grid">
+      <a class="card" href="/property-database">
+        <b>Property Database</b>
+        <span>Search and open all saved properties and complete property records.</span>
+        <span class="tag">Main database</span>
+      </a>
+
+      <a class="card" href="/property-manual">
+        <b>Add Property + Matcher</b>
+        <span>Add a property manually, create requirements and run property matching.</span>
+        <span class="tag">Daily use</span>
+      </a>
+
+      <a class="card" href="/capture-intelligence">
+        <b>Capture Property</b>
+        <span>Upload camera photos, newspapers, handwritten notes, WhatsApp screenshots and PDFs.</span>
+        <span class="tag">AI intake</span>
+      </a>
+
+      <a class="card" href="/inventory-activation">
+        <b>Inventory Activation</b>
+        <span>Review unmatched magazine inventory: Create New, Link Existing or Keep in Review.</span>
+        <span class="tag">Refined magazine</span>
+      </a>
+
+      <a class="card" href="/contacts-directory">
+        <b>Property Contacts</b>
+        <span>Verify contacts and classify them as Owner, Broker, Both or Other.</span>
+        <span class="tag">Verification</span>
+      </a>
+    </div>
+  </div>
+
+  <div class="section">
+    <h2>LEAD INTELLIGENCE</h2>
+    <div class="grid">
+      <a class="card" href="/retail-expansion">
+        <b>Retail Expansion Requirements</b>
+        <span>Simple table of brand requirements, person, contact, location and source post.</span>
+        <span class="tag">Retail</span>
+      </a>
+
+      <a class="card" href="/legacy-workspace#hospitality">
+        <b>Hospitality Intelligence</b>
+        <span>Restaurants, cafes, clubs, lounges, banquets, hotels and guest houses.</span>
+        <span class="tag">Hospitality</span>
+      </a>
+
+      <a class="card" href="/legacy-workspace#requirements">
+        <b>Requirement Discovery</b>
+        <span>Review demand signals and property requirements discovered by AI.</span>
+        <span class="tag">Demand</span>
+      </a>
+
+      <a class="card" href="/legacy-workspace#contacts">
+        <b>Marketing Contacts</b>
+        <span>Contact database for approved outreach and team follow-up.</span>
+        <span class="tag">Marketing</span>
+      </a>
+
+      <a class="card" href="/legacy-workspace#bots">
+        <b>Bot Control Room</b>
+        <span>Run and review Hospitality, Retail and Requirement Discovery bots.</span>
+        <span class="tag">AI bots</span>
+      </a>
+    </div>
+  </div>
+
+  {admin_tools}
+
+  <div class="note">
+    Public web signals are leads to qualify. Verify requirements and availability before outreach or sharing inventory.
+  </div>
+</div>
+</body>
+</html>""")
+
+# Make /workspace the clean daily team workspace.
+# The original technical V4 workspace is still available at /legacy-workspace.
+@app.middleware("http")
+async def v134_clean_workspace_router(request, call_next):
+    if request.url.path == "/workspace":
+        return RedirectResponse(url="/team-workspace-clean", status_code=307)
+    return await call_next(request)

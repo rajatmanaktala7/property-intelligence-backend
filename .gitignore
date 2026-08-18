@@ -23,3 +23,4 @@ app-before-v13-final-*.py
 app-before-v13-2-magazine-import-*.py
 app-before-v13-2-1-import-fix-*.py
 app-before-v13-3-inventory-activation-*.py
+app-before-v13-4-clean-dashboard-*.py
