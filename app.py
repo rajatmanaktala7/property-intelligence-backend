@@ -8954,3 +8954,285 @@ async def v134_clean_workspace_router(request, call_next):
     if request.url.path == "/workspace":
         return RedirectResponse(url="/team-workspace-clean", status_code=307)
     return await call_next(request)
+
+# ============================================================
+# V13.7.2 UNIVERSAL REQUIREMENTS SYSTEM
+# No dependency on V13.5/V13.6 markers.
+# Retail + Hospitality, AI + Manual, with unified matching.
+# ============================================================
+
+def _v1372_table_columns(table_name):
+    with engine.connect() as c:
+        rows=c.execute(text("""SELECT column_name
+            FROM information_schema.columns
+            WHERE table_schema='public' AND table_name=:t"""),{"t":table_name}).fetchall()
+    return {r._mapping["column_name"] for r in rows}
+
+def _v1372_ensure_tables():
+    with engine.begin() as c:
+        c.execute(text("""CREATE TABLE IF NOT EXISTS pi_retail_manual_requirements(
+            id BIGSERIAL PRIMARY KEY,
+            requirement_id TEXT UNIQUE NOT NULL,
+            company_name TEXT,
+            contact_name TEXT,
+            designation TEXT,
+            contact_phone TEXT,
+            contact_email TEXT,
+            linkedin_profile_url TEXT,
+            requirement_text TEXT,
+            location TEXT,
+            required_area_sqft NUMERIC,
+            required_property_type TEXT,
+            required_transaction TEXT DEFAULT 'LEASE',
+            priority TEXT DEFAULT 'NORMAL',
+            followup_status TEXT DEFAULT 'NEW',
+            crm_status TEXT DEFAULT 'NOT_SENT',
+            assigned_to TEXT,
+            notes TEXT,
+            created_by TEXT,
+            created_at TIMESTAMPTZ DEFAULT NOW(),
+            updated_at TIMESTAMPTZ DEFAULT NOW()
+        )"""))
+        c.execute(text("""CREATE TABLE IF NOT EXISTS pi_hospitality_manual_requirements(
+            id BIGSERIAL PRIMARY KEY,
+            requirement_id TEXT UNIQUE NOT NULL,
+            company_name TEXT,
+            contact_name TEXT,
+            designation TEXT,
+            contact_phone TEXT,
+            contact_email TEXT,
+            requirement_text TEXT,
+            location TEXT,
+            required_area_sqft NUMERIC,
+            required_property_type TEXT,
+            required_transaction TEXT DEFAULT 'LEASE',
+            priority TEXT DEFAULT 'NORMAL',
+            followup_status TEXT DEFAULT 'NEW',
+            assigned_to TEXT,
+            notes TEXT,
+            created_by TEXT,
+            created_at TIMESTAMPTZ DEFAULT NOW(),
+            updated_at TIMESTAMPTZ DEFAULT NOW()
+        )"""))
+        c.execute(text("""CREATE TABLE IF NOT EXISTS pi_requirement_bridge(
+            source_key TEXT PRIMARY KEY,
+            source_division TEXT NOT NULL,
+            source_type TEXT NOT NULL,
+            source_id TEXT NOT NULL,
+            pi_requirement_id TEXT,
+            created_at TIMESTAMPTZ DEFAULT NOW(),
+            updated_at TIMESTAMPTZ DEFAULT NOW()
+        )"""))
+
+def _v1372_ai_classify(title, excerpt):
+    txt=(" "+str(title or "")+" "+str(excerpt or "")+" ").lower()
+    bad=[
+        "job opportunity","hiring","vacancy","salary","store manager",
+        "assistant store manager","web development","wordpress","full stack developer",
+        "market report","market growth","rental yield","commercial vs residential",
+        "office leasing market","retail leasing up","research says"
+    ]
+    if any(x in txt for x in bad):
+        return "NOT_REQUIREMENT",15
+    score=20
+    for x in [
+        "space requirement","looking for space","looking for retail space",
+        "seeking retail space","actively seeking","looking to lease",
+        "rental spaces","space required","immediate leasing opportunity"
+    ]:
+        if x in txt: score+=20
+    if any(x in txt for x in ["sq ft","sqft","square feet","carpet area"]): score+=15
+    if any(x in txt for x in ["delhi","gurgaon","gurugram","noida","south delhi","delhi ncr"]): score+=10
+    if any(x in txt for x in ["lease","leasing","rent","rental"]): score+=10
+    if score>=70:return "LIKELY_REQUIREMENT",min(100,score)
+    if score>=50:return "POSSIBLE_REQUIREMENT",min(100,score)
+    return "NOT_REQUIREMENT",min(100,score)
+
+def _v1372_ai_rows(division):
+    cols=_v1372_table_columns("ai_demand_signals")
+    if not cols:
+        return []
+    with engine.connect() as c:
+        rows=[dict(r._mapping) for r in c.execute(text("SELECT * FROM ai_demand_signals ORDER BY created_at DESC LIMIT 3000")).fetchall()]
+    out=[]
+    for r in rows:
+        blob=" ".join(str(v or "") for v in r.values()).lower()
+        if division=="RETAIL":
+            if not any(x in blob for x in ["retail","store","shop"]): continue
+            title=r.get("title") or r.get("signal_title") or ""
+            excerpt=r.get("excerpt") or r.get("source_excerpt") or r.get("requirement_text") or ""
+            cls,score=_v1372_ai_classify(title,excerpt)
+        else:
+            if not any(x in blob for x in ["hospitality","restaurant","cafe","banquet","hotel","guest house","lounge","club"]): continue
+            cls="AI_SIGNAL"
+            score=int(r.get("intent_score") or r.get("score") or 0)
+        out.append({
+            "division":division,
+            "source_type":"AI",
+            "source_id":str(r.get("signal_id") or r.get("id") or ""),
+            "company_name":r.get("company_name") or r.get("company") or r.get("brand_name"),
+            "contact_name":r.get("contact_name") or r.get("person_name"),
+            "contact_phone":r.get("contact_phone") or r.get("phone") or r.get("mobile"),
+            "contact_email":r.get("contact_email") or r.get("email"),
+            "requirement_text":r.get("excerpt") or r.get("source_excerpt") or r.get("requirement_text") or r.get("title"),
+            "location":r.get("location"),
+            "required_area_sqft":r.get("required_area_sqft") or r.get("area_sqft"),
+            "required_property_type":r.get("required_property_type") or r.get("category"),
+            "required_transaction":r.get("required_transaction") or "LEASE",
+            "system_classification":cls,
+            "system_score":score,
+            "source_url":r.get("source_url") or r.get("linkedin_post_url") or r.get("url")
+        })
+    return out
+
+def _v1372_manual_rows(division):
+    _v1372_ensure_tables()
+    table="pi_retail_manual_requirements" if division=="RETAIL" else "pi_hospitality_manual_requirements"
+    with engine.connect() as c:
+        rows=[dict(r._mapping) for r in c.execute(text(f"SELECT * FROM {table} ORDER BY created_at DESC")).fetchall()]
+    out=[]
+    for r in rows:
+        out.append({
+            "division":division,
+            "source_type":"MANUAL",
+            "source_id":r.get("requirement_id"),
+            "company_name":r.get("company_name"),
+            "contact_name":r.get("contact_name"),
+            "contact_phone":r.get("contact_phone"),
+            "contact_email":r.get("contact_email"),
+            "requirement_text":r.get("requirement_text"),
+            "location":r.get("location"),
+            "required_area_sqft":r.get("required_area_sqft"),
+            "required_property_type":r.get("required_property_type"),
+            "required_transaction":r.get("required_transaction"),
+            "system_classification":"MANUAL_CONFIRMED",
+            "system_score":100
+        })
+    return out
+
+def _v1372_promote(payload):
+    _v1372_ensure_tables()
+    division=str(payload.get("division") or "").upper()
+    source_type=str(payload.get("source_type") or "").upper()
+    source_id=str(payload.get("source_id") or "")
+    source_key=f"{division}|{source_type}|{source_id}"
+
+    with engine.connect() as c:
+        old=c.execute(text("SELECT pi_requirement_id FROM pi_requirement_bridge WHERE source_key=:k"),{"k":source_key}).fetchone()
+        if old and old._mapping["pi_requirement_id"]:
+            return str(old._mapping["pi_requirement_id"])
+
+    cols=_v1372_table_columns("pi_requirements")
+    if not cols:
+        raise HTTPException(500,"pi_requirements table missing")
+
+    rid="REQ-"+division[:3]+"-"+datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")+"-"+uuid.uuid4().hex[:5].upper()
+    vals={
+        "requirement_id":rid,"id":rid,
+        "retailer_name":payload.get("company_name") or division.title()+" Requirement",
+        "client_company":payload.get("company_name"),"company_name":payload.get("company_name"),
+        "contact_name":payload.get("contact_name"),"contact_number":payload.get("contact_phone"),
+        "contact_phone":payload.get("contact_phone"),"email":payload.get("contact_email"),
+        "contact_email":payload.get("contact_email"),"city":"Delhi NCR","location":payload.get("location"),
+        "requirement_sqft":payload.get("required_area_sqft"),"required_area_sqft":payload.get("required_area_sqft"),
+        "minimum_area_sqft":payload.get("required_area_sqft"),"maximum_area_sqft":payload.get("required_area_sqft"),
+        "retailers_purpose":payload.get("required_transaction") or "LEASE",
+        "transaction_type":payload.get("required_transaction") or "LEASE",
+        "rent_or_sale":payload.get("required_transaction") or "LEASE",
+        "retailers_category":payload.get("required_property_type") or division,
+        "required_property_type":payload.get("required_property_type"),
+        "property_type":payload.get("required_property_type"),
+        "nearby_brands":"",
+        "additional_points":payload.get("requirement_text") or "",
+        "remarks":payload.get("requirement_text") or "",
+        "source":source_type,"division":division,"status":"NEW"
+    }
+    insert_cols=[];params={}
+    for k,v in vals.items():
+        if k in cols and k not in insert_cols:
+            insert_cols.append(k);params[k]=v
+    if "requirement_id" not in insert_cols and "id" not in insert_cols:
+        raise HTTPException(500,"No compatible requirement ID field in pi_requirements")
+
+    with engine.begin() as c:
+        c.execute(text("INSERT INTO pi_requirements("+",".join(insert_cols)+") VALUES("+",".join(":"+x for x in insert_cols)+")"),params)
+        c.execute(text("""INSERT INTO pi_requirement_bridge(
+            source_key,source_division,source_type,source_id,pi_requirement_id,updated_at
+        ) VALUES(:k,:d,:t,:sid,:rid,NOW())
+        ON CONFLICT(source_key) DO UPDATE SET pi_requirement_id=EXCLUDED.pi_requirement_id,updated_at=NOW()"""),
+        {"k":source_key,"d":division,"t":source_type,"sid":source_id,"rid":rid})
+    return rid
+
+@app.post("/api/v13-7-2/manual/{division}")
+async def v1372_manual_add(division:str,req:Request):
+    need_login(req);_v1372_ensure_tables()
+    div=division.upper()
+    if div not in {"RETAIL","HOSPITALITY"}:raise HTTPException(400,"Invalid division")
+    body=await req.json()
+    rid=("RMR-" if div=="RETAIL" else "HMR-")+datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")+"-"+uuid.uuid4().hex[:5].upper()
+    table="pi_retail_manual_requirements" if div=="RETAIL" else "pi_hospitality_manual_requirements"
+    with engine.begin() as c:
+        c.execute(text(f"""INSERT INTO {table}(
+            requirement_id,company_name,contact_name,designation,contact_phone,contact_email,
+            requirement_text,location,required_area_sqft,required_property_type,
+            required_transaction,priority,followup_status,assigned_to,notes,created_by
+        ) VALUES(:rid,:co,:cn,:des,:ph,:em,:req,:loc,:area,:pt,:tr,:pri,'NEW',:asgn,:notes,:by)"""),
+        {"rid":rid,"co":body.get("company_name"),"cn":body.get("contact_name"),
+         "des":body.get("designation"),"ph":body.get("contact_phone"),"em":body.get("contact_email"),
+         "req":body.get("requirement_text"),"loc":body.get("location"),
+         "area":body.get("required_area_sqft") or None,"pt":body.get("required_property_type"),
+         "tr":body.get("required_transaction") or "LEASE","pri":body.get("priority") or "NORMAL",
+         "asgn":body.get("assigned_to"),"notes":body.get("notes"),"by":actor_name(req)})
+    return {"status":"ok","requirement_id":rid}
+
+@app.get("/api/v13-7-2/requirements")
+def v1372_requirements(req:Request,division:str=Query("ALL"),source_type:str=Query("ALL")):
+    need_login(req);_v1372_ensure_tables()
+    division=division.upper();source_type=source_type.upper();rows=[]
+    for div in ["RETAIL","HOSPITALITY"]:
+        if division not in {"ALL",div}:continue
+        if source_type in {"ALL","MANUAL"}:rows.extend(_v1372_manual_rows(div))
+        if source_type in {"ALL","AI"}:rows.extend(_v1372_ai_rows(div))
+    return {"status":"ok","rows":rows}
+
+@app.post("/api/v13-7-2/match")
+async def v1372_match(req:Request):
+    need_login(req)
+    body=await req.json()
+    rid=_v1372_promote(body)
+    result=robust_match_requirement(rid,create_whatsapp=False)
+    return {"status":"ok","pi_requirement_id":rid,**result}
+
+@app.get("/requirements-match-center",response_class=HTMLResponse)
+def v1372_center(req:Request):
+    role=page_role_or_redirect(req)
+    if not role:return RedirectResponse("/login",status_code=303)
+    return HTMLResponse("""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Requirements + Matches</title><style>
+body{font-family:Arial;margin:0;background:#f4f7fb;color:#172437}header{background:#102235;color:#fff;padding:18px}.wrap{padding:18px}.nav{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}.nav a{background:#e9eef5;padding:8px 10px;border-radius:7px;text-decoration:none;color:#203247;font-weight:bold}.card{background:#fff;border:1px solid #e2e8f0;border-radius:12px;padding:12px;margin-bottom:10px}.toolbar{display:flex;gap:8px;flex-wrap:wrap}.pill{padding:3px 7px;border-radius:10px;background:#edf4ff}.manual{background:#dcfce7}.ai{background:#fef3c7}.matches{margin-top:8px;background:#f8fafc;padding:8px;border-radius:7px}</style></head><body>
+<header><b>Requirements + Matches</b><br><small>Retail + Hospitality · AI + Manual</small></header><div class="wrap">
+<div class="nav"><a href="/workspace">← Team Workspace</a><a href="/requirements-entry?division=HOSPITALITY">Hospitality Entry</a><a href="/requirements-entry?division=RETAIL">Retail Entry</a><a href="/property-database">Property Database</a></div>
+<div class="toolbar"><select id="division"><option>ALL</option><option>RETAIL</option><option>HOSPITALITY</option></select><select id="source"><option>ALL</option><option>MANUAL</option><option>AI</option></select><input id="q" placeholder="Search"><button onclick="load()">Refresh</button></div><div id="rows"></div></div>
+<script>
+const E=x=>String(x??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));let D=[];
+async function A(u,o={}){let r=await fetch(u,o),d=await r.json();if(!r.ok)throw Error(d.detail||'Error');return d}
+function render(){let s=(q.value||'').toLowerCase(),R=D.filter(x=>!s||JSON.stringify(x).toLowerCase().includes(s));rows.innerHTML=R.map((x,i)=>`<div class="card"><b>${E(x.division)} · <span class="pill ${x.source_type==='MANUAL'?'manual':'ai'}">${E(x.source_type)}</span> · ${E(x.company_name||'To verify')}</b><br>${E(x.requirement_text||'')}<br>${E(x.location||'')} · ${E(x.required_area_sqft||'')} · ${E(x.required_property_type||'')}<br><button onclick="match(${i})">Run Match</button><div class="matches" id="m_${i}">Not run</div></div>`).join('')||'No requirements found.'}
+async function load(){let d=await A('/api/v13-7-2/requirements?division='+division.value+'&source_type='+source.value);D=d.rows||[];render()}
+async function match(i){let x=D[i],box=document.getElementById('m_'+i);box.textContent='Matching...';try{let d=await A('/api/v13-7-2/match',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(x)});let ms=d.matches||[];box.innerHTML=ms.slice(0,5).map((m,j)=>`${j+1}. <a target="_blank" href="/property-record/${encodeURIComponent(m.property_id)}">${E(m.property_name||m.property_id)}</a> · Score ${E(m.score||'')}`).join('<br>')||'No matches';}catch(e){box.textContent=e.message}}
+division.addEventListener('change',load);source.addEventListener('change',load);q.addEventListener('input',render);load();
+</script></body></html>""")
+
+@app.get("/requirements-entry",response_class=HTMLResponse)
+def v1372_entry(req:Request,division:str=Query("RETAIL")):
+    role=page_role_or_redirect(req)
+    if not role:return RedirectResponse("/login",status_code=303)
+    div=division.upper()
+    if div not in {"RETAIL","HOSPITALITY"}:div="RETAIL"
+    return HTMLResponse(f"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{div.title()} Requirement Entry</title></head>
+<body style="font-family:Arial;background:#f4f7fb;margin:0;color:#172437"><div style="background:#102235;color:white;padding:18px"><b>{div.title()} Requirement Entry</b></div><div style="padding:18px;max-width:1000px;margin:auto">
+<p><a href="/workspace">← Team Workspace</a> · <a href="/requirements-match-center">Requirements + Matches</a></p>
+<div style="background:white;padding:15px;border-radius:12px"><form id="f">
+<p><input name="company_name" placeholder="Company / Brand *" required> <input name="contact_name" placeholder="Contact Person"> <input name="contact_phone" placeholder="Mobile"></p>
+<p><input name="location" placeholder="Location *" required> <input name="required_area_sqft" type="number" placeholder="Area SqFt"> <input name="required_property_type" placeholder="Property Type"></p>
+<p><textarea name="requirement_text" style="width:100%;min-height:90px" placeholder="Requirement details *" required></textarea></p><button>Save Manual Requirement</button></form><p id="msg"></p></div></div>
+<script>f.addEventListener('submit',async e=>{{e.preventDefault();let b=Object.fromEntries(new FormData(f));b.required_area_sqft=b.required_area_sqft?Number(b.required_area_sqft):null;let r=await fetch('/api/v13-7-2/manual/{div}',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify(b)}}),d=await r.json();if(!r.ok){{msg.textContent=d.detail||'Error';return}}msg.innerHTML='Saved <b>'+d.requirement_id+'</b>. <a href="/requirements-match-center">Open Requirements + Matches</a>';f.reset()}})</script></body></html>""")
