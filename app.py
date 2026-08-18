@@ -17,7 +17,7 @@ from PIL import Image
 import fitz
 from pypdf import PdfReader, PdfWriter
 
-VERSION="10.0.0-V10-UNIVERSAL-INTAKE"
+VERSION="10.2.0-CONTACT-VERIFY-SEGREGATE"
 DATABASE_URL=os.getenv("DATABASE_URL","")
 GEMINI_API_KEY=os.getenv("GEMINI_API_KEY","")
 GEMINI_MODEL=os.getenv("GEMINI_MODEL","gemini-3.1-flash-lite")
@@ -6337,6 +6337,315 @@ async function load(){let r=await fetch('/api/v10/intake/status'),d=await r.json
 document.querySelector('#photoForm').addEventListener('submit',async e=>{e.preventDefault();document.querySelector('#photoMsg').textContent='Uploading...';let r=await fetch('/api/v10/intake/file',{method:'POST',body:new FormData(e.target)}),d=await r.json();document.querySelector('#photoMsg').textContent=r.ok?'Accepted. AI extraction is running.':(d.detail||d.message||'Upload failed');if(r.ok){e.target.reset();load()}})
 async function sendText(){let t=document.querySelector('#textContent').value.trim();if(!t)return;document.querySelector('#textMsg').textContent='Sending...';let r=await fetch('/api/v10/intake/text',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({source_type:document.querySelector('#textType').value,text:t})}),d=await r.json();document.querySelector('#textMsg').textContent=r.ok?'Accepted. AI extraction is running.':(d.detail||d.message||'Failed');if(r.ok){document.querySelector('#textContent').value=''}}
 load();setInterval(load,15000);
+</script></body></html>""")
+
+
+# ============================================================
+# FINAL TEAM OPERATIONS V2
+# Unified Property Contacts -> Manual verification -> Owner/Broker segregation
+# ============================================================
+
+_CONTACT_SYNC_RUNNING=False
+_CONTACT_SYNC_PENDING=False
+
+def _ensure_unified_contact_directory():
+    with engine.begin() as c:
+        c.execute(text("""CREATE TABLE IF NOT EXISTS pi_contact_directory_v2(
+            contact_key TEXT PRIMARY KEY,
+            display_name TEXT,
+            primary_phone TEXT,
+            phones JSONB DEFAULT '[]'::jsonb,
+            property_ids JSONB DEFAULT '[]'::jsonb,
+            property_names JSONB DEFAULT '[]'::jsonb,
+            locations JSONB DEFAULT '[]'::jsonb,
+            cities JSONB DEFAULT '[]'::jsonb,
+            sources JSONB DEFAULT '[]'::jsonb,
+            property_count INTEGER DEFAULT 0,
+            verified_property_count INTEGER DEFAULT 0,
+            contact_role TEXT DEFAULT 'UNVERIFIED',
+            verification_status TEXT DEFAULT 'UNVERIFIED',
+            verified_by TEXT,
+            verified_at TIMESTAMPTZ,
+            remarks TEXT,
+            updated_at TIMESTAMPTZ DEFAULT NOW()
+        )"""))
+        c.execute(text("CREATE INDEX IF NOT EXISTS idx_contact_v2_phone ON pi_contact_directory_v2(primary_phone)"))
+        c.execute(text("CREATE INDEX IF NOT EXISTS idx_contact_v2_role ON pi_contact_directory_v2(contact_role)"))
+
+def _unified_contact_key(name,phones):
+    phones=sorted(set(phones or []))
+    if phones:
+        return "PHONE:"+phones[0]
+    n=_norm(name)
+    if n and n not in {"na","n a","unknown","none","not specified"}:
+        return "NAME:"+hashlib.sha256(n.encode()).hexdigest()[:24]
+    return None
+
+def _sync_unified_contacts():
+    """
+    Merge owner, broker and general property contacts into ONE directory first.
+    Existing manually verified roles are preserved.
+    """
+    _ensure_unified_contact_directory()
+
+    with engine.connect() as c:
+        existing={
+            r._mapping["contact_key"]:dict(r._mapping)
+            for r in c.execute(text("SELECT * FROM pi_contact_directory_v2")).fetchall()
+        }
+        props=[dict(r._mapping) for r in c.execute(text("""SELECT
+            property_id,property_name,city,location,source,verification_status,
+            owner_name,owner_contact,owner_contact_normalized,
+            broker_name,broker_contact,broker_contact_normalized,
+            contact_number,general_contact_normalized
+            FROM pi_properties""")).fetchall()]
+
+    grouped={}
+    for p in props:
+        candidates=[
+            (p.get("owner_name"),p.get("owner_contact"),p.get("owner_contact_normalized"),"OWNER_SOURCE"),
+            (p.get("broker_name"),p.get("broker_contact"),p.get("broker_contact_normalized"),"BROKER_SOURCE"),
+            (None,p.get("contact_number"),p.get("general_contact_normalized"),"GENERAL_SOURCE")
+        ]
+        for name,raw,normed,source_hint in candidates:
+            phones=sorted(_contact_number_set(raw,normed))
+            key=_unified_contact_key(name,phones)
+            if not key:
+                continue
+            g=grouped.setdefault(key,{
+                "contact_key":key,
+                "display_name":_dq_text(name) or None,
+                "phones":set(),
+                "property_ids":set(),
+                "property_names":set(),
+                "locations":set(),
+                "cities":set(),
+                "sources":set(),
+                "source_hints":set(),
+                "verified_property_count":0
+            })
+            if not g["display_name"] and _dq_text(name):
+                g["display_name"]=_dq_text(name)
+            g["phones"].update(phones)
+            if p.get("property_id"):g["property_ids"].add(str(p.get("property_id")))
+            if p.get("property_name"):g["property_names"].add(str(p.get("property_name")))
+            if p.get("location") and not _dq_unknown(p.get("location")):g["locations"].add(str(p.get("location")))
+            if p.get("city") and not _dq_unknown(p.get("city")):g["cities"].add(str(p.get("city")))
+            if p.get("source"):g["sources"].add(str(p.get("source")))
+            g["source_hints"].add(source_hint)
+            if str(p.get("verification_status") or "").upper()=="VERIFIED":
+                g["verified_property_count"]+=1
+
+    with engine.begin() as c:
+        for key,g in grouped.items():
+            old=existing.get(key,{})
+            phones=sorted(g["phones"])
+            pids=sorted(g["property_ids"])
+            # Manual role always wins. We only show source hints in remarks.
+            role=old.get("contact_role") or "UNVERIFIED"
+            status=old.get("verification_status") or "UNVERIFIED"
+            remarks=old.get("remarks")
+            if not remarks:
+                remarks="Imported from property fields: "+", ".join(sorted(g["source_hints"]))
+            c.execute(text("""INSERT INTO pi_contact_directory_v2(
+                contact_key,display_name,primary_phone,phones,property_ids,property_names,
+                locations,cities,sources,property_count,verified_property_count,
+                contact_role,verification_status,verified_by,verified_at,remarks,updated_at
+            ) VALUES(
+                :ck,:name,:phone,CAST(:phones AS JSONB),CAST(:pids AS JSONB),CAST(:pnames AS JSONB),
+                CAST(:locs AS JSONB),CAST(:cities AS JSONB),CAST(:sources AS JSONB),:pc,:vc,
+                :role,:vs,:vby,:vat,:remarks,NOW()
+            )
+            ON CONFLICT(contact_key) DO UPDATE SET
+                display_name=COALESCE(EXCLUDED.display_name,pi_contact_directory_v2.display_name),
+                primary_phone=EXCLUDED.primary_phone,
+                phones=EXCLUDED.phones,
+                property_ids=EXCLUDED.property_ids,
+                property_names=EXCLUDED.property_names,
+                locations=EXCLUDED.locations,
+                cities=EXCLUDED.cities,
+                sources=EXCLUDED.sources,
+                property_count=EXCLUDED.property_count,
+                verified_property_count=EXCLUDED.verified_property_count,
+                remarks=COALESCE(pi_contact_directory_v2.remarks,EXCLUDED.remarks),
+                updated_at=NOW()"""),{
+                "ck":key,"name":g["display_name"],"phone":phones[0] if phones else None,
+                "phones":json.dumps(phones),"pids":json.dumps(pids),
+                "pnames":json.dumps(sorted(g["property_names"])),
+                "locs":json.dumps(sorted(g["locations"])),"cities":json.dumps(sorted(g["cities"])),
+                "sources":json.dumps(sorted(g["sources"])),"pc":len(pids),
+                "vc":g["verified_property_count"],"role":role,"vs":status,
+                "vby":old.get("verified_by"),"vat":old.get("verified_at"),
+                "remarks":remarks
+            })
+    return {"contacts":len(grouped)}
+
+def _contact_sync_worker_v2():
+    global _CONTACT_SYNC_RUNNING,_CONTACT_SYNC_PENDING
+    import time
+    try:
+        while True:
+            time.sleep(2)
+            _CONTACT_SYNC_PENDING=False
+            try:_sync_unified_contacts()
+            except Exception:pass
+            if not _CONTACT_SYNC_PENDING:break
+    finally:
+        _CONTACT_SYNC_RUNNING=False
+
+def _request_contact_directory_sync():
+    global _CONTACT_SYNC_RUNNING,_CONTACT_SYNC_PENDING
+    _CONTACT_SYNC_PENDING=True
+    if _CONTACT_SYNC_RUNNING:return
+    _CONTACT_SYNC_RUNNING=True
+    import threading
+    threading.Thread(target=_contact_sync_worker_v2,daemon=True).start()
+
+@app.post("/api/final-v2/contact-directory/sync")
+def final_v2_sync(req:Request):
+    need_login(req)
+    return {"status":"ok",**_sync_unified_contacts()}
+
+@app.get("/api/final-v2/contacts")
+def final_v2_contacts(req:Request,role:str=Query("ALL"),limit:int=Query(3000,ge=1,le=5000)):
+    need_login(req)
+    _ensure_unified_contact_directory()
+    params={"n":limit}
+    where=""
+    r=role.upper()
+    if r!="ALL":
+        if r not in {"UNVERIFIED","OWNER","BROKER","BOTH","OTHER"}:
+            raise HTTPException(400,"Invalid role")
+        where="WHERE contact_role=:role"
+        params["role"]=r
+    with engine.connect() as c:
+        rows=c.execute(text(f"""SELECT * FROM pi_contact_directory_v2
+            {where}
+            ORDER BY
+                CASE WHEN verification_status='UNVERIFIED' THEN 0 ELSE 1 END,
+                property_count DESC,
+                display_name NULLS LAST
+            LIMIT :n"""),params).fetchall()
+    return {"status":"ok","rows":_json_rows(rows)}
+
+@app.post("/api/final-v2/contacts/{contact_key}/verify")
+async def final_v2_verify_contact(contact_key:str,req:Request):
+    need_login(req)
+    body=await req.json()
+    role=str(body.get("contact_role") or "").upper().strip()
+    if role not in {"OWNER","BROKER","BOTH","OTHER","UNVERIFIED"}:
+        raise HTTPException(400,"Role must be OWNER, BROKER, BOTH, OTHER or UNVERIFIED")
+    name=str(body.get("display_name") or "").strip() or None
+    remarks=str(body.get("remarks") or "").strip() or None
+    status="VERIFIED" if role!="UNVERIFIED" else "UNVERIFIED"
+    actor=actor_name(req)
+    with engine.begin() as c:
+        res=c.execute(text("""UPDATE pi_contact_directory_v2 SET
+            display_name=COALESCE(:name,display_name),
+            contact_role=:role,
+            verification_status=:vs,
+            verified_by=:by,
+            verified_at=CASE WHEN :vs='VERIFIED' THEN NOW() ELSE NULL END,
+            remarks=:remarks,
+            updated_at=NOW()
+            WHERE contact_key=:ck"""),{
+                "name":name,"role":role,"vs":status,"by":actor,
+                "remarks":remarks,"ck":contact_key
+            })
+        if res.rowcount==0:
+            raise HTTPException(404,"Contact not found")
+    return {"status":"ok","contact_key":contact_key,"contact_role":role,"verification_status":status}
+
+@app.get("/api/final-v2/contact-counts")
+def final_v2_contact_counts(req:Request):
+    need_login(req)
+    _ensure_unified_contact_directory()
+    with engine.connect() as c:
+        rows=c.execute(text("""SELECT contact_role,COUNT(*) n
+            FROM pi_contact_directory_v2 GROUP BY contact_role""")).fetchall()
+    d={str(r._mapping["contact_role"] or "UNVERIFIED"):int(r._mapping["n"]) for r in rows}
+    return {"status":"ok","all":sum(d.values()),"unverified":d.get("UNVERIFIED",0),
+            "owners":d.get("OWNER",0)+d.get("BOTH",0),
+            "brokers":d.get("BROKER",0)+d.get("BOTH",0),
+            "other":d.get("OTHER",0)}
+
+@app.get("/contacts-directory",response_class=HTMLResponse)
+def contacts_directory_page(req:Request):
+    role=page_role_or_redirect(req)
+    if not role:return RedirectResponse("/login",status_code=303)
+    _request_contact_directory_sync()
+    return HTMLResponse(r"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Property Contacts</title>
+<style>*{box-sizing:border-box}body{margin:0;background:#f4f7fb;font-family:Arial;color:#142033}header{background:#0d1d2d;color:#fff;padding:16px 22px}.wrap{max-width:1850px;margin:auto;padding:18px}.card{background:#fff;border:1px solid #e4eaf1;border-radius:12px;padding:14px;margin-bottom:12px}.toolbar{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.btn{padding:9px 12px;border:0;border-radius:8px;background:#1677ff;color:#fff;text-decoration:none;font-weight:700;cursor:pointer}.gray{background:#edf2f7;color:#24364b}input,select{padding:8px;border:1px solid #ccd7e4;border-radius:7px}.tablewrap{overflow:auto;max-height:72vh}table{width:100%;border-collapse:collapse;font-size:12px}th,td{padding:8px;border-bottom:1px solid #edf1f5;text-align:left;vertical-align:top;white-space:nowrap}th{position:sticky;top:0;background:#f8fafc}.UNVERIFIED{color:#a36b00;font-weight:700}.VERIFIED{color:#08734b;font-weight:700}</style></head><body>
+<header><b>Unified Property Contacts</b><br><small>First merge all contacts. Then your team verifies and marks Owner / Broker / Both / Other.</small></header>
+<div class="wrap">
+<div class="card toolbar">
+<a class="btn gray" href="/team-dashboard">Team Dashboard</a>
+<button class="btn" onclick="sync()">Sync From Properties</button>
+<input id="q" placeholder="Search name, phone, property, location">
+<select id="filter"><option value="ALL">ALL CONTACTS</option><option value="UNVERIFIED">UNVERIFIED</option><option value="OWNER">OWNER</option><option value="BROKER">BROKER</option><option value="BOTH">BOTH</option><option value="OTHER">OTHER</option></select>
+<span id="counts"></span>
+</div>
+<div class="card"><div class="tablewrap"><table><thead><tr>
+<th>Name</th><th>Primary Phone</th><th>All Phones</th><th>Properties</th><th>Locations</th><th>Current Role</th><th>Status</th><th>Edit / Verify</th><th>Property Links</th>
+</tr></thead><tbody id="rows"></tbody></table></div></div></div>
+<script>
+const E=x=>String(x??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));let D=[];
+async function api(u,o={}){let r=await fetch(u,o),d=await r.json();if(!r.ok)throw new Error(d.detail||d.message||'Error');return d}
+async function load(){let role=document.querySelector('#filter').value;let d=await api('/api/final-v2/contacts?role='+encodeURIComponent(role));D=d.rows||[];render();counts()}
+function render(){let q=(document.querySelector('#q').value||'').toLowerCase();document.querySelector('#rows').innerHTML=D.filter(x=>!q||JSON.stringify(x).toLowerCase().includes(q)).map(x=>`<tr>
+<td><input id="${E(x.contact_key)}_name" value="${E(x.display_name||'')}" placeholder="Contact name"></td>
+<td><b>${E(x.primary_phone||'')}</b></td><td>${E((x.phones||[]).join(', '))}</td>
+<td>${E(x.property_count||0)}</td><td>${E((x.locations||[]).join(', '))}</td>
+<td><select id="${E(x.contact_key)}_role"><option ${x.contact_role==='UNVERIFIED'?'selected':''}>UNVERIFIED</option><option ${x.contact_role==='OWNER'?'selected':''}>OWNER</option><option ${x.contact_role==='BROKER'?'selected':''}>BROKER</option><option ${x.contact_role==='BOTH'?'selected':''}>BOTH</option><option ${x.contact_role==='OTHER'?'selected':''}>OTHER</option></select></td>
+<td class="${E(x.verification_status||'UNVERIFIED')}">${E(x.verification_status||'UNVERIFIED')}<br><small>${E(x.verified_by||'')}</small></td>
+<td><input id="${E(x.contact_key)}_remarks" value="${E(x.remarks||'')}" placeholder="Verification note"><br><button class="btn" onclick='save(${JSON.stringify(x.contact_key)})'>Save / Verify</button></td>
+<td>${(x.property_ids||[]).slice(0,15).map(id=>`<a target="_blank" href="/property-record/${encodeURIComponent(id)}">${E(id)}</a>`).join('<br>')}</td>
+</tr>`).join('')}
+async function save(key){let body={display_name:document.getElementById(key+'_name').value,contact_role:document.getElementById(key+'_role').value,remarks:document.getElementById(key+'_remarks').value};await api('/api/final-v2/contacts/'+encodeURIComponent(key)+'/verify',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});await load()}
+async function sync(){let d=await api('/api/final-v2/contact-directory/sync',{method:'POST'});alert('Unified contacts synchronized: '+d.contacts);await load()}
+async function counts(){let d=await api('/api/final-v2/contact-counts');document.querySelector('#counts').innerHTML=`All <b>${d.all}</b> · Unverified <b>${d.unverified}</b> · Owners <b>${d.owners}</b> · Brokers <b>${d.brokers}</b>`}
+document.querySelector('#q').addEventListener('input',render);document.querySelector('#filter').addEventListener('change',load);setTimeout(load,2000);load();
+</script></body></html>""")
+
+@app.get("/owners-directory",response_class=HTMLResponse)
+def owners_directory_v2(req:Request):
+    role=page_role_or_redirect(req)
+    if not role:return RedirectResponse("/login",status_code=303)
+    return RedirectResponse("/contacts-directory?view=OWNER",status_code=303)
+
+@app.get("/brokers-directory",response_class=HTMLResponse)
+def brokers_directory_v2(req:Request):
+    role=page_role_or_redirect(req)
+    if not role:return RedirectResponse("/login",status_code=303)
+    return RedirectResponse("/contacts-directory?view=BROKER",status_code=303)
+
+@app.get("/team-dashboard",response_class=HTMLResponse)
+def team_dashboard_v2(req:Request):
+    role=page_role_or_redirect(req)
+    if not role:return RedirectResponse("/login",status_code=303)
+    _request_contact_directory_sync()
+    admin='<a class="nav admin" href="/admin-data-tools">Admin Data Management<small>Technical data tools</small></a>' if role=="admin" else ''
+    return HTMLResponse(f"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>AI Deal Intelligence OS</title>
+<style>*{{box-sizing:border-box}}body{{margin:0;background:#f4f7fb;font-family:Arial;color:#142033}}header{{background:#0d1d2d;color:#fff;padding:16px 22px;display:flex;justify-content:space-between;flex-wrap:wrap}}.wrap{{max-width:1650px;margin:auto;padding:18px}}.navs{{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:10px}}.nav{{display:block;background:#fff;border:1px solid #e4eaf1;border-radius:11px;padding:13px;text-decoration:none;color:#16324f;font-weight:700}}.nav small{{display:block;color:#68788c;font-weight:400;margin-top:5px}}.admin{{border-color:#df8b13}}.kpis{{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;margin:14px 0}}.kpi,.card{{background:#fff;border:1px solid #e4eaf1;border-radius:12px;padding:14px;margin-bottom:12px}}.kpi b{{display:block;font-size:26px}}.btn{{padding:8px 11px;border:0;border-radius:7px;background:#1677ff;color:#fff;font-weight:700;cursor:pointer}}.gray{{background:#edf2f7;color:#24364b}}</style></head><body>
+<header><div><b>AI Deal Intelligence OS</b><br><small>Unified Team Operations</small></div><div>{escape(role.upper())} · <a style="color:white" href="/logout">Logout</a></div></header>
+<div class="wrap"><div class="navs">
+<a class="nav" href="/property-database">Property Database<small>All saved inventory</small></a>
+<a class="nav" href="/property-manual">Add Property + Matcher<small>Manual property and matching</small></a>
+<a class="nav" href="/capture-intelligence">Capture Property<small>Camera, newspaper, handwritten, WhatsApp, PDF</small></a>
+<a class="nav" href="/contacts-directory">Property Contacts<small>Verify then mark Owner / Broker / Both</small></a>
+<a class="nav" href="/retail-requirements">Retail Requirements<small>LinkedIn leasing signals</small></a>
+<a class="nav" href="/workspace#hospitality">Hospitality<small>Hospitality intelligence</small></a>
+<a class="nav" href="/workspace#contacts">Marketing Contacts<small>WhatsApp contact database</small></a>
+<a class="nav" href="/workspace#requirements">Requirement Discovery<small>Demand discovery</small></a>
+<a class="nav" href="/workspace#bots">Bot Control Room<small>AI bot actions</small></a>
+{admin}
+</div>
+<div class="card"><b>Contact workflow:</b> All property contacts are merged first. Your team verifies each contact, edits the name if required, and chooses OWNER, BROKER, BOTH or OTHER.</div>
+<div class="card"><button class="btn" onclick="counts()">Refresh Contact Counts</button> <button class="btn gray" onclick="sync()">Sync Property Contacts</button> <span id="c"></span></div>
+</div>
+<script>
+async function counts(){{let r=await fetch('/api/final-v2/contact-counts'),d=await r.json();document.querySelector('#c').innerHTML=`All <b>${{d.all}}</b> · Unverified <b>${{d.unverified}}</b> · Owners <b>${{d.owners}}</b> · Brokers <b>${{d.brokers}}</b>`}}
+async function sync(){{await fetch('/api/final-v2/contact-directory/sync',{{method:'POST'}});counts()}}setTimeout(counts,2500);counts();
 </script></body></html>""")
 
 
