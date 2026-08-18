@@ -17,7 +17,7 @@ from PIL import Image
 import fitz
 from pypdf import PdfReader, PdfWriter
 
-VERSION="7.8.0-V6-ORGANIZED-DATA-RETAIL"
+VERSION="7.9.0-V7-MASTER-PROPERTY-CLEANER"
 DATABASE_URL=os.getenv("DATABASE_URL","")
 GEMINI_API_KEY=os.getenv("GEMINI_API_KEY","")
 GEMINI_MODEL=os.getenv("GEMINI_MODEL","gemini-3.1-flash-lite")
@@ -3891,6 +3891,8 @@ def _hard_filter_property(q,p):
     quality=_organize_property_v4(p)
     if not quality["match_eligible"]:
         exclusions.append("MATCH_DATA_INCOMPLETE")
+    if p.get("matching_bucket") and p.get("matching_bucket")!="MATCH_READY":
+        exclusions.append("NOT_MATCH_READY_V7")
     request_phones=_contact_number_set(q.get("contact_phone"))
     property_phones=_contact_number_set(
         p.get("owner_contact"),p.get("broker_contact"),p.get("contact_number"),
@@ -4718,13 +4720,13 @@ def _v5_infer_type(text_value):
 
 def _v5_infer_transaction(text_value):
     v=_norm(text_value)
-    rent_terms=["for rent","on rent","to let","lease","leasing","rented","rental","rent @","rent rs","rent ₹"]
-    sale_terms=["for sale","sale @","sale rs","asking sale","sell","selling","free hold sale","freehold sale"]
+    rent_terms=["for rent","on rent","to let","available for lease","available on lease","space for lease","offered for lease"]
+    sale_terms=["for sale","on sale","available for sale","sale @","sale rs","asking sale","resale","sell","selling"]
     rent=any(x in v for x in rent_terms)
     sale=any(x in v for x in sale_terms)
-    if rent and sale:return "RENT/SALE",95
-    if rent:return "RENT",96
-    if sale:return "SALE",96
+    if rent and sale:return "RENT/SALE",98
+    if rent:return "RENT",98
+    if sale:return "SALE",98
     return None,0
 
 def _v5_infer_area(text_value):
@@ -4775,9 +4777,11 @@ def _v5_recovery_suggestion(p):
 
     if _property_area(p) is None:
         area,conf,unit=_v5_infer_area(txt)
-        if area:
-            suggestions["available_area_sqft"]={"value":area,"confidence":conf,"reason":f"Explicit {unit} area found in stored text"}
+        if area and unit in {"SQFT","FT"}:
+            suggestions["available_area_sqft"]={"value":area,"confidence":conf,"reason":f"Explicit {unit} usable/built-up area found in stored text"}
             reasons.append("AREA_RECOVERABLE")
+        elif area and unit=="SQYD":
+            reasons.append("PLOT_AREA_RECOVERABLE_REVIEW_ONLY")
 
     if _canonical_transaction_v4(p.get("rent_or_sale"))=="UNKNOWN":
         tx,conf=_v5_infer_transaction(txt)
@@ -5179,6 +5183,342 @@ document.querySelector('#search').addEventListener('input',R);document.querySele
 </script></body></html>""")
 
 
+# ============================================================
+# V7 MASTER PROPERTY DATABASE CLEANER
+# ============================================================
+
+def _ensure_v7_master_columns():
+    statements=[
+        "ALTER TABLE pi_properties ADD COLUMN IF NOT EXISTS plot_area_sqft DOUBLE PRECISION",
+        "ALTER TABLE pi_properties ADD COLUMN IF NOT EXISTS builtup_area_sqft DOUBLE PRECISION",
+        "ALTER TABLE pi_properties ADD COLUMN IF NOT EXISTS area_basis TEXT",
+        "ALTER TABLE pi_properties ADD COLUMN IF NOT EXISTS occupancy_status TEXT",
+        "ALTER TABLE pi_properties ADD COLUMN IF NOT EXISTS offering_transaction TEXT",
+        "ALTER TABLE pi_properties ADD COLUMN IF NOT EXISTS duplicate_group_id TEXT",
+        "ALTER TABLE pi_properties ADD COLUMN IF NOT EXISTS duplicate_status TEXT",
+        "ALTER TABLE pi_properties ADD COLUMN IF NOT EXISTS master_property_id TEXT",
+        "ALTER TABLE pi_properties ADD COLUMN IF NOT EXISTS matching_bucket TEXT",
+        "ALTER TABLE pi_properties ADD COLUMN IF NOT EXISTS v7_quality_score INTEGER",
+        "ALTER TABLE pi_properties ADD COLUMN IF NOT EXISTS v7_review_reasons JSONB DEFAULT '[]'::jsonb",
+        "ALTER TABLE pi_properties ADD COLUMN IF NOT EXISTS v7_updated_at TIMESTAMP"
+    ]
+    with engine.begin() as c:
+        for stmt in statements:
+            c.execute(text(stmt))
+
+def _v7_norm_name(value):
+    v=_norm(value)
+    v=_re.sub(r'\b(property|prop|available|booking|new|ready|urgent)\b',' ',v)
+    v=_re.sub(r'[^a-z0-9]+',' ',v)
+    return _re.sub(r'\s+',' ',v).strip()
+
+def _v7_area_facts(p):
+    raw=_v5_source_text(p)
+    plot=None
+    built=None
+    basis=None
+
+    m=_re.search(r'(?i)(\d[\d,]{1,5})\s*(?:sq\.?\s*yd|sqyd|sq\.?\s*yard|yards?|yds?|\byd\b)',raw)
+    if m:
+        try:
+            y=float(m.group(1).replace(",",""))
+            if 10 <= y <= 100000:
+                plot=round(y*9.0,2)
+                basis="PLOT_FROM_SQYD"
+        except Exception:
+            pass
+
+    m2=_re.search(r'(?i)(\d[\d,]{1,6})\s*(?:sq\.?\s*ft|sqft|sft|square\s*feet)\b',raw)
+    if m2:
+        try:
+            f=float(m2.group(1).replace(",",""))
+            if 50 <= f <= 500000:
+                built=round(f,2)
+                basis="BUILTUP_FROM_SQFT"
+        except Exception:
+            pass
+
+    existing=_property_area(p)
+    if existing and not built:
+        built=float(existing)
+        basis=basis or "EXISTING_STRUCTURED_AREA"
+
+    return {"plot_area_sqft":plot,"builtup_area_sqft":built,"area_basis":basis}
+
+def _v7_transaction_facts(p):
+    raw=_norm(_v5_source_text(p))
+    occupancy=None
+    offered=None
+    reasons=[]
+
+    if any(x in raw for x in ["preleased","pre leased","pre-leased"]):
+        occupancy="PRELEASED"
+        reasons.append("PRELEASED_IS_OCCUPANCY_NOT_RENT_OFFER")
+    elif any(x in raw for x in ["rented","tenanted","tenant occupied","leased out"]):
+        occupancy="TENANTED"
+        reasons.append("RENTED_IS_OCCUPANCY_NOT_RENT_OFFER")
+    elif any(x in raw for x in ["vacant","ready possession","ready to move"]):
+        occupancy="VACANT_OR_READY"
+
+    rent_offer=any(x in raw for x in [
+        "for rent","on rent","to let","available for lease","available on lease",
+        "space for lease","offered for lease","lease available"
+    ])
+    sale_offer=any(x in raw for x in [
+        "for sale","on sale","available for sale","asking sale","sale @","resale","sell"
+    ])
+
+    if rent_offer and sale_offer:
+        offered="RENT/SALE"
+    elif rent_offer:
+        offered="RENT"
+    elif sale_offer:
+        offered="SALE"
+    else:
+        structured=_canonical_transaction_v4(p.get("rent_or_sale"))
+        if structured in {"RENT","SALE","RENT/SALE"}:
+            offered=structured
+
+    if "lease hold" in raw or "leasehold" in raw:
+        reasons.append("LEASEHOLD_IS_TENURE_NOT_RENT_OFFER")
+
+    return {"occupancy_status":occupancy,"offering_transaction":offered,"reasons":reasons}
+
+def _v7_completeness_score(p):
+    q=_organize_property_v4(p)
+    score=0
+    if _canonical_city_v4(p.get("city"))!="UNKNOWN": score+=12
+    loc=_dq_text(p.get("location") or p.get("micro_market"))
+    if loc and not _dq_unknown(loc): score+=15
+    if _canonical_property_type_v4(p.get("property_type"),p.get("suitable_category"),p.get("remarks"))!="UNKNOWN": score+=15
+    area=_v7_area_facts(p)
+    if area["builtup_area_sqft"]: score+=15
+    tx=_v7_transaction_facts(p)
+    if tx["offering_transaction"]: score+=15
+    if q["contact_ready"]: score+=15
+    if _dq_text(p.get("address")): score+=5
+    if _dq_text(p.get("property_name")): score+=3
+    if str(p.get("verification_status") or "").upper()=="VERIFIED": score+=5
+    return min(100,score)
+
+def _v7_duplicate_signature(p):
+    name=_v7_norm_name(p.get("property_name"))
+    loc=_norm(p.get("location") or p.get("micro_market"))
+    city=_norm(p.get("city"))
+    area=_v7_area_facts(p)
+    a=area["builtup_area_sqft"] or area["plot_area_sqft"] or 0
+    contacts=sorted(_contact_number_set(
+        p.get("owner_contact"),p.get("broker_contact"),p.get("contact_number"),
+        p.get("owner_contact_normalized"),p.get("broker_contact_normalized"),
+        p.get("general_contact_normalized")
+    ))
+    keys=[]
+    if contacts:
+        for c in contacts:
+            keys.append("CONTACT|"+c+"|"+loc)
+    if name and len(name)>=3 and a:
+        keys.append("NAME_AREA|"+name+"|"+loc+"|"+str(round(float(a),1)))
+    if name and loc and city:
+        keys.append("NAME_LOC|"+name+"|"+loc+"|"+city)
+    return keys
+
+def _v7_duplicate_groups(properties):
+    keymap={}
+    byid={str(p.get("property_id")):p for p in properties}
+    for p in properties:
+        pid=str(p.get("property_id"))
+        for k in _v7_duplicate_signature(p):
+            keymap.setdefault(k,set()).add(pid)
+
+    parent={pid:pid for pid in byid}
+    def find(x):
+        while parent[x]!=x:
+            parent[x]=parent[parent[x]]
+            x=parent[x]
+        return x
+    def union(a,b):
+        ra,rb=find(a),find(b)
+        if ra!=rb:
+            parent[rb]=ra
+
+    for ids in keymap.values():
+        ids=list(ids)
+        if len(ids)>1:
+            for x in ids[1:]:
+                union(ids[0],x)
+
+    groups={}
+    for pid in byid:
+        groups.setdefault(find(pid),[]).append(pid)
+
+    final=[]
+    for ids in groups.values():
+        if len(ids)>1:
+            ranked=sorted(ids,key=lambda pid:(
+                _v7_completeness_score(byid[pid]),
+                1 if str(byid[pid].get("verification_status") or "").upper()=="VERIFIED" else 0,
+                pid
+            ),reverse=True)
+            master=ranked[0]
+            gid="DUP-"+hashlib.sha256("|".join(sorted(ids)).encode()).hexdigest()[:12].upper()
+            all_contacts=sorted(set().union(*[
+                _contact_number_set(
+                    byid[x].get("owner_contact"),byid[x].get("broker_contact"),byid[x].get("contact_number"),
+                    byid[x].get("owner_contact_normalized"),byid[x].get("broker_contact_normalized"),
+                    byid[x].get("general_contact_normalized")
+                ) for x in ids
+            ]))
+            final.append({"group_id":gid,"master_property_id":master,"property_ids":ranked,"all_contacts":all_contacts})
+    return final
+
+def _v7_classify_property(p,is_duplicate=False,is_master=False):
+    q=_organize_property_v4(p)
+    area=_v7_area_facts(p)
+    tx=_v7_transaction_facts(p)
+    reasons=list(q["quality_issues"])+list(tx["reasons"])
+
+    core_ok=True
+    if _canonical_city_v4(p.get("city"))=="UNKNOWN":
+        core_ok=False
+    loc=_dq_text(p.get("location") or p.get("micro_market"))
+    if not loc or _dq_unknown(loc):
+        core_ok=False
+    if _canonical_property_type_v4(p.get("property_type"),p.get("suitable_category"),p.get("remarks"))=="UNKNOWN":
+        core_ok=False
+    if not area["builtup_area_sqft"]:
+        core_ok=False
+        if area["plot_area_sqft"]:
+            reasons.append("PLOT_AREA_KNOWN_BUT_BUILTUP_OR_AVAILABLE_AREA_UNKNOWN")
+    if not tx["offering_transaction"]:
+        core_ok=False
+        reasons.append("OFFERING_TRANSACTION_UNCONFIRMED")
+
+    if is_duplicate and not is_master:
+        bucket="DUPLICATE_REVIEW"
+        reasons.append("POSSIBLE_DUPLICATE_NON_MASTER")
+    elif not core_ok:
+        bucket="DATA_REVIEW"
+    elif not q["contact_ready"]:
+        bucket="CONTACT_REVIEW"
+    else:
+        bucket="MATCH_READY"
+
+    return {
+        "bucket":bucket,
+        "quality_score":_v7_completeness_score(p),
+        "review_reasons":list(dict.fromkeys(reasons)),
+        **area,**tx
+    }
+
+def _v7_audit_master_database(limit=1000):
+    _ensure_v7_master_columns()
+    with engine.connect() as c:
+        props=[dict(r._mapping) for r in c.execute(text("SELECT * FROM pi_properties ORDER BY created_at DESC")).fetchall()]
+
+    groups=_v7_duplicate_groups(props)
+    duplicate_map={}
+    for g in groups:
+        for pid in g["property_ids"]:
+            duplicate_map[pid]=g
+
+    counts={"total":len(props),"match_ready":0,"contact_review":0,"data_review":0,"duplicate_review":0,
+            "duplicate_groups":len(groups),"duplicate_records":sum(len(g["property_ids"]) for g in groups)}
+    reviewed=[]
+    for p in props:
+        pid=str(p.get("property_id"))
+        g=duplicate_map.get(pid)
+        cl=_v7_classify_property(p,bool(g),bool(g and g["master_property_id"]==pid))
+        counts[cl["bucket"].lower()]+=1
+        if len(reviewed)<limit and cl["bucket"]!="MATCH_READY":
+            reviewed.append({
+                "property_id":pid,"property_name":p.get("property_name"),"city":p.get("city"),
+                "location":p.get("location"),"property_type":p.get("property_type"),
+                "bucket":cl["bucket"],"score":cl["quality_score"],
+                "plot_area_sqft":cl["plot_area_sqft"],"builtup_area_sqft":cl["builtup_area_sqft"],
+                "occupancy_status":cl["occupancy_status"],"offering_transaction":cl["offering_transaction"],
+                "reasons":cl["review_reasons"],
+                "duplicate_group_id":g["group_id"] if g else None,
+                "master_property_id":g["master_property_id"] if g else None
+            })
+    return {"summary":counts,"reviewed":reviewed,"duplicate_groups":groups[:500]}
+
+def _v7_apply_classification():
+    _ensure_v7_master_columns()
+    with engine.connect() as c:
+        props=[dict(r._mapping) for r in c.execute(text("SELECT * FROM pi_properties")).fetchall()]
+    groups=_v7_duplicate_groups(props)
+    duplicate_map={}
+    for g in groups:
+        for pid in g["property_ids"]:
+            duplicate_map[pid]=g
+
+    with engine.begin() as c:
+        for p in props:
+            pid=str(p.get("property_id"))
+            g=duplicate_map.get(pid)
+            is_master=bool(g and g["master_property_id"]==pid)
+            cl=_v7_classify_property(p,bool(g),is_master)
+            c.execute(text("""UPDATE pi_properties SET
+                plot_area_sqft=:plot,
+                builtup_area_sqft=:built,
+                area_basis=:basis,
+                occupancy_status=:occ,
+                offering_transaction=:tx,
+                duplicate_group_id=:gid,
+                duplicate_status=:ds,
+                master_property_id=:mid,
+                matching_bucket=:bucket,
+                v7_quality_score=:score,
+                v7_review_reasons=CAST(:reasons AS JSONB),
+                v7_updated_at=NOW()
+                WHERE property_id=:id"""),{
+                "plot":cl["plot_area_sqft"],"built":cl["builtup_area_sqft"],"basis":cl["area_basis"],
+                "occ":cl["occupancy_status"],"tx":cl["offering_transaction"],
+                "gid":g["group_id"] if g else None,
+                "ds":("MASTER" if is_master else "DUPLICATE") if g else "UNIQUE",
+                "mid":g["master_property_id"] if g else None,
+                "bucket":cl["bucket"],"score":cl["quality_score"],
+                "reasons":json.dumps(cl["review_reasons"]),"id":pid
+            })
+    return _v7_audit_master_database(1000)
+
+@app.get("/api/v7/master-cleaner/audit")
+def v7_master_cleaner_audit(req:Request):
+    need_login(req)
+    return {"status":"ok",**_v7_audit_master_database()}
+
+@app.post("/api/v7/master-cleaner/apply")
+def v7_master_cleaner_apply(req:Request):
+    need_login(req)
+    result=_v7_apply_classification()
+    return {"status":"ok","message":"V7 classification applied. No records deleted and no phone digits invented.",**result}
+
+@app.get("/master-data-cleaner",response_class=HTMLResponse)
+def v7_master_data_cleaner_page(req:Request):
+    role=page_role_or_redirect(req)
+    if not role:
+        return RedirectResponse("/login",status_code=303)
+    return HTMLResponse(r"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>V7 Master Property Database Cleaner</title>
+<style>*{box-sizing:border-box}body{margin:0;background:#f4f7fb;font-family:Arial;color:#142033}header{background:#0d1d2d;color:white;padding:16px 22px}.wrap{max-width:1850px;margin:auto;padding:18px}.card,.kpi{background:white;border:1px solid #e4eaf1;border-radius:12px;padding:14px;margin-bottom:12px}.kpis{display:grid;grid-template-columns:repeat(4,minmax(150px,1fr));gap:10px}.kpi b{display:block;font-size:26px;margin-top:5px}.btn{display:inline-block;border:0;border-radius:8px;padding:9px 12px;background:#1677ff;color:white;text-decoration:none;font-weight:700;cursor:pointer}.orange{background:#df8b13}.gray{background:#edf2f7;color:#24364b}.tablewrap{overflow:auto;max-height:62vh}table{width:100%;border-collapse:collapse;font-size:12px}th,td{padding:8px;border-bottom:1px solid #edf1f5;text-align:left;vertical-align:top;white-space:nowrap}th{position:sticky;top:0;background:#f8fafc}.MATCH_READY{color:#08734b;font-weight:700}.DATA_REVIEW,.DUPLICATE_REVIEW{color:#b23b00;font-weight:700}.CONTACT_REVIEW{color:#a36b00;font-weight:700}</style></head><body>
+<header><b>V7 Master Property Database Cleaner</b><br><small>Duplicate control · area semantics · occupancy vs transaction · match-ready gating</small></header>
+<div class="wrap"><div class="card"><a class="btn gray" href="/workspace">Workspace</a> <a class="btn gray" href="/property-database">Property Database</a> <a class="btn gray" href="/data-recovery">V5 Recovery</a></div>
+<div class="card"><b>Safety:</b> No source record is deleted. Square-yard values are plot area, not automatically built-up area. Rented/preleased is occupancy, not automatically a RENT offering.</div>
+<div class="card"><button class="btn" onclick="audit()">Run V7 Audit</button> <button class="btn orange" onclick="apply()">Apply Classification</button> <span id="msg"></span></div>
+<div class="kpis" id="kpis"></div>
+<div class="card"><h3>Records Requiring Review</h3><div class="tablewrap"><table><thead><tr><th>Property</th><th>Bucket</th><th>Score</th><th>City</th><th>Location</th><th>Type</th><th>Plot Area</th><th>Built-up/Available</th><th>Occupancy</th><th>Offer Transaction</th><th>Duplicate Group</th><th>Master</th><th>Reasons</th><th>Open</th></tr></thead><tbody id="rows"></tbody></table></div></div>
+<div class="card"><h3>Duplicate Groups</h3><div class="tablewrap"><table><thead><tr><th>Group</th><th>Master</th><th>Records</th><th>All Valid Contacts Across Group</th></tr></thead><tbody id="dups"></tbody></table></div></div></div>
+<script>
+const E=x=>String(x??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+async function A(u,o={}){let r=await fetch(u,o),d=await r.json();if(!r.ok)throw new Error(d.detail||d.message||'Error');return d}
+function render(d){let s=d.summary;document.querySelector('#kpis').innerHTML=[['TOTAL',s.total],['MATCH READY',s.match_ready],['CONTACT REVIEW',s.contact_review],['DATA REVIEW',s.data_review],['DUPLICATE REVIEW',s.duplicate_review],['DUPLICATE GROUPS',s.duplicate_groups],['DUPLICATE RECORDS',s.duplicate_records]].map(x=>`<div class="kpi"><span>${x[0]}</span><b>${Number(x[1]||0).toLocaleString()}</b></div>`).join('');
+document.querySelector('#rows').innerHTML=(d.reviewed||[]).map(x=>`<tr><td><b>${E(x.property_name||x.property_id)}</b><br>${E(x.property_id)}</td><td class="${E(x.bucket)}">${E(x.bucket)}</td><td>${E(x.score)}</td><td>${E(x.city||'')}</td><td>${E(x.location||'')}</td><td>${E(x.property_type||'')}</td><td>${E(x.plot_area_sqft||'')}</td><td>${E(x.builtup_area_sqft||'')}</td><td>${E(x.occupancy_status||'')}</td><td>${E(x.offering_transaction||'')}</td><td>${E(x.duplicate_group_id||'')}</td><td>${E(x.master_property_id||'')}</td><td style="max-width:420px;white-space:normal">${E((x.reasons||[]).join(', '))}</td><td><a target="_blank" href="/property-record/${encodeURIComponent(x.property_id)}">View</a></td></tr>`).join('');
+document.querySelector('#dups').innerHTML=(d.duplicate_groups||[]).map(g=>`<tr><td>${E(g.group_id)}</td><td><a target="_blank" href="/property-record/${encodeURIComponent(g.master_property_id)}">${E(g.master_property_id)}</a></td><td>${(g.property_ids||[]).map(id=>`<a target="_blank" href="/property-record/${encodeURIComponent(id)}">${E(id)}</a>`).join('<br>')}</td><td>${E((g.all_contacts||[]).join(', '))}</td></tr>`).join('')}
+async function audit(){document.querySelector('#msg').textContent=' Auditing...';let d=await A('/api/v7/master-cleaner/audit');render(d);document.querySelector('#msg').textContent=' Audit complete'}
+async function apply(){if(!confirm('Apply V7 classifications? No records will be deleted.'))return;document.querySelector('#msg').textContent=' Classifying...';let d=await A('/api/v7/master-cleaner/apply',{method:'POST'});render(d);document.querySelector('#msg').textContent=' '+d.message}
+audit();
+</script></body></html>""")
+
+
 @app.get("/api/v4/requirements")
 def v4_requirements(req:Request,limit:int=Query(300,ge=1,le=1000)):
     need_login(req)
@@ -5275,7 +5615,7 @@ def _v4_page(role):
 <title>AI Deal Intelligence OS V4</title><style>{_V4_CSS}</style></head><body><div class="shell">
 <aside class="side"><div class="brand">AI Deal Intelligence OS<small>V4 · Property · Hospitality · Retail · Demand</small></div>
 <div class="group">COMMAND</div><button class="nav active" data-page="command">▣ Command Centre</button><button class="nav" data-page="activity">◎ AI Activity</button><button class="nav" data-page="bots">⚡ Bot Control Room</button>
-<div class="group">PROPERTY</div><button class="nav" data-page="property">⌂ Add Property + Matcher</button><a class="nav" href="/property-database">▦ Full Property Database</a><a class="nav" href="/data-quality">✓ Data Quality / Organizer</a><a class="nav" href="/data-recovery">↻ Intelligent Recovery V5</a><a class="nav" href="/retail-requirements">▤ Retail Requirement Leads</a><button class="nav" data-page="owners">● Owners Database</button><button class="nav" data-page="brokers">● Brokers Database</button><a class="nav" href="/legacy-workspace">Original Upload Workspace</a><a class="nav" href="/database-page">Original Database</a>
+<div class="group">PROPERTY</div><button class="nav" data-page="property">⌂ Add Property + Matcher</button><a class="nav" href="/property-database">▦ Full Property Database</a><a class="nav" href="/data-quality">✓ Data Quality / Organizer</a><a class="nav" href="/data-recovery">↻ Intelligent Recovery V5</a><a class="nav" href="/master-data-cleaner">◆ Master Data Cleaner V7</a><a class="nav" href="/retail-requirements">▤ Retail Requirement Leads</a><button class="nav" data-page="owners">● Owners Database</button><button class="nav" data-page="brokers">● Brokers Database</button><a class="nav" href="/legacy-workspace">Original Upload Workspace</a><a class="nav" href="/database-page">Original Database</a>
 <div class="group">LEAD INTELLIGENCE</div><button class="nav" data-page="hospitality">◆ Hospitality</button><button class="nav" data-page="retail">◈ Retail Expansion</button><button class="nav" data-page="contacts">✉ Marketing Contacts</button><button class="nav" data-page="demand">⌕ Requirement Discovery</button>
 </aside><main class="main"><header class="top"><div><b>Unified Delhi NCR Deal Intelligence</b><div class="sub">Organized database + AI bots + matching</div></div><div>{badge} · <a href="/logout">Logout</a></div></header><div class="content">
 
