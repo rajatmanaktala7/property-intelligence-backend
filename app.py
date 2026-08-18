@@ -16,7 +16,7 @@ from PIL import Image
 import fitz
 from pypdf import PdfReader, PdfWriter
 
-VERSION="7.4.0-MATCHER-V2"
+VERSION="7.5.0-PROPERTY-DATABASE-V3"
 DATABASE_URL=os.getenv("DATABASE_URL","")
 GEMINI_API_KEY=os.getenv("GEMINI_API_KEY","")
 GEMINI_MODEL=os.getenv("GEMINI_MODEL","gemini-3.1-flash-lite")
@@ -4110,6 +4110,217 @@ def set_property_availability_verification(property_id:str, req:Request, status:
                   {"s":status,"id":property_id})
     return {"status":"OK","property_id":property_id,"verification_status":status}
 
+def _property_db_html_value(value):
+    if value is None:
+        return ""
+    if isinstance(value,(dict,list)):
+        try:
+            return json.dumps(value,ensure_ascii=False,default=str)
+        except Exception:
+            return str(value)
+    return str(value)
+
+
+@app.get("/property-database",response_class=HTMLResponse)
+def property_database_page(req:Request):
+    role=page_role_or_redirect(req)
+    if not role:
+        return RedirectResponse("/login",status_code=303)
+
+    with engine.connect() as c:
+        total=int(c.execute(text("SELECT COUNT(*) FROM pi_properties")).scalar_one())
+        verified=int(c.execute(text("SELECT COUNT(*) FROM pi_properties WHERE UPPER(COALESCE(verification_status,''))='VERIFIED'")).scalar_one())
+        available=int(c.execute(text("""SELECT COUNT(*) FROM pi_properties
+            WHERE UPPER(TRIM(COALESCE(availability_status,'AVAILABLE')))
+            NOT IN ('UNAVAILABLE','LEASED','SOLD','INACTIVE','REMOVED','NOT AVAILABLE')""")).scalar_one())
+        rows=c.execute(text("""SELECT *
+            FROM pi_properties
+            ORDER BY created_at DESC
+            LIMIT 5000""")).fetchall()
+
+    records=[dict(r._mapping) for r in rows]
+    row_html=[]
+    for p in records:
+        pid=_property_db_html_value(p.get("property_id"))
+        pname=_property_db_html_value(p.get("property_name")) or pid
+        city=_property_db_html_value(p.get("city"))
+        loc=_property_db_html_value(p.get("location"))
+        ptype=_property_db_html_value(p.get("property_type"))
+        area=_property_db_html_value(p.get("available_area_sqft"))
+        rent=_property_db_html_value(p.get("monthly_rent") or p.get("asking_rent_per_sqft"))
+        availability=_property_db_html_value(p.get("availability_status"))
+        verification=_property_db_html_value(p.get("verification_status"))
+        owner=_property_db_html_value(p.get("owner_name"))
+        owner_phone=_property_db_html_value(p.get("owner_contact"))
+        broker=_property_db_html_value(p.get("broker_name"))
+        broker_phone=_property_db_html_value(p.get("broker_contact"))
+        source=_property_db_html_value(p.get("source"))
+        created=_property_db_html_value(p.get("created_at"))
+        search_blob=" ".join([pid,pname,city,loc,ptype,availability,verification,owner,owner_phone,broker,broker_phone,source]).lower()
+        row_html.append(
+            f"""<tr data-search="{escape(search_blob)}">
+            <td><a class="recordlink" href="/property-record/{quote_plus(pid)}"><b>{escape(pname)}</b><br><small>{escape(pid)}</small></a></td>
+            <td>{escape(city)}</td><td>{escape(loc)}</td><td>{escape(ptype)}</td>
+            <td>{escape(area)}</td><td>{escape(rent)}</td>
+            <td>{escape(availability)}</td><td>{escape(verification)}</td>
+            <td>{escape(owner)}<br><small>{escape(owner_phone)}</small></td>
+            <td>{escape(broker)}<br><small>{escape(broker_phone)}</small></td>
+            <td>{escape(source)}</td><td>{escape(created)}</td>
+            <td><a class="btn" href="/property-record/{quote_plus(pid)}">View Full Property</a></td>
+            </tr>"""
+        )
+
+    return HTMLResponse(f"""<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Full Property Database</title>
+<style>
+*{{box-sizing:border-box}}body{{margin:0;background:#f4f7fb;font-family:Arial,sans-serif;color:#142033}}
+header{{background:#0d1d2d;color:white;padding:16px 22px;display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}}
+.wrap{{padding:20px;max-width:1800px;margin:auto}}.kpis{{display:grid;grid-template-columns:repeat(3,minmax(160px,1fr));gap:12px;margin:16px 0}}
+.kpi,.card{{background:white;border:1px solid #e4eaf1;border-radius:12px;padding:15px}}.kpi b{{font-size:28px;display:block;margin-top:6px}}
+.toolbar{{display:flex;gap:9px;flex-wrap:wrap;align-items:center;margin:12px 0}}input{{padding:11px;border:1px solid #ccd7e4;border-radius:8px;min-width:300px;flex:1}}
+.btn{{display:inline-block;background:#1677ff;color:white;padding:8px 11px;border-radius:7px;text-decoration:none;font-weight:700;font-size:12px}}
+.btn.gray{{background:#edf2f7;color:#24364b}}.tablewrap{{overflow:auto;max-height:70vh;border:1px solid #e4eaf1;border-radius:10px}}
+table{{width:100%;border-collapse:collapse;background:white;font-size:12px}}th,td{{padding:9px;border-bottom:1px solid #edf1f5;text-align:left;white-space:nowrap;vertical-align:top}}
+th{{position:sticky;top:0;background:#f8fafc;z-index:1}}.recordlink{{color:#135fb8;text-decoration:none}}small{{color:#6d7b90}}
+@media(max-width:760px){{.kpis{{grid-template-columns:1fr}}input{{min-width:100%}}}}
+</style></head>
+<body>
+<header><div><b>Full Property Database</b><br><small style="color:#b9c8d8">Master inventory saved in Property Intelligence</small></div>
+<div><a class="btn gray" href="/workspace">Back to Workspace</a> <a class="btn" href="/property-manual">Add Property</a></div></header>
+<div class="wrap">
+<div class="kpis">
+<div class="kpi"><span>TOTAL PROPERTIES</span><b id="totalCount">{total}</b></div>
+<div class="kpi"><span>AVAILABLE</span><b>{available}</b></div>
+<div class="kpi"><span>VERIFIED</span><b>{verified}</b></div>
+</div>
+<div class="card">
+<div class="toolbar"><input id="propertySearch" placeholder="Search Property ID, name, city, location, type, owner, broker, phone or source">
+<span id="visibleCount"><b>{len(records)}</b> records shown</span></div>
+<div class="tablewrap"><table>
+<thead><tr><th>Property / ID</th><th>City</th><th>Location</th><th>Type</th><th>Area</th><th>Rent</th><th>Availability</th><th>Verification</th><th>Owner</th><th>Broker</th><th>Source</th><th>Saved</th><th>Action</th></tr></thead>
+<tbody id="propertyRows">{''.join(row_html)}</tbody>
+</table></div></div></div>
+<script>
+const s=document.getElementById('propertySearch'),rows=[...document.querySelectorAll('#propertyRows tr')],count=document.getElementById('visibleCount');
+function filterRows(){{const q=(s.value||'').toLowerCase().trim();let n=0;rows.forEach(r=>{{let show=!q||(r.dataset.search||'').includes(q);r.style.display=show?'':'none';if(show)n++}});count.innerHTML='<b>'+n+'</b> records shown'}}
+s.addEventListener('input',filterRows);
+</script></body></html>""")
+
+
+@app.get("/property-record/{property_id}",response_class=HTMLResponse)
+def property_record_page(property_id:str,req:Request):
+    role=page_role_or_redirect(req)
+    if not role:
+        return RedirectResponse("/login",status_code=303)
+
+    with engine.connect() as c:
+        row=c.execute(text("SELECT * FROM pi_properties WHERE property_id=:id"),{"id":property_id}).first()
+        if not row:
+            raise HTTPException(404,"Property not found")
+        p=dict(row._mapping)
+
+        media=[]
+        for table_name in ["pi_property_media","pi_media"]:
+            try:
+                rr=c.execute(text(f"SELECT * FROM {table_name} WHERE property_id=:id ORDER BY created_at DESC"),{"id":property_id}).fetchall()
+                media.extend([dict(x._mapping) for x in rr])
+            except Exception:
+                pass
+
+        try:
+            verification=[dict(x._mapping) for x in c.execute(
+                text("SELECT * FROM pi_verification_log WHERE property_id=:id ORDER BY created_at DESC LIMIT 100"),
+                {"id":property_id}
+            ).fetchall()]
+        except Exception:
+            verification=[]
+
+        try:
+            matches=[dict(x._mapping) for x in c.execute(
+                text("""SELECT m.*,r.client_name,r.company_name,r.city AS requirement_city,
+                    r.preferred_locations,r.minimum_area_sqft,r.maximum_area_sqft
+                    FROM pi_matches m
+                    LEFT JOIN pi_requirements r ON r.requirement_id=m.requirement_id
+                    WHERE m.property_id=:id ORDER BY m.created_at DESC LIMIT 100"""),
+                {"id":property_id}
+            ).fetchall()]
+        except Exception:
+            matches=[]
+
+    preferred_order=[
+        "property_id","property_name","property_type","entry_status","availability_status",
+        "verification_status","city","location","micro_market","address","google_maps_pin",
+        "area_sqft","available_area_sqft","minimum_area_sqft","maximum_area_sqft","floor",
+        "rent_or_sale","monthly_rent","asking_rent_per_sqft","asking_sale_price","possession",
+        "nearby_brands","suitable_category","parking","ceiling_height","power_load",
+        "cam_per_sqft","security_deposit","frontage","assigned_to","verified_date","verified_by",
+        "remarks","source","source_id","extraction_confidence","created_at","updated_at"
+    ]
+    private_order=[
+        "owner_name","owner_contact","owner_email","broker_name","broker_contact",
+        "broker_email","broker_company","contact_number"
+    ]
+
+    def field_rows(keys):
+        out=[]
+        for key in keys:
+            if key in p:
+                val=_property_db_html_value(p.get(key))
+                out.append(f"<tr><th>{escape(key.replace('_',' ').title())}</th><td>{escape(val)}</td></tr>")
+        return "".join(out)
+
+    used=set(preferred_order+private_order)
+    other_keys=[k for k in p.keys() if k not in used and k not in {"fingerprint"}]
+    general_html=field_rows(preferred_order+other_keys)
+    private_html=field_rows(private_order)
+
+    media_html=[]
+    for m in media:
+        mid=_property_db_html_value(m.get("media_id") or m.get("id"))
+        filename=_property_db_html_value(m.get("filename") or m.get("title"))
+        mtype=_property_db_html_value(m.get("media_type"))
+        url=_property_db_html_value(m.get("url"))
+        if url:
+            media_html.append(f'<div class="media"><b>{escape(mtype)}</b><br>{escape(filename)}<br><a target="_blank" href="{escape(url)}">Open Media</a></div>')
+        else:
+            media_html.append(f'<div class="media"><b>{escape(mtype)}</b><br>{escape(filename)}<br><small>Stored media ID: {escape(mid)}</small></div>')
+
+    verification_html="".join(
+        f"<tr><td>{escape(_property_db_html_value(v.get('created_at')))}</td><td>{escape(_property_db_html_value(v.get('action')))}</td><td>{escape(_property_db_html_value(v.get('performed_by')))}</td><td>{escape(_property_db_html_value(v.get('notes')))}</td></tr>"
+        for v in verification
+    ) or '<tr><td colspan="4">No verification history saved.</td></tr>'
+
+    matches_html="".join(
+        f"<tr><td>{escape(_property_db_html_value(m.get('requirement_id')))}</td><td>{escape(_property_db_html_value(m.get('company_name') or m.get('client_name')))}</td><td>{escape(_property_db_html_value(m.get('requirement_city')))}</td><td>{escape(_property_db_html_value(m.get('preferred_locations')))}</td><td>{escape(_property_db_html_value(m.get('match_score')))}</td><td>{escape(_property_db_html_value(m.get('status')))}</td></tr>"
+        for m in matches
+    ) or '<tr><td colspan="6">This property has no saved match history.</td></tr>'
+
+    title=_property_db_html_value(p.get("property_name")) or property_id
+    return HTMLResponse(f"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{escape(title)} - Property Record</title>
+<style>
+*{{box-sizing:border-box}}body{{margin:0;background:#f4f7fb;font-family:Arial,sans-serif;color:#142033}}header{{background:#0d1d2d;color:white;padding:16px 22px;display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap}}
+.wrap{{max-width:1500px;margin:auto;padding:20px}}.card{{background:white;border:1px solid #e4eaf1;border-radius:12px;padding:16px;margin:14px 0}}.grid2{{display:grid;grid-template-columns:1fr 1fr;gap:14px}}
+table{{width:100%;border-collapse:collapse;font-size:13px}}th,td{{padding:9px;border-bottom:1px solid #edf1f5;text-align:left;vertical-align:top}}th{{width:240px;background:#fafbfd}}
+.btn{{display:inline-block;background:#1677ff;color:white;padding:9px 12px;border-radius:7px;text-decoration:none;font-weight:700}}.btn.gray{{background:#edf2f7;color:#24364b}}.private{{border-left:5px solid #df8b13}}.mediaGrid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:10px}}.media{{border:1px solid #e4eaf1;border-radius:9px;padding:10px}}
+.tablewrap{{overflow:auto}}.badge{{display:inline-block;background:#eaf8f2;color:#086d49;padding:5px 8px;border-radius:20px;font-weight:700}}
+@media(max-width:900px){{.grid2{{grid-template-columns:1fr}}}}
+</style></head><body>
+<header><div><b>{escape(title)}</b><br><small>{escape(property_id)}</small></div>
+<div><a class="btn gray" href="/workspace">Workspace</a> <a class="btn" href="/property-database">Full Property Database</a></div></header>
+<div class="wrap">
+<div class="card"><h2>Property Record</h2><span class="badge">{escape(_property_db_html_value(p.get("verification_status") or "UNVERIFIED"))}</span>
+<div class="tablewrap"><table>{general_html}</table></div></div>
+<div class="card private"><h2>Private / Internal Contact Details</h2><p>For team verification and follow-up. Do not automatically include these contacts in client-facing WhatsApp drafts.</p>
+<div class="tablewrap"><table>{private_html or '<tr><td>No owner/broker contact details saved.</td></tr>'}</table></div></div>
+<div class="card"><h2>Property Media</h2><div class="mediaGrid">{''.join(media_html) or 'No media saved for this property.'}</div></div>
+<div class="grid2">
+<div class="card"><h2>Verification History</h2><div class="tablewrap"><table><thead><tr><th>Date</th><th>Action</th><th>By</th><th>Notes</th></tr></thead><tbody>{verification_html}</tbody></table></div></div>
+<div class="card"><h2>Match History</h2><div class="tablewrap"><table><thead><tr><th>Requirement</th><th>Client</th><th>City</th><th>Location</th><th>Score</th><th>Status</th></tr></thead><tbody>{matches_html}</tbody></table></div></div>
+</div></div></body></html>""")
+
+
 @app.get("/api/v4/requirements")
 def v4_requirements(req:Request,limit:int=Query(300,ge=1,le=1000)):
     need_login(req)
@@ -4194,7 +4405,7 @@ async function loadDemandSignals(){let d=await api('/api/v4/demand-signals');$('
 async function loadRequirements(){let d=await api('/api/v4/requirements');let sel=$('#reqSelect');sel.innerHTML='<option value="">Select requirement</option>'+d.rows.map(x=>`<option value="${esc(x.requirement_id)}">${esc(x.requirement_id)} · ${esc(x.company_name||x.client_name||'')} · ${esc(x.city||'')} · ${esc(x.preferred_locations||'')}</option>`).join('');$('#reqRows').innerHTML=d.rows.map(x=>`<tr><td>${esc(x.requirement_id)}</td><td>${esc(x.company_name||x.client_name||'')}</td><td>${esc(x.city||'')}</td><td>${esc(x.preferred_locations||'')}</td><td>${x.minimum_area_sqft||''}-${x.maximum_area_sqft||''}</td><td>${esc(x.rent_or_sale||'')}</td><td><button class="btn" onclick="matchReq('${esc(x.requirement_id)}')">Match</button></td></tr>`).join('')}
 async function matchSelected(){let id=$('#reqSelect').value;if(!id)return alert('Select a requirement');await matchReq(id)}
 async function verifyProperty(pid){if(!confirm('Confirm: your team called the owner/broker and the property is currently available?'))return;let fd=new FormData();fd.append('status','VERIFIED');let r=await fetch('/api/v4/properties/'+encodeURIComponent(pid)+'/availability-verification',{method:'POST',body:fd});let d=await r.json();if(!r.ok)throw new Error(d.detail||'Verification failed');alert('VERIFIED. Contact numbers stay internal and will NOT be included in client WhatsApp.');await matchSelected()}
-async function matchReq(id){try{let d=await api('/api/v4/match/'+encodeURIComponent(id),{method:'POST'});let diag=d.diagnostic||{};let ec=diag.exclusion_counts||{};let exclusions=Object.entries(ec).map(([k,v])=>`${esc(k)}: ${v}`).join(' · ');$('#matchDiag').innerHTML=`<div class="msg ${d.matches.length?'good':'warn'}"><b>${esc(diag.message||'Matching complete')}</b><br><b>Engine:</b> ${esc(d.engine||diag.engine||'MATCHING_V2')} · Database: ${diag.database_properties||0} · Eligible: ${diag.eligible_count||0} · Excluded: ${diag.excluded_count||0} · Returned: ${diag.matches_returned||0}<br><b>Hard-filter exclusions:</b> ${exclusions||'None'}<br><b>Team flow:</b> Call internal contact → verify availability → Mark Verified → then share. Contacts remain internal.</div>`;$('#matchRows').innerHTML=(d.matches||[]).map((x,i)=>{let contacts=[x.owner_contact?('Owner: '+(x.owner_name||'')+' '+x.owner_contact):'',x.broker_contact?('Broker: '+(x.broker_name||'')+' '+x.broker_contact):'',(!x.owner_contact&&!x.broker_contact&&x.contact_number)?('Contact: '+x.contact_number):''].filter(Boolean).join('<br>');let verified=String(x.verification_status||'').toUpperCase()==='VERIFIED';let b=x.score_breakdown||{};let breakdown=`Location ${b.location||0}/30 · Area ${b.area||0}/25 · Type ${b.property_type||0}/15 · Use ${b.suitable_use||0}/15 · Budget ${b.budget||0}/10 · Verification ${b.verification||0}/5`;return `<tr><td>${i+1}</td><td><b>${esc(x.property_name||x.property_id)}</b><br>${esc(x.property_id)}</td><td>${esc(x.city||'')}</td><td>${esc(x.location||'')}</td><td>${x.available_area_sqft||''}</td><td>${x.monthly_rent?Number(x.monthly_rent).toLocaleString():''}</td><td class="${x.score>=80?'hot':''}"><b>${Number(x.score||0).toFixed(0)}%</b></td><td><b>${esc(x.match_band||'')}</b></td><td><b>Internal only</b><br>${contacts||'No contact saved'}</td><td>${verified?'<b>✓ VERIFIED</b>':`<button class="btn green" onclick="verifyProperty('${x.property_id}')">Mark Verified</button>`}</td><td>${esc((x.reasons||[]).join(', '))}</td><td>${esc(breakdown)}</td><td>${esc((x.gaps||[]).join(', '))}</td></tr>`}).join('')||'<tr><td colspan="13">No eligible property passed the hard filters.</td></tr>';$('#excludedRows').innerHTML=(d.excluded||[]).map((x,i)=>`<tr><td>${i+1}</td><td><b>${esc(x.property_name||x.property_id||'')}</b><br>${esc(x.property_id||'')}</td><td>${esc(x.city||'')}</td><td>${esc(x.location||'')}</td><td>${esc(x.property_type||'')}</td><td>${x.available_area_sqft||''}</td><td>${esc(x.source||'')}</td><td><b>${esc((x.reasons||[]).join(', '))}</b></td></tr>`).join('')||'<tr><td colspan="8">No inventory excluded.</td></tr>';await loadOverview()}catch(e){alert(e.message)}}
+async function matchReq(id){try{let d=await api('/api/v4/match/'+encodeURIComponent(id),{method:'POST'});let diag=d.diagnostic||{};let ec=diag.exclusion_counts||{};let exclusions=Object.entries(ec).map(([k,v])=>`${esc(k)}: ${v}`).join(' · ');$('#matchDiag').innerHTML=`<div class="msg ${d.matches.length?'good':'warn'}"><b>${esc(diag.message||'Matching complete')}</b><br><b>Engine:</b> ${esc(d.engine||diag.engine||'MATCHING_V2')} · Database: ${diag.database_properties||0} · Eligible: ${diag.eligible_count||0} · Excluded: ${diag.excluded_count||0} · Returned: ${diag.matches_returned||0}<br><b>Hard-filter exclusions:</b> ${exclusions||'None'}<br><b>Team flow:</b> Call internal contact → verify availability → Mark Verified → then share. Contacts remain internal.</div>`;$('#matchRows').innerHTML=(d.matches||[]).map((x,i)=>{let contacts=[x.owner_contact?('Owner: '+(x.owner_name||'')+' '+x.owner_contact):'',x.broker_contact?('Broker: '+(x.broker_name||'')+' '+x.broker_contact):'',(!x.owner_contact&&!x.broker_contact&&x.contact_number)?('Contact: '+x.contact_number):''].filter(Boolean).join('<br>');let verified=String(x.verification_status||'').toUpperCase()==='VERIFIED';let b=x.score_breakdown||{};let breakdown=`Location ${b.location||0}/30 · Area ${b.area||0}/25 · Type ${b.property_type||0}/15 · Use ${b.suitable_use||0}/15 · Budget ${b.budget||0}/10 · Verification ${b.verification||0}/5`;return `<tr><td>${i+1}</td><td><a href="/property-record/${encodeURIComponent(x.property_id)}" target="_blank"><b>${esc(x.property_name||x.property_id)}</b><br>${esc(x.property_id)}</a><br><a class="btn gray" target="_blank" href="/property-record/${encodeURIComponent(x.property_id)}">View Full Property</a></td><td>${esc(x.city||'')}</td><td>${esc(x.location||'')}</td><td>${x.available_area_sqft||''}</td><td>${x.monthly_rent?Number(x.monthly_rent).toLocaleString():''}</td><td class="${x.score>=80?'hot':''}"><b>${Number(x.score||0).toFixed(0)}%</b></td><td><b>${esc(x.match_band||'')}</b></td><td><b>Internal only</b><br>${contacts||'No contact saved'}</td><td>${verified?'<b>✓ VERIFIED</b>':`<button class="btn green" onclick="verifyProperty('${x.property_id}')">Mark Verified</button>`}</td><td>${esc((x.reasons||[]).join(', '))}</td><td>${esc(breakdown)}</td><td>${esc((x.gaps||[]).join(', '))}</td></tr>`}).join('')||'<tr><td colspan="13">No eligible property passed the hard filters.</td></tr>';$('#excludedRows').innerHTML=(d.excluded||[]).map((x,i)=>`<tr><td>${i+1}</td><td><a href="/property-record/${encodeURIComponent(x.property_id)}" target="_blank"><b>${esc(x.property_name||x.property_id||'')}</b><br>${esc(x.property_id||'')}</a></td><td>${esc(x.city||'')}</td><td>${esc(x.location||'')}</td><td>${esc(x.property_type||'')}</td><td>${x.available_area_sqft||''}</td><td>${esc(x.source||'')}</td><td><b>${esc((x.reasons||[]).join(', '))}</b></td></tr>`).join('')||'<tr><td colspan="8">No inventory excluded.</td></tr>';await loadOverview()}catch(e){alert(e.message)}}
 async function loadBots(){let d=await api('/api/v4/bot-runs');$('#botRows').innerHTML=d.rows.map(x=>`<tr><td>${esc(x.bot_name)}</td><td>${esc(x.division||'')}</td><td>${esc(x.status)}</td><td>${x.records_found||0}</td><td>${x.records_created||0}</td><td>${fmt(x.started_at)}</td><td>${esc(x.summary||x.error_message||'')}</td></tr>`).join('')}
 async function loadActivity(limit=100){let d=await api('/api/v4/activity?limit='+limit);let h=d.rows.map(x=>`<div class="activity"><b>${esc(x.actor_name)} · ${esc(x.action)}</b><small>${esc(x.division||'')} · ${esc(x.summary||'')} · ${fmt(x.created_at)}</small></div>`).join('')||'No activity yet.';if($('#activityFeed'))$('#activityFeed').innerHTML=h;if($('#activityRows'))$('#activityRows').innerHTML=d.rows.map(x=>`<tr><td>${fmt(x.created_at)}</td><td>${esc(x.actor_name)}</td><td>${esc(x.division||'')}</td><td>${esc(x.action)}</td><td>${esc(x.summary||'')}</td><td>${esc(x.status||'')}</td></tr>`).join('')}
 setupDrop();loadOverview();
@@ -4206,7 +4417,7 @@ def _v4_page(role):
 <title>AI Deal Intelligence OS V4</title><style>{_V4_CSS}</style></head><body><div class="shell">
 <aside class="side"><div class="brand">AI Deal Intelligence OS<small>V4 · Property · Hospitality · Retail · Demand</small></div>
 <div class="group">COMMAND</div><button class="nav active" data-page="command">▣ Command Centre</button><button class="nav" data-page="activity">◎ AI Activity</button><button class="nav" data-page="bots">⚡ Bot Control Room</button>
-<div class="group">PROPERTY</div><button class="nav" data-page="property">⌂ Add Property + Matcher</button><button class="nav" data-page="owners">● Owners Database</button><button class="nav" data-page="brokers">● Brokers Database</button><a class="nav" href="/legacy-workspace">Original Upload Workspace</a><a class="nav" href="/database-page">Original Database</a>
+<div class="group">PROPERTY</div><button class="nav" data-page="property">⌂ Add Property + Matcher</button><a class="nav" href="/property-database">▦ Full Property Database</a><button class="nav" data-page="owners">● Owners Database</button><button class="nav" data-page="brokers">● Brokers Database</button><a class="nav" href="/legacy-workspace">Original Upload Workspace</a><a class="nav" href="/database-page">Original Database</a>
 <div class="group">LEAD INTELLIGENCE</div><button class="nav" data-page="hospitality">◆ Hospitality</button><button class="nav" data-page="retail">◈ Retail Expansion</button><button class="nav" data-page="contacts">✉ Marketing Contacts</button><button class="nav" data-page="demand">⌕ Requirement Discovery</button>
 </aside><main class="main"><header class="top"><div><b>Unified Delhi NCR Deal Intelligence</b><div class="sub">Organized database + AI bots + matching</div></div><div>{badge} · <a href="/logout">Logout</a></div></header><div class="content">
 
@@ -4223,7 +4434,7 @@ def _v4_page(role):
 Owner Name · Owner Contact · Broker Name · Broker Contact · Main Contact Number · Monthly Rent in figures · Team Member · Verified/Unverified · Direct Images/Videos.</div>
 <a class="btn green" href="/property-manual">Open Correct Add Property Form</a>
 </div>
-<div class="card"><h3>Property Matching Centre · V2</h3><select id="reqSelect"><option>Loading requirements...</option></select><div class="toolbar"><button class="btn green" onclick="matchSelected()">Run Smart Match V2</button><a class="btn gray" href="/legacy-workspace">Add Requirement / Upload Source</a></div><div id="matchDiag"></div>
+<div class="card"><h3>Property Matching Centre · V2</h3><div class="toolbar"><a class="btn orange" href="/property-database">View Full Property Database</a><span class="badge">Master saved inventory</span></div><select id="reqSelect"><option>Loading requirements...</option></select><div class="toolbar"><button class="btn green" onclick="matchSelected()">Run Smart Match V2</button><a class="btn gray" href="/legacy-workspace">Add Requirement / Upload Source</a></div><div id="matchDiag"></div>
 <div class="msg good"><b>Matching order:</b> Self Inventory → Availability → Rent/Sale → Commercial/Residential → Suitable Use → City/Location → 80%-120% Area → 100-point ranking.</div>
 <h4>Ranked Eligible Matches</h4>
 <div class="tablewrap"><table><thead><tr><th>#</th><th>Property</th><th>City</th><th>Location</th><th>Area</th><th>Rent</th><th>Score</th><th>Band</th><th>Availability Contact (INTERNAL)</th><th>Verification</th><th>Why Matched</th><th>Score Breakdown</th><th>Data Gaps</th></tr></thead><tbody id="matchRows"></tbody></table></div>
