@@ -9292,8 +9292,9 @@ def _v138_ensure_tables():
         )"""))
 
 def _v138_classify_ai(title,excerpt):
-    txt=(" "+str(title or "")+" "+str(excerpt or "")+" ").lower()
-    noise=[
+    txt = (" " + str(title or "") + " " + str(excerpt or "") + " ").lower()
+
+    noise = [
         "job opportunity","job vacancy","hiring","salary","store manager",
         "assistant store manager","full stack developer","web development",
         "market report","market growth","rental yield","commercial vs residential",
@@ -9301,20 +9302,36 @@ def _v138_classify_ai(title,excerpt):
         "modern trade network","luxury sales"
     ]
     if any(x in txt for x in noise):
-        return "NOT_REQUIREMENT",10
-    score=20
+        return "NOT_REQUIREMENT", 10
+
+    supply = [
+        "property for sale","commercial property for sale","available for rent",
+        "available on rent","property available","shop available","space available",
+        "for sale in","for rent in","per sqft","/ sqft","suitable for restaurant",
+        "suitable for cafe","suitable for salon","suitable for saloon"
+    ]
+    if sum(1 for x in supply if x in txt) >= 2:
+        return "PROPERTY_SUPPLY_NOT_REQUIREMENT", 10
+
+    score = 20
     for x in [
         "space requirement","looking for space","looking for retail space",
         "seeking retail space","actively seeking","looking to lease",
         "rental spaces","space required","immediate leasing opportunity",
         "looking to lease hotels","requirement: retail space"
     ]:
-        if x in txt: score+=20
-    if any(x in txt for x in ["sq ft","sqft","square feet","carpet area"]):score+=15
-    if any(x in txt for x in ["lease","leasing","rent","rental"]):score+=10
-    if score>=70:return "LIKELY_REQUIREMENT",min(score,100)
-    if score>=50:return "POSSIBLE_REQUIREMENT",min(score,100)
-    return "LOW_CONFIDENCE",min(score,100)
+        if x in txt:
+            score += 20
+    if any(x in txt for x in ["sq ft","sqft","square feet","carpet area"]):
+        score += 15
+    if any(x in txt for x in ["lease","leasing","rent","rental"]):
+        score += 10
+
+    if score >= 70:
+        return "LIKELY_REQUIREMENT", min(score,100)
+    if score >= 50:
+        return "POSSIBLE_REQUIREMENT", min(score,100)
+    return "LOW_CONFIDENCE", min(score,100)
 
 def _v138_ai_rows(division):
     if not _v138_table_exists("ai_demand_signals"):
@@ -9359,75 +9376,90 @@ def _v138_manual_rows(division):
             "classification":"MANUAL","confidence":100} for r in rows]
 
 def _v138_requirement_insert(payload):
-    """
-    Build a pi_requirements row from its actual live schema.
-    Required columns without defaults are filled from known mappings.
-    This is safer than assuming one historical schema.
-    """
     if not _v138_table_exists("pi_requirements"):
         raise RuntimeError("pi_requirements table is missing")
 
-    meta=_v138_cols_meta("pi_requirements")
-    cols={x["column_name"] for x in meta}
-    rid="REQ-"+str(payload.get("division") or "GEN")[:3].upper()+"-"+datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")+"-"+uuid.uuid4().hex[:5].upper()
+    meta = _v138_cols_meta("pi_requirements")
+    rid = "REQ-" + str(payload.get("division") or "GEN")[:3].upper() + "-" + datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S") + "-" + uuid.uuid4().hex[:5].upper()
 
-    aliases={
-        "requirement_id":rid,"id":rid,
-        "retailer_name":payload.get("company_name") or "Requirement",
-        "client_company":payload.get("company_name") or "Requirement",
-        "company_name":payload.get("company_name") or "Requirement",
-        "contact_name":payload.get("contact_name"),
-        "contact_number":payload.get("contact_phone"),
-        "contact_phone":payload.get("contact_phone"),
-        "email":payload.get("contact_email"),
-        "contact_email":payload.get("contact_email"),
-        "city":"Delhi NCR",
-        "location":payload.get("location") or "Delhi NCR",
-        "requirement_sqft":payload.get("required_area_sqft") or 0,
-        "required_area_sqft":payload.get("required_area_sqft") or 0,
-        "minimum_area_sqft":payload.get("required_area_sqft") or 0,
-        "maximum_area_sqft":payload.get("required_area_sqft") or 0,
-        "retailers_purpose":payload.get("required_transaction") or "LEASE",
-        "transaction_type":payload.get("required_transaction") or "LEASE",
-        "rent_or_sale":payload.get("required_transaction") or "LEASE",
-        "retailers_category":payload.get("required_property_type") or payload.get("division") or "COMMERCIAL",
-        "required_property_type":payload.get("required_property_type") or payload.get("division") or "COMMERCIAL",
-        "property_type":payload.get("required_property_type") or payload.get("division") or "COMMERCIAL",
-        "nearby_brands":"",
-        "additional_points":payload.get("requirement_text") or "",
-        "remarks":payload.get("requirement_text") or "",
-        "source":payload.get("source_type") or "MANUAL",
-        "division":payload.get("division"),
-        "status":"NEW"
+    aliases = {
+        "requirement_id": rid,
+        "retailer_name": payload.get("company_name") or "Requirement",
+        "client_company": payload.get("company_name") or "Requirement",
+        "company_name": payload.get("company_name") or "Requirement",
+        "contact_name": payload.get("contact_name"),
+        "contact_number": payload.get("contact_phone"),
+        "contact_phone": payload.get("contact_phone"),
+        "email": payload.get("contact_email"),
+        "contact_email": payload.get("contact_email"),
+        "city": payload.get("city") or "Delhi NCR",
+        "location": payload.get("location") or "Delhi NCR",
+        "requirement_sqft": payload.get("required_area_sqft") or 0,
+        "required_area_sqft": payload.get("required_area_sqft") or 0,
+        "minimum_area_sqft": payload.get("required_area_sqft") or 0,
+        "maximum_area_sqft": payload.get("required_area_sqft") or 0,
+        "retailers_purpose": payload.get("required_transaction") or "LEASE",
+        "transaction_type": payload.get("required_transaction") or "LEASE",
+        "rent_or_sale": payload.get("required_transaction") or "LEASE",
+        "retailers_category": payload.get("required_property_type") or payload.get("division") or "COMMERCIAL",
+        "required_property_type": payload.get("required_property_type") or payload.get("division") or "COMMERCIAL",
+        "property_type": payload.get("required_property_type") or payload.get("division") or "COMMERCIAL",
+        "nearby_brands": "",
+        "additional_points": payload.get("requirement_text") or "",
+        "remarks": payload.get("requirement_text") or "",
+        "source": payload.get("source_type") or "MANUAL",
+        "division": payload.get("division"),
+        "status": "NEW"
     }
 
-    values={}
+    values = {}
     for m in meta:
-        name=m["column_name"]
+        name = m["column_name"]
+        dt = (m.get("data_type") or "").lower()
+        default = m.get("column_default")
+        required = m.get("is_nullable") == "NO"
+        numeric = any(x in dt for x in ["bigint","integer","smallint","numeric","double precision","real"])
+
+        # Critical fix: never put REQ-... text into numeric pi_requirements.id.
+        if name == "id" and numeric:
+            if default:
+                continue
+            with engine.connect() as c:
+                values[name] = int(c.execute(text("SELECT COALESCE(MAX(id),0)+1 FROM pi_requirements")).scalar_one() or 1)
+            continue
+
         if name in aliases:
-            values[name]=aliases[name]
-        elif m["is_nullable"]=="NO" and not m["column_default"]:
-            # Conservative fallback for unknown required fields.
-            dt=(m["data_type"] or "").lower()
-            if "int" in dt or "numeric" in dt or "double" in dt or "real" in dt:
-                values[name]=0
-            elif "bool" in dt:
-                values[name]=False
-            elif "timestamp" in dt or "date" in dt:
+            val = aliases[name]
+            if numeric:
+                try:
+                    val = 0 if val in (None, "") else float(val)
+                    if any(x in dt for x in ["bigint","integer","smallint"]):
+                        val = int(val)
+                except Exception:
+                    val = 0
+            values[name] = val
+        elif required and not default:
+            if numeric:
+                values[name] = 0
+            elif "boolean" in dt:
+                values[name] = False
+            elif "timestamp" in dt or dt == "date":
                 continue
             else:
-                values[name]=""
+                values[name] = ""
 
     if not values:
         raise RuntimeError("No compatible pi_requirements columns found")
 
-    insert_cols=list(values.keys())
-    sql="INSERT INTO pi_requirements("+",".join(insert_cols)+") VALUES("+",".join(":"+x for x in insert_cols)+")"
+    names = list(values)
+    sql = "INSERT INTO pi_requirements(" + ",".join(names) + ") VALUES(" + ",".join(":" + x for x in names) + ") RETURNING *"
     with engine.begin() as c:
-        c.execute(text(sql),values)
+        row = c.execute(text(sql), values).fetchone()
 
-    # Return whichever ID the matcher can use.
-    return str(values.get("requirement_id") or values.get("id") or rid)
+    if row:
+        d = dict(row._mapping)
+        return str(d.get("requirement_id") or d.get("id") or rid)
+    return rid
 
 def _v138_promote(payload):
     _v138_ensure_tables()
@@ -9540,7 +9572,7 @@ async function A(u,o={{}}){{let r=await fetch(u,o),d=await r.json();if(!r.ok)thr
 function item(x,i,src){{let bad=x.classification==='NOT_REQUIREMENT';return `<div class="item ${{bad?'bad':'good'}}"><b>${{E(x.company_name||'To verify')}}</b> · ${{E(x.classification||src)}}<br>${{E(x.requirement_text||'')}}<br>${{E(x.location||'')}} · ${{E(x.required_area_sqft||'')}} · ${{E(x.required_property_type||'')}}<br>${{x.source_url?`<a target="_blank" href="${{E(x.source_url)}}">Open source</a> · `:''}}<button class="btn primary" onclick="runMatch('${{src}}',${{i}})">Run Match</button><div class="matches" id="${{src}}_${{i}}">Not run</div></div>`}}
 function render(){{ai.innerHTML=AI.map((x,i)=>item(x,i,'AI')).join('')||'No AI requirements.';manual.innerHTML=MAN.map((x,i)=>item(x,i,'MANUAL')).join('')||'No manual requirements.'}}
 async function load(){{let d=await A('/api/v13-8/requirements?division='+DIV);AI=d.ai||[];MAN=d.manual||[];render()}}
-async function runMatch(src,i){{let x=(src==='AI'?AI:MAN)[i],box=document.getElementById(src+'_'+i);if(x.classification==='NOT_REQUIREMENT'&&!confirm('AI classified this as NOT_REQUIREMENT. Run anyway?'))return;box.textContent='Matching...';try{{let d=await A('/api/v13-8/match',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify(x)}});let ms=d.matches||[];box.innerHTML=ms.slice(0,10).map((m,j)=>`${{j+1}}. <a target="_blank" href="/property-record/${{encodeURIComponent(m.property_id)}}">${{E(m.property_name||m.property_id)}}</a> · Score <b>${{E(m.score||'')}}</b>`).join('<br>')||'No matches';}}catch(e){{box.innerHTML='<b>ERROR:</b> '+E(e.message)}}}}
+async function runMatch(src,i){{let x=(src==='AI'?AI:MAN)[i],box=document.getElementById(src+'_'+i);if(['NOT_REQUIREMENT','PROPERTY_SUPPLY_NOT_REQUIREMENT'].includes(x.classification)&&!confirm('AI classified this as '+x.classification+'. Run anyway?'))return;box.textContent='Matching...';try{{let d=await A('/api/v13-8/match',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify(x)}});let ms=d.matches||[];box.innerHTML=ms.slice(0,10).map((m,j)=>`${{j+1}}. <a target="_blank" href="/property-record/${{encodeURIComponent(m.property_id)}}">${{E(m.property_name||m.property_id)}}</a> · Score <b>${{E(m.score||'')}}</b>`).join('<br>')||'No matches';}}catch(e){{box.innerHTML='<b>ERROR:</b> '+E(e.message)}}}}
 f.addEventListener('submit',async e=>{{e.preventDefault();let b=Object.fromEntries(new FormData(f));b.division=DIV;b.required_area_sqft=b.required_area_sqft?Number(b.required_area_sqft):null;let d=await A('/api/v13-8/manual',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify(b)}});alert('Saved '+d.requirement_id);f.reset();load()}});load();
 </script></body></html>""")
 
@@ -9549,3 +9581,5 @@ async def v138_workspace_redirect(request,call_next):
     if request.url.path=="/workspace":
         return RedirectResponse("/simple-dashboard",status_code=307)
     return await call_next(request)
+
+# V13.8.2 CORRECTED BIGINT MATCHER FIX
