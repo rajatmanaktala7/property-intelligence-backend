@@ -20,3 +20,4 @@ app-before-contact-verify-segregate-*.py
 app-before-v12-data-doctor-*.py
 app-before-v13-1-repair-*.py
 app-before-v13-final-*.py
+app-before-v13-2-magazine-import-*.py

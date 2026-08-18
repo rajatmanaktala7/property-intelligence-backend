@@ -8000,3 +8000,342 @@ a{display:block;text-decoration:none;color:#172437;font-weight:bold}
 </div>
 </body>
 </html>""")
+
+# ============================================================
+# V13.2 REFINED MAGAZINE MASTER IMPORT
+# Uses the refined Excel inside Property Intelligence Agent
+# without overwriting/deleting original pi_properties rows.
+# ============================================================
+
+def _ensure_magazine_master_tables():
+    with engine.begin() as c:
+        c.execute(text("""CREATE TABLE IF NOT EXISTS pi_magazine_master(
+            source_id TEXT PRIMARY KEY,
+            record_status TEXT,
+            match_eligible BOOLEAN DEFAULT FALSE,
+            category TEXT,
+            listing_type TEXT,
+            locality TEXT,
+            locality_source TEXT,
+            plot_block TEXT,
+            configuration TEXT,
+            area NUMERIC,
+            area_unit TEXT,
+            floor TEXT,
+            price TEXT,
+            status_remarks TEXT,
+            contact_name_company TEXT,
+            valid_mobiles JSONB DEFAULT '[]'::jsonb,
+            valid_landlines JSONB DEFAULT '[]'::jsonb,
+            partial_contacts JSONB DEFAULT '[]'::jsonb,
+            valid_contact_count INTEGER DEFAULT 0,
+            quality_issues JSONB DEFAULT '[]'::jsonb,
+            original_raw_text TEXT,
+            import_batch TEXT,
+            imported_at TIMESTAMPTZ DEFAULT NOW(),
+            updated_at TIMESTAMPTZ DEFAULT NOW()
+        )"""))
+        c.execute(text("""CREATE TABLE IF NOT EXISTS pi_magazine_contact_links(
+            source_id TEXT NOT NULL,
+            normalized_contact TEXT NOT NULL,
+            contact_type TEXT,
+            contact_name_company TEXT,
+            locality TEXT,
+            property_status TEXT,
+            raw_evidence TEXT,
+            import_batch TEXT,
+            imported_at TIMESTAMPTZ DEFAULT NOW(),
+            PRIMARY KEY(source_id,normalized_contact,contact_type)
+        )"""))
+        c.execute(text("""CREATE TABLE IF NOT EXISTS pi_magazine_property_map(
+            source_id TEXT PRIMARY KEY,
+            property_id TEXT,
+            match_method TEXT,
+            confidence INTEGER DEFAULT 0,
+            map_status TEXT DEFAULT 'UNMATCHED',
+            evidence JSONB DEFAULT '{}'::jsonb,
+            reviewed_by TEXT,
+            reviewed_at TIMESTAMPTZ,
+            updated_at TIMESTAMPTZ DEFAULT NOW()
+        )"""))
+
+def _xl_list(v):
+    if v is None: return []
+    vals=[]
+    for x in _re.split(r'[,|;/]+',str(v)):
+        x=x.strip()
+        if x and x not in vals: vals.append(x)
+    return vals
+
+def _mag_norm(v):
+    return _re.sub(r'[^A-Z0-9]+',' ',str(v or '').upper()).strip()
+
+def _mag_num(v):
+    try:return float(v)
+    except Exception:return None
+
+def _mag_import_xlsx(path,batch):
+    from openpyxl import load_workbook
+    _ensure_magazine_master_tables()
+    wb=load_workbook(path,read_only=True,data_only=True)
+
+    if "REFINED MASTER" not in wb.sheetnames:
+        raise ValueError("REFINED MASTER sheet not found.")
+    if "PROPERTY CONTACT LINKS" not in wb.sheetnames:
+        raise ValueError("PROPERTY CONTACT LINKS sheet not found.")
+
+    sh=wb["REFINED MASTER"]
+    rows=sh.iter_rows(values_only=True)
+    headers=[str(x or '').strip() for x in next(rows)]
+    idx={h:i for i,h in enumerate(headers)}
+
+    imported=0
+    with engine.begin() as c:
+        for row in rows:
+            def g(name):
+                i=idx.get(name)
+                return row[i] if i is not None and i<len(row) else None
+            sid=str(g("Source ID") or '').strip()
+            if not sid: continue
+            c.execute(text("""INSERT INTO pi_magazine_master(
+                source_id,record_status,match_eligible,category,listing_type,locality,locality_source,
+                plot_block,configuration,area,area_unit,floor,price,status_remarks,
+                contact_name_company,valid_mobiles,valid_landlines,partial_contacts,
+                valid_contact_count,quality_issues,original_raw_text,import_batch,updated_at
+            ) VALUES(
+                :sid,:rs,:me,:cat,:lt,:loc,:ls,:pb,:cfg,:area,:unit,:floor,:price,:sr,:cn,
+                CAST(:mob AS JSONB),CAST(:land AS JSONB),CAST(:part AS JSONB),:vcc,
+                CAST(:issues AS JSONB),:raw,:batch,NOW()
+            )
+            ON CONFLICT(source_id) DO UPDATE SET
+                record_status=EXCLUDED.record_status,match_eligible=EXCLUDED.match_eligible,
+                category=EXCLUDED.category,listing_type=EXCLUDED.listing_type,locality=EXCLUDED.locality,
+                locality_source=EXCLUDED.locality_source,plot_block=EXCLUDED.plot_block,
+                configuration=EXCLUDED.configuration,area=EXCLUDED.area,area_unit=EXCLUDED.area_unit,
+                floor=EXCLUDED.floor,price=EXCLUDED.price,status_remarks=EXCLUDED.status_remarks,
+                contact_name_company=EXCLUDED.contact_name_company,valid_mobiles=EXCLUDED.valid_mobiles,
+                valid_landlines=EXCLUDED.valid_landlines,partial_contacts=EXCLUDED.partial_contacts,
+                valid_contact_count=EXCLUDED.valid_contact_count,quality_issues=EXCLUDED.quality_issues,
+                original_raw_text=EXCLUDED.original_raw_text,import_batch=EXCLUDED.import_batch,updated_at=NOW()
+            """),{
+                "sid":sid,"rs":str(g("Record Status") or ""),"me":str(g("Match Eligible") or "").upper()=="YES",
+                "cat":g("Category"),"lt":g("Listing Type"),"loc":g("Locality"),"ls":g("Locality Source"),
+                "pb":g("Plot / Block"),"cfg":g("Configuration"),"area":_mag_num(g("Area")),
+                "unit":g("Area Unit"),"floor":g("Floor"),"price":g("Price"),"sr":g("Status / Remarks"),
+                "cn":g("Contact Name / Company"),
+                "mob":__import__("json").dumps(_xl_list(g("Valid Mobile(s)"))),
+                "land":__import__("json").dumps(_xl_list(g("Valid Landline(s)"))),
+                "part":__import__("json").dumps(_xl_list(g("Partial Contact Review"))),
+                "vcc":int(g("Valid Contact Count") or 0),
+                "issues":__import__("json").dumps([x.strip() for x in str(g("Quality Issues") or "").split(";") if x.strip()]),
+                "raw":g("Original Raw Text"),"batch":batch
+            })
+            imported+=1
+
+    sh=wb["PROPERTY CONTACT LINKS"]
+    rows=sh.iter_rows(values_only=True)
+    headers=[str(x or '').strip() for x in next(rows)]
+    idx={h:i for i,h in enumerate(headers)}
+    links=0
+    with engine.begin() as c:
+        for row in rows:
+            def g(name):
+                i=idx.get(name)
+                return row[i] if i is not None and i<len(row) else None
+            sid=str(g("Property ID") or '').strip()
+            phone=str(g("Normalized Contact") or '').strip()
+            ctype=str(g("Contact Type") or '').strip()
+            if not sid or not phone: continue
+            c.execute(text("""INSERT INTO pi_magazine_contact_links(
+                source_id,normalized_contact,contact_type,contact_name_company,locality,
+                property_status,raw_evidence,import_batch
+            ) VALUES(:sid,:ph,:ct,:cn,:loc,:ps,:raw,:batch)
+            ON CONFLICT(source_id,normalized_contact,contact_type) DO UPDATE SET
+                contact_name_company=EXCLUDED.contact_name_company,locality=EXCLUDED.locality,
+                property_status=EXCLUDED.property_status,raw_evidence=EXCLUDED.raw_evidence,
+                import_batch=EXCLUDED.import_batch,imported_at=NOW()"""),{
+                "sid":sid,"ph":phone,"ct":ctype,"cn":g("Contact Name / Company"),
+                "loc":g("Locality"),"ps":g("Property Status"),"raw":g("Raw Evidence"),"batch":batch
+            })
+            links+=1
+    wb.close()
+    return imported,links
+
+def _mag_existing_property_contacts():
+    bypid={}
+    if not _v13_table_exists("pi_property_contact_links"):
+        return bypid
+    with engine.connect() as c:
+        for r in c.execute(text("SELECT property_id,normalized_contact FROM pi_property_contact_links")).fetchall():
+            bypid.setdefault(str(r._mapping["property_id"]),set()).add(str(r._mapping["normalized_contact"]))
+    return bypid
+
+def _mag_reconcile():
+    _ensure_magazine_master_tables()
+    with engine.connect() as c:
+        mags=[dict(r._mapping) for r in c.execute(text(
+            "SELECT * FROM pi_magazine_master WHERE record_status<>'EXCLUDE_NON_PROPERTY'"
+        )).fetchall()]
+        props=[dict(r._mapping) for r in c.execute(text("SELECT * FROM pi_properties")).fetchall()]
+
+    existing_contacts=_mag_existing_property_contacts()
+    mapped=review=unmatched=0
+
+    with engine.begin() as c:
+        for m in mags:
+            mn=_mag_norm(m.get("plot_block"))
+            ml=_mag_norm(m.get("locality"))
+            mc=_mag_norm(m.get("configuration"))
+            ma=float(m.get("area") or 0)
+            mcontacts=set()
+            for rr in c.execute(text("SELECT normalized_contact FROM pi_magazine_contact_links WHERE source_id=:sid"),{"sid":m["source_id"]}).fetchall():
+                mcontacts.add(str(rr._mapping["normalized_contact"]))
+
+            scored=[]
+            for p in props:
+                pn=_mag_norm(p.get("property_name"))
+                pl=_mag_norm(p.get("location"))
+                pc=_mag_norm(p.get("property_type"))
+                pa=float(p.get("available_area_sqft") or p.get("minimum_area_sqft") or p.get("maximum_area_sqft") or 0)
+                score=0;evidence=[]
+
+                if mn and pn and (mn==pn or mn in pn or pn in mn):
+                    score+=40;evidence.append("IDENTITY")
+                if ml and pl and ml==pl:
+                    score+=25;evidence.append("LOCALITY")
+                if mc and pc and (mc==pc or mc in pc or pc in mc):
+                    score+=8;evidence.append("CONFIGURATION_TYPE")
+                if ma and pa:
+                    diff=abs(ma-pa)/max(ma,pa)
+                    if diff<=0.05:
+                        score+=15;evidence.append("AREA_5_PERCENT")
+                    elif diff<=0.15:
+                        score+=8;evidence.append("AREA_15_PERCENT")
+                shared=mcontacts & existing_contacts.get(str(p.get("property_id")),set())
+                if shared:
+                    score+=20;evidence.append("SHARED_CONTACT")
+
+                if "IDENTITY" not in evidence or "LOCALITY" not in evidence:
+                    continue
+                if score>=80:
+                    scored.append((score,p.get("property_id"),evidence))
+
+            scored.sort(reverse=True,key=lambda x:x[0])
+            if scored:
+                score,pid,ev=scored[0]
+                status="AUTO_MAPPED" if score>=90 and (len(scored)==1 or score-scored[1][0]>=10) else "REVIEW"
+                mapped += 1 if status=="AUTO_MAPPED" else 0
+                review += 1 if status=="REVIEW" else 0
+                c.execute(text("""INSERT INTO pi_magazine_property_map(
+                    source_id,property_id,match_method,confidence,map_status,evidence,updated_at
+                ) VALUES(:sid,:pid,'IDENTITY_LOCALITY_AREA_CONTACT',:cf,:st,CAST(:ev AS JSONB),NOW())
+                ON CONFLICT(source_id) DO UPDATE SET property_id=EXCLUDED.property_id,
+                    match_method=EXCLUDED.match_method,confidence=EXCLUDED.confidence,
+                    map_status=EXCLUDED.map_status,evidence=EXCLUDED.evidence,updated_at=NOW()"""),{
+                    "sid":m["source_id"],"pid":pid,"cf":score,"st":status,
+                    "ev":__import__("json").dumps(ev)
+                })
+            else:
+                unmatched+=1
+                c.execute(text("""INSERT INTO pi_magazine_property_map(
+                    source_id,property_id,match_method,confidence,map_status,evidence,updated_at
+                ) VALUES(:sid,NULL,'NO_SAFE_MATCH',0,'UNMATCHED','{}'::jsonb,NOW())
+                ON CONFLICT(source_id) DO UPDATE SET property_id=NULL,match_method='NO_SAFE_MATCH',
+                    confidence=0,map_status='UNMATCHED',evidence='{}'::jsonb,updated_at=NOW()"""),{"sid":m["source_id"]})
+    return {"auto_mapped":mapped,"review":review,"unmatched":unmatched}
+
+def _mag_sync_contacts_to_agent():
+    if not _v13_table_exists("pi_property_contact_links"):
+        return 0
+    _ensure_magazine_master_tables()
+    added=0
+    with engine.begin() as c:
+        rows=c.execute(text("""SELECT mp.property_id,l.source_id,l.normalized_contact,l.contact_type,
+            l.contact_name_company
+            FROM pi_magazine_property_map mp
+            JOIN pi_magazine_contact_links l ON l.source_id=mp.source_id
+            WHERE mp.map_status IN ('AUTO_MAPPED','MANUALLY_CONFIRMED')
+              AND mp.property_id IS NOT NULL""")).fetchall()
+        for rr in rows:
+            r=rr._mapping
+            c.execute(text("""INSERT INTO pi_property_contact_links(
+                property_id,normalized_contact,contact_kind,evidence_field,raw_value,
+                role_hint,confidence,is_primary,updated_at
+            ) VALUES(:pid,:ph,:kind,'REFINED_MAGAZINE_IMPORT',:raw,'UNVERIFIED',100,FALSE,NOW())
+            ON CONFLICT(property_id,normalized_contact,evidence_field)
+            DO UPDATE SET updated_at=NOW()"""),{
+                "pid":r["property_id"],"ph":r["normalized_contact"],
+                "kind":r["contact_type"] or "PHONE",
+                "raw":(r["contact_name_company"] or "")+" | "+r["source_id"]
+            })
+            added+=1
+    return added
+
+@app.post("/api/v13-2/magazine/import")
+async def v132_magazine_import(req:Request,file:UploadFile=File(...)):
+    need_login(req)
+    filename=file.filename or "refined-magazine.xlsx"
+    if not filename.lower().endswith(".xlsx"):
+        raise HTTPException(400,"Please upload the refined .xlsx workbook.")
+
+    fd,path=tempfile.mkstemp(suffix=".xlsx");os.close(fd)
+    try:
+        total=0
+        with open(path,"wb") as out:
+            while True:
+                chunk=await file.read(1024*1024)
+                if not chunk:break
+                total+=len(chunk)
+                if total>50*1024*1024:
+                    raise HTTPException(413,"Maximum workbook size is 50 MB.")
+                out.write(chunk)
+
+        batch="MAG-"+datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        master_rows,links=_mag_import_xlsx(path,batch)
+        reconciliation=_mag_reconcile()
+        synced=_mag_sync_contacts_to_agent()
+
+        return {"status":"ok","batch":batch,"master_rows":master_rows,
+                "contact_links":links,"agent_contact_links_synced":synced,
+                **reconciliation}
+    finally:
+        try:os.unlink(path)
+        except Exception:pass
+
+@app.get("/api/v13-2/magazine/summary")
+def v132_magazine_summary(req:Request):
+    need_login(req)
+    _ensure_magazine_master_tables()
+    with engine.connect() as c:
+        one=lambda q:int(c.execute(text(q)).scalar_one() or 0)
+        return {"status":"ok",
+            "master_rows":one("SELECT COUNT(*) FROM pi_magazine_master"),
+            "match_ready":one("SELECT COUNT(*) FROM pi_magazine_master WHERE record_status='MATCH_READY'"),
+            "data_review":one("SELECT COUNT(*) FROM pi_magazine_master WHERE record_status='DATA_REVIEW'"),
+            "excluded":one("SELECT COUNT(*) FROM pi_magazine_master WHERE record_status='EXCLUDE_NON_PROPERTY'"),
+            "contact_links":one("SELECT COUNT(*) FROM pi_magazine_contact_links"),
+            "auto_mapped":one("SELECT COUNT(*) FROM pi_magazine_property_map WHERE map_status='AUTO_MAPPED'"),
+            "review":one("SELECT COUNT(*) FROM pi_magazine_property_map WHERE map_status='REVIEW'"),
+            "unmatched":one("SELECT COUNT(*) FROM pi_magazine_property_map WHERE map_status='UNMATCHED'")
+        }
+
+@app.get("/magazine-master-import",response_class=HTMLResponse)
+def magazine_master_import_page(req:Request):
+    role=page_role_or_redirect(req)
+    if not role:return RedirectResponse("/login",status_code=303)
+    return HTMLResponse("""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Refined Magazine Master Import</title></head>
+<body style="font-family:Arial;background:#f4f7fb;margin:0;color:#172437">
+<div style="background:#102235;color:white;padding:20px"><b>Refined Magazine Master Import</b><br><small>Safe reconciliation into Property Intelligence Agent</small></div>
+<div style="padding:20px;max-width:1200px;margin:auto">
+<div style="background:white;padding:16px;border-radius:12px;margin-bottom:12px">
+<a href="/data-command-center">Data Command Center</a> · <a href="/data-doctor">Data Doctor</a> · <a href="/property-database">Property Database</a>
+</div>
+<div style="background:white;padding:16px;border-radius:12px">
+<p><b>Upload Delhi_Property_Magazine_REFINED_FINAL.xlsx</b></p>
+<form id="f"><input type="file" name="file" accept=".xlsx" required> <button type="submit">Import + Reconcile</button></form>
+<p id="msg"></p><div id="summary"></div>
+</div></div>
+<script>
+async function load(){let r=await fetch('/api/v13-2/magazine/summary'),d=await r.json();summary.innerHTML=`Master rows <b>${d.master_rows}</b> · Match ready <b>${d.match_ready}</b> · Data review <b>${d.data_review}</b> · Excluded <b>${d.excluded}</b> · Contact links <b>${d.contact_links}</b> · Auto mapped <b>${d.auto_mapped}</b> · Review <b>${d.review}</b> · Unmatched <b>${d.unmatched}</b>`}
+f.addEventListener('submit',async e=>{e.preventDefault();msg.textContent='Importing and reconciling...';let r=await fetch('/api/v13-2/magazine/import',{method:'POST',body:new FormData(f)}),d=await r.json();if(!r.ok){msg.textContent=d.detail||'Import failed';return}msg.textContent=`Imported ${d.master_rows} rows, ${d.contact_links} contact links. Auto mapped ${d.auto_mapped}, review ${d.review}, unmatched ${d.unmatched}.`;load()});load();
+</script></body></html>""")
