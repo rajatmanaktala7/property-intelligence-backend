@@ -10181,7 +10181,7 @@ header{background:var(--nav);color:#fff;padding:18px 24px;display:flex;justify-c
     <h2>AI REQUIREMENT DISCOVERY</h2>
     <div class="grid">
       <a class="card purple" href="/requirements-workbench?division=RETAIL"><div class="icon">◈</div><b>AI Retail</b><span>Review retailer expansion signals. Team confirms first, then converts the genuine requirement into the manual requirement form.</span><span class="tag">AI Lead Discovery</span></a>
-      <a class="card purple" href="/ai-hospitality-master-only"><div class="icon">◆</div><b>AI Hospitality</b><span>Restaurants, cafes, lounges, clubs, hotels, guest houses and banquet requirement discovery.</span><span class="tag">AI Lead Discovery</span></a>
+      <a class="card purple" href="/ai-hospitality-master-final"><div class="icon">◆</div><b>AI Hospitality</b><span>Restaurants, cafes, lounges, clubs, hotels, guest houses and banquet requirement discovery.</span><span class="tag">AI Lead Discovery</span></a>
       <a class="card" href="/v14-requirement-leads"><div class="icon">✓</div><b>Requirement Verification</b><span>Human-review rule: AI signals do not match directly. Confirm first, then enter as a manual requirement.</span><span class="tag">Human Confirmation</span></a>
     </div>
   </div>
@@ -11539,4 +11539,196 @@ summary();load();
 async def v157_hospitality_nav_fix(request,call_next):
     if request.url.path=="/ai-hospitality-master":
         return RedirectResponse("/ai-hospitality-master-only",status_code=307)
+    return await call_next(request)
+
+# ============================================================
+# V15.7.1 HOSPITALITY LIST DISPLAY FIX
+# Fixes browser window.status collision that caused ALL records
+# to query as status=undefined and display 0 rows.
+# ============================================================
+
+@app.get("/ai-hospitality-master-final", response_class=HTMLResponse)
+def v1571_hospitality_master_final(req:Request):
+    role=page_role_or_redirect(req)
+    if not role:
+        return RedirectResponse("/login",303)
+
+    return HTMLResponse("""<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AI Hospitality Master</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;background:#f4f7fb;font-family:Arial;color:#172437}
+header{background:#102235;color:#fff;padding:18px 22px}
+.wrap{max-width:1750px;margin:auto;padding:18px}
+.nav,.filters{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px}
+.btn,a.btn{padding:8px 11px;border:0;border-radius:8px;background:#1677ff;color:#fff;text-decoration:none;font-weight:700;cursor:pointer}
+.gray{background:#e9eef5!important;color:#203247!important}
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:9px;margin-bottom:12px}
+.k{background:#fff;border:1px solid #e2e8f0;border-radius:11px;padding:12px}.k b{display:block;font-size:22px}.k span{font-size:11px;color:#687789}
+.card{background:#fff;border:1px solid #e2e8f0;border-radius:11px;padding:12px;margin-bottom:12px}
+.catgrid{display:flex;gap:6px;flex-wrap:wrap}.chip{padding:5px 8px;border-radius:10px;background:#eef3f8;font-size:11px;cursor:pointer}.chip b{margin-left:4px}
+select,input{padding:8px;border:1px solid #ccd6e2;border-radius:7px}
+.tablewrap{overflow:auto;max-height:70vh;background:#fff;border-radius:10px}
+table{width:100%;border-collapse:collapse;font-size:12px}
+th,td{padding:8px;border-bottom:1px solid #edf1f5;text-align:left;vertical-align:top;white-space:nowrap}
+th{position:sticky;top:0;background:#f8fafc;z-index:2}
+.pill{padding:3px 7px;border-radius:10px;background:#edf4ff}.good{background:#dcfce7}.warn{background:#fef3c7}
+.msg{background:#fff8e8;border:1px solid #eed18f;border-radius:9px;padding:10px;margin-bottom:12px}
+.small{font-size:11px;color:#687789}
+</style>
+</head>
+<body>
+<header><b>AI Hospitality Master</b><br><small>Only Hospitality Bot records · Property owners/brokers excluded</small></header>
+<div class="wrap">
+
+<div class="nav">
+<a class="btn gray" href="/workspace">← Dashboard</a>
+<button class="btn" onclick="recoverHospitality()">Recover Existing Hospitality Bot Data</button>
+<a class="btn gray" href="/marketing-contacts-final">Marketing Contacts</a>
+</div>
+
+<div class="kpis">
+<div class="k"><b id="kTotal">0</b><span>HOSPITALITY MASTER ROWS</span></div>
+<div class="k"><b id="kReady">0</b><span>CONTACT READY</span></div>
+<div class="k"><b id="kNeed">0</b><span>NEEDS ENRICHMENT</span></div>
+<div class="k"><b id="kVerified">0</b><span>VERIFIED</span></div>
+</div>
+
+<div class="card">
+<b>Hospitality Categories</b>
+<div id="categoryChips" class="catgrid"></div>
+</div>
+
+<div class="filters">
+<select id="categoryFilter">
+<option value="ALL">ALL</option><option>CAFE</option><option>RESTAURANT</option><option>BANQUET</option><option>HOTEL</option>
+<option>GUEST_HOUSE</option><option>LOUNGE</option><option>CLUB</option><option>BAR</option><option>FARMHOUSE</option><option>OTHER</option>
+</select>
+
+<select id="contactStatusFilter">
+<option value="ALL">ALL</option>
+<option value="CONTACT_READY">CONTACT_READY</option>
+<option value="NEEDS_ENRICHMENT">NEEDS_ENRICHMENT</option>
+</select>
+
+<input id="searchBox" placeholder="Search business, location, mobile, email">
+<button class="btn" onclick="loadHospitality()">Search</button>
+<span id="recordCount" class="small"></span>
+</div>
+
+<div id="message" class="msg">
+Recovered data is stored separately from property owners/brokers. Use category and contact-status filters to review all 1,298 Hospitality Bot records.
+</div>
+
+<div class="tablewrap">
+<table>
+<thead>
+<tr>
+<th>Business</th><th>Category</th><th>Location</th><th>Contact Person</th>
+<th>Mobile</th><th>Email</th><th>Website / Source</th><th>Status</th><th>Date Fetched</th>
+</tr>
+</thead>
+<tbody id="hospitalityRows"></tbody>
+</table>
+</div>
+</div>
+
+<script>
+const E=x=>String(x??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+async function api(url,opts={}){
+  const r=await fetch(url,opts);
+  let d={};
+  try{d=await r.json()}catch(e){}
+  if(!r.ok) throw Error(d.detail||('HTTP '+r.status));
+  return d;
+}
+
+async function loadSummary(){
+  const d=await api('/api/v15-7/hospitality-master/summary');
+  document.getElementById('kTotal').textContent=d.total||0;
+  document.getElementById('kReady').textContent=d.contact_ready||0;
+  document.getElementById('kNeed').textContent=d.needs_enrichment||0;
+  document.getElementById('kVerified').textContent=d.verified||0;
+
+  document.getElementById('categoryChips').innerHTML=
+    Object.entries(d.categories||{}).map(([k,v]) =>
+      `<span class="chip" onclick="selectCategory('${k}')">${E(k)}<b>${v}</b></span>`
+    ).join('');
+}
+
+function selectCategory(cat){
+  document.getElementById('categoryFilter').value=cat;
+  loadHospitality();
+}
+
+async function recoverHospitality(){
+  const msg=document.getElementById('message');
+  msg.textContent='Recovering existing Hospitality Bot data...';
+  try{
+    const d=await api('/api/v15-6/recover-ai-hospitality',{method:'POST'});
+    msg.textContent=`Recovered ${d.recovered||0} Hospitality Bot rows. ${d.contact_ready||0} contact-ready; ${d.needs_enrichment||0} need enrichment.`;
+    await loadSummary();
+    await loadHospitality();
+  }catch(e){
+    msg.textContent='ERROR: '+e.message;
+  }
+}
+
+async function loadHospitality(){
+  const cat=document.getElementById('categoryFilter').value || 'ALL';
+  const contactState=document.getElementById('contactStatusFilter').value || 'ALL';
+  const query=document.getElementById('searchBox').value || '';
+
+  const url='/api/v15-6/ai-hospitality-master?category='+
+      encodeURIComponent(cat)+'&status='+encodeURIComponent(contactState)+
+      '&q='+encodeURIComponent(query);
+
+  const msg=document.getElementById('message');
+
+  try{
+    const d=await api(url);
+    const list=d.rows||[];
+    document.getElementById('recordCount').textContent=list.length+' records';
+
+    document.getElementById('hospitalityRows').innerHTML=list.map(x=>`<tr>
+      <td><b>${E(x.business_name||'Unknown business')}</b></td>
+      <td><span class="pill">${E(x.category||'OTHER')}</span></td>
+      <td>${E(x.city||'')}<br>${E(x.location||'')}</td>
+      <td>${E(x.contact_name||'')}</td>
+      <td><b>${E(x.primary_phone||'')}</b><br><span class="small">${E((x.all_phones||[]).join(', '))}</span></td>
+      <td>${E(x.email||'')}</td>
+      <td>
+        ${x.website?`<a target="_blank" href="${E(x.website)}">Website</a>`:''}
+        ${x.source_url?` <a target="_blank" href="${E(x.source_url)}">Source</a>`:''}
+      </td>
+      <td><span class="pill ${x.contact_status==='CONTACT_READY'?'good':'warn'}">${E(x.contact_status||'')}</span></td>
+      <td>${E((x.date_fetched||'').slice(0,10))}</td>
+    </tr>`).join('') || '<tr><td colspan="9">No Hospitality Bot records for this filter.</td></tr>';
+
+    msg.textContent='Showing '+list.length+' Hospitality Bot records. Owner/Broker property contacts are excluded.';
+  }catch(e){
+    document.getElementById('recordCount').textContent='0 records';
+    document.getElementById('hospitalityRows').innerHTML='<tr><td colspan="9">Unable to load Hospitality records.</td></tr>';
+    msg.textContent='LOAD ERROR: '+e.message;
+  }
+}
+
+document.getElementById('categoryFilter').addEventListener('change',loadHospitality);
+document.getElementById('contactStatusFilter').addEventListener('change',loadHospitality);
+document.getElementById('searchBox').addEventListener('keydown',e=>{if(e.key==='Enter')loadHospitality()});
+
+loadSummary();
+loadHospitality();
+</script>
+</body></html>""")
+
+@app.middleware("http")
+async def v1571_hospitality_final_router(request,call_next):
+    if request.url.path in {"/ai-hospitality-master","/ai-hospitality-master-only"}:
+        return RedirectResponse("/ai-hospitality-master-final",status_code=307)
     return await call_next(request)
