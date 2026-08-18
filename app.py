@@ -10189,7 +10189,7 @@ header{background:var(--nav);color:#fff;padding:18px 24px;display:flex;justify-c
   <div class="section">
     <h2>MARKETING & CONTACTS</h2>
     <div class="grid">
-      <a class="card" href="/marketing-contacts-v3"><div class="icon">✉</div><b>Marketing Contacts</b><span>Property contacts, AI-generated hospitality/retail contacts and verified database contacts for approved outreach.</span><span class="tag">WhatsApp Ready</span></a>
+      <a class="card" href="/marketing-contacts-final"><div class="icon">✉</div><b>Marketing Contacts</b><span>Property contacts, AI-generated hospitality/retail contacts and verified database contacts for approved outreach.</span><span class="tag">WhatsApp Ready</span></a>
       <a class="card" href="/legacy-workspace#contacts"><div class="icon">⇧</div><b>Upload Contact List</b><span>Add external contact databases for marketing workflows without mixing them into property inventory.</span><span class="tag">Contact Import</span></a>
       <a class="card" href="/legacy-workspace#bots"><div class="icon">⚡</div><b>Bot Control Room</b><span>Run and review discovery bots and system activity.</span><span class="tag">Automation</span></a>
     </div>
@@ -10924,4 +10924,217 @@ async function rebuild(){msg.textContent='Scanning hospitality/contact/prospect/
 async def v153_marketing_route_fix(request,call_next):
     if request.url.path in {"/marketing-contacts","/marketing-contacts-v2"}:
         return RedirectResponse("/marketing-contacts-v3",status_code=307)
+    return await call_next(request)
+
+# ============================================================
+# V15.5.1 UNIVERSAL FINAL MARKETING CONTACTS INTERFACE
+# No V15.4 dependency. Uses existing V15.1 contact database APIs.
+# ============================================================
+
+@app.get("/api/v15-5-1/marketing-contacts/summary")
+def v1551_marketing_summary(req:Request):
+    need_login(req)
+    _v151_setup()
+
+    def one(sql,params=None):
+        try:
+            with engine.connect() as c:
+                return int(c.execute(text(sql),params or {}).scalar_one() or 0)
+        except Exception:
+            return 0
+
+    categories={}
+    for cat in ["CAFE","RESTAURANT","BANQUET","HOTEL","GUEST_HOUSE","LOUNGE","CLUB","BAR","FARMHOUSE","RETAILER","BROKER","OWNER","OTHER"]:
+        categories[cat]=one("SELECT COUNT(*) FROM pi_marketing_contacts WHERE category=:c",{"c":cat})
+
+    return {
+        "status":"ok",
+        "total":one("SELECT COUNT(*) FROM pi_marketing_contacts"),
+        "ai_hospitality":one("SELECT COUNT(*) FROM pi_marketing_contacts WHERE source ILIKE '%AI_HOSPITALITY%'"),
+        "ai_retail":one("SELECT COUNT(*) FROM pi_marketing_contacts WHERE source ILIKE '%AI_RETAIL%'"),
+        "property_database":one("SELECT COUNT(*) FROM pi_marketing_contacts WHERE source ILIKE '%PROPERTY_DATABASE%'"),
+        "magazine":one("SELECT COUNT(*) FROM pi_marketing_contacts WHERE source ILIKE '%MAGAZINE%'"),
+        "verified":one("SELECT COUNT(*) FROM pi_marketing_contacts WHERE verified_status='VERIFIED'"),
+        "ready":one("SELECT COUNT(*) FROM pi_marketing_contacts WHERE whatsapp_status='READY'"),
+        "categories":categories
+    }
+
+@app.get("/marketing-contacts-final",response_class=HTMLResponse)
+def v1551_marketing_contacts_final(req:Request):
+    role=page_role_or_redirect(req)
+    if not role:
+        return RedirectResponse("/login",303)
+
+    return HTMLResponse("""<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Marketing Contacts Database</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#f4f7fb;font-family:Arial;color:#172437}
+header{background:#102235;color:white;padding:18px 22px}
+.wrap{max-width:1800px;margin:auto;padding:18px}
+.nav,.tabs,.filters{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px}
+.btn,a.btn{padding:8px 11px;border:0;border-radius:8px;background:#1677ff;color:white;text-decoration:none;font-weight:700;cursor:pointer}
+.gray{background:#e9eef5!important;color:#203247!important}.green{background:#08734b!important}
+.tab{padding:9px 12px;border:1px solid #dbe3ec;background:#fff;border-radius:9px;cursor:pointer;font-weight:700}
+.tab.active{background:#102235;color:#fff}
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:9px;margin-bottom:14px}
+.k{background:#fff;border:1px solid #e2e8f0;border-radius:11px;padding:12px}.k b{display:block;font-size:22px}.k span{font-size:11px;color:#687789}
+.card{background:#fff;border:1px solid #e2e8f0;border-radius:12px;padding:12px;margin-bottom:12px}
+select,input{padding:8px;border:1px solid #ccd6e2;border-radius:7px}input.search{min-width:260px}
+.tablewrap{overflow:auto;max-height:68vh;background:#fff;border-radius:10px}
+table{width:100%;border-collapse:collapse;font-size:12px}th,td{padding:8px;border-bottom:1px solid #edf1f5;text-align:left;vertical-align:top;white-space:nowrap}
+th{position:sticky;top:0;background:#f8fafc;z-index:2}.pill{display:inline-block;padding:3px 7px;border-radius:10px;background:#edf4ff}
+.small{font-size:11px;color:#687789}.source{font-weight:700}.catgrid{display:flex;gap:6px;flex-wrap:wrap}.cchip{padding:5px 8px;background:#eef3f8;border-radius:10px;font-size:11px;cursor:pointer}.cchip b{margin-left:4px}
+.msg{background:#fff8e8;border:1px solid #eed18f;border-radius:9px;padding:10px;margin-bottom:12px}
+</style>
+</head>
+<body>
+<header><b>Marketing Contacts Database</b><br><small>Segregated by Category · Source · Verification · WhatsApp Status</small></header>
+<div class="wrap">
+
+<div class="nav">
+<a class="btn gray" href="/workspace">← Dashboard</a>
+<button class="btn green" onclick="syncHosp()">Sync AI Hospitality</button>
+<button class="btn" onclick="syncAll()">Sync All Sources</button>
+</div>
+
+<div class="kpis">
+<div class="k"><b id="ktotal">0</b><span>ALL CONTACTS</span></div>
+<div class="k"><b id="khosp">0</b><span>AI HOSPITALITY</span></div>
+<div class="k"><b id="kret">0</b><span>AI RETAIL</span></div>
+<div class="k"><b id="kprop">0</b><span>PROPERTY DATABASE</span></div>
+<div class="k"><b id="kmag">0</b><span>MAGAZINE</span></div>
+<div class="k"><b id="kver">0</b><span>VERIFIED</span></div>
+<div class="k"><b id="kready">0</b><span>WHATSAPP READY</span></div>
+</div>
+
+<div class="tabs">
+<button class="tab active" data-source="ALL" onclick="setSource(this)">All</button>
+<button class="tab" data-source="AI_HOSPITALITY" onclick="setSource(this)">AI Hospitality</button>
+<button class="tab" data-source="AI_RETAIL" onclick="setSource(this)">AI Retail</button>
+<button class="tab" data-source="PROPERTY_DATABASE" onclick="setSource(this)">Property Database</button>
+<button class="tab" data-source="MAGAZINE" onclick="setSource(this)">Magazine</button>
+</div>
+
+<div class="card">
+<div><b>Category Segregation</b></div>
+<div id="catgrid" class="catgrid"></div>
+</div>
+
+<div class="filters">
+<select id="category">
+<option>ALL</option><option>CAFE</option><option>RESTAURANT</option><option>BANQUET</option><option>HOTEL</option>
+<option>GUEST_HOUSE</option><option>LOUNGE</option><option>CLUB</option><option>BAR</option><option>FARMHOUSE</option>
+<option>RETAILER</option><option>BROKER</option><option>OWNER</option><option>OTHER</option>
+</select>
+<select id="verified"><option>ALL</option><option>UNVERIFIED</option><option>VERIFIED</option></select>
+<select id="whatsapp"><option>ALL</option><option>NOT_CONTACTED</option><option>READY</option><option>SENT</option><option>REPLIED</option><option>OPT_OUT</option></select>
+<input class="search" id="q" placeholder="Search name, mobile, brand, location, email">
+<button class="btn" onclick="loadContacts()">Search</button>
+<span id="count" class="small"></span>
+</div>
+
+<div id="msg" class="msg">Use source tabs and category filters. Example: <b>AI Hospitality + CAFE</b>.</div>
+
+<div class="tablewrap">
+<table>
+<thead><tr>
+<th>Select</th><th>Name</th><th>Mobile</th><th>Brand / Company</th><th>Category</th><th>Location</th><th>Source</th><th>Verified</th><th>WhatsApp</th><th>Linked Properties</th><th>Date Added</th><th>Notes</th>
+</tr></thead>
+<tbody id="rows"></tbody>
+</table>
+</div>
+</div>
+
+<script>
+const E=x=>String(x??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+let source='ALL';
+
+async function A(u,o={}){
+  let r=await fetch(u,o),d=await r.json();
+  if(!r.ok) throw Error(d.detail||'Error');
+  return d;
+}
+function setSource(el){
+  document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));
+  el.classList.add('active'); source=el.dataset.source; loadContacts();
+}
+async function summary(){
+  let d=await A('/api/v15-5-1/marketing-contacts/summary');
+  ktotal.textContent=d.total||0;khosp.textContent=d.ai_hospitality||0;kret.textContent=d.ai_retail||0;
+  kprop.textContent=d.property_database||0;kmag.textContent=d.magazine||0;kver.textContent=d.verified||0;kready.textContent=d.ready||0;
+  catgrid.innerHTML=Object.entries(d.categories||{}).map(([k,v])=>`<span class="cchip" onclick="pickCat('${k}')">${k}<b>${v}</b></span>`).join('');
+}
+function pickCat(c){category.value=c;loadContacts();}
+async function loadContacts(){
+  let u='/api/v15-1/marketing-contacts?category='+encodeURIComponent(category.value)
+      +'&source='+encodeURIComponent(source)
+      +'&verified='+encodeURIComponent(verified.value)
+      +'&whatsapp='+encodeURIComponent(whatsapp.value)
+      +'&q='+encodeURIComponent(q.value||'');
+  let d=await A(u),r=d.rows||[];
+  count.textContent=r.length+' contacts';
+  rows.innerHTML=r.map(x=>`<tr>
+    <td><input type="checkbox" ${x.opt_out?'disabled':''}></td>
+    <td>${E(x.contact_name||'')}</td>
+    <td><b>${E(x.primary_phone||'')}</b><br><span class="small">${E((x.all_phones||[]).join(', '))}</span></td>
+    <td>${E(x.company_brand||'')}</td>
+    <td><span class="pill">${E(x.category||'OTHER')}</span></td>
+    <td>${E(x.city||'')}<br>${E(x.location||'')}</td>
+    <td><span class="source">${E(x.source||'')}</span><br><span class="small">${E(x.source_detail||'')}</span></td>
+    <td><select onchange="upd(${x.id},'verified_status',this.value)">
+      <option ${x.verified_status==='UNVERIFIED'?'selected':''}>UNVERIFIED</option>
+      <option ${x.verified_status==='VERIFIED'?'selected':''}>VERIFIED</option>
+    </select></td>
+    <td><select onchange="upd(${x.id},'whatsapp_status',this.value)">
+      <option ${x.whatsapp_status==='NOT_CONTACTED'?'selected':''}>NOT_CONTACTED</option>
+      <option ${x.whatsapp_status==='READY'?'selected':''}>READY</option>
+      <option ${x.whatsapp_status==='SENT'?'selected':''}>SENT</option>
+      <option ${x.whatsapp_status==='REPLIED'?'selected':''}>REPLIED</option>
+      <option ${x.whatsapp_status==='OPT_OUT'?'selected':''}>OPT_OUT</option>
+    </select></td>
+    <td>${E(x.linked_property_count||0)}</td>
+    <td>${E((x.date_added||'').slice(0,10))}</td>
+    <td>${E(x.notes||'')}</td>
+  </tr>`).join('') || '<tr><td colspan="12">No contacts found for this filter.</td></tr>';
+}
+async function upd(id,k,v){
+  let b={};b[k]=v;
+  await A('/api/v15-1/marketing-contacts/'+id+'/update',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});
+  summary();
+}
+async function syncHosp(){
+  msg.textContent='Syncing AI Hospitality contacts...';
+  try{
+    let endpoint='/api/v15-3/marketing-contacts/rebuild-hospitality';
+    let r=await fetch(endpoint,{method:'POST'});
+    if(r.status===404){endpoint='/api/v15-2/marketing-contacts/sync-ai-hospitality';r=await fetch(endpoint,{method:'POST'});}
+    let d=await r.json();
+    if(!r.ok) throw Error(d.detail||'Sync failed');
+    msg.textContent='AI Hospitality sync complete.';
+    await summary();await loadContacts();
+  }catch(e){msg.textContent='ERROR: '+e.message}
+}
+async function syncAll(){
+  msg.textContent='Syncing all sources...';
+  try{
+    let d=await A('/api/v15-1/marketing-contacts/sync',{method:'POST'});
+    msg.textContent='Source sync complete.';
+    await summary();await loadContacts();
+  }catch(e){msg.textContent='ERROR: '+e.message}
+}
+[category,verified,whatsapp].forEach(x=>x.onchange=loadContacts);
+q.onkeydown=e=>{if(e.key==='Enter')loadContacts()};
+summary();loadContacts();
+</script>
+</body>
+</html>""")
+
+@app.middleware("http")
+async def v1551_marketing_final_router(request,call_next):
+    if request.url.path in {"/marketing-contacts","/marketing-contacts-v2","/marketing-contacts-v3","/marketing-contacts-v4"}:
+        return RedirectResponse("/marketing-contacts-final",status_code=307)
     return await call_next(request)
