@@ -17,7 +17,7 @@ from PIL import Image
 import fitz
 from pypdf import PdfReader, PdfWriter
 
-VERSION="7.7.0-V5-RECOVERY-RETAIL-LINKEDIN"
+VERSION="7.8.0-V6-ORGANIZED-DATA-RETAIL"
 DATABASE_URL=os.getenv("DATABASE_URL","")
 GEMINI_API_KEY=os.getenv("GEMINI_API_KEY","")
 GEMINI_MODEL=os.getenv("GEMINI_MODEL","gemini-3.1-flash-lite")
@@ -4695,9 +4695,9 @@ def _v5_infer_city(text_value, location=None):
     if "noida" in v: return "Noida",98
     if "faridabad" in v: return "Faridabad",98
     if "ghaziabad" in v: return "Ghaziabad",98
-    if location and location not in {"Gurugram","Noida","Faridabad","Ghaziabad"}:
-        return "New Delhi",92
-    if "delhi" in v: return "New Delhi",90
+    if "delhi" in v: return "New Delhi",98
+    known_delhi_localities={"Greater Kailash","Greater Kailash 1","Greater Kailash 2","Kailash Colony","East of Kailash","New Friends Colony","Safdarjung Enclave","Green Park","Vasant Vihar","Vasant Kunj","Hauz Khas","Panchsheel Park","Panchsheel Enclave","Defence Colony","Lajpat Nagar","Jangpura","Nizamuddin","Saket","Malviya Nagar","Chittaranjan Park","Nehru Place","Okhla","Mathura Road","Mohan Co-operative","Mayapuri","Pitampura","Sainik Farm"}
+    if location in known_delhi_localities: return "New Delhi",96
     return None,0
 
 def _v5_infer_type(text_value):
@@ -4785,7 +4785,7 @@ def _v5_recovery_suggestion(p):
             suggestions["rent_or_sale"]={"value":tx,"confidence":conf,"reason":"Explicit rent/lease/sale wording in stored text"}
             reasons.append("TRANSACTION_RECOVERABLE")
 
-    high_conf={k:v for k,v in suggestions.items() if int(v.get("confidence") or 0)>=92}
+    high_conf={k:v for k,v in suggestions.items() if int(v.get("confidence") or 0)>=95}
     return {
         "property_id":p.get("property_id"),
         "property_name":p.get("property_name"),
@@ -4927,6 +4927,7 @@ def _save_retail_linkedin_requirement(item,campaign_id):
             "b":json.dumps({"intent_score":score,"signal":"Retail leasing requirement from LinkedIn/public index"}),
             "v":"PUBLIC_SOURCE" if (phones or emails) else "NOT_FOUND","ct":(title+" | "+snippet)[:2500]
         })
+    _v6_enrich_retail_signal(sid,title,snippet,link)
     _log_activity("Retail Requirement Bot","DEMAND","LINKEDIN_RETAIL_REQUIREMENT","demand_signal",sid,f"LinkedIn | score {score} | manual follow-up")
     return sid
 
@@ -4960,6 +4961,222 @@ def v5_retail_linkedin_requirements(bg:BackgroundTasks,req:Request):
     run=_start_bot("Retail LinkedIn Requirement Bot","DEMAND","Scanning public/indexed LinkedIn retail leasing requirements")
     bg.add_task(_retail_linkedin_requirement_worker,run)
     return {"status":"ACCEPTED","run_id":run}
+
+
+# ============================================================
+# V6 ORGANIZED RETAIL REQUIREMENTS
+# ============================================================
+
+def _ensure_v6_retail_requirement_columns():
+    statements=[
+        "ALTER TABLE ai_demand_signals ADD COLUMN IF NOT EXISTS company_name TEXT",
+        "ALTER TABLE ai_demand_signals ADD COLUMN IF NOT EXISTS contact_name TEXT",
+        "ALTER TABLE ai_demand_signals ADD COLUMN IF NOT EXISTS designation TEXT",
+        "ALTER TABLE ai_demand_signals ADD COLUMN IF NOT EXISTS linkedin_profile_url TEXT",
+        "ALTER TABLE ai_demand_signals ADD COLUMN IF NOT EXISTS required_area_sqft DOUBLE PRECISION",
+        "ALTER TABLE ai_demand_signals ADD COLUMN IF NOT EXISTS required_property_type TEXT",
+        "ALTER TABLE ai_demand_signals ADD COLUMN IF NOT EXISTS required_transaction TEXT",
+        "ALTER TABLE ai_demand_signals ADD COLUMN IF NOT EXISTS assigned_to TEXT",
+        "ALTER TABLE ai_demand_signals ADD COLUMN IF NOT EXISTS followup_status TEXT",
+        "ALTER TABLE ai_demand_signals ADD COLUMN IF NOT EXISTS crm_status TEXT",
+        "ALTER TABLE ai_demand_signals ADD COLUMN IF NOT EXISTS crm_notes TEXT",
+        "ALTER TABLE ai_demand_signals ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT NOW()"
+    ]
+    with engine.begin() as c:
+        for stmt in statements:
+            c.execute(text(stmt))
+
+def _v6_extract_retail_requirement_fields(title,snippet):
+    raw=(title or "")+" | "+(snippet or "")
+    norm=_norm(raw)
+    company=_company_guess(title)
+    contact_name=None
+    designation=None
+
+    m=_re.match(r"^\s*([A-Z][A-Za-z.' -]{2,60})\s*[-|–]\s*(.+)$",(title or "").strip())
+    if m:
+        tail=_norm(m.group(2))
+        if any(role in tail for role in ["business development","expansion","leasing","real estate","property acquisition","store development","projects"]):
+            contact_name=m.group(1).strip()
+
+    for key,label in [
+        ("business development","Business Development"),
+        ("property acquisition","Property Acquisition"),
+        ("store development","Store Development"),
+        ("expansion","Expansion"),
+        ("leasing","Leasing"),
+        ("real estate","Real Estate"),
+        ("projects","Projects")
+    ]:
+        if key in norm:
+            designation=label
+            break
+
+    area=None
+    for pat,mult in [
+        (r"(?i)(\d[\d,]{2,6})\s*(?:sq\.?\s*ft|sqft|sft|square\s*feet)\b",1.0),
+        (r"(?i)(\d[\d,]{2,5})\s*(?:sq\.?\s*yd|sqyd|sq\.?\s*yard|yards?)\b",9.0)
+    ]:
+        m2=_re.search(pat,raw)
+        if m2:
+            try:
+                area=float(m2.group(1).replace(",",""))*mult
+                break
+            except Exception:
+                pass
+
+    ptype=None
+    for terms,label in [
+        (["restaurant","cafe","qsr","f&b","food outlet"],"F&B / Restaurant"),
+        (["showroom"],"Showroom"),
+        (["shop","retail","store","outlet"],"Retail / Store"),
+        (["office"],"Office"),
+        (["banquet"],"Banquet"),
+        (["warehouse"],"Warehouse")
+    ]:
+        if any(t in norm for t in terms):
+            ptype=label
+            break
+
+    tx="LEASE" if any(x in norm for x in ["lease","leasing","rent","rental"]) else None
+    if company and company.lower().startswith(("linkedin","post by","view")):
+        company=None
+
+    return {
+        "company_name":company,
+        "contact_name":contact_name,
+        "designation":designation,
+        "required_area_sqft":area,
+        "required_property_type":ptype,
+        "required_transaction":tx
+    }
+
+def _v6_enrich_retail_signal(signal_id,title,snippet,source_url):
+    _ensure_v6_retail_requirement_columns()
+    f=_v6_extract_retail_requirement_fields(title,snippet)
+    profile=None
+    u=(source_url or "").lower()
+    if "linkedin.com/in/" in u or "linkedin.com/company/" in u:
+        profile=source_url
+
+    with engine.begin() as c:
+        c.execute(text("""UPDATE ai_demand_signals SET
+            company_name=COALESCE(company_name,:company),
+            contact_name=COALESCE(contact_name,:contact),
+            designation=COALESCE(designation,:designation),
+            linkedin_profile_url=COALESCE(linkedin_profile_url,:profile),
+            required_area_sqft=COALESCE(required_area_sqft,:area),
+            required_property_type=COALESCE(required_property_type,:ptype),
+            required_transaction=COALESCE(required_transaction,:tx),
+            followup_status=COALESCE(followup_status,'NEW'),
+            crm_status=COALESCE(crm_status,'NOT_SENT'),
+            updated_at=NOW()
+            WHERE signal_id=:id"""),{
+            "company":f["company_name"],"contact":f["contact_name"],"designation":f["designation"],
+            "profile":profile,"area":f["required_area_sqft"],"ptype":f["required_property_type"],
+            "tx":f["required_transaction"],"id":signal_id
+        })
+
+def _v6_backfill_retail_signals():
+    _ensure_v6_retail_requirement_columns()
+    with engine.connect() as c:
+        rows=c.execute(text("""SELECT signal_id,title,excerpt,source_url
+            FROM ai_demand_signals
+            WHERE source_type='RETAIL_LINKEDIN_REQUIREMENT'
+               OR source_name ILIKE '%LinkedIn%'""")).fetchall()
+    done=0
+    for r in rows:
+        d=dict(r._mapping)
+        _v6_enrich_retail_signal(d.get("signal_id"),d.get("title"),d.get("excerpt"),d.get("source_url"))
+        done+=1
+    return done
+
+@app.get("/api/v6/retail-requirements")
+def v6_retail_requirements(req:Request,limit:int=Query(1000,ge=1,le=3000)):
+    need_login(req)
+    _ensure_v6_retail_requirement_columns()
+    with engine.connect() as c:
+        rows=c.execute(text("""SELECT
+            signal_id,campaign_id,company_name,contact_name,designation,
+            contact_phone,contact_email,linkedin_profile_url,source_url,title,excerpt,
+            location,required_area_sqft,required_property_type,required_transaction,
+            intent_score,status,contact_verification_status,assigned_to,
+            followup_status,crm_status,crm_notes,created_at,updated_at
+            FROM ai_demand_signals
+            WHERE source_type='RETAIL_LINKEDIN_REQUIREMENT'
+               OR source_name ILIKE '%LinkedIn%'
+            ORDER BY intent_score DESC,created_at DESC
+            LIMIT :n"""),{"n":limit}).fetchall()
+    return {"status":"ok","rows":_json_rows(rows)}
+
+@app.post("/api/v6/retail-requirements/backfill")
+def v6_retail_requirement_backfill(req:Request):
+    need_login(req)
+    return {"status":"ok","updated":_v6_backfill_retail_signals()}
+
+@app.post("/api/v6/retail-requirements/{signal_id}/update")
+async def v6_update_retail_requirement(signal_id:str,req:Request):
+    need_login(req)
+    body=await req.json()
+    allowed={
+        "company_name","contact_name","designation","contact_phone","contact_email",
+        "linkedin_profile_url","required_area_sqft","required_property_type",
+        "required_transaction","assigned_to","followup_status","crm_status","crm_notes"
+    }
+    updates={k:v for k,v in body.items() if k in allowed}
+    if not updates:
+        return {"status":"ok","message":"Nothing to update"}
+    sets=[];params={"id":signal_id}
+    for k,v in updates.items():
+        sets.append(f"{k}=:{k}")
+        params[k]=v
+    sets.append("updated_at=NOW()")
+    with engine.begin() as c:
+        c.execute(text("UPDATE ai_demand_signals SET "+",".join(sets)+" WHERE signal_id=:id"),params)
+    return {"status":"ok","signal_id":signal_id}
+
+@app.get("/retail-requirements",response_class=HTMLResponse)
+def v6_retail_requirements_page(req:Request):
+    role=page_role_or_redirect(req)
+    if not role:
+        return RedirectResponse("/login",status_code=303)
+    return HTMLResponse(r"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Retail Requirement Leads</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#f4f7fb;font-family:Arial;color:#142033}header{background:#0d1d2d;color:#fff;padding:16px 22px}.wrap{padding:18px}.card{background:#fff;border:1px solid #e4eaf1;border-radius:12px;padding:14px;margin-bottom:12px}.toolbar{display:flex;gap:8px;flex-wrap:wrap}.btn{padding:8px 10px;border:0;border-radius:7px;background:#1677ff;color:#fff;font-weight:700;text-decoration:none;cursor:pointer}.gray{background:#edf2f7;color:#24364b}input,select{padding:7px;border:1px solid #ccd7e4;border-radius:6px}.tablewrap{overflow:auto;max-height:72vh}table{width:100%;border-collapse:collapse;font-size:12px}th,td{padding:8px;border-bottom:1px solid #edf1f5;text-align:left;vertical-align:top;white-space:nowrap}th{position:sticky;top:0;background:#f8fafc;z-index:1}.small{font-size:11px;color:#697589}
+</style></head><body>
+<header><b>Retail Requirement Leads</b><br><small>LinkedIn/public-indexed leasing requirements for manual verification and follow-up</small></header>
+<div class="wrap">
+<div class="card toolbar">
+<a class="btn gray" href="/workspace">Workspace</a><a class="btn gray" href="/data-recovery">Data Recovery</a>
+<input id="search" placeholder="Search company, person, phone, email, location, requirement">
+<select id="follow"><option value="">All Follow-up</option><option>NEW</option><option>CONTACTED</option><option>QUALIFIED</option><option>NOT_RELEVANT</option></select>
+<button class="btn" onclick="load()">Refresh</button><button class="btn gray" onclick="backfill()">Organize Existing Signals</button>
+</div>
+<div class="card"><div class="tablewrap"><table><thead><tr>
+<th>Company / Brand</th><th>Contact Person</th><th>Designation</th><th>Mobile</th><th>Email</th><th>LinkedIn Profile</th><th>Requirement Post</th><th>Requirement</th><th>Location</th><th>Area</th><th>Property Type</th><th>Transaction</th><th>Intent</th><th>Assigned</th><th>Follow-up</th><th>CRM</th><th>Save</th>
+</tr></thead><tbody id="rows"></tbody></table></div></div></div>
+<script>
+const E=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+let D=[];
+async function A(u,o={}){let r=await fetch(u,o),d=await r.json();if(!r.ok)throw new Error(d.detail||d.message||'Error');return d}
+function I(id,k,v){return `<input id="${id}_${k}" value="${E(v||'')}">`}
+function S(id,k,v,opts){return `<select id="${id}_${k}">${opts.map(o=>`<option ${o===v?'selected':''}>${o}</option>`).join('')}</select>`}
+function R(){let q=(document.querySelector('#search').value||'').toLowerCase(),f=document.querySelector('#follow').value;let rows=D.filter(x=>(!q||JSON.stringify(x).toLowerCase().includes(q))&&(!f||x.followup_status===f));document.querySelector('#rows').innerHTML=rows.map(x=>`<tr>
+<td>${I(x.signal_id,'company_name',x.company_name)}</td><td>${I(x.signal_id,'contact_name',x.contact_name)}</td><td>${I(x.signal_id,'designation',x.designation)}</td>
+<td>${I(x.signal_id,'contact_phone',x.contact_phone)}</td><td>${I(x.signal_id,'contact_email',x.contact_email)}</td>
+<td>${x.linkedin_profile_url?`<a target="_blank" href="${E(x.linkedin_profile_url)}">Profile</a>`:'Not Found'}</td>
+<td>${x.source_url?`<a target="_blank" href="${E(x.source_url)}">Open Post</a>`:'Not Found'}</td>
+<td style="max-width:320px;white-space:normal"><b>${E(x.title||'')}</b><br><span class="small">${E(x.excerpt||'')}</span></td>
+<td>${E(x.location||'')}</td><td>${I(x.signal_id,'required_area_sqft',x.required_area_sqft)}</td><td>${I(x.signal_id,'required_property_type',x.required_property_type)}</td><td>${I(x.signal_id,'required_transaction',x.required_transaction)}</td>
+<td>${E(x.intent_score||0)}</td><td>${I(x.signal_id,'assigned_to',x.assigned_to)}</td>
+<td>${S(x.signal_id,'followup_status',x.followup_status||'NEW',['NEW','CONTACTED','QUALIFIED','NOT_RELEVANT'])}</td>
+<td>${S(x.signal_id,'crm_status',x.crm_status||'NOT_SENT',['NOT_SENT','CRM_READY','ADDED_TO_CRM'])}</td>
+<td><button class="btn" onclick="save('${x.signal_id}')">Save</button></td></tr>`).join('')}
+async function load(){let d=await A('/api/v6/retail-requirements');D=d.rows||[];R()}
+async function backfill(){let d=await A('/api/v6/retail-requirements/backfill',{method:'POST'});alert('Organized '+d.updated+' existing LinkedIn signals');await load()}
+async function save(id){let ks=['company_name','contact_name','designation','contact_phone','contact_email','required_area_sqft','required_property_type','required_transaction','assigned_to','followup_status','crm_status'];let b={};ks.forEach(k=>{let e=document.getElementById(id+'_'+k);if(e)b[k]=e.value});await A('/api/v6/retail-requirements/'+encodeURIComponent(id)+'/update',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});alert('Saved')}
+document.querySelector('#search').addEventListener('input',R);document.querySelector('#follow').addEventListener('change',R);load();
+</script></body></html>""")
 
 
 @app.get("/api/v4/requirements")
@@ -5058,7 +5275,7 @@ def _v4_page(role):
 <title>AI Deal Intelligence OS V4</title><style>{_V4_CSS}</style></head><body><div class="shell">
 <aside class="side"><div class="brand">AI Deal Intelligence OS<small>V4 · Property · Hospitality · Retail · Demand</small></div>
 <div class="group">COMMAND</div><button class="nav active" data-page="command">▣ Command Centre</button><button class="nav" data-page="activity">◎ AI Activity</button><button class="nav" data-page="bots">⚡ Bot Control Room</button>
-<div class="group">PROPERTY</div><button class="nav" data-page="property">⌂ Add Property + Matcher</button><a class="nav" href="/property-database">▦ Full Property Database</a><a class="nav" href="/data-quality">✓ Data Quality / Organizer</a><a class="nav" href="/data-recovery">↻ Intelligent Recovery V5</a><button class="nav" data-page="owners">● Owners Database</button><button class="nav" data-page="brokers">● Brokers Database</button><a class="nav" href="/legacy-workspace">Original Upload Workspace</a><a class="nav" href="/database-page">Original Database</a>
+<div class="group">PROPERTY</div><button class="nav" data-page="property">⌂ Add Property + Matcher</button><a class="nav" href="/property-database">▦ Full Property Database</a><a class="nav" href="/data-quality">✓ Data Quality / Organizer</a><a class="nav" href="/data-recovery">↻ Intelligent Recovery V5</a><a class="nav" href="/retail-requirements">▤ Retail Requirement Leads</a><button class="nav" data-page="owners">● Owners Database</button><button class="nav" data-page="brokers">● Brokers Database</button><a class="nav" href="/legacy-workspace">Original Upload Workspace</a><a class="nav" href="/database-page">Original Database</a>
 <div class="group">LEAD INTELLIGENCE</div><button class="nav" data-page="hospitality">◆ Hospitality</button><button class="nav" data-page="retail">◈ Retail Expansion</button><button class="nav" data-page="contacts">✉ Marketing Contacts</button><button class="nav" data-page="demand">⌕ Requirement Discovery</button>
 </aside><main class="main"><header class="top"><div><b>Unified Delhi NCR Deal Intelligence</b><div class="sub">Organized database + AI bots + matching</div></div><div>{badge} · <a href="/logout">Logout</a></div></header><div class="content">
 
