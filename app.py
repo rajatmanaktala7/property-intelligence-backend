@@ -11732,3 +11732,282 @@ async def v1571_hospitality_final_router(request,call_next):
     if request.url.path in {"/ai-hospitality-master","/ai-hospitality-master-only"}:
         return RedirectResponse("/ai-hospitality-master-final",status_code=307)
     return await call_next(request)
+
+# ============================================================
+# V15.8 HISTORICAL HOSPITALITY PHONE RECOVERY
+# Purpose: recover previously-fetched phone numbers for WhatsApp marketing.
+# Scans historical database tables and raw payloads, then links phones
+# back to AI Hospitality Master using business/location/source evidence.
+# Never invents phone digits.
+# ============================================================
+
+def _v158_setup():
+    _v156_setup()
+    with engine.begin() as c:
+        c.execute(text("""CREATE TABLE IF NOT EXISTS pi_hospitality_phone_evidence(
+            id BIGSERIAL PRIMARY KEY,
+            hospitality_master_id BIGINT,
+            business_name TEXT,
+            recovered_phone TEXT,
+            source_table TEXT,
+            source_row_ref TEXT,
+            match_method TEXT,
+            confidence INTEGER,
+            evidence_text TEXT,
+            applied BOOLEAN DEFAULT FALSE,
+            created_at TIMESTAMPTZ DEFAULT NOW()
+        )"""))
+        c.execute(text("CREATE INDEX IF NOT EXISTS idx_hosp_phone_evidence_master ON pi_hospitality_phone_evidence(hospitality_master_id)"))
+        c.execute(text("CREATE INDEX IF NOT EXISTS idx_hosp_phone_evidence_phone ON pi_hospitality_phone_evidence(recovered_phone)"))
+
+def _v158_norm(s):
+    return _re.sub(r"[^a-z0-9]+"," ",str(s or "").lower()).strip()
+
+def _v158_valid_phones_from_text(txt):
+    found=[]
+    for m in _re.findall(r"(?<!\d)(?:\+?91[\s\-]?)?([6-9]\d{9})(?!\d)",str(txt or "")):
+        ph=_v151_digits(m)
+        if ph and ph not in found:
+            found.append(ph)
+    return found
+
+def _v158_table_names():
+    with engine.connect() as c:
+        rows=c.execute(text("""SELECT table_name FROM information_schema.tables
+            WHERE table_schema='public' AND table_type='BASE TABLE'
+            ORDER BY table_name""")).fetchall()
+    excluded={
+        "pi_hospitality_phone_evidence",
+        "pi_ai_hospitality_master",
+        "pi_marketing_contacts"
+    }
+    return [r._mapping["table_name"] for r in rows if r._mapping["table_name"] not in excluded]
+
+def _v158_table_columns(table):
+    with engine.connect() as c:
+        rows=c.execute(text("""SELECT column_name,data_type FROM information_schema.columns
+            WHERE table_schema='public' AND table_name=:t ORDER BY ordinal_position"""),{"t":table}).fetchall()
+    return [dict(r._mapping) for r in rows]
+
+def _v158_relevant_table(table, cols):
+    name=table.lower()
+    ctext=" ".join(c["column_name"].lower() for c in cols)
+    keywords=["hospital","marketing","contact","lead","prospect","ai_","bot","source","raw","business"]
+    return any(k in name for k in keywords) or any(k in ctext for k in ["phone","mobile","whatsapp","contact","payload","raw"])
+
+def _v158_row_blob(row):
+    parts=[]
+    for k,v in row.items():
+        if v is None: continue
+        try:
+            if isinstance(v,(dict,list,tuple)):
+                parts.append(json.dumps(v,default=str))
+            else:
+                parts.append(str(v))
+        except Exception:
+            parts.append(str(v))
+    return " | ".join(parts)
+
+def _v158_master_rows():
+    with engine.connect() as c:
+        return [dict(r._mapping) for r in c.execute(text("""SELECT id,source_row_id,business_name,category,city,location,
+            primary_phone,email,website,source_url,raw_text,contact_status
+            FROM pi_ai_hospitality_master ORDER BY id""")).fetchall()]
+
+def _v158_match_candidate(master, blob, table, row):
+    bnorm=_v158_norm(blob)
+    business=_v158_norm(master.get("business_name"))
+    location=_v158_norm(master.get("location"))
+    source_id=_v158_norm(master.get("source_row_id"))
+    src_url=_v158_norm(master.get("source_url"))
+    score=0
+    methods=[]
+
+    if business and len(business)>=4 and business in bnorm:
+        score+=60;methods.append("BUSINESS")
+    if location and len(location)>=8:
+        # use first meaningful 2-3 tokens rather than exact giant address
+        toks=[x for x in location.split() if len(x)>=4][:4]
+        hits=sum(1 for x in toks if x in bnorm)
+        if hits>=2:
+            score+=20;methods.append("LOCATION")
+        elif hits==1:
+            score+=8;methods.append("LOCATION_PARTIAL")
+    if source_id and source_id in bnorm:
+        score+=30;methods.append("SOURCE_ROW_ID")
+    if src_url:
+        # compare host/path fragments conservatively
+        toks=[x for x in src_url.split() if len(x)>=8][:3]
+        if any(x in bnorm for x in toks):
+            score+=20;methods.append("SOURCE_URL")
+    # If source row id equals a visible row id-like value.
+    for key in ["id","contact_id","lead_id","prospect_id","record_id","source_id"]:
+        if key in row and source_id and _v158_norm(row.get(key))==source_id:
+            score+=35;methods.append("ID_EXACT")
+            break
+
+    return min(score,100),"+".join(methods) if methods else ""
+
+def _v158_recover_historical_phones():
+    _v158_setup()
+    masters=_v158_master_rows()
+    tables=[]
+    for t in _v158_table_names():
+        try:
+            cols=_v158_table_columns(t)
+            if _v158_relevant_table(t,cols):
+                tables.append(t)
+        except Exception:
+            pass
+
+    scanned_rows=0
+    evidence_count=0
+    applied=0
+    master_with_new_phone=set()
+    table_stats=[]
+    errors=[]
+
+    # Cache master records for simpler matching.
+    for table in tables:
+        trows=tphones=tevidence=tapplied=0
+        try:
+            with engine.connect() as c:
+                rows=[dict(r._mapping) for r in c.execute(text(f'SELECT * FROM "{table}" LIMIT 30000')).fetchall()]
+            trows=len(rows);scanned_rows+=trows
+
+            for row in rows:
+                blob=_v158_row_blob(row)
+                phones=_v158_valid_phones_from_text(blob)
+                if not phones:
+                    continue
+                tphones+=1
+
+                # Find best hospitality master match.
+                best=None
+                for m in masters:
+                    score,method=_v158_match_candidate(m,blob,table,row)
+                    if score>=70 and (best is None or score>best[0]):
+                        best=(score,method,m)
+
+                if not best:
+                    continue
+
+                score,method,m=best
+                sid=str(row.get("id") or row.get("contact_id") or row.get("lead_id") or row.get("prospect_id") or "")
+                for ph in phones:
+                    # Don't duplicate same evidence.
+                    exists=False
+                    with engine.connect() as c:
+                        ex=c.execute(text("""SELECT 1 FROM pi_hospitality_phone_evidence
+                            WHERE hospitality_master_id=:mid AND recovered_phone=:ph AND source_table=:t LIMIT 1"""),
+                            {"mid":m["id"],"ph":ph,"t":table}).first()
+                        exists=bool(ex)
+                    if exists:
+                        continue
+
+                    with engine.begin() as c:
+                        c.execute(text("""INSERT INTO pi_hospitality_phone_evidence(
+                            hospitality_master_id,business_name,recovered_phone,source_table,source_row_ref,
+                            match_method,confidence,evidence_text,applied
+                        ) VALUES(:mid,:bn,:ph,:t,:ref,:method,:conf,:ev,FALSE)"""),{
+                            "mid":m["id"],"bn":m.get("business_name"),"ph":ph,"t":table,"ref":sid,
+                            "method":method,"conf":score,"ev":blob[:2500]
+                        })
+                    evidence_count+=1;tevidence+=1
+
+                    # Auto-apply only very strong matches (90+), and preserve all phones.
+                    if score>=90:
+                        with engine.begin() as c:
+                            current=c.execute(text("""SELECT all_phones,primary_phone FROM pi_ai_hospitality_master WHERE id=:id"""),
+                                {"id":m["id"]}).fetchone()
+                            if current:
+                                cur=dict(current._mapping)
+                                arr=cur.get("all_phones") or []
+                                if isinstance(arr,str):
+                                    try:arr=json.loads(arr)
+                                    except:arr=[]
+                                arr=[str(x) for x in arr if x]
+                                if ph not in arr:arr.append(ph)
+                                primary=cur.get("primary_phone") or ph
+                                c.execute(text("""UPDATE pi_ai_hospitality_master
+                                    SET primary_phone=:primary,all_phones=CAST(:phones AS jsonb),
+                                        contact_status='CONTACT_READY',updated_at=NOW()
+                                    WHERE id=:id"""),{
+                                    "primary":primary,"phones":json.dumps(arr),"id":m["id"]
+                                })
+                                c.execute(text("""UPDATE pi_hospitality_phone_evidence
+                                    SET applied=TRUE WHERE hospitality_master_id=:mid AND recovered_phone=:ph AND source_table=:t"""),
+                                    {"mid":m["id"],"ph":ph,"t":table})
+                                applied+=1;tapplied+=1;master_with_new_phone.add(m["id"])
+                                # Promote to WhatsApp marketing contact DB.
+                                try:
+                                    _v151_upsert_contact(
+                                        ph,
+                                        company=m.get("business_name"),
+                                        category=m.get("category"),
+                                        city=m.get("city"),
+                                        location=m.get("location"),
+                                        email=m.get("email"),
+                                        website=m.get("website"),
+                                        source="AI_HOSPITALITY",
+                                        source_detail=f"HISTORICAL_RECOVERY:{table}",
+                                        notes=f"Recovered historical phone. Confidence {score}. Match {method}."
+                                    )
+                                except Exception:
+                                    pass
+
+            table_stats.append({"table":table,"rows":trows,"rows_with_phone":tphones,"evidence":tevidence,"applied":tapplied})
+        except Exception as ex:
+            errors.append(f"{table}: {type(ex).__name__}: {ex}")
+            table_stats.append({"table":table,"error":f"{type(ex).__name__}: {ex}"})
+
+    total_ready=_v15_safe_count("SELECT COUNT(*) FROM pi_ai_hospitality_master WHERE contact_status='CONTACT_READY'")
+    total_with_phone=_v15_safe_count("SELECT COUNT(*) FROM pi_ai_hospitality_master WHERE primary_phone IS NOT NULL AND primary_phone<>''")
+    return {
+        "candidate_tables":len(tables),
+        "rows_scanned":scanned_rows,
+        "phone_evidence_found":evidence_count,
+        "auto_applied":applied,
+        "hospitality_records_improved":len(master_with_new_phone),
+        "total_contact_ready":total_ready,
+        "total_with_phone":total_with_phone,
+        "table_stats":table_stats,
+        "errors":errors[:30]
+    }
+
+@app.post("/api/v15-8/recover-historical-hospitality-phones")
+def v158_recover_api(req:Request):
+    need_login(req)
+    try:
+        return {"status":"ok",**_v158_recover_historical_phones()}
+    except Exception as ex:
+        raise HTTPException(500,f"{type(ex).__name__}: {ex}")
+
+@app.get("/api/v15-8/phone-evidence")
+def v158_evidence_api(req:Request,applied:str=Query("ALL")):
+    need_login(req);_v158_setup()
+    sql="""SELECT id,hospitality_master_id,business_name,recovered_phone,source_table,source_row_ref,
+        match_method,confidence,applied,created_at FROM pi_hospitality_phone_evidence"""
+    p={}
+    if applied=="YES":sql+=" WHERE applied=TRUE"
+    elif applied=="NO":sql+=" WHERE applied=FALSE"
+    sql+=" ORDER BY confidence DESC,id DESC LIMIT 5000"
+    with engine.connect() as c:
+        rows=[dict(r._mapping) for r in c.execute(text(sql),p).fetchall()]
+    return {"status":"ok","rows":rows}
+
+@app.get("/hospitality-phone-recovery",response_class=HTMLResponse)
+def v158_recovery_page(req:Request):
+    role=page_role_or_redirect(req)
+    if not role:return RedirectResponse("/login",303)
+
+    return HTMLResponse("""<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>Hospitality Phone Recovery</title>
+<style>*{box-sizing:border-box}body{font-family:Arial;margin:0;background:#f4f7fb;color:#172437}header{background:#102235;color:white;padding:18px}.w{padding:18px;max-width:1700px;margin:auto}.bar{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}.btn,a.btn{padding:8px 10px;border:0;border-radius:8px;background:#1677ff;color:#fff;text-decoration:none;font-weight:bold;cursor:pointer}.gray{background:#e9eef5!important;color:#203247!important}.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;margin-bottom:12px}.k{background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:12px}.k b{display:block;font-size:22px}.msg{background:#fff8e8;border:1px solid #eed18f;padding:10px;border-radius:9px;margin-bottom:12px}.tablewrap{overflow:auto;background:#fff;border-radius:10px;max-height:65vh}table{width:100%;border-collapse:collapse;font-size:12px}th,td{padding:8px;border-bottom:1px solid #edf1f5;text-align:left;white-space:nowrap}th{position:sticky;top:0;background:#f8fafc}.good{color:#08734b;font-weight:bold}</style></head>
+<body><header><b>Historical Hospitality Phone Recovery</b><br><small>Recover previously fetched phone numbers for WhatsApp marketing</small></header><div class=w>
+<div class=bar><a class="btn gray" href="/ai-hospitality-master-final">← Hospitality Master</a><button class=btn onclick="recover()">Recover Historical Phone Numbers</button><a class="btn gray" href="/marketing-contacts-final">Marketing Contacts</a></div>
+<div class=kpis><div class=k><b id=tables>0</b><span>TABLES SCANNED</span></div><div class=k><b id=scan>0</b><span>ROWS SCANNED</span></div><div class=k><b id=ev>0</b><span>PHONE EVIDENCE</span></div><div class=k><b id=apply>0</b><span>AUTO APPLIED</span></div><div class=k><b id=improved>0</b><span>HOSPITALITY RECORDS IMPROVED</span></div><div class=k><b id=withphone>0</b><span>MASTER ROWS WITH PHONE</span></div></div>
+<div id=msg class=msg>This does not rerun the Hospitality Bot. It searches historical database tables/raw payloads for phone numbers already fetched earlier and links them back to the matching hospitality business.</div>
+<div class=tablewrap><table><thead><tr><th>Table</th><th>Rows</th><th>Rows With Phone</th><th>Matched Phone Evidence</th><th>Auto Applied</th><th>Status</th></tr></thead><tbody id=rows></tbody></table></div>
+</div><script>
+async function recover(){msg.textContent='Scanning historical data for previously fetched Hospitality phones...';let r=await fetch('/api/v15-8/recover-historical-hospitality-phones',{method:'POST'}),d=await r.json();if(!r.ok){msg.textContent='ERROR: '+(d.detail||'Recovery failed');return}tables.textContent=d.candidate_tables||0;scan.textContent=d.rows_scanned||0;ev.textContent=d.phone_evidence_found||0;apply.textContent=d.auto_applied||0;improved.textContent=d.hospitality_records_improved||0;withphone.textContent=d.total_with_phone||0;rows.innerHTML=(d.table_stats||[]).map(x=>`<tr><td>${x.table||''}</td><td>${x.rows||0}</td><td>${x.rows_with_phone||0}</td><td>${x.evidence||0}</td><td>${x.applied||0}</td><td>${x.error||'OK'}</td></tr>`).join('');msg.textContent=`Recovery complete. ${d.phone_evidence_found||0} matched phone records found; ${d.auto_applied||0} high-confidence phones applied.`}
+</script></body></html>""")
