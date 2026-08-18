@@ -12011,3 +12011,267 @@ def v158_recovery_page(req:Request):
 </div><script>
 async function recover(){msg.textContent='Scanning historical data for previously fetched Hospitality phones...';let r=await fetch('/api/v15-8/recover-historical-hospitality-phones',{method:'POST'}),d=await r.json();if(!r.ok){msg.textContent='ERROR: '+(d.detail||'Recovery failed');return}tables.textContent=d.candidate_tables||0;scan.textContent=d.rows_scanned||0;ev.textContent=d.phone_evidence_found||0;apply.textContent=d.auto_applied||0;improved.textContent=d.hospitality_records_improved||0;withphone.textContent=d.total_with_phone||0;rows.innerHTML=(d.table_stats||[]).map(x=>`<tr><td>${x.table||''}</td><td>${x.rows||0}</td><td>${x.rows_with_phone||0}</td><td>${x.evidence||0}</td><td>${x.applied||0}</td><td>${x.error||'OK'}</td></tr>`).join('');msg.textContent=`Recovery complete. ${d.phone_evidence_found||0} matched phone records found; ${d.auto_applied||0} high-confidence phones applied.`}
 </script></body></html>""")
+
+# ============================================================
+# V15.8.1 BACKGROUND HOSPITALITY PHONE RECOVERY
+# Fixes V15.8 long-running synchronous scan.
+# Runs recovery in background with progress + indexed matching.
+# ============================================================
+
+def _v1581_setup():
+    _v158_setup()
+    with engine.begin() as c:
+        c.execute(text("""CREATE TABLE IF NOT EXISTS pi_hospitality_phone_recovery_jobs(
+            id BIGSERIAL PRIMARY KEY,
+            status TEXT DEFAULT 'QUEUED',
+            current_table TEXT,
+            tables_total INTEGER DEFAULT 0,
+            tables_done INTEGER DEFAULT 0,
+            rows_scanned BIGINT DEFAULT 0,
+            rows_with_phone BIGINT DEFAULT 0,
+            phone_evidence BIGINT DEFAULT 0,
+            auto_applied BIGINT DEFAULT 0,
+            improved_records BIGINT DEFAULT 0,
+            error_message TEXT,
+            started_at TIMESTAMPTZ DEFAULT NOW(),
+            finished_at TIMESTAMPTZ,
+            updated_at TIMESTAMPTZ DEFAULT NOW()
+        )"""))
+
+def _v1581_candidate_tables():
+    preferred=[
+        "ai_marketing_contacts",
+        "ai_contacts",
+        "hospitality_contacts",
+        "ai_hospitality_contacts",
+        "hospitality_prospects",
+        "pi_hospitality_prospects",
+        "hospitality_leads",
+        "ai_demand_signals",
+        "pi_contact_directory_v2",
+        "pi_contacts"
+    ]
+    with engine.connect() as c:
+        existing={r._mapping["table_name"] for r in c.execute(text(
+            "SELECT table_name FROM information_schema.tables WHERE table_schema='public' AND table_type='BASE TABLE'"
+        )).fetchall()}
+    return [t for t in preferred if t in existing]
+
+def _v1581_master_index():
+    masters=_v158_master_rows()
+    exact={}
+    token_index={}
+    for m in masters:
+        name=_v158_norm(m.get("business_name"))
+        if name:
+            exact.setdefault(name,[]).append(m)
+            for tok in [x for x in name.split() if len(x)>=5][:4]:
+                token_index.setdefault(tok,[]).append(m)
+    return masters,exact,token_index
+
+def _v1581_candidates_from_blob(blob, exact, token_index):
+    bnorm=_v158_norm(blob)
+    cands={}
+    # exact business name hit
+    for name,rows in exact.items():
+        if len(name)>=4 and name in bnorm:
+            for m in rows:cands[m["id"]]=m
+    # token narrowing only if exact did not find
+    if not cands:
+        for tok,rows in token_index.items():
+            if tok in bnorm:
+                for m in rows:cands[m["id"]]=m
+    return list(cands.values())
+
+def _v1581_update_job(job_id, **vals):
+    if not vals:return
+    sets=[];p={"id":job_id}
+    for i,(k,v) in enumerate(vals.items()):
+        key=f"v{i}";sets.append(f"{k}=:{key}");p[key]=v
+    with engine.begin() as c:
+        c.execute(text("UPDATE pi_hospitality_phone_recovery_jobs SET "+",".join(sets)+",updated_at=NOW() WHERE id=:id"),p)
+
+def _v1581_worker(job_id):
+    try:
+        _v1581_setup()
+        masters,exact,token_index=_v1581_master_index()
+        tables=_v1581_candidate_tables()
+        _v1581_update_job(job_id,status="RUNNING",tables_total=len(tables),tables_done=0)
+
+        improved=set()
+        total_rows=total_phone_rows=total_evidence=total_applied=0
+
+        for ti,table in enumerate(tables,1):
+            _v1581_update_job(job_id,current_table=table,tables_done=ti-1)
+
+            with engine.connect() as c:
+                rows=[dict(r._mapping) for r in c.execute(text(f'SELECT * FROM "{table}" LIMIT 20000')).fetchall()]
+
+            for row in rows:
+                total_rows+=1
+                blob=_v158_row_blob(row)
+                phones=_v158_valid_phones_from_text(blob)
+                if not phones:
+                    if total_rows % 500 == 0:
+                        _v1581_update_job(job_id,rows_scanned=total_rows,rows_with_phone=total_phone_rows,
+                                         phone_evidence=total_evidence,auto_applied=total_applied,
+                                         improved_records=len(improved))
+                    continue
+
+                total_phone_rows+=1
+                candidates=_v1581_candidates_from_blob(blob,exact,token_index)
+                if not candidates:
+                    continue
+
+                best=None
+                for m in candidates:
+                    score,method=_v158_match_candidate(m,blob,table,row)
+                    if score>=70 and (best is None or score>best[0]):
+                        best=(score,method,m)
+                if not best:
+                    continue
+
+                score,method,m=best
+                row_ref=str(row.get("id") or row.get("contact_id") or row.get("lead_id") or row.get("prospect_id") or "")
+
+                for ph in phones:
+                    with engine.connect() as c:
+                        exists=c.execute(text("""SELECT 1 FROM pi_hospitality_phone_evidence
+                            WHERE hospitality_master_id=:mid AND recovered_phone=:ph AND source_table=:t LIMIT 1"""),
+                            {"mid":m["id"],"ph":ph,"t":table}).first()
+                    if exists:
+                        continue
+
+                    with engine.begin() as c:
+                        c.execute(text("""INSERT INTO pi_hospitality_phone_evidence(
+                            hospitality_master_id,business_name,recovered_phone,source_table,source_row_ref,
+                            match_method,confidence,evidence_text,applied
+                        ) VALUES(:mid,:bn,:ph,:t,:ref,:method,:conf,:ev,FALSE)"""),{
+                            "mid":m["id"],"bn":m.get("business_name"),"ph":ph,"t":table,"ref":row_ref,
+                            "method":method,"conf":score,"ev":blob[:2500]
+                        })
+                    total_evidence+=1
+
+                    if score>=90:
+                        with engine.begin() as c:
+                            current=c.execute(text(
+                                "SELECT all_phones,primary_phone FROM pi_ai_hospitality_master WHERE id=:id"
+                            ),{"id":m["id"]}).fetchone()
+                            if current:
+                                cur=dict(current._mapping)
+                                arr=cur.get("all_phones") or []
+                                if isinstance(arr,str):
+                                    try:arr=json.loads(arr)
+                                    except:arr=[]
+                                arr=[str(x) for x in arr if x]
+                                if ph not in arr:arr.append(ph)
+                                primary=cur.get("primary_phone") or ph
+                                c.execute(text("""UPDATE pi_ai_hospitality_master
+                                    SET primary_phone=:p,all_phones=CAST(:phones AS jsonb),
+                                        contact_status='CONTACT_READY',updated_at=NOW()
+                                    WHERE id=:id"""),{
+                                    "p":primary,"phones":json.dumps(arr),"id":m["id"]
+                                })
+                                c.execute(text("""UPDATE pi_hospitality_phone_evidence
+                                    SET applied=TRUE WHERE hospitality_master_id=:mid
+                                    AND recovered_phone=:ph AND source_table=:t"""),
+                                    {"mid":m["id"],"ph":ph,"t":table})
+                        total_applied+=1
+                        improved.add(m["id"])
+                        try:
+                            _v151_upsert_contact(
+                                ph,
+                                company=m.get("business_name"),
+                                category=m.get("category"),
+                                city=m.get("city"),
+                                location=m.get("location"),
+                                email=m.get("email"),
+                                website=m.get("website"),
+                                source="AI_HOSPITALITY",
+                                source_detail=f"HISTORICAL_RECOVERY:{table}",
+                                notes=f"Recovered historical phone. Confidence {score}. Match {method}."
+                            )
+                        except Exception:
+                            pass
+
+                if total_rows % 250 == 0:
+                    _v1581_update_job(job_id,rows_scanned=total_rows,rows_with_phone=total_phone_rows,
+                                     phone_evidence=total_evidence,auto_applied=total_applied,
+                                     improved_records=len(improved))
+
+            _v1581_update_job(job_id,tables_done=ti,rows_scanned=total_rows,rows_with_phone=total_phone_rows,
+                             phone_evidence=total_evidence,auto_applied=total_applied,
+                             improved_records=len(improved))
+
+        _v1581_update_job(job_id,status="COMPLETED",current_table=None,tables_done=len(tables),
+                         rows_scanned=total_rows,rows_with_phone=total_phone_rows,
+                         phone_evidence=total_evidence,auto_applied=total_applied,
+                         improved_records=len(improved),finished_at=datetime.now(timezone.utc))
+    except Exception as ex:
+        try:
+            _v1581_update_job(job_id,status="FAILED",error_message=f"{type(ex).__name__}: {ex}",
+                             finished_at=datetime.now(timezone.utc))
+        except Exception:
+            pass
+
+@app.post("/api/v15-8-1/phone-recovery/start")
+def v1581_start(req:Request, background_tasks:BackgroundTasks):
+    need_login(req);_v1581_setup()
+    with engine.begin() as c:
+        existing=c.execute(text("""SELECT id FROM pi_hospitality_phone_recovery_jobs
+            WHERE status IN ('QUEUED','RUNNING') ORDER BY id DESC LIMIT 1""")).first()
+        if existing:
+            return {"status":"already_running","job_id":existing._mapping["id"]}
+        row=c.execute(text("""INSERT INTO pi_hospitality_phone_recovery_jobs(status,started_at,updated_at)
+            VALUES('QUEUED',NOW(),NOW()) RETURNING id""")).first()
+        job_id=row._mapping["id"]
+    background_tasks.add_task(_v1581_worker,job_id)
+    return {"status":"started","job_id":job_id}
+
+@app.get("/api/v15-8-1/phone-recovery/status")
+def v1581_status(req:Request):
+    need_login(req);_v1581_setup()
+    with engine.connect() as c:
+        row=c.execute(text("""SELECT * FROM pi_hospitality_phone_recovery_jobs
+            ORDER BY id DESC LIMIT 1""")).first()
+    if not row:
+        return {"status":"none"}
+    d=dict(row._mapping)
+    d["master_rows_with_phone"]=_v15_safe_count(
+        "SELECT COUNT(*) FROM pi_ai_hospitality_master WHERE primary_phone IS NOT NULL AND primary_phone<>''"
+    )
+    d["contact_ready"]=_v15_safe_count(
+        "SELECT COUNT(*) FROM pi_ai_hospitality_master WHERE contact_status='CONTACT_READY'"
+    )
+    return d
+
+@app.get("/hospitality-phone-recovery-v2",response_class=HTMLResponse)
+def v1581_page(req:Request):
+    role=page_role_or_redirect(req)
+    if not role:return RedirectResponse("/login",303)
+    return HTMLResponse("""<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>Hospitality Phone Recovery</title>
+<style>*{box-sizing:border-box}body{font-family:Arial;margin:0;background:#f4f7fb;color:#172437}header{background:#102235;color:white;padding:18px}.w{max-width:1500px;margin:auto;padding:18px}.bar{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}.btn,a.btn{padding:8px 10px;border:0;border-radius:8px;background:#1677ff;color:white;text-decoration:none;font-weight:bold;cursor:pointer}.gray{background:#e9eef5!important;color:#203247!important}.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;margin-bottom:12px}.k{background:white;border:1px solid #e2e8f0;border-radius:10px;padding:12px}.k b{display:block;font-size:22px}.msg{background:#fff8e8;border:1px solid #eed18f;padding:11px;border-radius:9px}.progress{height:18px;background:#e8edf3;border-radius:9px;overflow:hidden;margin:12px 0}.fill{height:100%;background:#1677ff;width:0}.small{font-size:12px;color:#687789}</style></head>
+<body><header><b>Hospitality Phone Recovery</b><br><small>Background recovery of phone numbers already fetched earlier</small></header><div class=w>
+<div class=bar><a class="btn gray" href="/ai-hospitality-master-final">← Hospitality Master</a><button class=btn onclick="start()">Start Historical Phone Recovery</button><a class="btn gray" href="/marketing-contacts-final">Marketing Contacts</a></div>
+<div class=kpis>
+<div class=k><b id=tables>0</b><span>TABLES DONE / TOTAL</span></div>
+<div class=k><b id=rows>0</b><span>ROWS SCANNED</span></div>
+<div class=k><b id=evidence>0</b><span>PHONE EVIDENCE</span></div>
+<div class=k><b id=applied>0</b><span>AUTO APPLIED</span></div>
+<div class=k><b id=improved>0</b><span>RECORDS IMPROVED</span></div>
+<div class=k><b id=masterphones>0</b><span>MASTER ROWS WITH PHONE</span></div>
+</div>
+<div class=progress><div id=fill class=fill></div></div>
+<div id=msg class=msg>Ready. This runs in the background, so the page will not freeze or time out.</div>
+<p class=small>Current table: <b id=current>-</b></p>
+</div>
+<script>
+async function start(){msg.textContent='Starting recovery...';let r=await fetch('/api/v15-8-1/phone-recovery/start',{method:'POST'}),d=await r.json();if(!r.ok){msg.textContent='ERROR';return}msg.textContent=d.status==='already_running'?'Recovery is already running.':'Recovery started in background.';poll()}
+async function poll(){try{let d=await(await fetch('/api/v15-8-1/phone-recovery/status')).json();if(d.status==='none')return;tables.textContent=(d.tables_done||0)+' / '+(d.tables_total||0);rows.textContent=d.rows_scanned||0;evidence.textContent=d.phone_evidence||0;applied.textContent=d.auto_applied||0;improved.textContent=d.improved_records||0;masterphones.textContent=d.master_rows_with_phone||0;current.textContent=d.current_table||'-';let pct=d.tables_total?Math.round((d.tables_done||0)*100/d.tables_total):0;fill.style.width=pct+'%';msg.textContent=d.status+(d.error_message?': '+d.error_message:'');if(['QUEUED','RUNNING'].includes(d.status))setTimeout(poll,3000)}catch(e){msg.textContent='Status error: '+e.message}}poll()
+</script></body></html>""")
+
+@app.middleware("http")
+async def v1581_route_fix(request,call_next):
+    if request.url.path=="/hospitality-phone-recovery":
+        return RedirectResponse("/hospitality-phone-recovery-v2",status_code=307)
+    return await call_next(request)
