@@ -17,7 +17,7 @@ from PIL import Image
 import fitz
 from pypdf import PdfReader, PdfWriter
 
-VERSION="10.2.0-CONTACT-VERIFY-SEGREGATE"
+VERSION="12.0.0-DATA-DOCTOR-FULL-RECONCILIATION"
 DATABASE_URL=os.getenv("DATABASE_URL","")
 GEMINI_API_KEY=os.getenv("GEMINI_API_KEY","")
 GEMINI_MODEL=os.getenv("GEMINI_MODEL","gemini-3.1-flash-lite")
@@ -6632,7 +6632,7 @@ def team_dashboard_v2(req:Request):
 <a class="nav" href="/property-database">Property Database<small>All saved inventory</small></a>
 <a class="nav" href="/property-manual">Add Property + Matcher<small>Manual property and matching</small></a>
 <a class="nav" href="/capture-intelligence">Capture Property<small>Camera, newspaper, handwritten, WhatsApp, PDF</small></a>
-<a class="nav" href="/contacts-directory">Property Contacts<small>Verify then mark Owner / Broker / Both</small></a>
+<a class="nav" href="/contacts-directory">Property Contacts<small>Verify then mark Owner / Broker / Both</small></a><a class="nav" href="/data-doctor">V12 Data Doctor<small>Full 5,000+ property reconciliation and contact coverage</small></a>
 <a class="nav" href="/retail-requirements">Retail Requirements<small>LinkedIn leasing signals</small></a>
 <a class="nav" href="/workspace#hospitality">Hospitality<small>Hospitality intelligence</small></a>
 <a class="nav" href="/workspace#contacts">Marketing Contacts<small>WhatsApp contact database</small></a>
@@ -6646,6 +6646,496 @@ def team_dashboard_v2(req:Request):
 <script>
 async function counts(){{let r=await fetch('/api/final-v2/contact-counts'),d=await r.json();document.querySelector('#c').innerHTML=`All <b>${{d.all}}</b> · Unverified <b>${{d.unverified}}</b> · Owners <b>${{d.owners}}</b> · Brokers <b>${{d.brokers}}</b>`}}
 async function sync(){{await fetch('/api/final-v2/contact-directory/sync',{{method:'POST'}});counts()}}setTimeout(counts,2500);counts();
+</script></body></html>""")
+
+
+# ============================================================
+# V12 DATA DOCTOR - FULL DATABASE RECONCILIATION
+# Audits EVERY property and EVERY recoverable contact evidence.
+# Original property records are never deleted or overwritten.
+# ============================================================
+
+def _dd_table_exists(name):
+    with engine.connect() as c:
+        return bool(c.execute(text("""SELECT EXISTS(
+            SELECT 1 FROM information_schema.tables
+            WHERE table_schema='public' AND table_name=:n
+        )"""),{"n":name}).scalar_one())
+
+def _dd_property_columns():
+    with engine.connect() as c:
+        rows=c.execute(text("""SELECT column_name,data_type
+            FROM information_schema.columns
+            WHERE table_schema='public' AND table_name='pi_properties'
+            ORDER BY ordinal_position""")).fetchall()
+    return [(r._mapping["column_name"],r._mapping["data_type"]) for r in rows]
+
+def _dd_text_columns():
+    cols=_dd_property_columns()
+    result=[]
+    for name,dtype in cols:
+        if dtype in {"text","character varying","character"}:
+            result.append(name)
+    return result
+
+def _dd_contact_columns():
+    cols=[]
+    for name,_ in _dd_property_columns():
+        low=name.lower()
+        if any(k in low for k in ["contact","phone","mobile","whatsapp","telephone","tel_no","telno"]):
+            cols.append(name)
+    # Also inspect remarks because many magazine/manual imports preserve source details there.
+    for x in ["remarks","source","owner_name","broker_name"]:
+        if x not in cols and any(name==x for name,_ in _dd_property_columns()):
+            cols.append(x)
+    return cols
+
+def _ensure_data_doctor_tables():
+    with engine.begin() as c:
+        c.execute(text("""CREATE TABLE IF NOT EXISTS pi_property_contact_links(
+            id BIGSERIAL PRIMARY KEY,
+            property_id TEXT NOT NULL,
+            normalized_contact TEXT NOT NULL,
+            contact_kind TEXT DEFAULT 'PHONE',
+            evidence_field TEXT,
+            raw_value TEXT,
+            role_hint TEXT DEFAULT 'UNVERIFIED',
+            confidence INTEGER DEFAULT 100,
+            is_primary BOOLEAN DEFAULT FALSE,
+            first_seen_at TIMESTAMPTZ DEFAULT NOW(),
+            updated_at TIMESTAMPTZ DEFAULT NOW(),
+            UNIQUE(property_id,normalized_contact,evidence_field)
+        )"""))
+        c.execute(text("CREATE INDEX IF NOT EXISTS idx_dd_pcl_property ON pi_property_contact_links(property_id)"))
+        c.execute(text("CREATE INDEX IF NOT EXISTS idx_dd_pcl_contact ON pi_property_contact_links(normalized_contact)"))
+        c.execute(text("""CREATE TABLE IF NOT EXISTS pi_property_health(
+            property_id TEXT PRIMARY KEY,
+            valid_contact_count INTEGER DEFAULT 0,
+            partial_contact_count INTEGER DEFAULT 0,
+            contact_status TEXT,
+            data_status TEXT,
+            data_quality_score INTEGER DEFAULT 0,
+            missing_fields JSONB DEFAULT '[]'::jsonb,
+            contact_fields_scanned JSONB DEFAULT '[]'::jsonb,
+            has_multiple_contacts BOOLEAN DEFAULT FALSE,
+            updated_at TIMESTAMPTZ DEFAULT NOW()
+        )"""))
+        c.execute(text("""CREATE TABLE IF NOT EXISTS pi_source_contact_evidence(
+            id BIGSERIAL PRIMARY KEY,
+            source_id BIGINT,
+            normalized_contact TEXT,
+            raw_value TEXT,
+            source_field TEXT,
+            assignable_to_property BOOLEAN DEFAULT FALSE,
+            created_at TIMESTAMPTZ DEFAULT NOW(),
+            UNIQUE(source_id,normalized_contact,source_field)
+        )"""))
+        c.execute(text("""CREATE TABLE IF NOT EXISTS pi_data_doctor_runs(
+            id BIGSERIAL PRIMARY KEY,
+            run_id UUID UNIQUE NOT NULL,
+            status TEXT DEFAULT 'RUNNING',
+            total_properties INTEGER DEFAULT 0,
+            properties_with_valid_contact INTEGER DEFAULT 0,
+            properties_without_valid_contact INTEGER DEFAULT 0,
+            multiple_contact_properties INTEGER DEFAULT 0,
+            partial_contact_properties INTEGER DEFAULT 0,
+            unique_contacts INTEGER DEFAULT 0,
+            property_contact_links INTEGER DEFAULT 0,
+            source_orphan_contacts INTEGER DEFAULT 0,
+            notes TEXT,
+            started_at TIMESTAMPTZ DEFAULT NOW(),
+            completed_at TIMESTAMPTZ
+        )"""))
+
+def _dd_digits(v):
+    return _re.sub(r'\D','',str(v or ''))
+
+def _dd_extract_valid_contacts(value):
+    """
+    Conservative Indian contact extraction.
+    Never pads or invents digits.
+    Returns normalized 10-digit Indian mobiles and plausible full landlines.
+    """
+    raw=str(value or "")
+    found=set()
+
+    # Mobile patterns with optional +91/91/0 and separators.
+    for m in _re.finditer(r'(?<!\d)(?:\+?91[\s\-]*)?0?([6-9](?:[\s\-]*\d){9})(?!\d)',raw):
+        digits=_re.sub(r'\D','',m.group(1))
+        if len(digits)==10:
+            found.add(digits)
+
+    # Generic contiguous/separated numeric candidates, then validate.
+    for m in _re.finditer(r'(?<!\d)(\d(?:[\s\-]*\d){9,11})(?!\d)',raw):
+        d=_re.sub(r'\D','',m.group(1))
+        if len(d)==12 and d.startswith("91") and d[2] in "6789":
+            found.add(d[2:])
+        elif len(d)==11 and d.startswith("0") and d[1] in "6789":
+            found.add(d[1:])
+        elif len(d)==10 and d[0] in "6789":
+            found.add(d)
+        elif len(d) in {10,11} and d.startswith(("011","0120","0124","0129")):
+            found.add(d)
+    return sorted(found)
+
+def _dd_partial_contacts(value):
+    """
+    Finds suspicious short phone-like fragments. They are review evidence only.
+    They are NEVER converted into phone numbers.
+    """
+    raw=str(value or "")
+    out=set()
+    for m in _re.finditer(r'(?<!\d)([6-9]\d{4,8})(?!\d)',raw):
+        d=m.group(1)
+        if len(d)<10:
+            out.add(d)
+    return sorted(out)
+
+def _dd_role_hint(field_name):
+    f=(field_name or "").lower()
+    if "owner" in f:return "OWNER_SOURCE"
+    if "broker" in f:return "BROKER_SOURCE"
+    return "UNVERIFIED"
+
+def _dd_data_health(p):
+    missing=[]
+    score=0
+
+    def known(v):
+        s=str(v or "").strip()
+        return bool(s) and s.lower() not in {"na","n/a","unknown","none","null","not specified","0"}
+
+    if known(p.get("city")):score+=15
+    else:missing.append("CITY")
+    if known(p.get("location")):score+=20
+    else:missing.append("LOCATION")
+    if known(p.get("property_type")) and str(p.get("property_type")).upper() not in {"NA","UNKNOWN"}:score+=15
+    else:missing.append("PROPERTY_TYPE")
+
+    area=p.get("available_area_sqft") or p.get("minimum_area_sqft") or p.get("maximum_area_sqft")
+    if area not in (None,"",0,"0"):score+=20
+    else:missing.append("AREA")
+
+    if known(p.get("rent_or_sale")):score+=15
+    else:missing.append("TRANSACTION")
+    if known(p.get("property_name")):score+=5
+    if known(p.get("floor")):score+=5
+    if str(p.get("verification_status") or "").upper()=="VERIFIED":score+=5
+
+    if score>=80:data_status="DATA_STRONG"
+    elif score>=60:data_status="DATA_USABLE"
+    else:data_status="DATA_REVIEW"
+    return score,data_status,missing
+
+def _dd_rebuild_contact_directory_from_links():
+    """
+    Upgrade the existing unified contact directory from the complete link table.
+    Manual verified roles remain untouched.
+    """
+    if not _dd_table_exists("pi_contact_directory_v2"):
+        return {"directory_supported":False,"contacts":0}
+
+    with engine.connect() as c:
+        old={r._mapping["contact_key"]:dict(r._mapping) for r in
+             c.execute(text("SELECT * FROM pi_contact_directory_v2")).fetchall()}
+        rows=[dict(r._mapping) for r in c.execute(text("""SELECT
+            l.normalized_contact,
+            ARRAY_AGG(DISTINCT l.property_id) property_ids,
+            COUNT(DISTINCT l.property_id) property_count,
+            ARRAY_AGG(DISTINCT p.property_name) FILTER (WHERE p.property_name IS NOT NULL) property_names,
+            ARRAY_AGG(DISTINCT p.location) FILTER (WHERE p.location IS NOT NULL) locations,
+            ARRAY_AGG(DISTINCT p.city) FILTER (WHERE p.city IS NOT NULL) cities,
+            ARRAY_AGG(DISTINCT p.source) FILTER (WHERE p.source IS NOT NULL) sources,
+            ARRAY_AGG(DISTINCT l.role_hint) role_hints
+            FROM pi_property_contact_links l
+            JOIN pi_properties p ON p.property_id=l.property_id
+            GROUP BY l.normalized_contact""")).fetchall()]
+
+    with engine.begin() as c:
+        for r in rows:
+            phone=r["normalized_contact"]
+            key="PHONE:"+phone
+            previous=old.get(key,{})
+            role=previous.get("contact_role") or "UNVERIFIED"
+            vs=previous.get("verification_status") or "UNVERIFIED"
+            name=previous.get("display_name")
+            hints=[x for x in (r.get("role_hints") or []) if x]
+            remark=previous.get("remarks") or ("Data Doctor source hints: "+", ".join(sorted(set(hints))))
+            c.execute(text("""INSERT INTO pi_contact_directory_v2(
+                contact_key,display_name,primary_phone,phones,property_ids,property_names,
+                locations,cities,sources,property_count,verified_property_count,
+                contact_role,verification_status,verified_by,verified_at,remarks,updated_at
+            ) VALUES(
+                :key,:name,:phone,CAST(:phones AS JSONB),CAST(:pids AS JSONB),CAST(:pnames AS JSONB),
+                CAST(:locs AS JSONB),CAST(:cities AS JSONB),CAST(:sources AS JSONB),:pc,0,
+                :role,:vs,:vby,:vat,:remarks,NOW()
+            )
+            ON CONFLICT(contact_key) DO UPDATE SET
+                primary_phone=EXCLUDED.primary_phone,
+                phones=EXCLUDED.phones,
+                property_ids=EXCLUDED.property_ids,
+                property_names=EXCLUDED.property_names,
+                locations=EXCLUDED.locations,
+                cities=EXCLUDED.cities,
+                sources=EXCLUDED.sources,
+                property_count=EXCLUDED.property_count,
+                updated_at=NOW()"""),{
+                "key":key,"name":name,"phone":phone,"phones":json.dumps([phone]),
+                "pids":json.dumps(sorted(r.get("property_ids") or [])),
+                "pnames":json.dumps(sorted([x for x in (r.get("property_names") or []) if x])),
+                "locs":json.dumps(sorted([x for x in (r.get("locations") or []) if x])),
+                "cities":json.dumps(sorted([x for x in (r.get("cities") or []) if x])),
+                "sources":json.dumps(sorted([x for x in (r.get("sources") or []) if x])),
+                "pc":int(r.get("property_count") or 0),"role":role,"vs":vs,
+                "vby":previous.get("verified_by"),"vat":previous.get("verified_at"),
+                "remarks":remark
+            })
+    return {"directory_supported":True,"contacts":len(rows)}
+
+def _data_doctor_rebuild():
+    _ensure_data_doctor_tables()
+    run_id=str(uuid.uuid4())
+    contact_cols=_dd_contact_columns()
+
+    with engine.begin() as c:
+        c.execute(text("""INSERT INTO pi_data_doctor_runs(run_id,status,notes)
+            VALUES(CAST(:r AS UUID),'RUNNING',:n)"""),{
+                "r":run_id,"n":"Full property/contact reconciliation. Originals preserved."
+            })
+        c.execute(text("DELETE FROM pi_property_contact_links"))
+        c.execute(text("DELETE FROM pi_property_health"))
+        c.execute(text("DELETE FROM pi_source_contact_evidence"))
+
+    # Fetch full property rows dynamically so legacy/raw columns are included.
+    with engine.connect() as c:
+        props=[dict(r._mapping) for r in c.execute(text("SELECT * FROM pi_properties ORDER BY id")).fetchall()]
+
+    with engine.begin() as c:
+        for p in props:
+            pid=str(p.get("property_id"))
+            valid_by_contact=set()
+            partial=set()
+
+            for field in contact_cols:
+                val=p.get(field)
+                if val is None:continue
+                val_str=str(val)
+                for phone in _dd_extract_valid_contacts(val_str):
+                    valid_by_contact.add(phone)
+                    c.execute(text("""INSERT INTO pi_property_contact_links(
+                        property_id,normalized_contact,contact_kind,evidence_field,raw_value,
+                        role_hint,confidence,is_primary,updated_at
+                    ) VALUES(:pid,:phone,'PHONE',:field,:raw,:hint,100,:primary,NOW())
+                    ON CONFLICT(property_id,normalized_contact,evidence_field)
+                    DO UPDATE SET raw_value=EXCLUDED.raw_value,role_hint=EXCLUDED.role_hint,updated_at=NOW()"""),{
+                        "pid":pid,"phone":phone,"field":field,"raw":val_str[:2000],
+                        "hint":_dd_role_hint(field),
+                        "primary":field.lower() in {"owner_contact","broker_contact","contact_number"}
+                    })
+                partial.update(_dd_partial_contacts(val_str))
+
+            score,data_status,missing=_dd_data_health(p)
+            if len(valid_by_contact)>=2:contact_status="MULTIPLE_VALID_CONTACTS"
+            elif len(valid_by_contact)==1:contact_status="CONTACT_INDEXED"
+            elif partial:contact_status="PARTIAL_CONTACT_REVIEW"
+            else:contact_status="NO_VALID_CONTACT_FOUND"
+
+            c.execute(text("""INSERT INTO pi_property_health(
+                property_id,valid_contact_count,partial_contact_count,contact_status,
+                data_status,data_quality_score,missing_fields,contact_fields_scanned,
+                has_multiple_contacts,updated_at
+            ) VALUES(
+                :pid,:vc,:pc,:cs,:ds,:score,CAST(:missing AS JSONB),CAST(:fields AS JSONB),:multi,NOW()
+            )"""),{
+                "pid":pid,"vc":len(valid_by_contact),"pc":len(partial),"cs":contact_status,
+                "ds":data_status,"score":score,"missing":json.dumps(missing),
+                "fields":json.dumps(contact_cols),"multi":len(valid_by_contact)>=2
+            })
+
+    # Source-level phone evidence is tracked separately; NEVER auto-linked to every property.
+    with engine.connect() as c:
+        sources=[dict(r._mapping) for r in c.execute(text("""SELECT id,source_reference,source_name,original_filename
+            FROM pi_sources WHERE source_reference IS NOT NULL""")).fetchall()]
+    with engine.begin() as c:
+        for s in sources:
+            raw=str(s.get("source_reference") or "")
+            for phone in _dd_extract_valid_contacts(raw):
+                c.execute(text("""INSERT INTO pi_source_contact_evidence(
+                    source_id,normalized_contact,raw_value,source_field,assignable_to_property
+                ) VALUES(:sid,:phone,:raw,'source_reference',FALSE)
+                ON CONFLICT(source_id,normalized_contact,source_field) DO NOTHING"""),{
+                    "sid":s.get("id"),"phone":phone,"raw":raw[:2000]
+                })
+
+    directory=_dd_rebuild_contact_directory_from_links()
+
+    with engine.connect() as c:
+        one=lambda sql:int(c.execute(text(sql)).scalar_one() or 0)
+        total=one("SELECT COUNT(*) FROM pi_property_health")
+        with_valid=one("SELECT COUNT(*) FROM pi_property_health WHERE valid_contact_count>0")
+        without_valid=one("SELECT COUNT(*) FROM pi_property_health WHERE valid_contact_count=0")
+        multi=one("SELECT COUNT(*) FROM pi_property_health WHERE valid_contact_count>1")
+        partial=one("SELECT COUNT(*) FROM pi_property_health WHERE partial_contact_count>0")
+        unique_contacts=one("SELECT COUNT(DISTINCT normalized_contact) FROM pi_property_contact_links")
+        links=one("SELECT COUNT(*) FROM pi_property_contact_links")
+        orphan=one("SELECT COUNT(*) FROM pi_source_contact_evidence")
+
+    with engine.begin() as c:
+        c.execute(text("""UPDATE pi_data_doctor_runs SET
+            status='COMPLETED',total_properties=:t,properties_with_valid_contact=:wv,
+            properties_without_valid_contact=:wo,multiple_contact_properties=:m,
+            partial_contact_properties=:p,unique_contacts=:u,
+            property_contact_links=:l,source_orphan_contacts=:o,completed_at=NOW()
+            WHERE run_id=CAST(:r AS UUID)"""),{
+                "t":total,"wv":with_valid,"wo":without_valid,"m":multi,"p":partial,
+                "u":unique_contacts,"l":links,"o":orphan,"r":run_id
+            })
+    return {
+        "run_id":run_id,"total_properties":total,
+        "properties_with_valid_contact":with_valid,
+        "properties_without_valid_contact":without_valid,
+        "multiple_contact_properties":multi,
+        "partial_contact_properties":partial,
+        "unique_contacts":unique_contacts,
+        "property_contact_links":links,
+        "source_orphan_contacts":orphan,
+        "directory_contacts":directory.get("contacts",0)
+    }
+
+@app.post("/api/v12/data-doctor/rebuild")
+def v12_data_doctor_rebuild(req:Request):
+    need_login(req)
+    return {"status":"ok",**_data_doctor_rebuild()}
+
+@app.get("/api/v12/data-doctor/summary")
+def v12_data_doctor_summary(req:Request):
+    need_login(req)
+    _ensure_data_doctor_tables()
+    with engine.connect() as c:
+        one=lambda sql:int(c.execute(text(sql)).scalar_one() or 0)
+        total=one("SELECT COUNT(*) FROM pi_properties")
+        indexed=one("SELECT COUNT(*) FROM pi_property_health WHERE valid_contact_count>0")
+        no_valid=one("SELECT COUNT(*) FROM pi_property_health WHERE valid_contact_count=0")
+        multi=one("SELECT COUNT(*) FROM pi_property_health WHERE valid_contact_count>1")
+        partial=one("SELECT COUNT(*) FROM pi_property_health WHERE partial_contact_count>0")
+        unique=one("SELECT COUNT(DISTINCT normalized_contact) FROM pi_property_contact_links")
+        links=one("SELECT COUNT(*) FROM pi_property_contact_links")
+        orphan=one("SELECT COUNT(*) FROM pi_source_contact_evidence")
+        strong=one("SELECT COUNT(*) FROM pi_property_health WHERE data_status='DATA_STRONG'")
+        usable=one("SELECT COUNT(*) FROM pi_property_health WHERE data_status='DATA_USABLE'")
+        review=one("SELECT COUNT(*) FROM pi_property_health WHERE data_status='DATA_REVIEW'")
+    return {"status":"ok","total_properties":total,"contact_indexed_properties":indexed,
+            "properties_without_valid_contact":no_valid,"multiple_contact_properties":multi,
+            "partial_contact_properties":partial,"unique_contacts":unique,
+            "property_contact_links":links,"source_orphan_contacts":orphan,
+            "data_strong":strong,"data_usable":usable,"data_review":review}
+
+@app.get("/api/v12/data-doctor/properties")
+def v12_data_doctor_properties(
+    req:Request,
+    contact_status:str=Query("ALL"),
+    data_status:str=Query("ALL"),
+    q:str=Query(""),
+    limit:int=Query(500,ge=1,le=3000)
+):
+    need_login(req)
+    params={"n":limit}
+    wh=[]
+    if contact_status!="ALL":
+        wh.append("h.contact_status=:cs");params["cs"]=contact_status
+    if data_status!="ALL":
+        wh.append("h.data_status=:ds");params["ds"]=data_status
+    if q.strip():
+        wh.append("""(p.property_id ILIKE :q OR COALESCE(p.property_name,'') ILIKE :q
+            OR COALESCE(p.location,'') ILIKE :q OR COALESCE(p.city,'') ILIKE :q
+            OR EXISTS(SELECT 1 FROM pi_property_contact_links l
+                WHERE l.property_id=p.property_id AND l.normalized_contact ILIKE :q))""")
+        params["q"]="%"+q.strip()+"%"
+    where="WHERE "+(" AND ".join(wh)) if wh else ""
+    with engine.connect() as c:
+        rows=c.execute(text(f"""SELECT p.property_id,p.property_name,p.city,p.location,p.property_type,
+            p.available_area_sqft,p.rent_or_sale,p.source,
+            h.valid_contact_count,h.partial_contact_count,h.contact_status,h.data_status,
+            h.data_quality_score,h.missing_fields,
+            COALESCE((SELECT JSONB_AGG(DISTINCT l.normalized_contact)
+                FROM pi_property_contact_links l WHERE l.property_id=p.property_id),'[]'::jsonb) contacts
+            FROM pi_properties p
+            LEFT JOIN pi_property_health h ON h.property_id=p.property_id
+            {where}
+            ORDER BY h.data_quality_score DESC NULLS LAST,p.id DESC
+            LIMIT :n"""),params).fetchall()
+    return {"status":"ok","rows":_json_rows(rows)}
+
+@app.get("/api/v12/data-doctor/contact-links")
+def v12_contact_links(req:Request,phone:str=Query(""),limit:int=Query(1000,ge=1,le=5000)):
+    need_login(req)
+    params={"n":limit}
+    where=""
+    if phone.strip():
+        where="WHERE l.normalized_contact ILIKE :q";params["q"]="%"+phone.strip()+"%"
+    with engine.connect() as c:
+        rows=c.execute(text(f"""SELECT l.normalized_contact,l.property_id,l.evidence_field,l.role_hint,
+            p.property_name,p.city,p.location,p.source
+            FROM pi_property_contact_links l JOIN pi_properties p ON p.property_id=l.property_id
+            {where}
+            ORDER BY l.normalized_contact,p.property_id LIMIT :n"""),params).fetchall()
+    return {"status":"ok","rows":_json_rows(rows)}
+
+@app.get("/api/v12/data-doctor/export.csv")
+def v12_data_doctor_export(req:Request):
+    need_login(req)
+    import csv as _csv, io as _io
+    with engine.connect() as c:
+        rows=[dict(r._mapping) for r in c.execute(text("""SELECT
+            p.property_id,p.property_name,p.city,p.location,p.property_type,
+            p.available_area_sqft,p.rent_or_sale,p.source,
+            h.valid_contact_count,h.partial_contact_count,h.contact_status,
+            h.data_status,h.data_quality_score,h.missing_fields,
+            COALESCE((SELECT STRING_AGG(DISTINCT l.normalized_contact,' | ')
+                FROM pi_property_contact_links l WHERE l.property_id=p.property_id),'') contacts
+            FROM pi_properties p
+            LEFT JOIN pi_property_health h ON h.property_id=p.property_id
+            ORDER BY p.id""")).fetchall()]
+    out=_io.StringIO()
+    if rows:
+        w=_csv.DictWriter(out,fieldnames=list(rows[0].keys()))
+        w.writeheader()
+        for r in rows:
+            rr=dict(r)
+            if isinstance(rr.get("missing_fields"),(list,dict)):
+                rr["missing_fields"]=json.dumps(rr["missing_fields"])
+            w.writerow(rr)
+    return Response(content=out.getvalue(),media_type="text/csv",
+        headers={"Content-Disposition":"attachment; filename=property-data-doctor-export.csv"})
+
+@app.get("/data-doctor",response_class=HTMLResponse)
+def v12_data_doctor_page(req:Request):
+    role=page_role_or_redirect(req)
+    if not role:return RedirectResponse("/login",status_code=303)
+    _ensure_data_doctor_tables()
+    return HTMLResponse(r"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>V12 Data Doctor</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#f3f6fa;font-family:Arial;color:#142033}header{background:#0d1d2d;color:#fff;padding:17px 22px}.wrap{max-width:1900px;margin:auto;padding:18px}
+.card,.kpi{background:#fff;border:1px solid #e1e8f0;border-radius:12px;padding:14px;margin-bottom:12px}.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:9px}.kpi b{display:block;font-size:25px}.toolbar{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.btn{border:0;border-radius:8px;padding:9px 12px;background:#1677ff;color:#fff;text-decoration:none;font-weight:700;cursor:pointer}.gray{background:#edf2f7;color:#24364b}.orange{background:#d98200}input,select{padding:9px;border:1px solid #cad6e2;border-radius:7px}.tablewrap{overflow:auto;max-height:65vh}table{width:100%;border-collapse:collapse;font-size:12px}th,td{padding:8px;border-bottom:1px solid #edf1f5;text-align:left;vertical-align:top;white-space:nowrap}th{position:sticky;top:0;background:#f8fafc}.small{font-size:11px;color:#68788c}</style></head><body>
+<header><b>V12 Data Doctor - Full Database Reconciliation</b><br><small>Every property matters. Originals are preserved; contacts are indexed without guessing.</small></header>
+<div class="wrap">
+<div class="card toolbar"><a class="btn gray" href="/team-dashboard">Team Dashboard</a><a class="btn gray" href="/property-database">Property Database</a><a class="btn gray" href="/contacts-directory">Contacts</a><button class="btn orange" onclick="rebuild()">Rebuild Full Database Index</button><a class="btn" href="/api/v12/data-doctor/export.csv">Export Organized CSV</a><span id="msg"></span></div>
+<div class="card"><b>Safety:</b> This engine does not delete or merge property records. It scans all contact/phone/mobile fields, preserves every valid number, keeps short fragments as review-only evidence, builds a Property-to-Contact relationship index, and tracks source-level numbers separately when they cannot be safely assigned to one property.</div>
+<div class="kpis" id="kpis"></div>
+<div class="card toolbar">
+<select id="cs"><option value="ALL">ALL CONTACT STATUS</option><option>CONTACT_INDEXED</option><option>MULTIPLE_VALID_CONTACTS</option><option>PARTIAL_CONTACT_REVIEW</option><option>NO_VALID_CONTACT_FOUND</option></select>
+<select id="ds"><option value="ALL">ALL DATA STATUS</option><option>DATA_STRONG</option><option>DATA_USABLE</option><option>DATA_REVIEW</option></select>
+<input id="q" placeholder="Search property, location, city or phone"><button class="btn gray" onclick="loadRows()">Search</button>
+</div>
+<div class="card"><div class="tablewrap"><table><thead><tr><th>Property</th><th>City</th><th>Location</th><th>Type</th><th>Area</th><th>Transaction</th><th>Contacts</th><th>Contact Status</th><th>Data Status</th><th>Score</th><th>Missing</th><th>Open</th></tr></thead><tbody id="rows"></tbody></table></div></div>
+</div>
+<script>
+const E=x=>String(x??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+async function A(u,o={}){let r=await fetch(u,o),d=await r.json();if(!r.ok)throw new Error(d.detail||d.message||'Error');return d}
+async function summary(){let d=await A('/api/v12/data-doctor/summary');let cards=[['TOTAL PROPERTIES',d.total_properties],['CONTACT INDEXED',d.contact_indexed_properties],['NO VALID CONTACT',d.properties_without_valid_contact],['MULTIPLE CONTACTS',d.multiple_contact_properties],['PARTIAL CONTACT',d.partial_contact_properties],['UNIQUE CONTACTS',d.unique_contacts],['PROPERTY-CONTACT LINKS',d.property_contact_links],['SOURCE ORPHAN CONTACTS',d.source_orphan_contacts],['DATA STRONG',d.data_strong],['DATA USABLE',d.data_usable],['DATA REVIEW',d.data_review]];document.querySelector('#kpis').innerHTML=cards.map(x=>`<div class="kpi"><span>${x[0]}</span><b>${Number(x[1]||0).toLocaleString()}</b></div>`).join('')}
+async function rebuild(){if(!confirm('Rebuild the full reconciliation index for every property? Original property records will not be deleted or overwritten.'))return;document.querySelector('#msg').textContent=' Rebuilding all property/contact relationships...';let d=await A('/api/v12/data-doctor/rebuild',{method:'POST'});document.querySelector('#msg').textContent=` Complete: ${d.properties_with_valid_contact}/${d.total_properties} properties have valid contacts; ${d.unique_contacts} unique contacts; ${d.property_contact_links} links.`;await summary();await loadRows()}
+async function loadRows(){let u='/api/v12/data-doctor/properties?contact_status='+encodeURIComponent(document.querySelector('#cs').value)+'&data_status='+encodeURIComponent(document.querySelector('#ds').value)+'&q='+encodeURIComponent(document.querySelector('#q').value)+'&limit=1000';let d=await A(u);document.querySelector('#rows').innerHTML=(d.rows||[]).map(x=>`<tr><td><b>${E(x.property_name||x.property_id)}</b><br><span class="small">${E(x.property_id)}</span></td><td>${E(x.city||'')}</td><td>${E(x.location||'')}</td><td>${E(x.property_type||'')}</td><td>${E(x.available_area_sqft||'')}</td><td>${E(x.rent_or_sale||'')}</td><td>${E((x.contacts||[]).join(', '))}</td><td>${E(x.contact_status||'NOT INDEXED')}</td><td>${E(x.data_status||'')}</td><td>${E(x.data_quality_score||0)}</td><td>${E((x.missing_fields||[]).join(', '))}</td><td><a target="_blank" href="/property-record/${encodeURIComponent(x.property_id)}">View</a></td></tr>`).join('')}
+['cs','ds'].forEach(id=>document.querySelector('#'+id).addEventListener('change',loadRows));document.querySelector('#q').addEventListener('keydown',e=>{if(e.key==='Enter')loadRows()});summary();loadRows();
 </script></body></html>""")
 
 

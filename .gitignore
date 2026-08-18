@@ -17,3 +17,4 @@ app-before-v8-smart-master-data-*.py
 app-before-v9-property-reconstruction-*.py
 app-before-v10-universal-intake-*.py
 app-before-contact-verify-segregate-*.py
+app-before-v12-data-doctor-*.py
