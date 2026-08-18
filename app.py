@@ -12701,3 +12701,225 @@ async def v16_final_navigation(request,call_next):
         response.headers["Pragma"]="no-cache"
         response.headers["Expires"]="0"
     return response
+
+# ============================================================
+# V16.1 FINAL BOT CONTROL DASHBOARD
+# Adds one-click Hospitality Bot + Retail Bot run controls
+# to the single final dashboard.
+# Existing V4 bot endpoints are reused.
+# ============================================================
+
+@app.get("/api/v16-1/bots/status")
+def v161_bot_status(req:Request):
+    need_login(req)
+    try:
+        with engine.connect() as c:
+            rows=[dict(r._mapping) for r in c.execute(text("""
+                SELECT * FROM ai_bot_runs
+                WHERE division IN ('HOSPITALITY','RETAIL','DEMAND')
+                   OR bot_name ILIKE '%Hospitality%'
+                   OR bot_name ILIKE '%Retail%'
+                ORDER BY id DESC
+                LIMIT 30
+            """)).fetchall()]
+        return {"status":"ok","rows":rows}
+    except Exception as ex:
+        return {"status":"error","message":f"{type(ex).__name__}: {ex}","rows":[]}
+
+@app.get("/final-dashboard-v2",response_class=HTMLResponse)
+def v161_final_dashboard_v2(req:Request):
+    role=page_role_or_redirect(req)
+    if not role:
+        return RedirectResponse("/login",303)
+
+    return HTMLResponse("""<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AI Deal Intelligence OS</title>
+<style>
+*{box-sizing:border-box}
+body{font-family:Arial;margin:0;background:#f4f7fb;color:#172437}
+header{background:#102235;color:#fff;padding:22px}
+.wrap{max-width:1550px;margin:auto;padding:20px}
+.section{margin-bottom:24px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px}
+.card{background:#fff;border:1px solid #e2e8f0;border-radius:12px;padding:16px;text-decoration:none;color:#172437;min-height:110px;display:block}
+.card b{font-size:16px}.card p{font-size:12px;color:#687789;line-height:1.4}
+.primary{border:2px solid #1677ff}
+.bot{border:2px solid #14a673}
+.tag{display:inline-block;padding:3px 7px;border-radius:10px;background:#edf4ff;font-size:10px;margin-top:6px}
+.btn{display:inline-block;padding:9px 11px;border:0;border-radius:8px;background:#1677ff;color:white;font-weight:bold;cursor:pointer;text-decoration:none}
+.green{background:#08734b}.gray{background:#e9eef5;color:#203247}
+.botbar{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+.status{margin-top:10px;padding:8px;border-radius:8px;background:#f6f8fb;font-size:12px;min-height:30px}
+table{width:100%;border-collapse:collapse;background:white;font-size:12px}
+th,td{padding:8px;border-bottom:1px solid #edf1f5;text-align:left}
+.tablewrap{overflow:auto;background:white;border-radius:10px;border:1px solid #e2e8f0}
+.small{color:#9db0c5;font-size:12px}
+</style>
+</head>
+<body>
+<header>
+<b>AI Deal Intelligence OS</b><br>
+<span class="small">Final Team Dashboard · Property · Hospitality · Retail · Requirements · WhatsApp Marketing</span>
+</header>
+
+<div class="wrap">
+
+<div class="section">
+<h2>Run AI Bots</h2>
+<div class="grid">
+
+<div class="card bot">
+<b>◆ Hospitality Bot</b>
+<p>Fetch fresh Cafe, Restaurant, Banquet, Wedding Venue, Hotel, Guest House, Lounge, Club and Bar business contacts/signals.</p>
+<div class="botbar">
+<button class="btn green" onclick="runBot('hospitality')">▶ Run Hospitality Bot</button>
+<a class="btn gray" href="/ai-hospitality-master-final">Open Hospitality Data</a>
+</div>
+<div id="hospitalityMsg" class="status">Ready to run.</div>
+</div>
+
+<div class="card bot">
+<b>◈ Retail Expansion Bot</b>
+<p>Run fresh retail expansion discovery and public retail leasing requirement discovery using the existing Retail Bot.</p>
+<div class="botbar">
+<button class="btn green" onclick="runBot('retail')">▶ Run Retail Bot</button>
+<a class="btn gray" href="/retail-expansion">Open Retail Results</a>
+</div>
+<div id="retailMsg" class="status">Ready to run.</div>
+</div>
+
+<div class="card">
+<b>Bot Run History</b>
+<p>Check whether Hospitality and Retail bots are RUNNING, COMPLETED or FAILED.</p>
+<div class="botbar">
+<button class="btn" onclick="loadStatus()">Refresh Bot Status</button>
+</div>
+<div id="overallMsg" class="status">Status will refresh automatically.</div>
+</div>
+
+<div class="card">
+<b>Hospitality Contact Enrichment</b>
+<p>Use this after discovery to find missing mobile numbers for WhatsApp marketing without rerunning the full bot.</p>
+<div class="botbar">
+<a class="btn" href="/hospitality-enrichment">Find Missing Contacts</a>
+</div>
+</div>
+
+</div>
+</div>
+
+<div class="section">
+<h2>Daily Property Operations</h2>
+<div class="grid">
+<a class="card primary" href="/v14-property-form"><b>Add Property Manually</b><p>Add fresh structured inventory.</p><span class=tag>DAILY</span></a>
+<a class="card primary" href="/v14-requirement-form"><b>Add Requirement Manually</b><p>Add confirmed client requirement.</p><span class=tag>DAILY</span></a>
+<a class="card primary" href="/v14-matcher"><b>Property Matcher</b><p>Run matching against fresh verified inventory.</p><span class=tag>DAILY</span></a>
+<a class="card" href="/v14-inventory"><b>Fresh Inventory Database</b><p>Search and manage fresh inventory.</p></a>
+</div>
+</div>
+
+<div class="section">
+<h2>Hospitality & Marketing</h2>
+<div class="grid">
+<a class="card" href="/ai-hospitality-master-final"><b>Hospitality Master</b><p>All recovered/generated Hospitality businesses, segregated by category.</p></a>
+<a class="card" href="/hospitality-enrichment"><b>Find Missing Contact Numbers</b><p>Phone-first enrichment for WhatsApp marketing.</p></a>
+<a class="card" href="/marketing-contacts-final"><b>Marketing Contacts</b><p>Segregated contacts with verification and WhatsApp status.</p></a>
+<a class="card" href="/api/v16/whatsapp-ready.csv"><b>Export WhatsApp Contacts</b><p>Download mobile-ready Hospitality contacts.</p></a>
+</div>
+</div>
+
+<div class="section">
+<h2>Retail & Requirements</h2>
+<div class="grid">
+<a class="card" href="/retail-expansion"><b>AI Retail Expansion</b><p>Retail expansion signals and discovered opportunities.</p></a>
+<a class="card" href="/requirements-match-center"><b>Requirements Centre</b><p>AI-generated and manually confirmed requirements.</p></a>
+<a class="card" href="/requirements-entry?division=RETAIL"><b>Add Retail Requirement</b><p>Enter a confirmed retail requirement.</p></a>
+<a class="card" href="/requirements-entry?division=HOSPITALITY"><b>Add Hospitality Requirement</b><p>Enter a confirmed Hospitality requirement.</p></a>
+</div>
+</div>
+
+<div class="section">
+<h2>Database & Capture</h2>
+<div class="grid">
+<a class="card" href="/capture-intelligence"><b>Capture Property</b><p>Camera, screenshot, handwritten note, newspaper, magazine and PDF.</p></a>
+<a class="card" href="/property-database"><b>Full Property Database</b><p>Master/legacy property archive.</p></a>
+<a class="card" href="/contacts-directory"><b>Owner / Broker Contacts</b><p>Property contacts only, separate from marketing contacts.</p></a>
+<a class="card" href="/data-doctor"><b>Data Doctor</b><p>Admin reconciliation and database health.</p><span class=tag>ADMIN</span></a>
+</div>
+</div>
+
+<div class="section">
+<h2>Recent Bot Runs</h2>
+<div class="tablewrap">
+<table>
+<thead><tr><th>Bot</th><th>Division</th><th>Status</th><th>Summary</th><th>Run ID</th><th>Started / Created</th></tr></thead>
+<tbody id="botRows"><tr><td colspan="6">Loading...</td></tr></tbody>
+</table>
+</div>
+</div>
+
+</div>
+
+<script>
+const E=x=>String(x??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+async function runBot(type){
+  const isHosp=type==='hospitality';
+  const box=document.getElementById(isHosp?'hospitalityMsg':'retailMsg');
+  const url=isHosp?'/api/v4/hospitality-bot/start':'/api/v4/retail-bot/start';
+  box.textContent='Starting '+(isHosp?'Hospitality':'Retail')+' Bot...';
+  try{
+    const r=await fetch(url,{method:'POST'});
+    let d={};
+    try{d=await r.json()}catch(e){}
+    if(!r.ok) throw Error(d.detail||d.message||('HTTP '+r.status));
+    let ids=[];
+    if(d.run_id)ids.push(d.run_id);
+    if(d.requirement_run_id)ids.push(d.requirement_run_id);
+    box.textContent='Started successfully'+(ids.length?' · Run ID: '+ids.join(', '):'')+'. Running in background.';
+    setTimeout(loadStatus,1000);
+  }catch(e){
+    box.textContent='ERROR: '+e.message;
+  }
+}
+
+async function loadStatus(){
+  try{
+    const r=await fetch('/api/v16-1/bots/status');
+    const d=await r.json();
+    const rows=d.rows||[];
+    document.getElementById('botRows').innerHTML=rows.map(x=>`<tr>
+      <td><b>${E(x.bot_name||'')}</b></td>
+      <td>${E(x.division||'')}</td>
+      <td>${E(x.status||'')}</td>
+      <td>${E(x.summary||x.output_summary||'')}</td>
+      <td>${E(x.run_id||'')}</td>
+      <td>${E(x.started_at||x.created_at||'')}</td>
+    </tr>`).join('')||'<tr><td colspan="6">No Hospitality/Retail bot runs found.</td></tr>';
+
+    const running=rows.filter(x=>String(x.status||'').toUpperCase()==='RUNNING').length;
+    document.getElementById('overallMsg').textContent=running?running+' bot run(s) currently RUNNING.':'No Hospitality/Retail bots currently running.';
+  }catch(e){
+    document.getElementById('overallMsg').textContent='Status error: '+e.message;
+  }
+}
+loadStatus();
+setInterval(loadStatus,10000);
+</script>
+</body>
+</html>""")
+
+@app.middleware("http")
+async def v161_dashboard_router(request,call_next):
+    if request.url.path in {"/workspace","/final-dashboard","/v15-dashboard","/simple-dashboard","/team-workspace-clean"}:
+        return RedirectResponse("/final-dashboard-v2",status_code=307)
+    response=await call_next(request)
+    if request.url.path.startswith("/final-dashboard-v2"):
+        response.headers["Cache-Control"]="no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"]="no-cache"
+        response.headers["Expires"]="0"
+    return response
