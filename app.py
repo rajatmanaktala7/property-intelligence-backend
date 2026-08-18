@@ -8454,3 +8454,352 @@ async function load(){let r=await fetch('/api/v13-2/magazine/summary'),d=await r
 async function reconcileExisting(){msg.textContent='Reconciling staged data...';let r=await fetch('/api/v13-2/magazine/reconcile-existing',{method:'POST'}),d=await r.json();if(!r.ok){msg.textContent='RECONCILE ERROR: '+(d.detail||'Unknown error');return}msg.textContent=`Reconciled. Auto mapped ${d.auto_mapped}, review ${d.review}, unmatched ${d.unmatched}, contact links synced ${d.agent_contact_links_synced}.`;load()}
 f.addEventListener('submit',async e=>{e.preventDefault();msg.textContent='Importing and reconciling...';let r=await fetch('/api/v13-2/magazine/import',{method:'POST',body:new FormData(f)}),d=await r.json();if(!r.ok){msg.textContent='IMPORT ERROR: '+(d.detail||d.message||'Unknown error');return}msg.textContent=`Imported ${d.master_rows} rows, ${d.contact_links} contact links. Auto mapped ${d.auto_mapped}, review ${d.review}, unmatched ${d.unmatched}.`;load()});load();
 </script></body></html>""")
+
+# ============================================================
+# V13.3 UNMATCHED INVENTORY ACTIVATION SYSTEM
+# Turns refined magazine rows into a controlled team workflow:
+# CREATE NEW PROPERTY / LINK EXISTING / KEEP IN REVIEW
+# Originals remain preserved.
+# ============================================================
+
+def _ensure_v133_tables():
+    _ensure_magazine_master_tables()
+    with engine.begin() as c:
+        c.execute(text("""CREATE TABLE IF NOT EXISTS pi_magazine_activation_log(
+            id BIGSERIAL PRIMARY KEY,
+            source_id TEXT NOT NULL,
+            action TEXT NOT NULL,
+            property_id TEXT,
+            previous_map_status TEXT,
+            new_map_status TEXT,
+            notes TEXT,
+            acted_by TEXT,
+            acted_at TIMESTAMPTZ DEFAULT NOW()
+        )"""))
+        c.execute(text("CREATE INDEX IF NOT EXISTS idx_mag_activation_source ON pi_magazine_activation_log(source_id)"))
+
+def _v133_area_fields(m):
+    """
+    Preserve area meaning safely.
+    SqFt can populate available_area_sqft.
+    SqYd remains plot_area_sqyd and is NOT silently treated as available_area_sqft.
+    """
+    try:
+        area=float(m.get("area") or 0)
+    except Exception:
+        area=0.0
+
+    unit=_mag_norm(m.get("area_unit"))
+    out={}
+    if area<=0:
+        return out
+    if unit in {"SQFT","SQ FT","FT","SQUARE FEET","SQUARE FOOT"}:
+        out["available_area_sqft"]=area
+        out["minimum_area_sqft"]=area
+        out["maximum_area_sqft"]=area
+    elif unit in {"SQYD","SQ YD","SQYDS","SQ YDS","YARD","YARDS"}:
+        out["plot_area_sqyd"]=area
+    else:
+        out["area_raw"]=area
+        out["area_unit_raw"]=m.get("area_unit")
+    return out
+
+def _v133_contact_for_source(source_id):
+    with engine.connect() as c:
+        rows=c.execute(text("""SELECT normalized_contact,contact_type
+            FROM pi_magazine_contact_links WHERE source_id=:sid
+            ORDER BY CASE WHEN contact_type='MOBILE' THEN 0 ELSE 1 END, normalized_contact"""),
+            {"sid":source_id}).fetchall()
+    vals=[str(r._mapping["normalized_contact"]) for r in rows if r._mapping["normalized_contact"]]
+    return vals
+
+def _v133_create_property_from_magazine(source_id,req):
+    _ensure_v133_tables()
+
+    with engine.connect() as c:
+        mrow=c.execute(text("SELECT * FROM pi_magazine_master WHERE source_id=:sid"),{"sid":source_id}).fetchone()
+        maprow=c.execute(text("SELECT * FROM pi_magazine_property_map WHERE source_id=:sid"),{"sid":source_id}).fetchone()
+
+    if not mrow:
+        raise HTTPException(404,"Magazine record not found.")
+
+    m=dict(mrow._mapping)
+    mp=dict(maprow._mapping) if maprow else {}
+
+    if m.get("record_status")=="EXCLUDE_NON_PROPERTY":
+        raise HTTPException(400,"This row is classified as non-property and cannot be activated.")
+
+    if mp.get("map_status") in {"AUTO_MAPPED","MANUALLY_CONFIRMED","CREATED_NEW"} and mp.get("property_id"):
+        raise HTTPException(409,f"This row is already connected to property {mp.get('property_id')}.")
+
+    # Require team confirmation for data-review rows.
+    body={}
+    try:
+        body=req
+    except Exception:
+        body={}
+
+    contacts=_v133_contact_for_source(source_id)
+
+    raw_parts=[
+        f"REFINED MAGAZINE SOURCE ID: {source_id}",
+        f"ORIGINAL AREA: {m.get('area') or ''} {m.get('area_unit') or ''}",
+        f"QUALITY ISSUES: {', '.join(m.get('quality_issues') or []) if isinstance(m.get('quality_issues'),list) else m.get('quality_issues') or ''}",
+        f"RAW: {m.get('original_raw_text') or ''}"
+    ]
+
+    payload={
+        "property_name": (m.get("plot_block") or m.get("source_id")),
+        "city": body.get("city") or "New Delhi",
+        "location": body.get("location") or m.get("locality"),
+        "property_type": body.get("property_type") or m.get("configuration") or m.get("category") or "Property",
+        "floor": body.get("floor") or m.get("floor"),
+        "rent_or_sale": body.get("rent_or_sale") or m.get("listing_type"),
+        "source": "REFINED_MAGAZINE_V13_3",
+        "remarks": " | ".join([x for x in raw_parts if x]),
+        "contact_number": " | ".join(contacts),
+        "owner_name": None,
+        "broker_name": None,
+        "entry_status": "UNVERIFIED",
+        "verification_status": "UNVERIFIED",
+        "availability_status": "UNVERIFIED",
+        "suitable_category": m.get("category"),
+        "status_remarks": m.get("status_remarks"),
+        "price": m.get("price")
+    }
+    payload.update(_v133_area_fields(m))
+
+    # Existing save_property remains the canonical creator.
+    try:
+        result=save_property(payload)
+    except TypeError:
+        result=save_property(payload,None)
+
+    if not isinstance(result,dict) or not result.get("property_id"):
+        raise HTTPException(500,f"Property creation did not return a property_id: {result}")
+
+    pid=result["property_id"]
+
+    with engine.begin() as c:
+        c.execute(text("""INSERT INTO pi_magazine_property_map(
+            source_id,property_id,match_method,confidence,map_status,evidence,reviewed_by,reviewed_at,updated_at
+        ) VALUES(:sid,:pid,'TEAM_CREATE_NEW',100,'CREATED_NEW','{}'::jsonb,:by,NOW(),NOW())
+        ON CONFLICT(source_id) DO UPDATE SET
+            property_id=EXCLUDED.property_id,match_method='TEAM_CREATE_NEW',
+            confidence=100,map_status='CREATED_NEW',reviewed_by=EXCLUDED.reviewed_by,
+            reviewed_at=NOW(),updated_at=NOW()"""),{
+                "sid":source_id,"pid":pid,"by":body.get("acted_by") or "TEAM"
+            })
+        c.execute(text("""INSERT INTO pi_magazine_activation_log(
+            source_id,action,property_id,previous_map_status,new_map_status,notes,acted_by
+        ) VALUES(:sid,'CREATE_NEW',:pid,:old,'CREATED_NEW',:notes,:by)"""),{
+            "sid":source_id,"pid":pid,"old":mp.get("map_status"),
+            "notes":body.get("notes"),"by":body.get("acted_by") or "TEAM"
+        })
+
+    # Add all refined contacts as property-contact relationships.
+    if _v13_table_exists("pi_property_contact_links"):
+        with engine.begin() as c:
+            for ph in contacts:
+                c.execute(text("""INSERT INTO pi_property_contact_links(
+                    property_id,normalized_contact,contact_kind,evidence_field,raw_value,
+                    role_hint,confidence,is_primary,updated_at
+                ) VALUES(:pid,:ph,'PHONE','REFINED_MAGAZINE_NEW_PROPERTY',:raw,'UNVERIFIED',100,FALSE,NOW())
+                ON CONFLICT(property_id,normalized_contact,evidence_field)
+                DO UPDATE SET updated_at=NOW()"""),{
+                    "pid":pid,"ph":ph,"raw":source_id
+                })
+
+    return {"status":"ok","property_id":pid,"source_id":source_id}
+
+def _v133_link_existing(source_id,property_id,actor,notes=None):
+    _ensure_v133_tables()
+    with engine.begin() as c:
+        exists=c.execute(text("SELECT 1 FROM pi_properties WHERE property_id=:pid"),{"pid":property_id}).fetchone()
+        if not exists:
+            raise HTTPException(404,"Existing property ID not found.")
+
+        old=c.execute(text("SELECT map_status FROM pi_magazine_property_map WHERE source_id=:sid"),{"sid":source_id}).fetchone()
+        old_status=old._mapping["map_status"] if old else None
+
+        c.execute(text("""INSERT INTO pi_magazine_property_map(
+            source_id,property_id,match_method,confidence,map_status,evidence,reviewed_by,reviewed_at,updated_at
+        ) VALUES(:sid,:pid,'TEAM_LINK_EXISTING',100,'MANUALLY_CONFIRMED','{}'::jsonb,:by,NOW(),NOW())
+        ON CONFLICT(source_id) DO UPDATE SET
+            property_id=EXCLUDED.property_id,match_method='TEAM_LINK_EXISTING',
+            confidence=100,map_status='MANUALLY_CONFIRMED',reviewed_by=EXCLUDED.reviewed_by,
+            reviewed_at=NOW(),updated_at=NOW()"""),{
+                "sid":source_id,"pid":property_id,"by":actor
+            })
+
+        c.execute(text("""INSERT INTO pi_magazine_activation_log(
+            source_id,action,property_id,previous_map_status,new_map_status,notes,acted_by
+        ) VALUES(:sid,'LINK_EXISTING',:pid,:old,'MANUALLY_CONFIRMED',:notes,:by)"""),{
+            "sid":source_id,"pid":property_id,"old":old_status,"notes":notes,"by":actor
+        })
+
+    synced=_mag_sync_contacts_to_agent()
+    return {"status":"ok","property_id":property_id,"contact_links_synced":synced}
+
+def _v133_keep_review(source_id,actor,notes=None):
+    _ensure_v133_tables()
+    with engine.begin() as c:
+        old=c.execute(text("SELECT map_status FROM pi_magazine_property_map WHERE source_id=:sid"),{"sid":source_id}).fetchone()
+        old_status=old._mapping["map_status"] if old else None
+
+        c.execute(text("""INSERT INTO pi_magazine_property_map(
+            source_id,property_id,match_method,confidence,map_status,evidence,reviewed_by,reviewed_at,updated_at
+        ) VALUES(:sid,NULL,'TEAM_KEEP_REVIEW',0,'KEEP_REVIEW','{}'::jsonb,:by,NOW(),NOW())
+        ON CONFLICT(source_id) DO UPDATE SET
+            match_method='TEAM_KEEP_REVIEW',map_status='KEEP_REVIEW',
+            reviewed_by=EXCLUDED.reviewed_by,reviewed_at=NOW(),updated_at=NOW()"""),{
+                "sid":source_id,"by":actor
+            })
+
+        c.execute(text("""INSERT INTO pi_magazine_activation_log(
+            source_id,action,property_id,previous_map_status,new_map_status,notes,acted_by
+        ) VALUES(:sid,'KEEP_REVIEW',NULL,:old,'KEEP_REVIEW',:notes,:by)"""),{
+            "sid":source_id,"old":old_status,"notes":notes,"by":actor
+        })
+
+    return {"status":"ok"}
+
+@app.get("/api/v13-3/inventory/summary")
+def v133_inventory_summary(req:Request):
+    need_login(req)
+    _ensure_v133_tables()
+    with engine.connect() as c:
+        one=lambda q:int(c.execute(text(q)).scalar_one() or 0)
+        return {"status":"ok",
+            "total_magazine":one("SELECT COUNT(*) FROM pi_magazine_master"),
+            "unmatched":one("SELECT COUNT(*) FROM pi_magazine_property_map WHERE map_status='UNMATCHED'"),
+            "unmatched_match_ready":one("""SELECT COUNT(*) FROM pi_magazine_property_map mp
+                JOIN pi_magazine_master m ON m.source_id=mp.source_id
+                WHERE mp.map_status='UNMATCHED' AND m.record_status='MATCH_READY'"""),
+            "unmatched_data_review":one("""SELECT COUNT(*) FROM pi_magazine_property_map mp
+                JOIN pi_magazine_master m ON m.source_id=mp.source_id
+                WHERE mp.map_status='UNMATCHED' AND m.record_status='DATA_REVIEW'"""),
+            "review":one("SELECT COUNT(*) FROM pi_magazine_property_map WHERE map_status='REVIEW'"),
+            "auto_mapped":one("SELECT COUNT(*) FROM pi_magazine_property_map WHERE map_status='AUTO_MAPPED'"),
+            "created_new":one("SELECT COUNT(*) FROM pi_magazine_property_map WHERE map_status='CREATED_NEW'"),
+            "manually_linked":one("SELECT COUNT(*) FROM pi_magazine_property_map WHERE map_status='MANUALLY_CONFIRMED'"),
+            "keep_review":one("SELECT COUNT(*) FROM pi_magazine_property_map WHERE map_status='KEEP_REVIEW'")
+        }
+
+@app.get("/api/v13-3/inventory/queue")
+def v133_inventory_queue(
+    req:Request,
+    status:str=Query("UNMATCHED"),
+    data_status:str=Query("MATCH_READY"),
+    q:str=Query(""),
+    page:int=Query(1,ge=1),
+    page_size:int=Query(50,ge=10,le=200)
+):
+    need_login(req)
+    _ensure_v133_tables()
+    params={"lim":page_size,"off":(page-1)*page_size}
+    wh=[]
+
+    st=status.upper()
+    if st!="ALL":
+        wh.append("COALESCE(mp.map_status,'UNMATCHED')=:st")
+        params["st"]=st
+
+    ds=data_status.upper()
+    if ds!="ALL":
+        wh.append("m.record_status=:ds")
+        params["ds"]=ds
+
+    if q.strip():
+        wh.append("""(
+            m.source_id ILIKE :q OR COALESCE(m.locality,'') ILIKE :q OR
+            COALESCE(m.plot_block,'') ILIKE :q OR COALESCE(m.configuration,'') ILIKE :q OR
+            COALESCE(m.contact_name_company,'') ILIKE :q OR
+            EXISTS(SELECT 1 FROM pi_magazine_contact_links l
+                WHERE l.source_id=m.source_id AND l.normalized_contact ILIKE :q)
+        )""")
+        params["q"]="%"+q.strip()+"%"
+
+    where="WHERE "+(" AND ".join(wh)) if wh else ""
+
+    with engine.connect() as c:
+        total=int(c.execute(text("""SELECT COUNT(*) FROM pi_magazine_master m
+            LEFT JOIN pi_magazine_property_map mp ON mp.source_id=m.source_id """+where),params).scalar_one() or 0)
+
+        rows=c.execute(text("""SELECT
+            m.source_id,m.record_status,m.match_eligible,m.category,m.listing_type,
+            m.locality,m.plot_block,m.configuration,m.area,m.area_unit,m.floor,m.price,
+            m.status_remarks,m.contact_name_company,m.valid_mobiles,m.valid_landlines,
+            m.quality_issues,m.original_raw_text,
+            COALESCE(mp.map_status,'UNMATCHED') map_status,
+            mp.property_id suggested_property_id,mp.confidence,mp.evidence
+            FROM pi_magazine_master m
+            LEFT JOIN pi_magazine_property_map mp ON mp.source_id=m.source_id
+            """+where+"""
+            ORDER BY
+                CASE WHEN m.record_status='MATCH_READY' THEN 0 ELSE 1 END,
+                COALESCE(mp.confidence,0) DESC,m.source_id
+            LIMIT :lim OFFSET :off"""),params).fetchall()
+
+    return {"status":"ok","total":total,"page":page,"page_size":page_size,"rows":_json_rows(rows)}
+
+@app.post("/api/v13-3/inventory/{source_id}/create-new")
+async def v133_create_new(source_id:str,req:Request):
+    need_login(req)
+    body=await req.json()
+    body["acted_by"]=actor_name(req)
+    return _v133_create_property_from_magazine(source_id,body)
+
+@app.post("/api/v13-3/inventory/{source_id}/link-existing")
+async def v133_link_existing_api(source_id:str,req:Request):
+    need_login(req)
+    body=await req.json()
+    pid=str(body.get("property_id") or "").strip()
+    if not pid:
+        raise HTTPException(400,"property_id is required.")
+    return _v133_link_existing(source_id,pid,actor_name(req),body.get("notes"))
+
+@app.post("/api/v13-3/inventory/{source_id}/keep-review")
+async def v133_keep_review_api(source_id:str,req:Request):
+    need_login(req)
+    body=await req.json()
+    return _v133_keep_review(source_id,actor_name(req),body.get("notes"))
+
+@app.get("/inventory-activation",response_class=HTMLResponse)
+def v133_inventory_activation_page(req:Request):
+    role=page_role_or_redirect(req)
+    if not role:return RedirectResponse("/login",status_code=303)
+
+    return HTMLResponse("""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Inventory Activation</title><style>
+*{box-sizing:border-box}body{margin:0;background:#f4f7fb;font-family:Arial;color:#172437}header{background:#102235;color:#fff;padding:18px 22px}.wrap{max-width:1750px;margin:auto;padding:18px}
+.card,.kpi{background:#fff;border:1px solid #e2e8f0;border-radius:12px;padding:14px;margin-bottom:12px}.toolbar{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.btn{background:#1677ff;color:#fff;border:0;border-radius:7px;padding:8px 11px;text-decoration:none;font-weight:700;cursor:pointer}.green{background:#08734b}.orange{background:#d98200}.gray{background:#e9eef5;color:#203247}.red{background:#a83b32}
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:9px}.kpi b{display:block;font-size:24px}.queue{display:grid;grid-template-columns:1.3fr 1fr;gap:12px}.raw{background:#f8fafc;border-radius:8px;padding:8px;white-space:pre-wrap;font-size:12px}.small{font-size:11px;color:#687789}.actions{display:flex;gap:6px;flex-wrap:wrap;margin-top:10px}input,select{padding:8px;border:1px solid #ccd6e2;border-radius:7px}.pager{display:flex;justify-content:space-between;align-items:center}
+@media(max-width:900px){.queue{grid-template-columns:1fr}}</style></head><body>
+<header><b>Unmatched Inventory Activation</b><br><small>Create New Property · Link Existing Property · Keep in Review</small></header>
+<div class="wrap">
+<div class="card toolbar"><a class="btn gray" href="/data-command-center">Data Command Center</a><a class="btn gray" href="/magazine-master-import">Magazine Master</a><a class="btn gray" href="/property-database">Property Database</a>
+<select id="status"><option>UNMATCHED</option><option>REVIEW</option><option>KEEP_REVIEW</option><option>ALL</option></select>
+<select id="ds"><option>MATCH_READY</option><option>DATA_REVIEW</option><option>ALL</option></select>
+<input id="q" placeholder="Search property, locality, contact"><button class="btn" onclick="reload()">Search</button></div>
+<div class="kpis" id="kpis"></div>
+<div id="cards"></div>
+<div class="card pager"><button class="btn gray" onclick="prev()">Previous</button><span id="pageTxt"></span><button class="btn gray" onclick="next()">Next</button></div>
+</div><script>
+const E=x=>String(x??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+let page=1,size=25,total=0,rows=[];
+async function A(u,o={}){let r=await fetch(u,o),d=await r.json();if(!r.ok)throw Error(d.detail||d.message||'Error');return d}
+async function summary(){let d=await A('/api/v13-3/inventory/summary');let a=[['UNMATCHED',d.unmatched],['UNMATCHED MATCH READY',d.unmatched_match_ready],['UNMATCHED DATA REVIEW',d.unmatched_data_review],['REVIEW',d.review],['AUTO MAPPED',d.auto_mapped],['CREATED NEW',d.created_new],['MANUALLY LINKED',d.manually_linked],['KEEP REVIEW',d.keep_review]];document.querySelector('#kpis').innerHTML=a.map(x=>`<div class="kpi"><span>${x[0]}</span><b>${Number(x[1]||0).toLocaleString()}</b></div>`).join('')}
+function render(){document.querySelector('#pageTxt').textContent=`Page ${page} of ${Math.max(1,Math.ceil(total/size))}`;document.querySelector('#cards').innerHTML=rows.map((x,i)=>`<div class="card queue">
+<div><h3>${E(x.plot_block||x.source_id)} <span class="small">${E(x.source_id)}</span></h3><p><b>${E(x.locality||'Locality missing')}</b> · ${E(x.configuration||x.category||'')} · ${E(x.area||'')} ${E(x.area_unit||'')} · ${E(x.listing_type||'')}</p><p>Contact: <b>${E((x.valid_mobiles||[]).join(', '))}</b> ${E((x.valid_landlines||[]).join(', '))}</p><p>Status: <b>${E(x.record_status)}</b> · Map: <b>${E(x.map_status)}</b></p><div class="raw">${E(x.original_raw_text||'')}</div></div>
+<div><p><b>Quality Issues</b><br>${E((x.quality_issues||[]).join(', ')||'None')}</p>${x.suggested_property_id?`<p>Suggested existing: <a target="_blank" href="/property-record/${encodeURIComponent(x.suggested_property_id)}">${E(x.suggested_property_id)}</a> · Confidence ${E(x.confidence||0)}</p>`:''}
+<label>Existing Property ID</label><br><input id="pid_${i}" value="${E(x.suggested_property_id||'')}" placeholder="PROP-..."><div class="actions">
+<button class="btn green" onclick="createNew(${i})">Create New Property</button><button class="btn orange" onclick="linkExisting(${i})">Link Existing</button><button class="btn gray" onclick="keepReview(${i})">Keep in Review</button></div><p class="small">Create New always creates UNVERIFIED inventory. SqYd remains plot area and is not silently treated as available SqFt.</p></div>
+</div>`).join('')||'<div class="card">No records in this queue.</div>'}
+async function load(){let u='/api/v13-3/inventory/queue?status='+encodeURIComponent(status.value)+'&data_status='+encodeURIComponent(ds.value)+'&q='+encodeURIComponent(q.value)+'&page='+page+'&page_size='+size;let d=await A(u);total=d.total;rows=d.rows||[];render();summary()}
+async function createNew(i){let x=rows[i];if(!confirm('Create a NEW UNVERIFIED property from '+x.source_id+'?'))return;try{let d=await A('/api/v13-3/inventory/'+encodeURIComponent(x.source_id)+'/create-new',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});alert('Created '+d.property_id);load()}catch(e){alert(e.message)}}
+async function linkExisting(i){let x=rows[i],pid=document.querySelector('#pid_'+i).value.trim();if(!pid){alert('Enter existing Property ID');return}if(!confirm('Link '+x.source_id+' to '+pid+'?'))return;try{await A('/api/v13-3/inventory/'+encodeURIComponent(x.source_id)+'/link-existing',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({property_id:pid})});load()}catch(e){alert(e.message)}}
+async function keepReview(i){let x=rows[i];await A('/api/v13-3/inventory/'+encodeURIComponent(x.source_id)+'/keep-review',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});load()}
+function reload(){page=1;load()}function next(){if(page<Math.ceil(total/size)){page++;load()}}function prev(){if(page>1){page--;load()}}
+status.addEventListener('change',reload);ds.addEventListener('change',reload);q.addEventListener('keydown',e=>{if(e.key==='Enter')reload()});load();
+</script></body></html>""")
