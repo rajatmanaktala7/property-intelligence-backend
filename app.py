@@ -9583,3 +9583,457 @@ async def v138_workspace_redirect(request,call_next):
     return await call_next(request)
 
 # V13.8.2 CORRECTED BIGINT MATCHER FIX
+
+# ============================================================
+# V14 FRESH VERIFIED INVENTORY + CONFIRMED REQUIREMENT OS
+# Magazine/legacy data is NOT used by this matcher.
+# Fresh properties -> verify -> activate -> match.
+# AI signals -> human confirm -> manual confirmed requirement -> match.
+# Pictures stored in PostgreSQL so Railway redeploys do not lose them.
+# ============================================================
+
+def _v14_setup():
+    with engine.begin() as c:
+        c.execute(text("""CREATE TABLE IF NOT EXISTS pi_v14_properties(
+            id BIGSERIAL PRIMARY KEY,
+            property_code TEXT UNIQUE NOT NULL,
+            property_name TEXT,
+            city TEXT NOT NULL,
+            location TEXT NOT NULL,
+            micro_market TEXT,
+            full_address TEXT,
+            property_type TEXT NOT NULL,
+            suitable_category TEXT,
+            transaction_type TEXT NOT NULL,
+            availability_status TEXT DEFAULT 'UNVERIFIED',
+            matcher_eligible BOOLEAN DEFAULT FALSE,
+            available_area_sqft NUMERIC NOT NULL,
+            floor TEXT,
+            frontage_ft NUMERIC,
+            monthly_rent NUMERIC,
+            rent_psf NUMERIC,
+            sale_price NUMERIC,
+            cam_psf NUMERIC,
+            security_deposit_months NUMERIC,
+            possession TEXT,
+            parking TEXT,
+            ceiling_height_ft NUMERIC,
+            power_load_kw NUMERIC,
+            nearby_brands TEXT,
+            main_road BOOLEAN DEFAULT FALSE,
+            corner_property BOOLEAN DEFAULT FALSE,
+            food_use_allowed TEXT,
+            exhaust_possible TEXT,
+            notes TEXT,
+            contact_name TEXT,
+            contact_phone TEXT,
+            contact_role TEXT DEFAULT 'UNVERIFIED',
+            contact_verified BOOLEAN DEFAULT FALSE,
+            verified_by TEXT,
+            verified_at TIMESTAMPTZ,
+            created_by TEXT,
+            created_at TIMESTAMPTZ DEFAULT NOW(),
+            updated_at TIMESTAMPTZ DEFAULT NOW()
+        )"""))
+        c.execute(text("""CREATE TABLE IF NOT EXISTS pi_v14_property_media(
+            id BIGSERIAL PRIMARY KEY,
+            property_code TEXT NOT NULL,
+            filename TEXT,
+            content_type TEXT,
+            content BYTEA NOT NULL,
+            created_at TIMESTAMPTZ DEFAULT NOW()
+        )"""))
+        c.execute(text("""CREATE TABLE IF NOT EXISTS pi_v14_requirements(
+            id BIGSERIAL PRIMARY KEY,
+            requirement_code TEXT UNIQUE NOT NULL,
+            division TEXT NOT NULL,
+            company_name TEXT NOT NULL,
+            contact_name TEXT,
+            contact_phone TEXT,
+            contact_email TEXT,
+            source_type TEXT DEFAULT 'MANUAL_CONFIRMED',
+            source_url TEXT,
+            city TEXT NOT NULL,
+            locations TEXT NOT NULL,
+            property_type TEXT NOT NULL,
+            suitable_category TEXT,
+            transaction_type TEXT NOT NULL,
+            area_min_sqft NUMERIC NOT NULL,
+            area_max_sqft NUMERIC NOT NULL,
+            ideal_area_sqft NUMERIC,
+            floor_preference TEXT,
+            ground_floor_mandatory BOOLEAN DEFAULT FALSE,
+            max_monthly_rent NUMERIC,
+            max_rent_psf NUMERIC,
+            max_sale_budget NUMERIC,
+            min_frontage_ft NUMERIC,
+            possession TEXT,
+            parking_required TEXT,
+            nearby_brands TEXT,
+            main_road_required BOOLEAN DEFAULT FALSE,
+            corner_preferred BOOLEAN DEFAULT FALSE,
+            food_use_required BOOLEAN DEFAULT FALSE,
+            exhaust_required BOOLEAN DEFAULT FALSE,
+            must_have TEXT,
+            preferred TEXT,
+            reject_if TEXT,
+            assigned_to TEXT,
+            confirmation_status TEXT DEFAULT 'CONFIRMED',
+            created_by TEXT,
+            created_at TIMESTAMPTZ DEFAULT NOW(),
+            updated_at TIMESTAMPTZ DEFAULT NOW()
+        )"""))
+
+def _v14_s(v):
+    return str(v or "").strip()
+
+def _v14_n(v):
+    try: return float(v) if v not in (None,"") else None
+    except: return None
+
+def _v14_b(v):
+    return str(v or "").lower() in {"true","1","yes","on","y"}
+
+def _v14_norm(v):
+    return _re.sub(r"[^a-z0-9]+"," ",_v14_s(v).lower()).strip()
+
+def _v14_actor(req):
+    try: return actor_name(req)
+    except: return "TEAM"
+
+def _v14_score(p,q):
+    reasons=[]; penalties=[]
+    # Hard filters
+    if _v14_norm(p.get("city")) != _v14_norm(q.get("city")):
+        return None,["City mismatch"]
+    qlocs=[_v14_norm(x) for x in _v14_s(q.get("locations")).split(",") if _v14_norm(x)]
+    ploc=_v14_norm(p.get("location"))
+    if qlocs and not any(x in ploc or ploc in x for x in qlocs):
+        return None,["Location mismatch"]
+    if _v14_norm(p.get("transaction_type")) != _v14_norm(q.get("transaction_type")):
+        return None,["Transaction mismatch"]
+    area=_v14_n(p.get("available_area_sqft")) or 0
+    amin=_v14_n(q.get("area_min_sqft")) or 0
+    amax=_v14_n(q.get("area_max_sqft")) or 10**12
+    if area < amin or area > amax:
+        return None,["Area outside required range"]
+    if not p.get("matcher_eligible") or _v14_norm(p.get("availability_status"))!="verified active":
+        return None,["Not verified active"]
+
+    if q.get("ground_floor_mandatory"):
+        fl=_v14_norm(p.get("floor"))
+        if not any(x in fl for x in ["ground","gf","upper ground","ug"]):
+            return None,["Ground floor mandatory"]
+
+    score=60
+    reasons += ["City","Location","Transaction","Area","Verified active"]
+
+    # Property/category
+    qtype=_v14_norm(q.get("property_type")); ptype=_v14_norm(p.get("property_type"))
+    if qtype and ptype and (qtype in ptype or ptype in qtype):
+        score+=10; reasons.append("Property type")
+    else:
+        penalties.append("Property type differs"); score-=8
+
+    qcat=_v14_norm(q.get("suitable_category")); pcat=_v14_norm(p.get("suitable_category"))
+    if qcat and pcat and (qcat in pcat or pcat in qcat):
+        score+=6; reasons.append("Suitable category")
+
+    ideal=_v14_n(q.get("ideal_area_sqft"))
+    if ideal and area:
+        diff=abs(area-ideal)/ideal
+        if diff<=.10: score+=8; reasons.append("Near ideal area")
+        elif diff<=.20: score+=4
+
+    # Floor preference
+    qfloor=_v14_norm(q.get("floor_preference")); pfloor=_v14_norm(p.get("floor"))
+    if qfloor and pfloor:
+        if qfloor in pfloor or pfloor in qfloor:
+            score+=6; reasons.append("Floor")
+        else:
+            score-=4; penalties.append("Floor preference differs")
+
+    # Commercial limits
+    maxrent=_v14_n(q.get("max_monthly_rent")); prent=_v14_n(p.get("monthly_rent"))
+    if maxrent and prent:
+        if prent<=maxrent: score+=5; reasons.append("Rent within budget")
+        else: score-=15; penalties.append("Rent above budget")
+    maxpsf=_v14_n(q.get("max_rent_psf")); ppsf=_v14_n(p.get("rent_psf"))
+    if maxpsf and ppsf:
+        if ppsf<=maxpsf: score+=4
+        else: score-=10; penalties.append("Rent/sqft above budget")
+    maxsale=_v14_n(q.get("max_sale_budget")); psale=_v14_n(p.get("sale_price"))
+    if maxsale and psale and psale>maxsale:
+        score-=15; penalties.append("Sale price above budget")
+
+    minfront=_v14_n(q.get("min_frontage_ft")); front=_v14_n(p.get("frontage_ft"))
+    if minfront:
+        if front and front>=minfront: score+=5; reasons.append("Frontage")
+        elif front: score-=8; penalties.append("Frontage below requirement")
+        else: penalties.append("Frontage unknown")
+
+    if q.get("main_road_required"):
+        if p.get("main_road"): score+=3
+        else: score-=8; penalties.append("Main road not confirmed")
+    if q.get("corner_preferred") and p.get("corner_property"):
+        score+=2; reasons.append("Corner")
+    if q.get("food_use_required"):
+        if _v14_norm(p.get("food_use_allowed")) in {"yes","allowed","true"}: score+=4
+        else: score-=10; penalties.append("Food use not confirmed")
+    if q.get("exhaust_required"):
+        if _v14_norm(p.get("exhaust_possible")) in {"yes","possible","true"}: score+=4
+        else: score-=10; penalties.append("Exhaust not confirmed")
+
+    return max(0,min(100,round(score))), reasons+penalties
+
+@app.post("/api/v14/property")
+async def v14_add_property(req:Request):
+    need_login(req); _v14_setup()
+    form=await req.form()
+    code="FP-"+datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")+"-"+uuid.uuid4().hex[:4].upper()
+    required=["city","location","property_type","transaction_type","available_area_sqft","contact_phone"]
+    missing=[x for x in required if not _v14_s(form.get(x))]
+    if missing: raise HTTPException(400,"Required: "+", ".join(missing))
+    vals={k:form.get(k) for k in form.keys() if k!="pictures"}
+    with engine.begin() as c:
+        c.execute(text("""INSERT INTO pi_v14_properties(
+          property_code,property_name,city,location,micro_market,full_address,property_type,suitable_category,
+          transaction_type,available_area_sqft,floor,frontage_ft,monthly_rent,rent_psf,sale_price,cam_psf,
+          security_deposit_months,possession,parking,ceiling_height_ft,power_load_kw,nearby_brands,
+          main_road,corner_property,food_use_allowed,exhaust_possible,notes,contact_name,contact_phone,
+          contact_role,created_by
+        ) VALUES(:code,:property_name,:city,:location,:micro_market,:full_address,:property_type,:suitable_category,
+          :transaction_type,:area,:floor,:frontage,:monthly_rent,:rent_psf,:sale_price,:cam,:deposit,:possession,
+          :parking,:ceiling,:power,:nearby,:mainroad,:corner,:food,:exhaust,:notes,:contact_name,:contact_phone,
+          :contact_role,:by)"""),{
+          "code":code,"property_name":form.get("property_name"),"city":form.get("city"),"location":form.get("location"),
+          "micro_market":form.get("micro_market"),"full_address":form.get("full_address"),"property_type":form.get("property_type"),
+          "suitable_category":form.get("suitable_category"),"transaction_type":form.get("transaction_type"),
+          "area":_v14_n(form.get("available_area_sqft")),"floor":form.get("floor"),"frontage":_v14_n(form.get("frontage_ft")),
+          "monthly_rent":_v14_n(form.get("monthly_rent")),"rent_psf":_v14_n(form.get("rent_psf")),
+          "sale_price":_v14_n(form.get("sale_price")),"cam":_v14_n(form.get("cam_psf")),
+          "deposit":_v14_n(form.get("security_deposit_months")),"possession":form.get("possession"),
+          "parking":form.get("parking"),"ceiling":_v14_n(form.get("ceiling_height_ft")),
+          "power":_v14_n(form.get("power_load_kw")),"nearby":form.get("nearby_brands"),
+          "mainroad":_v14_b(form.get("main_road")),"corner":_v14_b(form.get("corner_property")),
+          "food":form.get("food_use_allowed"),"exhaust":form.get("exhaust_possible"),"notes":form.get("notes"),
+          "contact_name":form.get("contact_name"),"contact_phone":form.get("contact_phone"),
+          "contact_role":form.get("contact_role") or "UNVERIFIED","by":_v14_actor(req)
+        })
+    pics=form.getlist("pictures")
+    for pic in pics[:8]:
+        try:
+            data=await pic.read()
+            if data and len(data)<=8*1024*1024:
+                with engine.begin() as c:
+                    c.execute(text("""INSERT INTO pi_v14_property_media(property_code,filename,content_type,content)
+                    VALUES(:p,:f,:ct,:b)"""),{"p":code,"f":pic.filename,"ct":pic.content_type or "image/jpeg","b":data})
+        except: pass
+    return {"status":"ok","property_code":code,"message":"Saved UNVERIFIED. Verify before matching."}
+
+@app.post("/api/v14/property/{code}/verify")
+async def v14_verify_property(code:str,req:Request):
+    need_login(req); _v14_setup()
+    body=await req.json()
+    role=_v14_s(body.get("contact_role") or "OTHER").upper()
+    if role not in {"OWNER","BROKER","BOTH","OTHER"}: role="OTHER"
+    with engine.begin() as c:
+        r=c.execute(text("""UPDATE pi_v14_properties SET availability_status='VERIFIED_ACTIVE',
+          matcher_eligible=TRUE,contact_verified=TRUE,contact_role=:role,verified_by=:by,
+          verified_at=NOW(),updated_at=NOW() WHERE property_code=:code"""),
+          {"role":role,"by":_v14_actor(req),"code":code})
+        if r.rowcount==0: raise HTTPException(404,"Property not found")
+    return {"status":"ok"}
+
+@app.post("/api/v14/requirement")
+async def v14_add_requirement(req:Request):
+    need_login(req); _v14_setup()
+    b=await req.json()
+    required=["division","company_name","city","locations","property_type","transaction_type","area_min_sqft","area_max_sqft"]
+    missing=[x for x in required if not _v14_s(b.get(x))]
+    if missing: raise HTTPException(400,"Required: "+", ".join(missing))
+    code="CR-"+datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")+"-"+uuid.uuid4().hex[:4].upper()
+    with engine.begin() as c:
+        c.execute(text("""INSERT INTO pi_v14_requirements(
+          requirement_code,division,company_name,contact_name,contact_phone,contact_email,source_type,source_url,
+          city,locations,property_type,suitable_category,transaction_type,area_min_sqft,area_max_sqft,ideal_area_sqft,
+          floor_preference,ground_floor_mandatory,max_monthly_rent,max_rent_psf,max_sale_budget,min_frontage_ft,
+          possession,parking_required,nearby_brands,main_road_required,corner_preferred,food_use_required,
+          exhaust_required,must_have,preferred,reject_if,assigned_to,created_by
+        ) VALUES(:code,:division,:company,:contact,:phone,:email,'MANUAL_CONFIRMED',:url,:city,:locations,:ptype,
+          :category,:tx,:amin,:amax,:ideal,:floor,:gf,:maxrent,:maxpsf,:maxsale,:front,:poss,:parking,:brands,
+          :mainroad,:corner,:food,:exhaust,:must,:pref,:reject,:assigned,:by)"""),{
+          "code":code,"division":b.get("division"),"company":b.get("company_name"),"contact":b.get("contact_name"),
+          "phone":b.get("contact_phone"),"email":b.get("contact_email"),"url":b.get("source_url"),"city":b.get("city"),
+          "locations":b.get("locations"),"ptype":b.get("property_type"),"category":b.get("suitable_category"),
+          "tx":b.get("transaction_type"),"amin":_v14_n(b.get("area_min_sqft")),"amax":_v14_n(b.get("area_max_sqft")),
+          "ideal":_v14_n(b.get("ideal_area_sqft")),"floor":b.get("floor_preference"),"gf":_v14_b(b.get("ground_floor_mandatory")),
+          "maxrent":_v14_n(b.get("max_monthly_rent")),"maxpsf":_v14_n(b.get("max_rent_psf")),
+          "maxsale":_v14_n(b.get("max_sale_budget")),"front":_v14_n(b.get("min_frontage_ft")),
+          "poss":b.get("possession"),"parking":b.get("parking_required"),"brands":b.get("nearby_brands"),
+          "mainroad":_v14_b(b.get("main_road_required")),"corner":_v14_b(b.get("corner_preferred")),
+          "food":_v14_b(b.get("food_use_required")),"exhaust":_v14_b(b.get("exhaust_required")),
+          "must":b.get("must_have"),"pref":b.get("preferred"),"reject":b.get("reject_if"),
+          "assigned":b.get("assigned_to"),"by":_v14_actor(req)
+        })
+    return {"status":"ok","requirement_code":code}
+
+@app.get("/api/v14/match/{code}")
+def v14_match(code:str,req:Request):
+    need_login(req); _v14_setup()
+    with engine.connect() as c:
+        qr=c.execute(text("SELECT * FROM pi_v14_requirements WHERE requirement_code=:x"),{"x":code}).fetchone()
+        if not qr: raise HTTPException(404,"Requirement not found")
+        q=dict(qr._mapping)
+        props=[dict(r._mapping) for r in c.execute(text("""SELECT * FROM pi_v14_properties
+          WHERE matcher_eligible=TRUE AND availability_status='VERIFIED_ACTIVE'""")).fetchall()]
+    out=[]
+    for p in props:
+        score,reasons=_v14_score(p,q)
+        if score is None: continue
+        p["match_score"]=score;p["match_reasons"]=reasons
+        out.append(p)
+    out.sort(key=lambda x:x["match_score"],reverse=True)
+    return {"status":"ok","requirement":q,"matches":out[:100],"total":len(out)}
+
+@app.get("/api/v14/properties")
+def v14_properties(req:Request,status:str=Query("ALL")):
+    need_login(req); _v14_setup()
+    sql="SELECT * FROM pi_v14_properties"
+    params={}
+    if status=="ACTIVE": sql+=" WHERE matcher_eligible=TRUE"
+    elif status=="UNVERIFIED": sql+=" WHERE matcher_eligible=FALSE"
+    sql+=" ORDER BY created_at DESC"
+    with engine.connect() as c:
+        rows=[dict(r._mapping) for r in c.execute(text(sql),params).fetchall()]
+    return {"status":"ok","rows":rows}
+
+@app.get("/api/v14/requirements")
+def v14_requirements(req:Request):
+    need_login(req); _v14_setup()
+    with engine.connect() as c:
+        rows=[dict(r._mapping) for r in c.execute(text("SELECT * FROM pi_v14_requirements ORDER BY created_at DESC")).fetchall()]
+    return {"status":"ok","rows":rows}
+
+@app.get("/api/v14/media/{mid}")
+def v14_media(mid:int,req:Request):
+    need_login(req); _v14_setup()
+    with engine.connect() as c:
+        r=c.execute(text("SELECT content,content_type FROM pi_v14_property_media WHERE id=:i"),{"i":mid}).fetchone()
+    if not r: raise HTTPException(404,"Image not found")
+    from fastapi.responses import Response
+    return Response(content=bytes(r._mapping["content"]),media_type=r._mapping["content_type"] or "image/jpeg")
+
+@app.get("/api/v14/property/{code}/media")
+def v14_media_list(code:str,req:Request):
+    need_login(req); _v14_setup()
+    with engine.connect() as c:
+        rows=[dict(r._mapping) for r in c.execute(text(
+          "SELECT id,filename,content_type FROM pi_v14_property_media WHERE property_code=:p ORDER BY id"
+        ),{"p":code}).fetchall()]
+    return {"status":"ok","rows":rows}
+
+@app.get("/v14-dashboard",response_class=HTMLResponse)
+def v14_dashboard(req:Request):
+    role=page_role_or_redirect(req)
+    if not role:return RedirectResponse("/login",status_code=303)
+    return HTMLResponse("""<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>Deal Intelligence</title>
+<style>body{font-family:Arial;margin:0;background:#f5f7fb;color:#172437}header{background:#102235;color:#fff;padding:20px}.w{padding:20px;max-width:1200px;margin:auto}.g{display:grid;grid-template-columns:repeat(2,1fr);gap:14px}.c{background:white;border:1px solid #dfe6ee;border-radius:12px;padding:20px;text-decoration:none;color:#172437}.c b{font-size:19px}.c span{display:block;color:#687789;margin-top:8px}.archive{margin-top:25px;padding-top:15px;border-top:1px solid #ccd6e2}.archive a{margin-right:15px}@media(max-width:700px){.g{grid-template-columns:1fr}}</style></head>
+<body><header><b>AI Deal Intelligence OS</b><br><small>Fresh verified inventory + confirmed requirements</small></header><div class=w>
+<div class=g>
+<a class=c href="/v14-requirement-leads"><b>1. AI Requirement Leads</b><span>Review discovered demand. Team confirms before matching.</span></a>
+<a class=c href="/v14-requirement-form"><b>2. Add Confirmed Requirement</b><span>Enter complete confirmed requirement and run matching.</span></a>
+<a class=c href="/v14-property-form"><b>3. Add Fresh Property</b><span>Complete inventory form with pictures and contact.</span></a>
+<a class=c href="/v14-inventory"><b>4. Verify / Active Inventory</b><span>Verify fresh properties. Only VERIFIED ACTIVE properties match.</span></a>
+<a class=c href="/v14-matcher"><b>5. Property Matcher</b><span>Confirmed requirements matched only against fresh verified inventory.</span></a>
+<a class=c href="/contacts-directory"><b>6. Contacts</b><span>Existing contact verification directory.</span></a>
+</div><div class=archive><b>Archive / Research only — excluded from V14 matching</b><p>
+<a href="/magazine-import">Magazine Data</a><a href="/data-doctor">Legacy Data Doctor</a><a href="/capture-intelligence">Camera / Newspaper / PDF</a><a href="/property-database">Legacy Property Database</a></p></div>
+</div></body></html>""")
+
+@app.get("/v14-property-form",response_class=HTMLResponse)
+def v14_property_form(req:Request):
+    role=page_role_or_redirect(req)
+    if not role:return RedirectResponse("/login",303)
+    return HTMLResponse("""<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>Add Fresh Property</title>
+<style>body{font-family:Arial;background:#f5f7fb;margin:0}header{background:#102235;color:white;padding:18px}.w{max-width:1100px;margin:auto;padding:18px}.card{background:white;padding:18px;border-radius:12px}.g{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}input,select,textarea{width:100%;padding:10px;box-sizing:border-box}textarea{min-height:80px}.full{grid-column:1/-1}.req:after{content:" *";color:red}button{padding:11px 18px;background:#1677ff;color:white;border:0;border-radius:8px}@media(max-width:800px){.g{grid-template-columns:1fr}.full{grid-column:auto}}</style></head>
+<body><header><b>Add Fresh Property</b> · <a style="color:white" href="/v14-dashboard">← Dashboard</a></header><div class=w><div class=card>
+<p>New property starts <b>UNVERIFIED</b>. It cannot match until your team verifies it.</p>
+<form id=f enctype=multipart/form-data><div class=g>
+<label class=req>Property Name/No.<input name=property_name></label>
+<label class=req>City<input name=city required></label><label class=req>Location<input name=location required></label>
+<label>Micro Market<input name=micro_market></label><label class=full>Full Address<input name=full_address></label>
+<label class=req>Property Type<select name=property_type required><option></option><option>High Street Retail</option><option>Retail Store</option><option>Restaurant/F&B</option><option>Office</option><option>Showroom</option><option>Hotel</option><option>Banquet</option><option>Commercial Land</option><option>Other</option></select></label>
+<label>Suitable Category<input name=suitable_category placeholder="Retail, Restaurant, Cafe..."></label>
+<label class=req>Transaction<select name=transaction_type required><option>LEASE</option><option>SALE</option></select></label>
+<label class=req>Available Area SqFt<input type=number name=available_area_sqft required></label>
+<label>Floor<input name=floor placeholder="Ground Floor"></label><label>Frontage Ft<input type=number step=any name=frontage_ft></label>
+<label>Monthly Rent ₹<input type=number step=any name=monthly_rent></label><label>Rent / SqFt ₹<input type=number step=any name=rent_psf></label>
+<label>Sale Price ₹<input type=number step=any name=sale_price></label><label>CAM / SqFt<input type=number step=any name=cam_psf></label>
+<label>Security Deposit Months<input type=number step=any name=security_deposit_months></label><label>Possession<input name=possession></label>
+<label>Parking<input name=parking></label><label>Ceiling Height Ft<input type=number step=any name=ceiling_height_ft></label>
+<label>Power Load KW<input type=number step=any name=power_load_kw></label><label>Nearby Brands<input name=nearby_brands></label>
+<label>Main Road<select name=main_road><option value=false>No/Unknown</option><option value=true>Yes</option></select></label>
+<label>Corner Property<select name=corner_property><option value=false>No/Unknown</option><option value=true>Yes</option></select></label>
+<label>Food Use Allowed<select name=food_use_allowed><option>Unknown</option><option>Yes</option><option>No</option></select></label>
+<label>Exhaust Possible<select name=exhaust_possible><option>Unknown</option><option>Yes</option><option>No</option></select></label>
+<label class=req>Contact Number<input name=contact_phone required></label><label>Contact Name<input name=contact_name></label>
+<label>Contact Role<select name=contact_role><option>UNVERIFIED</option><option>OWNER</option><option>BROKER</option><option>BOTH</option><option>OTHER</option></select></label>
+<label class="full req">Property Pictures (up to 8)<input type=file name=pictures accept="image/*" multiple required></label>
+<label class=full>Notes<textarea name=notes></textarea></label></div><p><button>Save Fresh Property</button></p></form><div id=m></div></div></div>
+<script>f.onsubmit=async e=>{e.preventDefault();m.textContent='Saving...';let r=await fetch('/api/v14/property',{method:'POST',body:new FormData(f)}),d=await r.json();m.textContent=r.ok?'Saved '+d.property_code+' — now verify it in Active Inventory.':(d.detail||'Error');if(r.ok)f.reset()}</script></body></html>""")
+
+@app.get("/v14-requirement-form",response_class=HTMLResponse)
+def v14_requirement_form(req:Request):
+    role=page_role_or_redirect(req)
+    if not role:return RedirectResponse("/login",303)
+    return HTMLResponse("""<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>Confirmed Requirement</title>
+<style>body{font-family:Arial;background:#f5f7fb;margin:0}header{background:#102235;color:white;padding:18px}.w{max-width:1100px;margin:auto;padding:18px}.card{background:white;padding:18px;border-radius:12px}.g{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}input,select,textarea{width:100%;padding:10px;box-sizing:border-box}textarea{min-height:75px}.full{grid-column:1/-1}.req:after{content:" *";color:red}button{padding:11px 18px;background:#1677ff;color:white;border:0;border-radius:8px}@media(max-width:800px){.g{grid-template-columns:1fr}.full{grid-column:auto}}</style></head>
+<body><header><b>Add Confirmed Requirement</b> · <a style="color:white" href="/v14-dashboard">← Dashboard</a></header><div class=w><div class=card>
+<p>Use this form <b>after your team confirms the requirement</b>. AI-discovered signals should not match directly.</p><form id=f><div class=g>
+<label class=req>Division<select name=division required><option>RETAIL</option><option>HOSPITALITY</option></select></label>
+<label class=req>Company / Brand<input name=company_name required></label><label>Contact Person<input name=contact_name></label>
+<label>Mobile<input name=contact_phone></label><label>Email<input name=contact_email></label><label>Source URL<input name=source_url></label>
+<label class=req>City<input name=city required></label><label class="full req">Locations — comma separated<input name=locations required placeholder="GK1, GK2, Defence Colony"></label>
+<label class=req>Property Type<input name=property_type required placeholder="High Street Retail"></label><label>Suitable Category<input name=suitable_category placeholder="Restaurant / Cafe"></label>
+<label class=req>Transaction<select name=transaction_type required><option>LEASE</option><option>SALE</option></select></label>
+<label class=req>Minimum Area SqFt<input type=number name=area_min_sqft required></label><label class=req>Maximum Area SqFt<input type=number name=area_max_sqft required></label>
+<label>Ideal Area SqFt<input type=number name=ideal_area_sqft></label><label>Floor Preference<input name=floor_preference></label>
+<label>Ground Floor Mandatory<select name=ground_floor_mandatory><option value=false>No</option><option value=true>Yes</option></select></label>
+<label>Max Monthly Rent ₹<input type=number name=max_monthly_rent></label><label>Max Rent/SqFt ₹<input type=number name=max_rent_psf></label>
+<label>Max Sale Budget ₹<input type=number name=max_sale_budget></label><label>Minimum Frontage Ft<input type=number name=min_frontage_ft></label>
+<label>Possession<input name=possession></label><label>Parking Required<input name=parking_required></label><label>Nearby Brands<input name=nearby_brands></label>
+<label>Main Road Mandatory<select name=main_road_required><option value=false>No</option><option value=true>Yes</option></select></label>
+<label>Corner Preferred<select name=corner_preferred><option value=false>No</option><option value=true>Yes</option></select></label>
+<label>Food Use Required<select name=food_use_required><option value=false>No</option><option value=true>Yes</option></select></label>
+<label>Exhaust Required<select name=exhaust_required><option value=false>No</option><option value=true>Yes</option></select></label>
+<label>Assigned Team Member<input name=assigned_to></label>
+<label class=full>Must Have<textarea name=must_have></textarea></label><label class=full>Preferred<textarea name=preferred></textarea></label>
+<label class=full>Reject If<textarea name=reject_if></textarea></label></div><p><button>Save Confirmed Requirement</button></p></form><div id=m></div></div></div>
+<script>f.onsubmit=async e=>{e.preventDefault();let b=Object.fromEntries(new FormData(f));['ground_floor_mandatory','main_road_required','corner_preferred','food_use_required','exhaust_required'].forEach(k=>b[k]=b[k]==='true');let r=await fetch('/api/v14/requirement',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}),d=await r.json();m.innerHTML=r.ok?'Saved <b>'+d.requirement_code+'</b>. <a href="/v14-matcher">Open Matcher</a>':(d.detail||'Error');if(r.ok)f.reset()}</script></body></html>""")
+
+@app.get("/v14-inventory",response_class=HTMLResponse)
+def v14_inventory_page(req:Request):
+    role=page_role_or_redirect(req)
+    if not role:return RedirectResponse("/login",303)
+    return HTMLResponse("""<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>Fresh Inventory</title>
+<style>body{font-family:Arial;background:#f5f7fb;margin:0}header{background:#102235;color:white;padding:18px}.w{padding:18px;overflow:auto}table{width:100%;border-collapse:collapse;background:white}th,td{padding:8px;border-bottom:1px solid #ddd;text-align:left;white-space:nowrap}button{padding:7px}</style></head>
+<body><header><b>Fresh Inventory Verification</b> · <a style="color:white" href="/v14-dashboard">← Dashboard</a></header><div class=w><p><button onclick="load('UNVERIFIED')">Unverified</button> <button onclick="load('ACTIVE')">Verified Active</button> <button onclick="load('ALL')">All Fresh</button></p><div id=x></div></div>
+<script>async function load(s){let d=await (await fetch('/api/v14/properties?status='+s)).json(),r=d.rows||[];x.innerHTML='<table><tr><th>Status</th><th>Property</th><th>Location</th><th>Type</th><th>Area</th><th>Floor</th><th>Rent</th><th>Frontage</th><th>Contact</th><th>Role</th><th>Action</th></tr>'+r.map(p=>`<tr><td>${p.availability_status}</td><td>${p.property_code}<br>${p.property_name||''}</td><td>${p.city} / ${p.location}</td><td>${p.property_type}</td><td>${p.available_area_sqft}</td><td>${p.floor||''}</td><td>${p.monthly_rent||''}</td><td>${p.frontage_ft||''}</td><td><b>${p.contact_phone||''}</b><br>${p.contact_name||''}</td><td>${p.contact_role||''}</td><td>${p.matcher_eligible?'MATCH ACTIVE':`<select id="r_${p.property_code}"><option>OWNER</option><option>BROKER</option><option>BOTH</option><option>OTHER</option></select> <button onclick="verify('${p.property_code}')">Verify + Activate</button>`}</td></tr>`).join('')+'</table>'}async function verify(c){let role=document.getElementById('r_'+c).value,r=await fetch('/api/v14/property/'+c+'/verify',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({contact_role:role})});if(r.ok)load('UNVERIFIED');else alert('Verification failed')}load('UNVERIFIED')</script></body></html>""")
+
+@app.get("/v14-matcher",response_class=HTMLResponse)
+def v14_matcher_page(req:Request):
+    role=page_role_or_redirect(req)
+    if not role:return RedirectResponse("/login",303)
+    return HTMLResponse("""<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>Verified Property Matcher</title>
+<style>body{font-family:Arial;background:#f5f7fb;margin:0}header{background:#102235;color:white;padding:18px}.w{padding:18px;overflow:auto}.req{background:white;padding:12px;border-radius:10px;margin-bottom:10px}table{width:100%;border-collapse:collapse;background:white}th,td{padding:8px;border-bottom:1px solid #ddd;text-align:left;vertical-align:top}.score{font-size:20px;font-weight:bold}</style></head>
+<body><header><b>Confirmed Requirement → Verified Property Matcher</b> · <a style="color:white" href="/v14-dashboard">← Dashboard</a></header><div class=w><div id=reqs></div><div id=res></div></div>
+<script>const E=x=>String(x??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));async function load(){let d=await(await fetch('/api/v14/requirements')).json();reqs.innerHTML=(d.rows||[]).map(q=>`<div class=req><b>${E(q.company_name)} · ${E(q.requirement_code)}</b><br>${E(q.locations)} · ${E(q.area_min_sqft)}-${E(q.area_max_sqft)} sqft · ${E(q.property_type)} · ${E(q.transaction_type)} <button onclick="match('${q.requirement_code}')">Run Match</button></div>`).join('')||'No confirmed requirements.'}async function match(c){res.innerHTML='Matching fresh verified inventory only...';let d=await(await fetch('/api/v14/match/'+c)).json(),r=d.matches||[];res.innerHTML='<h3>'+r.length+' qualified matches</h3><table><tr><th>Match</th><th>Property</th><th>Location</th><th>Area/Floor</th><th>Commercial</th><th>Contact to Verify</th><th>Why</th></tr>'+r.map(p=>`<tr><td class=score>${p.match_score}%</td><td><b>${E(p.property_code)}</b><br>${E(p.property_name)}</td><td>${E(p.city)}<br>${E(p.location)}<br>${E(p.full_address)}</td><td>${E(p.available_area_sqft)} sqft<br>${E(p.floor)}<br>Frontage ${E(p.frontage_ft)} ft</td><td>Rent ₹${E(p.monthly_rent)}<br>₹/sqft ${E(p.rent_psf)}<br>${E(p.transaction_type)}</td><td><b>${E(p.contact_phone)}</b><br>${E(p.contact_name)}<br>${E(p.contact_role)}<br>Verified: ${p.contact_verified?'YES':'NO'}</td><td>${(p.match_reasons||[]).map(E).join('<br>')}</td></tr>`).join('')+'</table>'}load()</script></body></html>""")
+
+@app.get("/v14-requirement-leads",response_class=HTMLResponse)
+def v14_requirement_leads(req:Request):
+    role=page_role_or_redirect(req)
+    if not role:return RedirectResponse("/login",303)
+    return HTMLResponse("""<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>AI Requirement Leads</title>
+<style>body{font-family:Arial;background:#f5f7fb;margin:0}header{background:#102235;color:white;padding:18px}.w{padding:18px}.note{background:#fff3cd;padding:12px;border-radius:8px}</style></head>
+<body><header><b>AI Requirement Leads</b> · <a style="color:white" href="/v14-dashboard">← Dashboard</a></header><div class=w><div class=note><b>Rule:</b> AI/public-web signals are leads only. Contact and confirm the requirement first. Then enter the confirmed details in the V14 Confirmed Requirement form. AI signals do not run directly against property inventory.</div><p><a href="/requirements-workbench?division=RETAIL">Open Retail AI Signals</a></p><p><a href="/requirements-workbench?division=HOSPITALITY">Open Hospitality AI Signals</a></p><p><a href="/v14-requirement-form"><b>Requirement confirmed? → Enter Confirmed Requirement</b></a></p></div></body></html>""")
