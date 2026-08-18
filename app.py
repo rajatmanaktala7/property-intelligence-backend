@@ -17,7 +17,7 @@ from PIL import Image
 import fitz
 from pypdf import PdfReader, PdfWriter
 
-VERSION="12.0.0-DATA-DOCTOR-FULL-RECONCILIATION"
+VERSION="13.2.1-REFINED-MAGAZINE-IMPORT-FIX"
 DATABASE_URL=os.getenv("DATABASE_URL","")
 GEMINI_API_KEY=os.getenv("GEMINI_API_KEY","")
 GEMINI_MODEL=os.getenv("GEMINI_MODEL","gemini-3.1-flash-lite")
@@ -8171,68 +8171,139 @@ def _mag_existing_property_contacts():
     return bypid
 
 def _mag_reconcile():
+    """
+    V13.2.1 optimized reconciliation.
+    Important:
+    - compares only properties in the same normalized locality
+    - converts SqYd to SqFt for area comparison
+    - phone alone never maps a property
+    - original pi_properties rows are never changed
+    """
     _ensure_magazine_master_tables()
+
     with engine.connect() as c:
         mags=[dict(r._mapping) for r in c.execute(text(
             "SELECT * FROM pi_magazine_master WHERE record_status<>'EXCLUDE_NON_PROPERTY'"
         )).fetchall()]
         props=[dict(r._mapping) for r in c.execute(text("SELECT * FROM pi_properties")).fetchall()]
+        link_rows=[dict(r._mapping) for r in c.execute(text(
+            "SELECT source_id,normalized_contact FROM pi_magazine_contact_links"
+        )).fetchall()]
+
+    mag_contacts={}
+    for r in link_rows:
+        mag_contacts.setdefault(str(r["source_id"]),set()).add(str(r["normalized_contact"]))
 
     existing_contacts=_mag_existing_property_contacts()
+
+    by_locality={}
+    for p in props:
+        pl=_mag_norm(p.get("location"))
+        if pl:
+            by_locality.setdefault(pl,[]).append(p)
+
+    def magazine_area_sqft(m):
+        try:
+            a=float(m.get("area") or 0)
+        except Exception:
+            return 0.0
+        unit=_mag_norm(m.get("area_unit"))
+        if not a:
+            return 0.0
+        if unit in {"SQYD","SQ YD","SQYDS","SQ YDS","YARD","YARDS"}:
+            return a*9.0
+        return a
+
     mapped=review=unmatched=0
 
     with engine.begin() as c:
         for m in mags:
+            sid=str(m.get("source_id"))
             mn=_mag_norm(m.get("plot_block"))
             ml=_mag_norm(m.get("locality"))
             mc=_mag_norm(m.get("configuration"))
-            ma=float(m.get("area") or 0)
-            mcontacts=set()
-            for rr in c.execute(text("SELECT normalized_contact FROM pi_magazine_contact_links WHERE source_id=:sid"),{"sid":m["source_id"]}).fetchall():
-                mcontacts.add(str(rr._mapping["normalized_contact"]))
+            ma=magazine_area_sqft(m)
+            mcontacts=mag_contacts.get(sid,set())
 
+            candidates=by_locality.get(ml,[])
             scored=[]
-            for p in props:
-                pn=_mag_norm(p.get("property_name"))
-                pl=_mag_norm(p.get("location"))
-                pc=_mag_norm(p.get("property_type"))
-                pa=float(p.get("available_area_sqft") or p.get("minimum_area_sqft") or p.get("maximum_area_sqft") or 0)
-                score=0;evidence=[]
 
-                if mn and pn and (mn==pn or mn in pn or pn in mn):
-                    score+=40;evidence.append("IDENTITY")
-                if ml and pl and ml==pl:
-                    score+=25;evidence.append("LOCALITY")
+            for p in candidates:
+                pn=_mag_norm(p.get("property_name"))
+                pc=_mag_norm(p.get("property_type"))
+
+                try:
+                    pa=float(
+                        p.get("available_area_sqft")
+                        or p.get("minimum_area_sqft")
+                        or p.get("maximum_area_sqft")
+                        or 0
+                    )
+                except Exception:
+                    pa=0.0
+
+                score=0
+                evidence=["LOCALITY"]
+
+                identity=False
+                if mn and pn and mn==pn:
+                    score+=50
+                    identity=True
+                    evidence.append("EXACT_IDENTITY")
+                elif mn and pn and (mn in pn or pn in mn) and min(len(mn),len(pn))>=3:
+                    score+=38
+                    identity=True
+                    evidence.append("CLOSE_IDENTITY")
+
+                if not identity:
+                    continue
+
+                score+=25
+
                 if mc and pc and (mc==pc or mc in pc or pc in mc):
-                    score+=8;evidence.append("CONFIGURATION_TYPE")
+                    score+=7
+                    evidence.append("CONFIGURATION_TYPE")
+
                 if ma and pa:
                     diff=abs(ma-pa)/max(ma,pa)
                     if diff<=0.05:
-                        score+=15;evidence.append("AREA_5_PERCENT")
+                        score+=15
+                        evidence.append("AREA_5_PERCENT")
                     elif diff<=0.15:
-                        score+=8;evidence.append("AREA_15_PERCENT")
+                        score+=8
+                        evidence.append("AREA_15_PERCENT")
+
                 shared=mcontacts & existing_contacts.get(str(p.get("property_id")),set())
                 if shared:
-                    score+=20;evidence.append("SHARED_CONTACT")
+                    score+=15
+                    evidence.append("SHARED_CONTACT")
 
-                if "IDENTITY" not in evidence or "LOCALITY" not in evidence:
-                    continue
-                if score>=80:
-                    scored.append((score,p.get("property_id"),evidence))
+                scored.append((score,str(p.get("property_id")),evidence))
 
             scored.sort(reverse=True,key=lambda x:x[0])
+
             if scored:
-                score,pid,ev=scored[0]
-                status="AUTO_MAPPED" if score>=90 and (len(scored)==1 or score-scored[1][0]>=10) else "REVIEW"
-                mapped += 1 if status=="AUTO_MAPPED" else 0
-                review += 1 if status=="REVIEW" else 0
+                top_score,pid,ev=scored[0]
+                margin=top_score-(scored[1][0] if len(scored)>1 else 0)
+
+                if top_score>=90 and margin>=10:
+                    status="AUTO_MAPPED"
+                    mapped+=1
+                else:
+                    status="REVIEW"
+                    review+=1
+
                 c.execute(text("""INSERT INTO pi_magazine_property_map(
                     source_id,property_id,match_method,confidence,map_status,evidence,updated_at
-                ) VALUES(:sid,:pid,'IDENTITY_LOCALITY_AREA_CONTACT',:cf,:st,CAST(:ev AS JSONB),NOW())
-                ON CONFLICT(source_id) DO UPDATE SET property_id=EXCLUDED.property_id,
-                    match_method=EXCLUDED.match_method,confidence=EXCLUDED.confidence,
-                    map_status=EXCLUDED.map_status,evidence=EXCLUDED.evidence,updated_at=NOW()"""),{
-                    "sid":m["source_id"],"pid":pid,"cf":score,"st":status,
+                ) VALUES(:sid,:pid,'V13_2_1_LOCALITY_INDEXED',:cf,:st,CAST(:ev AS JSONB),NOW())
+                ON CONFLICT(source_id) DO UPDATE SET
+                    property_id=EXCLUDED.property_id,
+                    match_method=EXCLUDED.match_method,
+                    confidence=EXCLUDED.confidence,
+                    map_status=EXCLUDED.map_status,
+                    evidence=EXCLUDED.evidence,
+                    updated_at=NOW()"""),{
+                    "sid":sid,"pid":pid,"cf":top_score,"st":status,
                     "ev":__import__("json").dumps(ev)
                 })
             else:
@@ -8240,8 +8311,11 @@ def _mag_reconcile():
                 c.execute(text("""INSERT INTO pi_magazine_property_map(
                     source_id,property_id,match_method,confidence,map_status,evidence,updated_at
                 ) VALUES(:sid,NULL,'NO_SAFE_MATCH',0,'UNMATCHED','{}'::jsonb,NOW())
-                ON CONFLICT(source_id) DO UPDATE SET property_id=NULL,match_method='NO_SAFE_MATCH',
-                    confidence=0,map_status='UNMATCHED',evidence='{}'::jsonb,updated_at=NOW()"""),{"sid":m["source_id"]})
+                ON CONFLICT(source_id) DO UPDATE SET
+                    property_id=NULL,match_method='NO_SAFE_MATCH',
+                    confidence=0,map_status='UNMATCHED',
+                    evidence='{}'::jsonb,updated_at=NOW()"""),{"sid":sid})
+
     return {"auto_mapped":mapped,"review":review,"unmatched":unmatched}
 
 def _mag_sync_contacts_to_agent():
@@ -8276,31 +8350,71 @@ async def v132_magazine_import(req:Request,file:UploadFile=File(...)):
     need_login(req)
     filename=file.filename or "refined-magazine.xlsx"
     if not filename.lower().endswith(".xlsx"):
-        raise HTTPException(400,"Please upload the refined .xlsx workbook.")
+        raise HTTPException(400,"Please upload Delhi_Property_Magazine_REFINED_FINAL.xlsx.")
 
-    fd,path=tempfile.mkstemp(suffix=".xlsx");os.close(fd)
+    fd,path=tempfile.mkstemp(suffix=".xlsx")
+    os.close(fd)
+
     try:
         total=0
         with open(path,"wb") as out:
             while True:
                 chunk=await file.read(1024*1024)
-                if not chunk:break
+                if not chunk:
+                    break
                 total+=len(chunk)
                 if total>50*1024*1024:
                     raise HTTPException(413,"Maximum workbook size is 50 MB.")
                 out.write(chunk)
 
+        if total==0:
+            raise HTTPException(400,"Uploaded workbook is empty.")
+
         batch="MAG-"+datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+
         master_rows,links=_mag_import_xlsx(path,batch)
         reconciliation=_mag_reconcile()
         synced=_mag_sync_contacts_to_agent()
 
-        return {"status":"ok","batch":batch,"master_rows":master_rows,
-                "contact_links":links,"agent_contact_links_synced":synced,
-                **reconciliation}
+        return {
+            "status":"ok",
+            "batch":batch,
+            "master_rows":master_rows,
+            "contact_links":links,
+            "agent_contact_links_synced":synced,
+            **reconciliation
+        }
+
+    except HTTPException:
+        raise
+    except Exception as ex:
+        import traceback
+        print("V13.2.1 MAGAZINE IMPORT ERROR")
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=500,
+            detail=f"{type(ex).__name__}: {str(ex)}"
+        )
     finally:
-        try:os.unlink(path)
-        except Exception:pass
+        try:
+            os.unlink(path)
+        except Exception:
+            pass
+
+@app.post("/api/v13-2/magazine/reconcile-existing")
+def v132_reconcile_existing(req:Request):
+    need_login(req)
+    try:
+        reconciliation=_mag_reconcile()
+        synced=_mag_sync_contacts_to_agent()
+        return {"status":"ok","agent_contact_links_synced":synced,**reconciliation}
+    except Exception as ex:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=500,
+            detail=f"{type(ex).__name__}: {str(ex)}"
+        )
 
 @app.get("/api/v13-2/magazine/summary")
 def v132_magazine_summary(req:Request):
@@ -8332,10 +8446,11 @@ def magazine_master_import_page(req:Request):
 </div>
 <div style="background:white;padding:16px;border-radius:12px">
 <p><b>Upload Delhi_Property_Magazine_REFINED_FINAL.xlsx</b></p>
-<form id="f"><input type="file" name="file" accept=".xlsx" required> <button type="submit">Import + Reconcile</button></form>
+<form id="f"><input type="file" name="file" accept=".xlsx" required> <button type="submit">Import + Reconcile</button></form><p><button type="button" onclick="reconcileExisting()">Reconcile Already Imported Data</button></p>
 <p id="msg"></p><div id="summary"></div>
 </div></div>
 <script>
 async function load(){let r=await fetch('/api/v13-2/magazine/summary'),d=await r.json();summary.innerHTML=`Master rows <b>${d.master_rows}</b> · Match ready <b>${d.match_ready}</b> · Data review <b>${d.data_review}</b> · Excluded <b>${d.excluded}</b> · Contact links <b>${d.contact_links}</b> · Auto mapped <b>${d.auto_mapped}</b> · Review <b>${d.review}</b> · Unmatched <b>${d.unmatched}</b>`}
-f.addEventListener('submit',async e=>{e.preventDefault();msg.textContent='Importing and reconciling...';let r=await fetch('/api/v13-2/magazine/import',{method:'POST',body:new FormData(f)}),d=await r.json();if(!r.ok){msg.textContent=d.detail||'Import failed';return}msg.textContent=`Imported ${d.master_rows} rows, ${d.contact_links} contact links. Auto mapped ${d.auto_mapped}, review ${d.review}, unmatched ${d.unmatched}.`;load()});load();
+async function reconcileExisting(){msg.textContent='Reconciling staged data...';let r=await fetch('/api/v13-2/magazine/reconcile-existing',{method:'POST'}),d=await r.json();if(!r.ok){msg.textContent='RECONCILE ERROR: '+(d.detail||'Unknown error');return}msg.textContent=`Reconciled. Auto mapped ${d.auto_mapped}, review ${d.review}, unmatched ${d.unmatched}, contact links synced ${d.agent_contact_links_synced}.`;load()}
+f.addEventListener('submit',async e=>{e.preventDefault();msg.textContent='Importing and reconciling...';let r=await fetch('/api/v13-2/magazine/import',{method:'POST',body:new FormData(f)}),d=await r.json();if(!r.ok){msg.textContent='IMPORT ERROR: '+(d.detail||d.message||'Unknown error');return}msg.textContent=`Imported ${d.master_rows} rows, ${d.contact_links} contact links. Auto mapped ${d.auto_mapped}, review ${d.review}, unmatched ${d.unmatched}.`;load()});load();
 </script></body></html>""")
