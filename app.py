@@ -17,7 +17,7 @@ from PIL import Image
 import fitz
 from pypdf import PdfReader, PdfWriter
 
-VERSION="7.9.0-V7-MASTER-PROPERTY-CLEANER"
+VERSION="8.0.0-V8-SMART-MASTER-DATA"
 DATABASE_URL=os.getenv("DATABASE_URL","")
 GEMINI_API_KEY=os.getenv("GEMINI_API_KEY","")
 GEMINI_MODEL=os.getenv("GEMINI_MODEL","gemini-3.1-flash-lite")
@@ -3891,7 +3891,10 @@ def _hard_filter_property(q,p):
     quality=_organize_property_v4(p)
     if not quality["match_eligible"]:
         exclusions.append("MATCH_DATA_INCOMPLETE")
-    if p.get("matching_bucket") and p.get("matching_bucket")!="MATCH_READY":
+    if p.get("v8_bucket"):
+        if p.get("v8_bucket")!="MATCH_READY" or p.get("v8_match_eligible") is False:
+            exclusions.append("NOT_MATCH_READY_V8")
+    elif p.get("matching_bucket") and p.get("matching_bucket")!="MATCH_READY":
         exclusions.append("NOT_MATCH_READY_V7")
     request_phones=_contact_number_set(q.get("contact_phone"))
     property_phones=_contact_number_set(
@@ -5519,6 +5522,250 @@ audit();
 </script></body></html>""")
 
 
+# ============================================================
+# V8 SMART MASTER DATA ENGINE
+# ============================================================
+
+_V8_GENERIC={"unknown","na","n a","south delhi","new delhi","delhi","4bhk","3bhk","2bhk","1bhk","commercial","residential","shop","office","property","parking","booking","rented","preleased","lease hold","leasehold","unit","bmt","gf","ff","sf"}
+
+def _ensure_v8_columns():
+    stmts=[
+        "ALTER TABLE pi_properties ADD COLUMN IF NOT EXISTS v8_identity_key TEXT",
+        "ALTER TABLE pi_properties ADD COLUMN IF NOT EXISTS v8_locality_key TEXT",
+        "ALTER TABLE pi_properties ADD COLUMN IF NOT EXISTS v8_duplicate_confidence TEXT",
+        "ALTER TABLE pi_properties ADD COLUMN IF NOT EXISTS v8_duplicate_evidence JSONB DEFAULT '[]'::jsonb",
+        "ALTER TABLE pi_properties ADD COLUMN IF NOT EXISTS v8_master_property_id TEXT",
+        "ALTER TABLE pi_properties ADD COLUMN IF NOT EXISTS v8_bucket TEXT",
+        "ALTER TABLE pi_properties ADD COLUMN IF NOT EXISTS v8_match_eligible BOOLEAN",
+        "ALTER TABLE pi_properties ADD COLUMN IF NOT EXISTS v8_quality_score INTEGER",
+        "ALTER TABLE pi_properties ADD COLUMN IF NOT EXISTS v8_review_reasons JSONB DEFAULT '[]'::jsonb",
+        "ALTER TABLE pi_properties ADD COLUMN IF NOT EXISTS v8_updated_at TIMESTAMP"
+    ]
+    with engine.begin() as c:
+        for s in stmts:c.execute(text(s))
+
+def _v8_clean(v):
+    v=_norm(v)
+    v=_re.sub(r'[^a-z0-9/ -]+',' ',v)
+    return _re.sub(r'\s+',' ',v).strip()
+
+def _v8_loc(p):
+    v=_v8_clean(p.get("location") or p.get("micro_market"))
+    aliases={"kalash colony":"kailash colony","gk 1":"greater kailash 1","gk1":"greater kailash 1","gk 2":"greater kailash 2","gk2":"greater kailash 2","nfc":"new friends colony","gurgaon":"gurugram","safdurjung enclave":"safdarjung enclave","defense colony":"defence colony","chatterpur":"chattarpur"}
+    return aliases.get(v,v if v not in {"unknown","na","n a","none","not specified"} else "")
+
+def _v8_identity(p):
+    for raw in [p.get("property_name"),p.get("address")]:
+        s=_v8_clean(raw)
+        if not s or s in _V8_GENERIC:continue
+        m=_re.search(r'\b(?:shop\s*no\s*[- ]?\d+[a-z]?|unit\s*no\s*[- ]?\d+[a-z]?|[a-z]{1,3}\s*[-/]\s*\d+[a-z0-9/-]*|\d+[a-z]?\s+[a-z][a-z ]{2,25}(?:complex|tower|house|market|mkt))\b',s,re.I)
+        if m:return _v8_clean(m.group(0))
+    return ""
+
+def _v8_area(p):
+    raw=_v5_source_text(p)
+    plot=built=None
+    reasons=[]
+    y=_re.search(r'(?i)(\d[\d,]{1,5})\s*(?:sq\.?\s*yd|sqyd|sq\.?\s*yard|yards?|yds?|\byd\b)',raw)
+    f=_re.search(r'(?i)(\d[\d,]{1,6})\s*(?:sq\.?\s*ft|sqft|sft|square\s*feet)\b',raw)
+    if y:
+        try:
+            yy=float(y.group(1).replace(",","")); plot=round(yy*9,2) if 10<=yy<=100000 else None
+        except: pass
+    if f:
+        try:
+            ff=float(f.group(1).replace(",","")); built=round(ff,2) if 50<=ff<=500000 else None
+        except: pass
+    existing=_property_area(p)
+    if plot and not built and existing and abs(float(existing)-plot)<=max(1,plot*.01):
+        reasons.append("LEGACY_SQYD_AS_BUILTUP_REJECTED")
+        existing=None
+    if not built and existing:built=float(existing)
+    return {"plot":plot,"built":built,"reasons":reasons}
+
+def _v8_tx(p):
+    raw=_norm(_v5_source_text(p))
+    reasons=[];occ=None;off=None
+    if any(x in raw for x in ["preleased","pre leased","pre-leased"]):occ="PRELEASED"
+    elif any(x in raw for x in ["rented","tenanted","leased out"]):occ="TENANTED"
+    elif any(x in raw for x in ["vacant","ready possession","ready to move"]):occ="VACANT_OR_READY"
+
+    rent=any(x in raw for x in ["for rent","on rent","to let","available for lease","available on lease","space for lease","offered for lease"])
+    sale=any(x in raw for x in ["for sale","on sale","available for sale","asking sale","sale @","resale","sell","selling"])
+    if rent and sale:off="RENT/SALE"
+    elif rent:off="RENT"
+    elif sale:off="SALE"
+    else:
+        st=_canonical_transaction_v4(p.get("rent_or_sale"))
+        bad=(st=="RENT" and any(x in raw for x in ["rented","preleased","pre leased","pre-leased","lease hold","leasehold"]))
+        if bad:reasons.append("LEGACY_RENT_INFERENCE_REJECTED")
+        elif st in {"RENT","SALE","RENT/SALE"}:off=st
+    if "lease hold" in raw or "leasehold" in raw:reasons.append("LEASEHOLD_IS_TENURE")
+    return {"occupancy":occ,"offering":off,"reasons":reasons}
+
+def _v8_quality(p):
+    q=_organize_property_v4(p); a=_v8_area(p); t=_v8_tx(p); s=0
+    if _canonical_city_v4(p.get("city"))!="UNKNOWN":s+=15
+    if _v8_loc(p):s+=15
+    if _canonical_property_type_v4(p.get("property_type"),p.get("suitable_category"),p.get("remarks"))!="UNKNOWN":s+=15
+    if a["built"]:s+=15
+    if t["offering"]:s+=15
+    if q["contact_ready"]:s+=15
+    if _v8_identity(p):s+=5
+    if str(p.get("verification_status") or "").upper()=="VERIFIED":s+=5
+    return min(100,s)
+
+def _v8_area_ok(a,b):
+    if not a or not b:return None
+    return abs(float(a)-float(b))/max(float(a),float(b))<=.10
+
+def _v8_pair(a,b):
+    ia,ib=_v8_identity(a),_v8_identity(b)
+    la,lb=_v8_loc(a),_v8_loc(b)
+    if not ia or not ib or ia!=ib or not la or la!=lb:return None,[]
+    aa=_v8_area(a)["built"] or _v8_area(a)["plot"]
+    ab=_v8_area(b)["built"] or _v8_area(b)["plot"]
+    ok=_v8_area_ok(aa,ab)
+    if ok is True:return "STRONG",["SAME_SPECIFIC_IDENTITY","SAME_LOCALITY","AREA_COMPATIBLE_10_PERCENT"]
+    if ok is None:return "POSSIBLE",["SAME_SPECIFIC_IDENTITY","SAME_LOCALITY","AREA_MISSING"]
+    return "POSSIBLE",["SAME_SPECIFIC_IDENTITY","SAME_LOCALITY","AREA_CONFLICT"]
+
+def _v8_duplicates(props):
+    byid={str(p.get("property_id")):p for p in props}
+    buckets={}
+    for p in props:
+        i,l=_v8_identity(p),_v8_loc(p)
+        if i and l:buckets.setdefault((i,l),[]).append(str(p.get("property_id")))
+
+    strong=[];possible=[]
+    for ids in buckets.values():
+        ids=list(dict.fromkeys(ids))
+        if len(ids)<2 or len(ids)>50:continue
+        for i in range(len(ids)):
+            for j in range(i+1,len(ids)):
+                lvl,ev=_v8_pair(byid[ids[i]],byid[ids[j]])
+                if lvl=="STRONG":strong.append((ids[i],ids[j],ev))
+                elif lvl=="POSSIBLE":possible.append({"property_ids":[ids[i],ids[j]],"evidence":ev})
+
+    parent={x:x for x in byid}
+    def find(x):
+        while parent[x]!=x:
+            parent[x]=parent[parent[x]];x=parent[x]
+        return x
+    def union(a,b):
+        a,b=find(a),find(b)
+        if a!=b:parent[b]=a
+    for a,b,_ in strong:union(a,b)
+
+    groups={}
+    for pid in byid:groups.setdefault(find(pid),[]).append(pid)
+
+    final=[];member={}
+    for ids in groups.values():
+        if len(ids)>1:
+            ranked=sorted(ids,key=lambda x:(_v8_quality(byid[x]),1 if str(byid[x].get("verification_status") or "").upper()=="VERIFIED" else 0,x),reverse=True)
+            gid="V8DUP-"+hashlib.sha256("|".join(sorted(ids)).encode()).hexdigest()[:12].upper()
+            ev=[]
+            for a,b,e in strong:
+                if a in ids and b in ids:ev+=e
+            g={"group_id":gid,"master_property_id":ranked[0],"property_ids":ranked,"evidence":list(dict.fromkeys(ev))}
+            final.append(g)
+            for x in ids:member[x]=g
+    return final,possible,member
+
+def _v8_classify(p,g=None,is_master=False,possible=False):
+    q=_organize_property_v4(p);a=_v8_area(p);t=_v8_tx(p)
+    reasons=list(q["quality_issues"])+a["reasons"]+t["reasons"]
+    core=True
+    if _canonical_city_v4(p.get("city"))=="UNKNOWN":core=False
+    if not _v8_loc(p):core=False
+    if _canonical_property_type_v4(p.get("property_type"),p.get("suitable_category"),p.get("remarks"))=="UNKNOWN":core=False
+    if not a["built"]:
+        core=False
+        if a["plot"]:reasons.append("PLOT_AREA_ONLY_BUILTUP_UNKNOWN")
+    if not t["offering"]:
+        core=False;reasons.append("OFFERING_TRANSACTION_UNCONFIRMED")
+
+    if g and not is_master:bucket="DUPLICATE_REVIEW";reasons.append("STRONG_DUPLICATE_NON_MASTER")
+    elif possible:bucket="POSSIBLE_DUPLICATE_REVIEW";reasons.append("POSSIBLE_DUPLICATE_TEAM_REVIEW")
+    elif not core:bucket="DATA_REVIEW"
+    elif not q["contact_ready"]:bucket="CONTACT_REVIEW"
+    else:bucket="MATCH_READY"
+
+    return {"bucket":bucket,"match":bucket=="MATCH_READY","score":_v8_quality(p),"identity":_v8_identity(p),"locality":_v8_loc(p),
+            "plot":a["plot"],"built":a["built"],"occupancy":t["occupancy"],"offering":t["offering"],"reasons":list(dict.fromkeys(reasons))}
+
+def _v8_audit(limit=1200):
+    _ensure_v8_columns()
+    with engine.connect() as c:props=[dict(r._mapping) for r in c.execute(text("SELECT * FROM pi_properties ORDER BY created_at DESC")).fetchall()]
+    groups,possible,member=_v8_duplicates(props)
+    pmap={}
+    for pr in possible:
+        for pid in pr["property_ids"]:pmap.setdefault(pid,[]).append(pr)
+    s={"total":len(props),"match_ready":0,"contact_review":0,"data_review":0,"duplicate_review":0,"possible_duplicate_review":0,
+       "strong_duplicate_groups":len(groups),"strong_duplicate_records":sum(len(g["property_ids"]) for g in groups),"possible_duplicate_pairs":len(possible)}
+    rows=[]
+    for p in props:
+        pid=str(p.get("property_id"));g=member.get(pid);cl=_v8_classify(p,g,bool(g and g["master_property_id"]==pid),bool(pmap.get(pid)))
+        s[cl["bucket"].lower()]+=1
+        if len(rows)<limit and cl["bucket"]!="MATCH_READY":
+            rows.append({"property_id":pid,"property_name":p.get("property_name"),"city":p.get("city"),"location":p.get("location"),
+                         "property_type":p.get("property_type"),"bucket":cl["bucket"],"score":cl["score"],"identity":cl["identity"],
+                         "locality":cl["locality"],"plot_area_sqft":cl["plot"],"builtup_area_sqft":cl["built"],"occupancy_status":cl["occupancy"],
+                         "offering_transaction":cl["offering"],"master_property_id":g["master_property_id"] if g else None,"reasons":cl["reasons"]})
+    return {"summary":s,"reviewed":rows,"strong_duplicate_groups":groups[:500],"possible_duplicates":possible[:500]}
+
+def _v8_apply():
+    _ensure_v8_columns()
+    with engine.connect() as c:props=[dict(r._mapping) for r in c.execute(text("SELECT * FROM pi_properties")).fetchall()]
+    groups,possible,member=_v8_duplicates(props)
+    pmap={}
+    for pr in possible:
+        for pid in pr["property_ids"]:pmap.setdefault(pid,[]).append(pr)
+    with engine.begin() as c:
+        for p in props:
+            pid=str(p.get("property_id"));g=member.get(pid);cl=_v8_classify(p,g,bool(g and g["master_property_id"]==pid),bool(pmap.get(pid)))
+            ev=g["evidence"] if g else []
+            c.execute(text("""UPDATE pi_properties SET
+                plot_area_sqft=:plot,builtup_area_sqft=:built,occupancy_status=:occ,offering_transaction=:tx,
+                v8_identity_key=:ik,v8_locality_key=:lk,v8_duplicate_confidence=:dc,v8_duplicate_evidence=CAST(:ev AS JSONB),
+                v8_master_property_id=:mid,v8_bucket=:bucket,v8_match_eligible=:me,v8_quality_score=:score,
+                v8_review_reasons=CAST(:reasons AS JSONB),v8_updated_at=NOW() WHERE property_id=:id"""),
+                {"plot":cl["plot"],"built":cl["built"],"occ":cl["occupancy"],"tx":cl["offering"],"ik":cl["identity"],"lk":cl["locality"],
+                 "dc":"STRONG" if g else ("POSSIBLE" if pmap.get(pid) else "UNIQUE"),"ev":json.dumps(ev),
+                 "mid":g["master_property_id"] if g else None,"bucket":cl["bucket"],"me":cl["match"],"score":cl["score"],
+                 "reasons":json.dumps(cl["reasons"]),"id":pid})
+    return _v8_audit()
+
+@app.get("/api/v8/master-engine/audit")
+def v8_master_engine_audit(req:Request):
+    need_login(req);return {"status":"ok",**_v8_audit()}
+
+@app.post("/api/v8/master-engine/apply")
+def v8_master_engine_apply(req:Request):
+    need_login(req);return {"status":"ok","message":"V8 applied safely. No records deleted; possible duplicates remain review-only.",**_v8_apply()}
+
+@app.get("/smart-master-data",response_class=HTMLResponse)
+def v8_smart_master_data_page(req:Request):
+    role=page_role_or_redirect(req)
+    if not role:return RedirectResponse("/login",status_code=303)
+    return HTMLResponse(r"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>V8 Smart Master Data</title>
+<style>*{box-sizing:border-box}body{margin:0;background:#f4f7fb;font-family:Arial;color:#142033}header{background:#0d1d2d;color:#fff;padding:16px 22px}.wrap{max-width:1900px;margin:auto;padding:18px}.card,.kpi{background:#fff;border:1px solid #e4eaf1;border-radius:12px;padding:14px;margin-bottom:12px}.kpis{display:grid;grid-template-columns:repeat(4,minmax(150px,1fr));gap:10px}.kpi b{display:block;font-size:25px}.btn{display:inline-block;padding:9px 12px;border:0;border-radius:8px;background:#1677ff;color:#fff;text-decoration:none;font-weight:700;cursor:pointer}.orange{background:#df8b13}.gray{background:#edf2f7;color:#24364b}.tablewrap{overflow:auto;max-height:65vh}table{width:100%;border-collapse:collapse;font-size:12px}th,td{padding:8px;border-bottom:1px solid #edf1f5;text-align:left;vertical-align:top;white-space:nowrap}th{position:sticky;top:0;background:#f8fafc}</style></head><body>
+<header><b>V8 Smart Master Data Engine</b><br><small>Conservative duplicates · area correction · transaction correction · matcher-ready inventory</small></header>
+<div class="wrap"><div class="card"><a class="btn gray" href="/workspace">Workspace</a> <a class="btn gray" href="/property-database">Property Database</a> <button class="btn" onclick="audit()">Run V8 Audit</button> <button class="btn orange" onclick="apply()">Apply V8</button> <span id="msg"></span></div>
+<div class="card"><b>Rules:</b> shared broker phone alone never creates a duplicate. Strong duplicate requires specific property identity + same locality + compatible area. Possible duplicates stay review-only. No records are deleted.</div>
+<div class="kpis" id="k"></div><div class="card"><div class="tablewrap"><table><thead><tr><th>Property</th><th>Bucket</th><th>Score</th><th>Identity</th><th>Locality</th><th>City</th><th>Type</th><th>Plot</th><th>Built-up</th><th>Occupancy</th><th>Offer Tx</th><th>Master</th><th>Reasons</th><th>Open</th></tr></thead><tbody id="r"></tbody></table></div></div></div>
+<script>
+const E=x=>String(x??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+async function A(u,o={}){let r=await fetch(u,o),d=await r.json();if(!r.ok)throw new Error(d.detail||d.message||'Error');return d}
+function R(d){let s=d.summary;document.querySelector('#k').innerHTML=[['TOTAL',s.total],['MATCH READY',s.match_ready],['CONTACT REVIEW',s.contact_review],['DATA REVIEW',s.data_review],['STRONG DUP REVIEW',s.duplicate_review],['POSSIBLE DUP REVIEW',s.possible_duplicate_review],['STRONG DUP GROUPS',s.strong_duplicate_groups],['STRONG DUP RECORDS',s.strong_duplicate_records],['POSSIBLE DUP PAIRS',s.possible_duplicate_pairs]].map(x=>`<div class="kpi"><span>${x[0]}</span><b>${Number(x[1]||0).toLocaleString()}</b></div>`).join('');
+document.querySelector('#r').innerHTML=(d.reviewed||[]).map(x=>`<tr><td><b>${E(x.property_name||x.property_id)}</b><br>${E(x.property_id)}</td><td>${E(x.bucket)}</td><td>${E(x.score)}</td><td>${E(x.identity||'')}</td><td>${E(x.locality||'')}</td><td>${E(x.city||'')}</td><td>${E(x.property_type||'')}</td><td>${E(x.plot_area_sqft||'')}</td><td>${E(x.builtup_area_sqft||'')}</td><td>${E(x.occupancy_status||'')}</td><td>${E(x.offering_transaction||'')}</td><td>${E(x.master_property_id||'')}</td><td style="max-width:430px;white-space:normal">${E((x.reasons||[]).join(', '))}</td><td><a target="_blank" href="/property-record/${encodeURIComponent(x.property_id)}">View</a></td></tr>`).join('')}
+async function audit(){document.querySelector('#msg').textContent=' Auditing...';R(await A('/api/v8/master-engine/audit'));document.querySelector('#msg').textContent=' Audit complete'}
+async function apply(){if(!confirm('Apply V8? No records will be deleted.'))return;document.querySelector('#msg').textContent=' Applying...';R(await A('/api/v8/master-engine/apply',{method:'POST'}));document.querySelector('#msg').textContent=' Applied'}
+audit();
+</script></body></html>""")
+
+
 @app.get("/api/v4/requirements")
 def v4_requirements(req:Request,limit:int=Query(300,ge=1,le=1000)):
     need_login(req)
@@ -5615,7 +5862,7 @@ def _v4_page(role):
 <title>AI Deal Intelligence OS V4</title><style>{_V4_CSS}</style></head><body><div class="shell">
 <aside class="side"><div class="brand">AI Deal Intelligence OS<small>V4 · Property · Hospitality · Retail · Demand</small></div>
 <div class="group">COMMAND</div><button class="nav active" data-page="command">▣ Command Centre</button><button class="nav" data-page="activity">◎ AI Activity</button><button class="nav" data-page="bots">⚡ Bot Control Room</button>
-<div class="group">PROPERTY</div><button class="nav" data-page="property">⌂ Add Property + Matcher</button><a class="nav" href="/property-database">▦ Full Property Database</a><a class="nav" href="/data-quality">✓ Data Quality / Organizer</a><a class="nav" href="/data-recovery">↻ Intelligent Recovery V5</a><a class="nav" href="/master-data-cleaner">◆ Master Data Cleaner V7</a><a class="nav" href="/retail-requirements">▤ Retail Requirement Leads</a><button class="nav" data-page="owners">● Owners Database</button><button class="nav" data-page="brokers">● Brokers Database</button><a class="nav" href="/legacy-workspace">Original Upload Workspace</a><a class="nav" href="/database-page">Original Database</a>
+<div class="group">PROPERTY</div><button class="nav" data-page="property">⌂ Add Property + Matcher</button><a class="nav" href="/property-database">▦ Full Property Database</a><a class="nav" href="/data-quality">✓ Data Quality / Organizer</a><a class="nav" href="/data-recovery">↻ Intelligent Recovery V5</a><a class="nav" href="/master-data-cleaner">◆ Master Data Cleaner V7</a><a class="nav" href="/smart-master-data">★ Smart Master Data V8</a><a class="nav" href="/retail-requirements">▤ Retail Requirement Leads</a><button class="nav" data-page="owners">● Owners Database</button><button class="nav" data-page="brokers">● Brokers Database</button><a class="nav" href="/legacy-workspace">Original Upload Workspace</a><a class="nav" href="/database-page">Original Database</a>
 <div class="group">LEAD INTELLIGENCE</div><button class="nav" data-page="hospitality">◆ Hospitality</button><button class="nav" data-page="retail">◈ Retail Expansion</button><button class="nav" data-page="contacts">✉ Marketing Contacts</button><button class="nav" data-page="demand">⌕ Requirement Discovery</button>
 </aside><main class="main"><header class="top"><div><b>Unified Delhi NCR Deal Intelligence</b><div class="sub">Organized database + AI bots + matching</div></div><div>{badge} · <a href="/logout">Logout</a></div></header><div class="content">
 
