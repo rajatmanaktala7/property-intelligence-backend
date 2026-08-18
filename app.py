@@ -12923,3 +12923,421 @@ async def v161_dashboard_router(request,call_next):
         response.headers["Pragma"]="no-cache"
         response.headers["Expires"]="0"
     return response
+
+# ============================================================
+# V16.2 ADMIN TOOLS + PHONE CONTACT UPLOAD
+# Fixes Admin Data Tools and adds VCF/CSV/XLSX phone-contact import
+# for WhatsApp marketing.
+# ============================================================
+
+def _v162_setup():
+    _v151_setup()
+    with engine.begin() as c:
+        c.execute(text("""CREATE TABLE IF NOT EXISTS pi_phone_contact_uploads(
+            id BIGSERIAL PRIMARY KEY,
+            upload_id TEXT UNIQUE NOT NULL,
+            filename TEXT,
+            default_category TEXT,
+            rows_read INTEGER DEFAULT 0,
+            valid_mobile_rows INTEGER DEFAULT 0,
+            contacts_created INTEGER DEFAULT 0,
+            contacts_updated INTEGER DEFAULT 0,
+            duplicates INTEGER DEFAULT 0,
+            invalid_rows INTEGER DEFAULT 0,
+            uploaded_by TEXT,
+            created_at TIMESTAMPTZ DEFAULT NOW()
+        )"""))
+        c.execute(text("""CREATE TABLE IF NOT EXISTS pi_phone_contact_upload_evidence(
+            id BIGSERIAL PRIMARY KEY,
+            upload_id TEXT NOT NULL,
+            contact_name TEXT,
+            raw_phone TEXT,
+            normalized_phone TEXT,
+            email TEXT,
+            company_brand TEXT,
+            category TEXT,
+            city TEXT,
+            location TEXT,
+            status TEXT,
+            reason TEXT,
+            created_at TIMESTAMPTZ DEFAULT NOW()
+        )"""))
+
+def _v162_mobile(v):
+    if v is None:
+        return None
+    digits=_re.sub(r"\D","",str(v))
+    if len(digits)>10 and digits.startswith("91"):
+        digits=digits[-10:]
+    if len(digits)==10 and digits[0] in "6789":
+        return digits
+    return None
+
+def _v162_split_phones(v):
+    if v is None:return []
+    vals=[]
+    if isinstance(v,(list,tuple)):
+        chunks=v
+    else:
+        chunks=_re.split(r"[,;/|]+",str(v))
+    for x in chunks:
+        ph=_v162_mobile(x)
+        if ph and ph not in vals:vals.append(ph)
+    return vals
+
+def _v162_upsert_phone_contact(phone,name=None,email=None,company=None,category=None,city=None,location=None,upload_id=None):
+    """
+    Uses the existing V15 marketing contact upsert layer so phone uploads
+    dedupe against the existing WhatsApp marketing database.
+    """
+    before=0
+    try:
+        with engine.connect() as c:
+            before=int(c.execute(text("SELECT COUNT(*) FROM pi_marketing_contacts WHERE primary_phone=:p"),{"p":phone}).scalar_one() or 0)
+    except Exception:
+        pass
+
+    _v151_upsert_contact(
+        phone,
+        name=name,
+        company=company,
+        category=(category or "OTHER"),
+        city=city,
+        location=location,
+        email=email,
+        website=None,
+        source="PHONE_UPLOAD",
+        source_detail=f"PHONE_UPLOAD:{upload_id or ''}",
+        notes="Imported from user's phone contacts for WhatsApp marketing; verify/consent status before outreach."
+    )
+
+    return "updated" if before else "created"
+
+def _v162_parse_vcf(raw_text, default_category):
+    records=[]
+    current=None
+    for raw in raw_text.splitlines():
+        line=raw.strip()
+        if line.upper()=="BEGIN:VCARD":
+            current={"phones":[]}
+            continue
+        if line.upper()=="END:VCARD":
+            if current is not None:
+                records.append(current)
+            current=None
+            continue
+        if current is None:continue
+        left,sep,val=line.partition(":")
+        if not sep:continue
+        key=left.upper()
+        val=val.strip()
+        if key.startswith("FN"):
+            current["name"]=val
+        elif key.startswith("ORG"):
+            current["company"]=val.replace(";"," ").strip()
+        elif key.startswith("TEL"):
+            current.setdefault("phones",[]).append(val)
+        elif key.startswith("EMAIL"):
+            current["email"]=val
+        elif key.startswith("ADR"):
+            current["location"]=val.replace(";"," ").strip()
+        elif key.startswith("CATEGORIES"):
+            current["category"]=val.split(",")[0].strip().upper()
+    for r in records:
+        r["category"]=r.get("category") or default_category
+    return records
+
+def _v162_parse_csv_bytes(data, default_category):
+    import io,csv
+    text_data=data.decode("utf-8-sig","ignore")
+    reader=csv.DictReader(io.StringIO(text_data))
+    out=[]
+    for row in reader:
+        low={str(k or "").strip().lower():v for k,v in row.items()}
+        def first(*keys):
+            for k in keys:
+                if low.get(k) not in (None,""):return low.get(k)
+            return None
+        out.append({
+            "name":first("name","contact name","full name","contact_name"),
+            "phones":[first("phone","mobile","mobile number","phone number","contact number","whatsapp")],
+            "email":first("email","email id","email_id"),
+            "company":first("company","brand","business","organization","organisation"),
+            "category":(first("category","type","segment") or default_category),
+            "city":first("city"),
+            "location":first("location","address","area")
+        })
+    return out
+
+def _v162_parse_xlsx(path,default_category):
+    from openpyxl import load_workbook
+    wb=load_workbook(path,read_only=True,data_only=True)
+    ws=wb.active
+    rows=ws.iter_rows(values_only=True)
+    try:headers=[str(x or "").strip().lower() for x in next(rows)]
+    except StopIteration:
+        wb.close();return []
+    idx={h:i for i,h in enumerate(headers)}
+    def gi(row,*keys):
+        for k in keys:
+            i=idx.get(k)
+            if i is not None and i<len(row) and row[i] not in (None,""):
+                return row[i]
+        return None
+    out=[]
+    for row in rows:
+        out.append({
+            "name":gi(row,"name","contact name","full name","contact_name"),
+            "phones":[gi(row,"phone","mobile","mobile number","phone number","contact number","whatsapp")],
+            "email":gi(row,"email","email id","email_id"),
+            "company":gi(row,"company","brand","business","organization","organisation"),
+            "category":gi(row,"category","type","segment") or default_category,
+            "city":gi(row,"city"),
+            "location":gi(row,"location","address","area")
+        })
+    wb.close()
+    return out
+
+@app.post("/api/v16-2/phone-contacts/upload")
+async def v162_phone_contacts_upload(
+    req:Request,
+    file:UploadFile=File(...),
+    default_category:str=Form("OTHER")
+):
+    need_login(req);_v162_setup()
+    fn=file.filename or "contacts"
+    ext=fn.lower().rsplit(".",1)[-1] if "." in fn else ""
+    if ext not in {"vcf","csv","xlsx"}:
+        raise HTTPException(400,"Upload .vcf, .csv or .xlsx")
+
+    data=await file.read()
+    if len(data)>25*1024*1024:
+        raise HTTPException(413,"Maximum file size is 25 MB.")
+
+    default_category=str(default_category or "OTHER").strip().upper()
+    upload_id="PHONE-"+datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")+"-"+uuid.uuid4().hex[:6].upper()
+
+    tmp=None
+    try:
+        if ext=="vcf":
+            records=_v162_parse_vcf(data.decode("utf-8","ignore"),default_category)
+        elif ext=="csv":
+            records=_v162_parse_csv_bytes(data,default_category)
+        else:
+            fd,tmp=tempfile.mkstemp(suffix=".xlsx");os.close(fd)
+            with open(tmp,"wb") as f:f.write(data)
+            records=_v162_parse_xlsx(tmp,default_category)
+    finally:
+        if tmp:
+            try:os.unlink(tmp)
+            except:pass
+
+    rows_read=len(records)
+    valid_mobile_rows=created=updated=duplicates=invalid=0
+
+    with engine.begin() as c:
+        c.execute(text("""INSERT INTO pi_phone_contact_uploads(
+            upload_id,filename,default_category,rows_read,uploaded_by
+        ) VALUES(:id,:fn,:cat,:rows,:by)"""),{
+            "id":upload_id,"fn":fn,"cat":default_category,"rows":rows_read,"by":actor_name(req)
+        })
+
+    seen=set()
+    for r in records:
+        phones=[]
+        for rawp in (r.get("phones") or []):
+            phones.extend(_v162_split_phones(rawp))
+        phones=list(dict.fromkeys(phones))
+        if not phones:
+            invalid+=1
+            with engine.begin() as c:
+                c.execute(text("""INSERT INTO pi_phone_contact_upload_evidence(
+                    upload_id,contact_name,raw_phone,email,company_brand,category,city,location,status,reason
+                ) VALUES(:u,:n,:raw,:e,:co,:cat,:city,:loc,'INVALID','No valid 10-digit Indian mobile')"""),{
+                    "u":upload_id,"n":r.get("name"),"raw":" | ".join(str(x or "") for x in (r.get("phones") or [])),
+                    "e":r.get("email"),"co":r.get("company"),"cat":r.get("category") or default_category,
+                    "city":r.get("city"),"loc":r.get("location")
+                })
+            continue
+
+        valid_mobile_rows+=1
+        for ph in phones:
+            if ph in seen:
+                duplicates+=1
+                continue
+            seen.add(ph)
+            try:
+                outcome=_v162_upsert_phone_contact(
+                    ph,name=r.get("name"),email=r.get("email"),company=r.get("company"),
+                    category=str(r.get("category") or default_category).upper(),
+                    city=r.get("city"),location=r.get("location"),upload_id=upload_id
+                )
+                if outcome=="created":created+=1
+                else:updated+=1
+                with engine.begin() as c:
+                    c.execute(text("""INSERT INTO pi_phone_contact_upload_evidence(
+                        upload_id,contact_name,raw_phone,normalized_phone,email,company_brand,category,
+                        city,location,status,reason
+                    ) VALUES(:u,:n,:raw,:ph,:e,:co,:cat,:city,:loc,'IMPORTED',:reason)"""),{
+                        "u":upload_id,"n":r.get("name"),"raw":" | ".join(str(x or "") for x in (r.get("phones") or [])),
+                        "ph":ph,"e":r.get("email"),"co":r.get("company"),
+                        "cat":str(r.get("category") or default_category).upper(),
+                        "city":r.get("city"),"loc":r.get("location"),"reason":outcome.upper()
+                    })
+            except Exception as ex:
+                invalid+=1
+
+    with engine.begin() as c:
+        c.execute(text("""UPDATE pi_phone_contact_uploads SET
+            valid_mobile_rows=:v,contacts_created=:c,contacts_updated=:u,
+            duplicates=:d,invalid_rows=:i WHERE upload_id=:id"""),{
+            "v":valid_mobile_rows,"c":created,"u":updated,"d":duplicates,"i":invalid,"id":upload_id
+        })
+
+    return {
+        "status":"ok","upload_id":upload_id,"rows_read":rows_read,
+        "valid_mobile_rows":valid_mobile_rows,"contacts_created":created,
+        "contacts_updated":updated,"duplicates":duplicates,"invalid_rows":invalid
+    }
+
+@app.get("/api/v16-2/phone-contacts/uploads")
+def v162_phone_uploads(req:Request):
+    need_login(req);_v162_setup()
+    with engine.connect() as c:
+        rows=[dict(r._mapping) for r in c.execute(text(
+            "SELECT * FROM pi_phone_contact_uploads ORDER BY id DESC LIMIT 50"
+        )).fetchall()]
+    return {"status":"ok","rows":rows}
+
+@app.get("/phone-contact-upload",response_class=HTMLResponse)
+def v162_phone_upload_page(req:Request):
+    role=page_role_or_redirect(req)
+    if not role:return RedirectResponse("/login",303)
+    return HTMLResponse("""<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>Upload Phone Contacts</title>
+<style>*{box-sizing:border-box}body{font-family:Arial;margin:0;background:#f4f7fb;color:#172437}header{background:#102235;color:#fff;padding:18px}.w{max-width:1200px;margin:auto;padding:18px}.card{background:#fff;border:1px solid #e2e8f0;border-radius:12px;padding:16px;margin-bottom:14px}.bar{display:flex;gap:8px;flex-wrap:wrap}.btn,a.btn{padding:9px 11px;border:0;border-radius:8px;background:#1677ff;color:white;text-decoration:none;font-weight:bold;cursor:pointer}.gray{background:#e9eef5!important;color:#203247!important}select,input{padding:9px;border:1px solid #ccd6e2;border-radius:7px}.msg{margin-top:12px;padding:10px;border-radius:8px;background:#fff8e8;border:1px solid #eed18f}table{width:100%;border-collapse:collapse;font-size:12px}th,td{padding:8px;border-bottom:1px solid #edf1f5;text-align:left}.small{font-size:12px;color:#687789}</style></head>
+<body><header><b>Upload Phone Contacts for WhatsApp Marketing</b><br><small>VCF · CSV · XLSX · Dedupe by mobile number</small></header><div class=w>
+<div class=card>
+<div class=bar><a class="btn gray" href="/final-dashboard-v3">← Final Dashboard</a><a class="btn gray" href="/marketing-contacts-final">Marketing Contacts</a></div>
+<h3>Upload contacts from your phone</h3>
+<p class=small>Android and iPhone can export contacts as a <b>.VCF</b> file. You can also upload CSV/XLSX. Existing mobile numbers are updated/deduplicated instead of duplicated.</p>
+<form id=f>
+<label>Default Category</label><br>
+<select name=default_category>
+<option>OTHER</option><option>CAFE</option><option>RESTAURANT</option><option>BANQUET</option><option>HOTEL</option>
+<option>GUEST_HOUSE</option><option>LOUNGE</option><option>CLUB</option><option>BAR</option><option>FARMHOUSE</option>
+<option>RETAILER</option><option>BROKER</option><option>OWNER</option>
+</select><br><br>
+<input type=file name=file accept=".vcf,.csv,.xlsx" required>
+<button class=btn type=submit>Upload Contacts</button>
+</form>
+<div id=msg class=msg>Phone-uploaded contacts enter Marketing Contacts with source <b>PHONE_UPLOAD</b>. Verify before WhatsApp outreach.</div>
+</div>
+<div class=card><h3>Recent Uploads</h3><table><thead><tr><th>File</th><th>Rows</th><th>Valid Mobile Rows</th><th>Created</th><th>Updated</th><th>Duplicates</th><th>Invalid</th><th>Date</th></tr></thead><tbody id=rows></tbody></table></div>
+</div>
+<script>
+f.onsubmit=async e=>{e.preventDefault();msg.textContent='Uploading and organizing contacts...';let r=await fetch('/api/v16-2/phone-contacts/upload',{method:'POST',body:new FormData(f)}),d=await r.json();if(!r.ok){msg.textContent='ERROR: '+(d.detail||d.message||'Upload failed');return}msg.textContent=`Done. ${d.contacts_created} created, ${d.contacts_updated} updated, ${d.duplicates} duplicates skipped, ${d.invalid_rows} invalid rows.`;load()}
+async function load(){let d=await(await fetch('/api/v16-2/phone-contacts/uploads')).json();rows.innerHTML=(d.rows||[]).map(x=>`<tr><td>${x.filename||''}</td><td>${x.rows_read||0}</td><td>${x.valid_mobile_rows||0}</td><td>${x.contacts_created||0}</td><td>${x.contacts_updated||0}</td><td>${x.duplicates||0}</td><td>${x.invalid_rows||0}</td><td>${String(x.created_at||'').slice(0,16)}</td></tr>`).join('')||'<tr><td colspan=8>No uploads yet.</td></tr>'}load()
+</script></body></html>""")
+
+def _v162_table_count(table):
+    try:
+        with engine.connect() as c:
+            return int(c.execute(text(f'SELECT COUNT(*) FROM "{table}"')).scalar_one() or 0)
+    except Exception:
+        return None
+
+@app.get("/api/v16-2/admin/health")
+def v162_admin_health(req:Request):
+    role=need_login(req)
+    if role!="admin":raise HTTPException(403,"Admin only")
+    tables=["pi_properties","pi_requirements","pi_matches","pi_ai_hospitality_master","pi_marketing_contacts",
+            "ai_marketing_contacts","ai_bot_runs","pi_sources","pi_phone_contact_uploads"]
+    counts={t:_v162_table_count(t) for t in tables}
+    try:
+        with engine.connect() as c:
+            c.execute(text("SELECT 1")).scalar_one()
+        db="OK"
+    except Exception as ex:
+        db=f"ERROR: {ex}"
+    return {"status":"ok","database":db,"counts":counts}
+
+@app.get("/admin-data-tools-v2",response_class=HTMLResponse)
+def v162_admin_tools(req:Request):
+    role=page_role_or_redirect(req)
+    if not role:return RedirectResponse("/login",303)
+    if role!="admin":
+        return HTMLResponse("<h2>Admin only</h2><p>Please log in with the admin code.</p>",status_code=403)
+    return HTMLResponse("""<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>Admin Data Tools</title>
+<style>*{box-sizing:border-box}body{font-family:Arial;margin:0;background:#f4f7fb;color:#172437}header{background:#102235;color:#fff;padding:18px}.w{max-width:1300px;margin:auto;padding:18px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}.card{display:block;background:#fff;border:1px solid #e2e8f0;border-radius:12px;padding:15px;text-decoration:none;color:#172437}.card p{font-size:12px;color:#687789}.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:8px;margin-bottom:14px}.k{background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:12px}.k b{display:block;font-size:20px}.btn{display:inline-block;padding:8px 10px;border-radius:8px;background:#e9eef5;color:#203247;text-decoration:none;font-weight:bold;margin-bottom:12px}</style></head>
+<body><header><b>Admin Data Tools V2</b><br><small>Safe database health and maintenance links</small></header><div class=w>
+<a class=btn href="/final-dashboard-v3">← Final Dashboard</a>
+<div class=kpis id=kpis><div class=k><b>Loading...</b><span>Database health</span></div></div>
+<div class=grid>
+<a class=card href="/data-doctor"><b>Data Doctor</b><p>Full property/contact reconciliation and database health.</p></a>
+<a class=card href="/property-database"><b>Full Property Database</b><p>Inspect master property data.</p></a>
+<a class=card href="/contacts-directory"><b>Owner / Broker Contacts</b><p>Verify property contact roles.</p></a>
+<a class=card href="/ai-hospitality-master-final"><b>Hospitality Master</b><p>Inspect AI Hospitality business data.</p></a>
+<a class=card href="/marketing-contacts-final"><b>Marketing Contacts</b><p>WhatsApp marketing contact database.</p></a>
+<a class=card href="/phone-contact-upload"><b>Phone Contacts Upload</b><p>Import VCF/CSV/XLSX contacts.</p></a>
+<a class=card href="/hospitality-enrichment"><b>Hospitality Enrichment</b><p>Find missing business mobile numbers.</p></a>
+<a class=card href="/capture-intelligence"><b>Capture Intelligence</b><p>Upload and extract source documents/images.</p></a>
+</div></div>
+<script>
+(async()=>{let r=await fetch('/api/v16-2/admin/health'),d=await r.json();if(!r.ok){kpis.innerHTML='<div class=k><b>ERROR</b><span>'+(d.detail||'Unable to load')+'</span></div>';return}let h=`<div class=k><b>${d.database}</b><span>DATABASE</span></div>`;for(const [k,v] of Object.entries(d.counts||{})){h+=`<div class=k><b>${v===null?'N/A':v}</b><span>${k}</span></div>`}kpis.innerHTML=h})()
+</script></body></html>""")
+
+@app.get("/final-dashboard-v3",response_class=HTMLResponse)
+def v162_final_dashboard(req:Request):
+    role=page_role_or_redirect(req)
+    if not role:return RedirectResponse("/login",303)
+    admin_card = """<a class="card" href="/admin-data-tools-v2"><b>Admin Data Tools</b><p>Database health, reconciliation and maintenance links.</p><span class=tag>ADMIN</span></a>""" if role=="admin" else ""
+    return HTMLResponse(f"""<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>AI Deal Intelligence OS</title>
+<style>*{{box-sizing:border-box}}body{{font-family:Arial;margin:0;background:#f4f7fb;color:#172437}}header{{background:#102235;color:#fff;padding:22px}}.w{{max-width:1550px;margin:auto;padding:20px}}.section{{margin-bottom:24px}}.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px}}.card{{background:#fff;border:1px solid #e2e8f0;border-radius:12px;padding:16px;text-decoration:none;color:#172437;min-height:105px;display:block}}.card b{{font-size:16px}}.card p{{font-size:12px;color:#687789;line-height:1.4}}.primary{{border:2px solid #1677ff}}.bot{{border:2px solid #14a673}}.tag{{display:inline-block;padding:3px 7px;border-radius:10px;background:#edf4ff;font-size:10px}}.btn{{display:inline-block;padding:9px 11px;border:0;border-radius:8px;background:#08734b;color:#fff;font-weight:bold;cursor:pointer}}.status{{margin-top:8px;padding:7px;background:#f6f8fb;border-radius:7px;font-size:12px}}</style></head>
+<body><header><b>AI Deal Intelligence OS</b><br><small>Final Team Dashboard · One entry point</small></header><div class=w>
+
+<div class=section><h2>Run AI Bots</h2><div class=grid>
+<div class="card bot"><b>Hospitality Bot</b><p>Fetch fresh Hospitality business contacts and signals.</p><button class=btn onclick="runBot('hospitality')">▶ Run Hospitality Bot</button><div id=hmsg class=status>Ready</div></div>
+<div class="card bot"><b>Retail Bot</b><p>Fetch fresh Retail expansion and leasing signals.</p><button class=btn onclick="runBot('retail')">▶ Run Retail Bot</button><div id=rmsg class=status>Ready</div></div>
+<a class=card href="/hospitality-enrichment"><b>Find Missing Hospitality Contacts</b><p>Phone-first enrichment for existing businesses.</p></a>
+<a class=card href="/ai-hospitality-master-final"><b>Hospitality Master</b><p>Review Hospitality database by category.</p></a>
+</div></div>
+
+<div class=section><h2>Property & Requirements</h2><div class=grid>
+<a class="card primary" href="/v14-property-form"><b>Add Property Manually</b><p>Fresh structured inventory.</p></a>
+<a class="card primary" href="/v14-requirement-form"><b>Add Requirement Manually</b><p>Confirmed requirement entry.</p></a>
+<a class="card primary" href="/v14-matcher"><b>Property Matcher</b><p>Match fresh/verified inventory.</p></a>
+<a class=card href="/v14-inventory"><b>Fresh Inventory Database</b><p>Search current working inventory.</p></a>
+<a class=card href="/requirements-match-center"><b>Requirements Centre</b><p>AI + manual requirements separated.</p></a>
+<a class=card href="/retail-expansion"><b>Retail Expansion</b><p>Retail AI results.</p></a>
+</div></div>
+
+<div class=section><h2>WhatsApp Marketing</h2><div class=grid>
+<a class="card primary" href="/phone-contact-upload"><b>Upload Contacts From Phone</b><p>Upload iPhone/Android .VCF, CSV or XLSX. Dedupe automatically.</p><span class=tag>NEW</span></a>
+<a class=card href="/marketing-contacts-final"><b>Marketing Contacts</b><p>All WhatsApp marketing contacts with source/category filters.</p></a>
+<a class=card href="/api/v16/whatsapp-ready.csv"><b>Export Hospitality WhatsApp CSV</b><p>Download Hospitality contacts with usable mobile numbers.</p></a>
+<a class=card href="/contacts-directory"><b>Owner / Broker Contacts</b><p>Property contacts remain separate.</p></a>
+</div></div>
+
+<div class=section><h2>Database & Admin</h2><div class=grid>
+<a class=card href="/capture-intelligence"><b>Capture Property</b><p>Camera, screenshot, newspaper, magazine, handwritten note, PDF.</p></a>
+<a class=card href="/property-database"><b>Full Property Database</b><p>Master property archive.</p></a>
+<a class=card href="/data-doctor"><b>Data Doctor</b><p>Database reconciliation and health.</p></a>
+{admin_card}
+</div></div>
+
+</div><script>
+async function runBot(t){{let box=document.getElementById(t==='hospitality'?'hmsg':'rmsg'),u=t==='hospitality'?'/api/v4/hospitality-bot/start':'/api/v4/retail-bot/start';box.textContent='Starting...';try{{let r=await fetch(u,{{method:'POST'}}),d=await r.json();if(!r.ok)throw Error(d.detail||d.message||'Failed');box.textContent='Started in background'+(d.run_id?' · '+d.run_id:'')}}catch(e){{box.textContent='ERROR: '+e.message}}}}
+</script></body></html>""")
+
+@app.middleware("http")
+async def v162_final_router(request,call_next):
+    if request.url.path in {"/workspace","/final-dashboard","/final-dashboard-v2","/admin-data-tools"}:
+        if request.url.path=="/admin-data-tools":
+            return RedirectResponse("/admin-data-tools-v2",status_code=307)
+        return RedirectResponse("/final-dashboard-v3",status_code=307)
+    response=await call_next(request)
+    if request.url.path.startswith(("/final-dashboard-v3","/admin-data-tools-v2","/phone-contact-upload")):
+        response.headers["Cache-Control"]="no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"]="no-cache"
+        response.headers["Expires"]="0"
+    return response
