@@ -7509,3 +7509,494 @@ def v4_workspace(req:Request):
     role=page_role_or_redirect(req)
     if not role: return RedirectResponse("/login",status_code=303)
     return HTMLResponse(_v4_page(role))
+
+# ============================================================
+# V13 FINAL DATA ENGINE + SIMPLIFIED RETAIL REQUIREMENT TABLE
+# REPAIRED V13.1
+# ============================================================
+
+def _v13_table_exists(name):
+    with engine.connect() as c:
+        return bool(c.execute(text("""SELECT EXISTS(
+            SELECT 1 FROM information_schema.tables
+            WHERE table_schema='public' AND table_name=:n
+        )"""), {"n": name}).scalar_one())
+
+def _ensure_v13_tables():
+    with engine.begin() as c:
+        c.execute(text("""CREATE TABLE IF NOT EXISTS pi_v13_recovery_suggestions(
+            id BIGSERIAL PRIMARY KEY,
+            property_id TEXT NOT NULL,
+            suggested_contact TEXT,
+            matched_property_id TEXT,
+            confidence INTEGER DEFAULT 0,
+            evidence JSONB DEFAULT '{}'::jsonb,
+            decision TEXT DEFAULT 'PENDING',
+            decided_by TEXT,
+            decided_at TIMESTAMPTZ,
+            created_at TIMESTAMPTZ DEFAULT NOW(),
+            UNIQUE(property_id,suggested_contact,matched_property_id)
+        )"""))
+        c.execute(text("""CREATE TABLE IF NOT EXISTS pi_v13_master_groups(
+            group_key TEXT PRIMARY KEY,
+            master_property_id TEXT NOT NULL,
+            member_property_ids JSONB DEFAULT '[]'::jsonb,
+            group_type TEXT DEFAULT 'SINGLE',
+            confidence INTEGER DEFAULT 100,
+            review_status TEXT DEFAULT 'AUTO',
+            created_at TIMESTAMPTZ DEFAULT NOW(),
+            updated_at TIMESTAMPTZ DEFAULT NOW()
+        )"""))
+
+def _v13_norm(v):
+    return _re.sub(r'[^A-Z0-9]+', ' ', str(v or '').upper()).strip()
+
+def _v13_area(p):
+    for k in ("available_area_sqft", "minimum_area_sqft", "maximum_area_sqft"):
+        try:
+            x = float(p.get(k) or 0)
+            if x > 0:
+                return x
+        except Exception:
+            pass
+    return 0.0
+
+def _v13_identity(p):
+    return (
+        _v13_norm(p.get("property_name")),
+        _v13_norm(p.get("location")),
+        _v13_norm(p.get("city")),
+        _v13_norm(p.get("property_type"))
+    )
+
+def _v13_contact_recovery():
+    _ensure_v13_tables()
+    if not _v13_table_exists("pi_property_health") or not _v13_table_exists("pi_property_contact_links"):
+        return 0
+
+    with engine.connect() as c:
+        props = [dict(r._mapping) for r in c.execute(text("SELECT * FROM pi_properties")).fetchall()]
+        links = [dict(r._mapping) for r in c.execute(
+            text("SELECT property_id,normalized_contact FROM pi_property_contact_links")
+        ).fetchall()]
+
+    bypid = {}
+    for x in links:
+        bypid.setdefault(str(x["property_id"]), set()).add(x["normalized_contact"])
+
+    indexed = [p for p in props if bypid.get(str(p.get("property_id")))]
+    missing = [p for p in props if not bypid.get(str(p.get("property_id")))]
+    made = 0
+
+    with engine.begin() as c:
+        for p in missing:
+            pn, pl, pc, pt = _v13_identity(p)
+            pa = _v13_area(p)
+            if not pn or not pl:
+                continue
+
+            candidates = []
+            for q in indexed:
+                qn, ql, qc, qt = _v13_identity(q)
+                qa = _v13_area(q)
+
+                score = 0
+                evidence = []
+
+                if pn == qn:
+                    score += 45
+                    evidence.append("PROPERTY_IDENTITY")
+                elif pn and qn and (pn in qn or qn in pn) and min(len(pn), len(qn)) >= 4:
+                    score += 30
+                    evidence.append("PROPERTY_NAME_CLOSE")
+
+                if pl == ql:
+                    score += 25
+                    evidence.append("LOCALITY")
+
+                if pc and qc and pc == qc:
+                    score += 8
+                    evidence.append("CITY")
+
+                if pt and qt and pt == qt:
+                    score += 7
+                    evidence.append("TYPE")
+
+                if pa and qa:
+                    diff = abs(pa - qa) / max(pa, qa)
+                    if diff <= 0.05:
+                        score += 15
+                        evidence.append("AREA_5_PERCENT")
+                    elif diff <= 0.15:
+                        score += 8
+                        evidence.append("AREA_15_PERCENT")
+
+                # Strict safety: exact property identity + locality required.
+                if score >= 85 and "PROPERTY_IDENTITY" in evidence and "LOCALITY" in evidence:
+                    for phone in bypid.get(str(q.get("property_id")), []):
+                        candidates.append((score, phone, q.get("property_id"), evidence))
+
+            for score, phone, matched_pid, evidence in sorted(candidates, reverse=True)[:5]:
+                c.execute(text("""INSERT INTO pi_v13_recovery_suggestions(
+                    property_id,suggested_contact,matched_property_id,confidence,evidence
+                ) VALUES(:p,:ph,:m,:cf,CAST(:ev AS JSONB))
+                ON CONFLICT(property_id,suggested_contact,matched_property_id)
+                DO UPDATE SET confidence=EXCLUDED.confidence,evidence=EXCLUDED.evidence"""), {
+                    "p": p.get("property_id"),
+                    "ph": phone,
+                    "m": matched_pid,
+                    "cf": score,
+                    "ev": __import__("json").dumps(evidence)
+                })
+                made += 1
+
+    return made
+
+def _v13_duplicate_groups():
+    _ensure_v13_tables()
+
+    with engine.connect() as c:
+        props = [dict(r._mapping) for r in c.execute(text("SELECT * FROM pi_properties")).fetchall()]
+
+    buckets = {}
+    for p in props:
+        name, loc, city, ptype = _v13_identity(p)
+        area = _v13_area(p)
+        if not name or not loc:
+            continue
+        area_bucket = round(area / 25) * 25 if area else 0
+        key = "|".join([name, loc, city, ptype, str(area_bucket)])
+        buckets.setdefault(key, []).append(str(p.get("property_id")))
+
+    groups = 0
+    with engine.begin() as c:
+        for key, ids in buckets.items():
+            if len(ids) < 2:
+                continue
+            master = ids[0]
+            c.execute(text("""INSERT INTO pi_v13_master_groups(
+                group_key,master_property_id,member_property_ids,group_type,confidence,review_status,updated_at
+            ) VALUES(:g,:m,CAST(:ids AS JSONB),'STRONG_DUPLICATE',95,'REVIEW',NOW())
+            ON CONFLICT(group_key) DO UPDATE SET
+                master_property_id=EXCLUDED.master_property_id,
+                member_property_ids=EXCLUDED.member_property_ids,
+                updated_at=NOW()"""), {
+                    "g": key,
+                    "m": master,
+                    "ids": __import__("json").dumps(ids)
+                })
+            groups += 1
+
+    return groups
+
+def _v13_run_final():
+    _ensure_v13_tables()
+    suggestions = _v13_contact_recovery()
+    groups = _v13_duplicate_groups()
+
+    with engine.connect() as c:
+        total = int(c.execute(text("SELECT COUNT(*) FROM pi_properties")).scalar() or 0)
+
+        if _v13_table_exists("pi_property_health"):
+            indexed = int(c.execute(text(
+                "SELECT COUNT(*) FROM pi_property_health WHERE valid_contact_count>0"
+            )).scalar() or 0)
+            match_ready = int(c.execute(text(
+                """SELECT COUNT(*) FROM pi_property_health
+                   WHERE data_status IN ('DATA_STRONG','DATA_USABLE')"""
+            )).scalar() or 0)
+        else:
+            indexed = 0
+            match_ready = 0
+
+    return {
+        "status": "ok",
+        "total_properties": total,
+        "contact_indexed": indexed,
+        "contact_missing": max(0, total - indexed),
+        "recovery_suggestions": suggestions,
+        "duplicate_groups": groups,
+        "match_ready": match_ready
+    }
+
+@app.post("/api/v13/final-reconcile")
+def v13_final_reconcile(req: Request):
+    need_login(req)
+    return _v13_run_final()
+
+@app.get("/api/v13/recovery-suggestions")
+def v13_recovery_suggestions(req: Request, limit: int = Query(1000, ge=1, le=5000)):
+    need_login(req)
+    _ensure_v13_tables()
+
+    with engine.connect() as c:
+        rows = c.execute(text("""SELECT s.*,p.property_name,p.city,p.location,p.property_type,
+            p.available_area_sqft
+            FROM pi_v13_recovery_suggestions s
+            JOIN pi_properties p ON p.property_id=s.property_id
+            WHERE s.decision='PENDING'
+            ORDER BY s.confidence DESC,s.created_at DESC LIMIT :n"""), {"n": limit}).fetchall()
+
+    return {"status": "ok", "rows": _json_rows(rows)}
+
+@app.post("/api/v13/recovery-suggestions/{sid}/decision")
+async def v13_recovery_decision(sid: int, req: Request):
+    need_login(req)
+    body = await req.json()
+
+    decision = str(body.get("decision") or "").upper()
+    if decision not in {"APPROVED", "REJECTED"}:
+        raise HTTPException(400, "decision must be APPROVED or REJECTED")
+
+    who = str(body.get("decided_by") or actor_name(req) or "TEAM")
+
+    with engine.begin() as c:
+        row = c.execute(text(
+            "SELECT * FROM pi_v13_recovery_suggestions WHERE id=:id"
+        ), {"id": sid}).fetchone()
+
+        if not row:
+            raise HTTPException(404, "Suggestion not found")
+
+        c.execute(text("""UPDATE pi_v13_recovery_suggestions SET
+            decision=:d,decided_by=:w,decided_at=NOW()
+            WHERE id=:id"""), {"d": decision, "w": who, "id": sid})
+
+        if decision == "APPROVED":
+            r = dict(row._mapping)
+            c.execute(text("""INSERT INTO pi_property_contact_links(
+                property_id,normalized_contact,contact_kind,evidence_field,raw_value,
+                role_hint,confidence,is_primary,updated_at
+            ) VALUES(:p,:ph,'PHONE','V13_APPROVED_RECOVERY',:ph,'UNVERIFIED',:cf,FALSE,NOW())
+            ON CONFLICT(property_id,normalized_contact,evidence_field)
+            DO UPDATE SET confidence=EXCLUDED.confidence,updated_at=NOW()"""), {
+                "p": r["property_id"],
+                "ph": r["suggested_contact"],
+                "cf": r["confidence"]
+            })
+
+    return {"status": "ok", "decision": decision}
+
+def _v13_retail_rows():
+    with engine.connect() as c:
+        cols = {
+            r._mapping["column_name"]
+            for r in c.execute(text("""SELECT column_name
+                FROM information_schema.columns
+                WHERE table_schema='public' AND table_name='ai_demand_signals'""")).fetchall()
+        }
+
+    def col(name, default_sql="NULL"):
+        if name in cols:
+            return name
+        return f"{default_sql} AS {name}"
+
+    wanted = [
+        col("signal_id"),
+        col("company_name"),
+        col("contact_name"),
+        col("designation"),
+        col("contact_phone"),
+        col("contact_email"),
+        col("linkedin_profile_url"),
+        col("source_url"),
+        col("title"),
+        col("excerpt"),
+        col("location"),
+        col("required_area_sqft"),
+        col("required_property_type"),
+        col("required_transaction"),
+        col("intent_score", "0"),
+        col("followup_status", "'NEW'"),
+        col("crm_status", "'NOT_SENT'"),
+        col("assigned_to"),
+        col("created_at", "NOW()")
+    ]
+
+    where = []
+    if "source_type" in cols:
+        where.append("source_type='RETAIL_LINKEDIN_REQUIREMENT'")
+    if "source_name" in cols:
+        where.append("source_name ILIKE '%LinkedIn%'")
+    if not where:
+        where = ["1=1"]
+
+    sql = (
+        "SELECT " + ",".join(wanted) +
+        " FROM ai_demand_signals WHERE (" + " OR ".join(where) + ")" +
+        " ORDER BY intent_score DESC,created_at DESC LIMIT 2000"
+    )
+
+    with engine.connect() as c:
+        return _json_rows(c.execute(text(sql)).fetchall())
+
+@app.get("/api/v13/retail-simple")
+def v13_retail_simple_api(req: Request):
+    need_login(req)
+    return {"status": "ok", "rows": _v13_retail_rows()}
+
+@app.get("/retail-expansion", response_class=HTMLResponse)
+def v13_retail_simple_page(req: Request):
+    role = page_role_or_redirect(req)
+    if not role:
+        return RedirectResponse("/login", status_code=303)
+
+    return HTMLResponse("""<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Retail Expansion Requirements</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;background:#f4f7fb;font-family:Arial;color:#172437}
+header{padding:18px 22px;background:#102235;color:#fff}
+.wrap{padding:18px}
+.card{background:#fff;border:1px solid #e2e8f0;border-radius:12px;padding:14px;margin-bottom:12px}
+.toolbar{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.btn{background:#1677ff;color:#fff;border:0;border-radius:7px;padding:9px 12px;text-decoration:none;font-weight:700;cursor:pointer}
+.gray{background:#e9eef5;color:#203247}
+input,select{padding:9px;border:1px solid #ccd6e2;border-radius:7px}
+.stats{font-weight:700}
+.tablewrap{overflow:auto;max-height:74vh}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{padding:9px;border-bottom:1px solid #edf1f5;text-align:left;vertical-align:top}
+th{position:sticky;top:0;background:#f8fafc;z-index:1;white-space:nowrap}
+.req{min-width:300px;white-space:normal}
+.small{font-size:11px;color:#687789}
+a{color:#1268d3}
+.pill{padding:3px 7px;border-radius:10px;background:#edf4ff;white-space:nowrap}
+</style>
+</head>
+<body>
+<header>
+<b>Retail Expansion Requirements</b><br>
+<small>Simple team table: requirement, person, contact and original LinkedIn/public post</small>
+</header>
+<div class="wrap">
+<div class="card toolbar">
+<a class="btn gray" href="/workspace">Workspace</a>
+<a class="btn gray" href="/data-command-center">Data Command Center</a>
+<input id="q" placeholder="Search brand, person, location, phone, requirement">
+<select id="status">
+<option value="">All Follow-up</option>
+<option>NEW</option>
+<option>CONTACTED</option>
+<option>QUALIFIED</option>
+<option>NOT_RELEVANT</option>
+</select>
+<button class="btn" onclick="load()">Refresh</button>
+<span class="stats" id="count"></span>
+</div>
+<div class="card">
+<div class="tablewrap">
+<table>
+<thead>
+<tr>
+<th>Brand / Company</th>
+<th>Person</th>
+<th>Designation</th>
+<th>Contact</th>
+<th>Requirement</th>
+<th>Location</th>
+<th>Area</th>
+<th>Type</th>
+<th>Deal</th>
+<th>Score</th>
+<th>LinkedIn / Source</th>
+<th>Follow-up</th>
+<th>CRM</th>
+<th>Assigned</th>
+</tr>
+</thead>
+<tbody id="rows"></tbody>
+</table>
+</div>
+</div>
+</div>
+<script>
+const E=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+let D=[];
+async function A(u){
+  let r=await fetch(u),d=await r.json();
+  if(!r.ok)throw Error(d.detail||'Error');
+  return d;
+}
+function render(){
+  let q=(document.querySelector('#q').value||'').toLowerCase();
+  let st=document.querySelector('#status').value;
+  let R=D.filter(x=>
+    (!q||JSON.stringify(x).toLowerCase().includes(q)) &&
+    (!st||(x.followup_status||'NEW')===st)
+  );
+  document.querySelector('#count').textContent=R.length+' leads';
+  document.querySelector('#rows').innerHTML=R.map(x=>`<tr>
+<td><b>${E(x.company_name||'To verify')}</b></td>
+<td>${E(x.contact_name||'To verify')}</td>
+<td>${E(x.designation||'')}</td>
+<td>${x.contact_phone?'<b>'+E(x.contact_phone)+'</b>':'Phone not found'}${x.contact_email?'<br>'+E(x.contact_email):''}</td>
+<td class="req"><b>${E(x.title||'')}</b><br><span class="small">${E(x.excerpt||'')}</span></td>
+<td>${E(x.location||'')}</td>
+<td>${E(x.required_area_sqft||'')}</td>
+<td>${E(x.required_property_type||'')}</td>
+<td>${E(x.required_transaction||'Lease')}</td>
+<td><span class="pill">${E(x.intent_score||0)}</span></td>
+<td>${x.linkedin_profile_url?`<a target="_blank" href="${E(x.linkedin_profile_url)}">Profile</a><br>`:''}${x.source_url?`<a target="_blank" href="${E(x.source_url)}">Open requirement post</a>`:'Source unavailable'}</td>
+<td>${E(x.followup_status||'NEW')}</td>
+<td>${E(x.crm_status||'NOT_SENT')}</td>
+<td>${E(x.assigned_to||'')}</td>
+</tr>`).join('') || '<tr><td colspan="14">No retail requirement signals found.</td></tr>';
+}
+async function load(){
+  let d=await A('/api/v13/retail-simple');
+  D=d.rows||[];
+  render();
+}
+document.querySelector('#q').addEventListener('input',render);
+document.querySelector('#status').addEventListener('change',render);
+load();
+</script>
+</body>
+</html>""")
+
+@app.get("/data-command-center", response_class=HTMLResponse)
+def v13_command_center(req: Request):
+    role = page_role_or_redirect(req)
+    if not role:
+        return RedirectResponse("/login", status_code=303)
+
+    return HTMLResponse("""<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Final Data Command Center</title>
+<style>
+body{font-family:Arial;background:#f4f7fb;margin:0;color:#172437}
+header{background:#102235;color:white;padding:20px}
+.wrap{padding:20px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px}
+.card{background:white;border:1px solid #e2e8f0;border-radius:12px;padding:16px}
+a{display:block;text-decoration:none;color:#172437;font-weight:bold}
+.small{font-size:12px;color:#687789}
+</style>
+</head>
+<body>
+<header>
+<b>FINAL Data Command Center</b><br>
+<small>One simple team entry point</small>
+</header>
+<div class="wrap">
+<div class="grid">
+<div class="card"><a href="/property-database">Property Database</a><span class="small">All saved inventory</span></div>
+<div class="card"><a href="/data-doctor">Data Doctor</a><span class="small">Full database reconciliation and health</span></div>
+<div class="card"><a href="/contacts-directory">Property Contacts</a><span class="small">Verify and classify Owner/Broker/Other</span></div>
+<div class="card"><a href="/capture-intelligence">Capture Property</a><span class="small">Camera, newspaper, handwritten, WhatsApp, PDF</span></div>
+<div class="card"><a href="/property-manual">Add Property + Matcher</a><span class="small">Manual property and matching</span></div>
+<div class="card"><a href="/retail-expansion">Retail Expansion Requirements</a><span class="small">Simple LinkedIn requirement table</span></div>
+<div class="card"><a href="/workspace#hospitality">Hospitality</a><span class="small">Hospitality intelligence</span></div>
+<div class="card"><a href="/workspace#bots">Bot Control Room</a><span class="small">Run and review AI bots</span></div>
+</div>
+</div>
+</body>
+</html>""")
