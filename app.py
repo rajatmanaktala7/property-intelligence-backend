@@ -9236,3 +9236,316 @@ def v1372_entry(req:Request,division:str=Query("RETAIL")):
 <p><input name="location" placeholder="Location *" required> <input name="required_area_sqft" type="number" placeholder="Area SqFt"> <input name="required_property_type" placeholder="Property Type"></p>
 <p><textarea name="requirement_text" style="width:100%;min-height:90px" placeholder="Requirement details *" required></textarea></p><button>Save Manual Requirement</button></form><p id="msg"></p></div></div>
 <script>f.addEventListener('submit',async e=>{{e.preventDefault();let b=Object.fromEntries(new FormData(f));b.required_area_sqft=b.required_area_sqft?Number(b.required_area_sqft):null;let r=await fetch('/api/v13-7-2/manual/{div}',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify(b)}}),d=await r.json();if(!r.ok){{msg.textContent=d.detail||'Error';return}}msg.innerHTML='Saved <b>'+d.requirement_id+'</b>. <a href="/requirements-match-center">Open Requirements + Matches</a>';f.reset()}})</script></body></html>""")
+
+# ============================================================
+# V13.8 FINAL SIMPLE DASHBOARD + REQUIREMENT MATCHER FIX
+# - Simple daily dashboard
+# - Add Property is separate from Property Matcher
+# - Requirements page has TWO columns: AI Generated / Manual
+# - Retail and Hospitality are separate filters
+# - Match creation introspects pi_requirements safely
+# ============================================================
+
+def _v138_cols_meta(table_name):
+    with engine.connect() as c:
+        rows=c.execute(text("""SELECT column_name,data_type,is_nullable,column_default
+            FROM information_schema.columns
+            WHERE table_schema='public' AND table_name=:t
+            ORDER BY ordinal_position"""),{"t":table_name}).fetchall()
+    return [dict(r._mapping) for r in rows]
+
+def _v138_table_exists(table_name):
+    with engine.connect() as c:
+        return bool(c.execute(text("""SELECT EXISTS(
+            SELECT 1 FROM information_schema.tables
+            WHERE table_schema='public' AND table_name=:t
+        )"""),{"t":table_name}).scalar_one())
+
+def _v138_ensure_tables():
+    with engine.begin() as c:
+        c.execute(text("""CREATE TABLE IF NOT EXISTS pi_unified_manual_requirements(
+            requirement_id TEXT PRIMARY KEY,
+            division TEXT NOT NULL,
+            company_name TEXT,
+            contact_name TEXT,
+            contact_phone TEXT,
+            contact_email TEXT,
+            location TEXT,
+            required_area_sqft NUMERIC,
+            required_property_type TEXT,
+            required_transaction TEXT DEFAULT 'LEASE',
+            requirement_text TEXT,
+            assigned_to TEXT,
+            status TEXT DEFAULT 'NEW',
+            created_by TEXT,
+            created_at TIMESTAMPTZ DEFAULT NOW(),
+            updated_at TIMESTAMPTZ DEFAULT NOW()
+        )"""))
+        c.execute(text("""CREATE TABLE IF NOT EXISTS pi_unified_requirement_bridge(
+            source_key TEXT PRIMARY KEY,
+            division TEXT NOT NULL,
+            source_type TEXT NOT NULL,
+            source_id TEXT NOT NULL,
+            pi_requirement_id TEXT,
+            last_error TEXT,
+            updated_at TIMESTAMPTZ DEFAULT NOW()
+        )"""))
+
+def _v138_classify_ai(title,excerpt):
+    txt=(" "+str(title or "")+" "+str(excerpt or "")+" ").lower()
+    noise=[
+        "job opportunity","job vacancy","hiring","salary","store manager",
+        "assistant store manager","full stack developer","web development",
+        "market report","market growth","rental yield","commercial vs residential",
+        "office leasing market","research says","real estate leader",
+        "modern trade network","luxury sales"
+    ]
+    if any(x in txt for x in noise):
+        return "NOT_REQUIREMENT",10
+    score=20
+    for x in [
+        "space requirement","looking for space","looking for retail space",
+        "seeking retail space","actively seeking","looking to lease",
+        "rental spaces","space required","immediate leasing opportunity",
+        "looking to lease hotels","requirement: retail space"
+    ]:
+        if x in txt: score+=20
+    if any(x in txt for x in ["sq ft","sqft","square feet","carpet area"]):score+=15
+    if any(x in txt for x in ["lease","leasing","rent","rental"]):score+=10
+    if score>=70:return "LIKELY_REQUIREMENT",min(score,100)
+    if score>=50:return "POSSIBLE_REQUIREMENT",min(score,100)
+    return "LOW_CONFIDENCE",min(score,100)
+
+def _v138_ai_rows(division):
+    if not _v138_table_exists("ai_demand_signals"):
+        return []
+    with engine.connect() as c:
+        rows=[dict(r._mapping) for r in c.execute(text(
+            "SELECT * FROM ai_demand_signals ORDER BY created_at DESC LIMIT 2500"
+        )).fetchall()]
+    out=[]
+    for r in rows:
+        blob=" ".join(str(v or "") for v in r.values()).lower()
+        if division=="RETAIL":
+            if not any(x in blob for x in ["retail","store","shop","pharmacy"]):continue
+        else:
+            if not any(x in blob for x in ["hospitality","restaurant","cafe","banquet","hotel","guest house","lounge","club"]):continue
+        title=r.get("title") or r.get("signal_title") or ""
+        excerpt=r.get("excerpt") or r.get("source_excerpt") or r.get("requirement_text") or title
+        cls,score=_v138_classify_ai(title,excerpt)
+        out.append({
+            "division":division,"source_type":"AI",
+            "source_id":str(r.get("signal_id") or r.get("id") or ""),
+            "company_name":r.get("company_name") or r.get("brand_name") or r.get("company"),
+            "contact_name":r.get("contact_name") or r.get("person_name"),
+            "contact_phone":r.get("contact_phone") or r.get("phone") or r.get("mobile"),
+            "contact_email":r.get("contact_email") or r.get("email"),
+            "location":r.get("location") or "Delhi NCR",
+            "required_area_sqft":r.get("required_area_sqft") or r.get("area_sqft"),
+            "required_property_type":r.get("required_property_type") or r.get("category"),
+            "required_transaction":r.get("required_transaction") or "LEASE",
+            "requirement_text":excerpt,
+            "source_url":r.get("source_url") or r.get("linkedin_post_url") or r.get("url"),
+            "classification":cls,"confidence":score
+        })
+    return out
+
+def _v138_manual_rows(division):
+    _v138_ensure_tables()
+    with engine.connect() as c:
+        rows=c.execute(text("""SELECT * FROM pi_unified_manual_requirements
+            WHERE division=:d ORDER BY created_at DESC"""),{"d":division}).fetchall()
+    return [dict(r._mapping)|{"source_type":"MANUAL","source_id":r._mapping["requirement_id"],
+            "classification":"MANUAL","confidence":100} for r in rows]
+
+def _v138_requirement_insert(payload):
+    """
+    Build a pi_requirements row from its actual live schema.
+    Required columns without defaults are filled from known mappings.
+    This is safer than assuming one historical schema.
+    """
+    if not _v138_table_exists("pi_requirements"):
+        raise RuntimeError("pi_requirements table is missing")
+
+    meta=_v138_cols_meta("pi_requirements")
+    cols={x["column_name"] for x in meta}
+    rid="REQ-"+str(payload.get("division") or "GEN")[:3].upper()+"-"+datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")+"-"+uuid.uuid4().hex[:5].upper()
+
+    aliases={
+        "requirement_id":rid,"id":rid,
+        "retailer_name":payload.get("company_name") or "Requirement",
+        "client_company":payload.get("company_name") or "Requirement",
+        "company_name":payload.get("company_name") or "Requirement",
+        "contact_name":payload.get("contact_name"),
+        "contact_number":payload.get("contact_phone"),
+        "contact_phone":payload.get("contact_phone"),
+        "email":payload.get("contact_email"),
+        "contact_email":payload.get("contact_email"),
+        "city":"Delhi NCR",
+        "location":payload.get("location") or "Delhi NCR",
+        "requirement_sqft":payload.get("required_area_sqft") or 0,
+        "required_area_sqft":payload.get("required_area_sqft") or 0,
+        "minimum_area_sqft":payload.get("required_area_sqft") or 0,
+        "maximum_area_sqft":payload.get("required_area_sqft") or 0,
+        "retailers_purpose":payload.get("required_transaction") or "LEASE",
+        "transaction_type":payload.get("required_transaction") or "LEASE",
+        "rent_or_sale":payload.get("required_transaction") or "LEASE",
+        "retailers_category":payload.get("required_property_type") or payload.get("division") or "COMMERCIAL",
+        "required_property_type":payload.get("required_property_type") or payload.get("division") or "COMMERCIAL",
+        "property_type":payload.get("required_property_type") or payload.get("division") or "COMMERCIAL",
+        "nearby_brands":"",
+        "additional_points":payload.get("requirement_text") or "",
+        "remarks":payload.get("requirement_text") or "",
+        "source":payload.get("source_type") or "MANUAL",
+        "division":payload.get("division"),
+        "status":"NEW"
+    }
+
+    values={}
+    for m in meta:
+        name=m["column_name"]
+        if name in aliases:
+            values[name]=aliases[name]
+        elif m["is_nullable"]=="NO" and not m["column_default"]:
+            # Conservative fallback for unknown required fields.
+            dt=(m["data_type"] or "").lower()
+            if "int" in dt or "numeric" in dt or "double" in dt or "real" in dt:
+                values[name]=0
+            elif "bool" in dt:
+                values[name]=False
+            elif "timestamp" in dt or "date" in dt:
+                continue
+            else:
+                values[name]=""
+
+    if not values:
+        raise RuntimeError("No compatible pi_requirements columns found")
+
+    insert_cols=list(values.keys())
+    sql="INSERT INTO pi_requirements("+",".join(insert_cols)+") VALUES("+",".join(":"+x for x in insert_cols)+")"
+    with engine.begin() as c:
+        c.execute(text(sql),values)
+
+    # Return whichever ID the matcher can use.
+    return str(values.get("requirement_id") or values.get("id") or rid)
+
+def _v138_promote(payload):
+    _v138_ensure_tables()
+    key=f"{payload.get('division')}|{payload.get('source_type')}|{payload.get('source_id')}"
+    with engine.connect() as c:
+        old=c.execute(text("SELECT pi_requirement_id FROM pi_unified_requirement_bridge WHERE source_key=:k"),{"k":key}).fetchone()
+        if old and old._mapping["pi_requirement_id"]:
+            return str(old._mapping["pi_requirement_id"])
+    try:
+        rid=_v138_requirement_insert(payload)
+        err=None
+    except Exception as ex:
+        with engine.begin() as c:
+            c.execute(text("""INSERT INTO pi_unified_requirement_bridge(
+                source_key,division,source_type,source_id,last_error,updated_at
+            ) VALUES(:k,:d,:t,:sid,:e,NOW())
+            ON CONFLICT(source_key) DO UPDATE SET last_error=EXCLUDED.last_error,updated_at=NOW()"""),
+            {"k":key,"d":payload.get("division"),"t":payload.get("source_type"),
+             "sid":payload.get("source_id"),"e":f"{type(ex).__name__}: {ex}"})
+        raise
+    with engine.begin() as c:
+        c.execute(text("""INSERT INTO pi_unified_requirement_bridge(
+            source_key,division,source_type,source_id,pi_requirement_id,last_error,updated_at
+        ) VALUES(:k,:d,:t,:sid,:rid,NULL,NOW())
+        ON CONFLICT(source_key) DO UPDATE SET pi_requirement_id=EXCLUDED.pi_requirement_id,
+            last_error=NULL,updated_at=NOW()"""),
+        {"k":key,"d":payload.get("division"),"t":payload.get("source_type"),
+         "sid":payload.get("source_id"),"rid":rid})
+    return rid
+
+@app.post("/api/v13-8/manual")
+async def v138_manual_add(req:Request):
+    need_login(req);_v138_ensure_tables()
+    body=await req.json()
+    div=str(body.get("division") or "").upper()
+    if div not in {"RETAIL","HOSPITALITY"}:raise HTTPException(400,"Choose RETAIL or HOSPITALITY")
+    rid=("RMR-" if div=="RETAIL" else "HMR-")+datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")+"-"+uuid.uuid4().hex[:5].upper()
+    with engine.begin() as c:
+        c.execute(text("""INSERT INTO pi_unified_manual_requirements(
+            requirement_id,division,company_name,contact_name,contact_phone,contact_email,
+            location,required_area_sqft,required_property_type,required_transaction,
+            requirement_text,assigned_to,created_by
+        ) VALUES(:rid,:d,:co,:cn,:ph,:em,:loc,:area,:pt,:tr,:req,:asgn,:by)"""),
+        {"rid":rid,"d":div,"co":body.get("company_name"),"cn":body.get("contact_name"),
+         "ph":body.get("contact_phone"),"em":body.get("contact_email"),"loc":body.get("location"),
+         "area":body.get("required_area_sqft") or None,"pt":body.get("required_property_type"),
+         "tr":body.get("required_transaction") or "LEASE","req":body.get("requirement_text"),
+         "asgn":body.get("assigned_to"),"by":actor_name(req)})
+    return {"status":"ok","requirement_id":rid}
+
+@app.get("/api/v13-8/requirements")
+def v138_requirements(req:Request,division:str=Query("RETAIL")):
+    need_login(req);div=division.upper()
+    if div not in {"RETAIL","HOSPITALITY"}:div="RETAIL"
+    return {"status":"ok","ai":_v138_ai_rows(div),"manual":_v138_manual_rows(div)}
+
+@app.post("/api/v13-8/match")
+async def v138_match(req:Request):
+    need_login(req)
+    payload=await req.json()
+    try:
+        rid=_v138_promote(payload)
+        result=robust_match_requirement(rid,create_whatsapp=False)
+        return {"status":"ok","requirement_id":rid,**result}
+    except HTTPException:
+        raise
+    except Exception as ex:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(500,f"{type(ex).__name__}: {str(ex)}")
+
+@app.get("/simple-dashboard",response_class=HTMLResponse)
+def v138_dashboard(req:Request):
+    role=page_role_or_redirect(req)
+    if not role:return RedirectResponse("/login",status_code=303)
+    return HTMLResponse("""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>AI Deal Intelligence OS</title>
+<style>*{box-sizing:border-box}body{margin:0;background:#f4f7fb;font-family:Arial;color:#172437}header{background:#102235;color:white;padding:20px}.wrap{max-width:1300px;margin:auto;padding:20px}.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}.card{display:block;background:white;border:1px solid #e2e8f0;border-radius:12px;padding:18px;text-decoration:none;color:#172437;min-height:120px}.card b{font-size:17px}.card span{display:block;color:#687789;margin-top:8px;line-height:1.4}.main{border:2px solid #8eb9e6}.section{margin:20px 0 10px;font-size:13px;color:#63768a;font-weight:bold;letter-spacing:.08em}@media(max-width:800px){.grid{grid-template-columns:1fr}}</style></head>
+<body><header><b>AI Deal Intelligence OS</b><br><small>Simple Team Dashboard</small></header><div class="wrap">
+<div class="section">DAILY WORK</div><div class="grid">
+<a class="card main" href="/requirements-workbench"><b>Property Matcher</b><span>Create/select Retail or Hospitality requirement, see AI vs Manual separately and run matching.</span></a>
+<a class="card" href="/property-manual"><b>Add Property Manually</b><span>Use only when your team wants to add a new property manually.</span></a>
+<a class="card" href="/property-database"><b>Property Database</b><span>Search and open all saved property inventory.</span></a>
+<a class="card" href="/capture-intelligence"><b>Capture Property</b><span>Camera, newspaper, handwritten note, WhatsApp screenshot or PDF.</span></a>
+<a class="card" href="/inventory-activation"><b>Inventory Activation</b><span>Review unmatched refined magazine properties.</span></a>
+<a class="card" href="/contacts-directory"><b>Property Contacts</b><span>Verify contact and mark Owner, Broker, Both or Other.</span></a>
+</div>
+<div class="section">LEADS & AI</div><div class="grid">
+<a class="card" href="/requirements-workbench?division=RETAIL"><b>Retail Requirements</b><span>Two columns: AI Generated and Manual.</span></a>
+<a class="card" href="/requirements-workbench?division=HOSPITALITY"><b>Hospitality Requirements</b><span>Two columns: AI Generated and Manual.</span></a>
+<a class="card" href="/legacy-workspace#bots"><b>Bot Control Room</b><span>Run background discovery bots.</span></a>
+</div></div></body></html>""")
+
+@app.get("/requirements-workbench",response_class=HTMLResponse)
+def v138_workbench(req:Request,division:str=Query("RETAIL")):
+    role=page_role_or_redirect(req)
+    if not role:return RedirectResponse("/login",status_code=303)
+    div=division.upper() if division.upper() in {"RETAIL","HOSPITALITY"} else "RETAIL"
+    return HTMLResponse(f"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Requirements Workbench</title>
+<style>*{{box-sizing:border-box}}body{{margin:0;background:#f4f7fb;font-family:Arial;color:#172437}}header{{background:#102235;color:white;padding:18px}}.wrap{{padding:18px;max-width:1800px;margin:auto}}.nav{{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}}.nav a,.btn{{background:#e9eef5;color:#203247;border:0;padding:8px 10px;border-radius:7px;text-decoration:none;font-weight:bold;cursor:pointer}}.primary{{background:#1677ff;color:white}}.columns{{display:grid;grid-template-columns:1fr 1fr;gap:12px}}.col{{background:white;border:1px solid #e2e8f0;border-radius:12px;padding:12px}}.item{{border:1px solid #e5ebf1;border-radius:10px;padding:10px;margin-bottom:8px}}.good{{border-left:5px solid #30936b}}.bad{{opacity:.6}}.matches{{margin-top:8px;background:#f8fafc;padding:8px;border-radius:7px}}input,select,textarea{{padding:8px;border:1px solid #ccd6e2;border-radius:7px}}textarea{{width:100%;min-height:70px}}.formgrid{{display:grid;grid-template-columns:repeat(2,1fr);gap:7px}}.full{{grid-column:1/-1}}@media(max-width:950px){{.columns{{grid-template-columns:1fr}}}}</style></head>
+<body><header><b>{div.title()} Requirements + Property Matcher</b><br><small>AI Generated and Manual are kept separate</small></header><div class="wrap">
+<div class="nav"><a href="/simple-dashboard">← Dashboard</a><a href="/requirements-workbench?division=RETAIL">Retail</a><a href="/requirements-workbench?division=HOSPITALITY">Hospitality</a><a href="/property-database">Property Database</a><a href="/property-manual">Add Property Manually</a></div>
+<div class="columns">
+<div class="col"><h2>AI Generated Requirements</h2><p>AI/public-web signals. Ignore NOT_REQUIREMENT items.</p><div id="ai"></div></div>
+<div class="col"><h2>Manual Requirements</h2>
+<form id="f" class="formgrid"><input name="company_name" placeholder="Company / Brand *" required><input name="contact_name" placeholder="Contact Person"><input name="contact_phone" placeholder="Mobile"><input name="contact_email" placeholder="Email"><input name="location" placeholder="Location *" required><input name="required_area_sqft" type="number" placeholder="Area SqFt"><input name="required_property_type" placeholder="Property Type"><select name="required_transaction"><option>LEASE</option><option>RENT</option><option>SALE</option></select><textarea class="full" name="requirement_text" placeholder="Requirement details *" required></textarea><input name="assigned_to" placeholder="Assigned Team Member"><button class="btn primary">Save Manual Requirement</button></form><hr><div id="manual"></div></div>
+</div></div>
+<script>
+const DIV='{div}',E=x=>String(x??'').replace(/[&<>"]/g,c=>({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}}[c]));let AI=[],MAN=[];
+async function A(u,o={{}}){{let r=await fetch(u,o),d=await r.json();if(!r.ok)throw Error(d.detail||'Error');return d}}
+function item(x,i,src){{let bad=x.classification==='NOT_REQUIREMENT';return `<div class="item ${{bad?'bad':'good'}}"><b>${{E(x.company_name||'To verify')}}</b> · ${{E(x.classification||src)}}<br>${{E(x.requirement_text||'')}}<br>${{E(x.location||'')}} · ${{E(x.required_area_sqft||'')}} · ${{E(x.required_property_type||'')}}<br>${{x.source_url?`<a target="_blank" href="${{E(x.source_url)}}">Open source</a> · `:''}}<button class="btn primary" onclick="runMatch('${{src}}',${{i}})">Run Match</button><div class="matches" id="${{src}}_${{i}}">Not run</div></div>`}}
+function render(){{ai.innerHTML=AI.map((x,i)=>item(x,i,'AI')).join('')||'No AI requirements.';manual.innerHTML=MAN.map((x,i)=>item(x,i,'MANUAL')).join('')||'No manual requirements.'}}
+async function load(){{let d=await A('/api/v13-8/requirements?division='+DIV);AI=d.ai||[];MAN=d.manual||[];render()}}
+async function runMatch(src,i){{let x=(src==='AI'?AI:MAN)[i],box=document.getElementById(src+'_'+i);if(x.classification==='NOT_REQUIREMENT'&&!confirm('AI classified this as NOT_REQUIREMENT. Run anyway?'))return;box.textContent='Matching...';try{{let d=await A('/api/v13-8/match',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify(x)}});let ms=d.matches||[];box.innerHTML=ms.slice(0,10).map((m,j)=>`${{j+1}}. <a target="_blank" href="/property-record/${{encodeURIComponent(m.property_id)}}">${{E(m.property_name||m.property_id)}}</a> · Score <b>${{E(m.score||'')}}</b>`).join('<br>')||'No matches';}}catch(e){{box.innerHTML='<b>ERROR:</b> '+E(e.message)}}}}
+f.addEventListener('submit',async e=>{{e.preventDefault();let b=Object.fromEntries(new FormData(f));b.division=DIV;b.required_area_sqft=b.required_area_sqft?Number(b.required_area_sqft):null;let d=await A('/api/v13-8/manual',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify(b)}});alert('Saved '+d.requirement_id);f.reset();load()}});load();
+</script></body></html>""")
+
+@app.middleware("http")
+async def v138_workspace_redirect(request,call_next):
+    if request.url.path=="/workspace":
+        return RedirectResponse("/simple-dashboard",status_code=307)
+    return await call_next(request)
