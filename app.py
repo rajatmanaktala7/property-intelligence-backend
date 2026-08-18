@@ -10037,3 +10037,241 @@ def v14_requirement_leads(req:Request):
     return HTMLResponse("""<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>AI Requirement Leads</title>
 <style>body{font-family:Arial;background:#f5f7fb;margin:0}header{background:#102235;color:white;padding:18px}.w{padding:18px}.note{background:#fff3cd;padding:12px;border-radius:8px}</style></head>
 <body><header><b>AI Requirement Leads</b> · <a style="color:white" href="/v14-dashboard">← Dashboard</a></header><div class=w><div class=note><b>Rule:</b> AI/public-web signals are leads only. Contact and confirm the requirement first. Then enter the confirmed details in the V14 Confirmed Requirement form. AI signals do not run directly against property inventory.</div><p><a href="/requirements-workbench?division=RETAIL">Open Retail AI Signals</a></p><p><a href="/requirements-workbench?division=HOSPITALITY">Open Hospitality AI Signals</a></p><p><a href="/v14-requirement-form"><b>Requirement confirmed? → Enter Confirmed Requirement</b></a></p></div></body></html>""")
+
+# ============================================================
+# V15 DYNAMIC DEAL INTELLIGENCE DASHBOARD
+# Clean team interface. No version numbers shown to users.
+# ============================================================
+
+def _v15_safe_count(sql, params=None):
+    try:
+        with engine.connect() as c:
+            return int(c.execute(text(sql), params or {}).scalar_one() or 0)
+    except Exception:
+        return 0
+
+@app.get("/api/v15/dashboard/summary")
+def v15_dashboard_summary(req:Request):
+    need_login(req)
+    try:_v14_setup()
+    except Exception:pass
+
+    return {
+        "status":"ok",
+
+        "delhi_verified_properties":_v15_safe_count(
+            "SELECT COUNT(*) FROM pi_v14_properties WHERE matcher_eligible=TRUE AND availability_status='VERIFIED_ACTIVE'"
+        ),
+        "delhi_unverified_properties":_v15_safe_count(
+            "SELECT COUNT(*) FROM pi_v14_properties WHERE matcher_eligible=FALSE"
+        ),
+        "delhi_confirmed_requirements":_v15_safe_count(
+            "SELECT COUNT(*) FROM pi_v14_requirements WHERE confirmation_status='CONFIRMED'"
+        ),
+
+        "retail_ai_signals":_v15_safe_count(
+            """SELECT COUNT(*) FROM ai_demand_signals
+               WHERE LOWER(COALESCE(source_type,'')) LIKE '%retail%'
+                  OR LOWER(COALESCE(source_name,'')) LIKE '%retail%'"""
+        ),
+        "hospitality_ai_signals":_v15_safe_count(
+            """SELECT COUNT(*) FROM ai_demand_signals
+               WHERE LOWER(COALESCE(source_type,'')) LIKE '%hospital%'
+                  OR LOWER(COALESCE(source_name,'')) LIKE '%hospital%'"""
+        ),
+
+        "contacts":_v15_safe_count(
+            "SELECT COUNT(*) FROM pi_property_contact_links"
+        ),
+
+        "goa_properties":_v15_safe_count(
+            "SELECT COUNT(*) FROM pi_goa_properties"
+        ),
+        "goa_requirements":_v15_safe_count(
+            "SELECT COUNT(*) FROM pi_goa_requirements"
+        ),
+
+        "archived_magazine":_v15_safe_count(
+            "SELECT COUNT(*) FROM pi_magazine_master"
+        )
+    }
+
+@app.get("/v15-dashboard",response_class=HTMLResponse)
+def v15_dashboard(req:Request):
+    role=page_role_or_redirect(req)
+    if not role:
+        return RedirectResponse("/login",status_code=303)
+
+    return HTMLResponse("""<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AI Deal Intelligence OS</title>
+<style>
+:root{
+  --nav:#102235;--bg:#f4f7fb;--card:#fff;--line:#e1e8f0;
+  --text:#172437;--muted:#68798c;--blue:#1677ff;--green:#138a63;
+  --orange:#d98200;--red:#b5473d;--purple:#6d5bd0
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);font-family:Arial,sans-serif;color:var(--text)}
+header{background:var(--nav);color:#fff;padding:18px 24px;display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap}
+.brand b{font-size:21px}.brand small{display:block;color:#cbd7e3;margin-top:4px}
+.toplinks{display:flex;gap:8px;align-items:center}.toplinks a{color:#fff;text-decoration:none;font-size:13px}
+.wrap{max-width:1500px;margin:auto;padding:22px}
+.hero{background:linear-gradient(135deg,#102235,#1f4365);color:#fff;border-radius:16px;padding:24px;margin-bottom:18px}
+.hero h1{margin:0 0 6px;font-size:28px}.hero p{margin:0;color:#dce8f4}
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-top:18px}
+.kpi{background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.15);padding:13px;border-radius:12px}
+.kpi b{display:block;font-size:24px}.kpi span{font-size:11px;color:#d9e5ef}
+.section{margin-top:24px}.section h2{font-size:14px;letter-spacing:.08em;color:#526579;margin:0 0 10px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(245px,1fr));gap:12px}
+.card{display:block;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:17px;text-decoration:none;color:var(--text);min-height:120px;position:relative;transition:.16s}
+.card:hover{transform:translateY(-2px);box-shadow:0 8px 24px rgba(16,34,53,.08);border-color:#b8cae0}
+.card b{display:block;font-size:17px;margin-bottom:7px}.card span{display:block;font-size:13px;line-height:1.45;color:var(--muted);padding-right:20px}
+.icon{font-size:25px;margin-bottom:10px}.tag{display:inline-block;margin-top:10px;padding:4px 8px;border-radius:11px;background:#edf4ff;color:#285d92;font-size:10px;font-weight:bold}
+.green .tag{background:#e8f7f1;color:#176248}.orange .tag{background:#fff4df;color:#815716}.purple .tag{background:#f1edff;color:#5744ad}
+.alert{margin-top:20px;background:#fff8e8;border:1px solid #efd08d;padding:12px;border-radius:10px;color:#6b572e;font-size:13px}
+.archive{margin-top:25px;background:#fff;border:1px dashed #b9c7d7;border-radius:12px;padding:14px}
+.archive summary{cursor:pointer;font-weight:bold}.archive-links{display:flex;gap:10px;flex-wrap:wrap;margin-top:12px}.archive-links a{background:#eef2f6;color:#35485b;text-decoration:none;padding:8px 10px;border-radius:8px;font-size:12px}
+@media(max-width:650px){.wrap{padding:14px}.hero{padding:18px}.hero h1{font-size:23px}}
+</style>
+</head>
+<body>
+<header>
+  <div class="brand"><b>AI Deal Intelligence OS</b><small>Property · Requirements · AI Leads · Contacts · Goa</small></div>
+  <div class="toplinks"><span id="role">TEAM</span><a href="/logout">Logout</a></div>
+</header>
+
+<div class="wrap">
+  <div class="hero">
+    <h1>Team Command Center</h1>
+    <p>Fresh verified inventory, confirmed requirements and controlled AI lead discovery.</p>
+    <div class="kpis">
+      <div class="kpi"><b id="pv">0</b><span>VERIFIED DELHI PROPERTIES</span></div>
+      <div class="kpi"><b id="pu">0</b><span>UNVERIFIED PROPERTIES</span></div>
+      <div class="kpi"><b id="rq">0</b><span>CONFIRMED REQUIREMENTS</span></div>
+      <div class="kpi"><b id="rt">0</b><span>RETAIL AI SIGNALS</span></div>
+      <div class="kpi"><b id="hs">0</b><span>HOSPITALITY AI SIGNALS</span></div>
+      <div class="kpi"><b id="ct">0</b><span>CONTACT RELATIONSHIPS</span></div>
+    </div>
+  </div>
+
+  <div class="section">
+    <h2>DELHI NCR · DAILY OPERATIONS</h2>
+    <div class="grid">
+      <a class="card green" href="/v14-property-form"><div class="icon">＋</div><b>Add Property Manually</b><span>Complete standardized property form with pictures and contact details. New entries start unverified.</span><span class="tag">Fresh Inventory</span></a>
+      <a class="card green" href="/v14-requirement-form"><div class="icon">◎</div><b>Add Requirement Manually</b><span>Enter a confirmed client requirement using the same fields used by the matcher.</span><span class="tag">Confirmed Demand</span></a>
+      <a class="card" href="/v14-inventory"><div class="icon">✓</div><b>Verify Properties</b><span>Review unverified inventory and activate only properties confirmed by your team.</span><span class="tag">Verified / Unverified</span></a>
+      <a class="card" href="/v14-matcher"><div class="icon">◆</div><b>Property Matcher</b><span>Match confirmed requirements only against fresh VERIFIED ACTIVE inventory.</span><span class="tag">Match Engine</span></a>
+    </div>
+  </div>
+
+  <div class="section">
+    <h2>DATABASE & CAPTURE</h2>
+    <div class="grid">
+      <a class="card" href="/v14-inventory"><div class="icon">▦</div><b>Fresh Property Database</b><span>Search and review active and unverified fresh inventory separately from legacy data.</span><span class="tag">Searchable Inventory</span></a>
+      <a class="card orange" href="/capture-intelligence"><div class="icon">◉</div><b>Capture / Import Property</b><span>Camera, screenshot, handwritten note, WhatsApp screenshot, newspaper, magazine or PDF.</span><span class="tag">Staging Only</span></a>
+      <a class="card" href="/contacts-directory"><div class="icon">☎</div><b>Property Contacts</b><span>Verify contacts and classify Owner, Broker, Both or Other.</span><span class="tag">Verification</span></a>
+    </div>
+  </div>
+
+  <div class="section">
+    <h2>AI REQUIREMENT DISCOVERY</h2>
+    <div class="grid">
+      <a class="card purple" href="/requirements-workbench?division=RETAIL"><div class="icon">◈</div><b>AI Retail</b><span>Review retailer expansion signals. Team confirms first, then converts the genuine requirement into the manual requirement form.</span><span class="tag">AI Lead Discovery</span></a>
+      <a class="card purple" href="/requirements-workbench?division=HOSPITALITY"><div class="icon">◆</div><b>AI Hospitality</b><span>Restaurants, cafes, lounges, clubs, hotels, guest houses and banquet requirement discovery.</span><span class="tag">AI Lead Discovery</span></a>
+      <a class="card" href="/v14-requirement-leads"><div class="icon">✓</div><b>Requirement Verification</b><span>Human-review rule: AI signals do not match directly. Confirm first, then enter as a manual requirement.</span><span class="tag">Human Confirmation</span></a>
+    </div>
+  </div>
+
+  <div class="section">
+    <h2>MARKETING & CONTACTS</h2>
+    <div class="grid">
+      <a class="card" href="/contacts-directory"><div class="icon">✉</div><b>Marketing Contacts</b><span>Property contacts, AI-generated hospitality/retail contacts and verified database contacts for approved outreach.</span><span class="tag">WhatsApp Ready</span></a>
+      <a class="card" href="/legacy-workspace#contacts"><div class="icon">⇧</div><b>Upload Contact List</b><span>Add external contact databases for marketing workflows without mixing them into property inventory.</span><span class="tag">Contact Import</span></a>
+      <a class="card" href="/legacy-workspace#bots"><div class="icon">⚡</div><b>Bot Control Room</b><span>Run and review discovery bots and system activity.</span><span class="tag">Automation</span></a>
+    </div>
+  </div>
+
+  <div class="section">
+    <h2>GOA PROPERTY</h2>
+    <div class="grid">
+      <a class="card green" href="/goa-property-form"><div class="icon">＋</div><b>Add Goa Property</b><span>Fresh Goa property inventory with photos, commercial details and verification workflow.</span><span class="tag">Goa Inventory</span></a>
+      <a class="card green" href="/goa-requirement-form"><div class="icon">◎</div><b>Add Goa Requirement</b><span>Buyer/investor requirement entry with Goa-specific fields.</span><span class="tag">Goa Demand</span></a>
+      <a class="card" href="/goa-matcher"><div class="icon">◆</div><b>Goa Matcher</b><span>Match verified Goa requirements against verified Goa inventory only.</span><span class="tag">Goa Matching</span></a>
+      <a class="card" href="/goa-database"><div class="icon">▦</div><b>Goa Database</b><span>Search, verify and manage Goa inventory separately from Delhi NCR.</span><span class="tag">Separate Database</span></a>
+    </div>
+  </div>
+
+  <div class="alert"><b>Operating rule:</b> AI-discovered requirements are leads only. Human verification is required before they enter the manual requirement list and property matcher.</div>
+
+  <details class="archive">
+    <summary>Archive / Technical Data Sources</summary>
+    <div class="archive-links">
+      <a href="/property-database">Legacy Property Database</a>
+      <a href="/magazine-master-import">Magazine Archive</a>
+      <a href="/data-doctor">Data Doctor</a>
+      <a href="/data-command-center">Admin Data Tools</a>
+      <a href="/legacy-workspace">Legacy Workspace</a>
+    </div>
+  </details>
+</div>
+
+<script>
+async function load(){
+  try{
+    const d=await (await fetch('/api/v15/dashboard/summary')).json();
+    pv.textContent=(d.delhi_verified_properties||0).toLocaleString();
+    pu.textContent=(d.delhi_unverified_properties||0).toLocaleString();
+    rq.textContent=(d.delhi_confirmed_requirements||0).toLocaleString();
+    rt.textContent=(d.retail_ai_signals||0).toLocaleString();
+    hs.textContent=(d.hospitality_ai_signals||0).toLocaleString();
+    ct.textContent=(d.contacts||0).toLocaleString();
+  }catch(e){}
+}
+load();
+</script>
+</body></html>""")
+
+# Clean daily entry point.
+@app.middleware("http")
+async def v15_workspace_router(request,call_next):
+    if request.url.path=="/workspace":
+        return RedirectResponse("/v15-dashboard",status_code=307)
+    return await call_next(request)
+
+# Friendly placeholder routes for Goa until the dedicated Goa module is installed.
+def _v15_goa_placeholder(title,desc):
+    return HTMLResponse(f"""<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>{title}</title></head>
+    <body style='font-family:Arial;background:#f4f7fb;margin:0;color:#172437'>
+    <div style='background:#102235;color:white;padding:18px'><b>{title}</b></div>
+    <div style='max-width:900px;margin:auto;padding:20px'><p><a href='/v15-dashboard'>← Dashboard</a></p>
+    <div style='background:white;border:1px solid #e1e8f0;border-radius:12px;padding:18px'>
+    <b>Goa module</b><p>{desc}</p><p>This page is reserved so the dashboard navigation remains stable. The Goa inventory/matcher can be installed as a separate database module without affecting Delhi NCR.</p>
+    </div></div></body></html>""")
+
+@app.get("/goa-property-form",response_class=HTMLResponse)
+def v15_goa_property_form(req:Request):
+    role=page_role_or_redirect(req)
+    if not role:return RedirectResponse("/login",303)
+    return _v15_goa_placeholder("Add Goa Property","Fresh Goa property entry with pictures and verification.")
+
+@app.get("/goa-requirement-form",response_class=HTMLResponse)
+def v15_goa_requirement_form(req:Request):
+    role=page_role_or_redirect(req)
+    if not role:return RedirectResponse("/login",303)
+    return _v15_goa_placeholder("Add Goa Requirement","Buyer/investor requirement entry for Goa properties.")
+
+@app.get("/goa-matcher",response_class=HTMLResponse)
+def v15_goa_matcher(req:Request):
+    role=page_role_or_redirect(req)
+    if not role:return RedirectResponse("/login",303)
+    return _v15_goa_placeholder("Goa Matcher","Goa-specific verified inventory and requirement matching.")
+
+@app.get("/goa-database",response_class=HTMLResponse)
+def v15_goa_database(req:Request):
+    role=page_role_or_redirect(req)
+    if not role:return RedirectResponse("/login",303)
+    return _v15_goa_placeholder("Goa Database","Separate searchable Goa property database.")
