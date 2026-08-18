@@ -17,7 +17,7 @@ from PIL import Image
 import fitz
 from pypdf import PdfReader, PdfWriter
 
-VERSION="9.0.0-V9-PROPERTY-RECONSTRUCTION"
+VERSION="10.0.0-V10-UNIVERSAL-INTAKE"
 DATABASE_URL=os.getenv("DATABASE_URL","")
 GEMINI_API_KEY=os.getenv("GEMINI_API_KEY","")
 GEMINI_MODEL=os.getenv("GEMINI_MODEL","gemini-3.1-flash-lite")
@@ -6055,6 +6055,291 @@ audit();
 </script></body></html>""")
 
 
+# ============================================================
+# V10 UNIVERSAL PROPERTY INTAKE
+# Camera/newspaper/handwritten/WhatsApp/PDF ingestion + V9 reconstruction.
+# ============================================================
+
+V10_VISION_PROMPT = """You are the Property Intelligence V10 multimodal extraction engine.
+
+INPUT MAY BE:
+- a photograph of a newspaper or property magazine
+- a phone camera photo of handwritten property notes
+- a WhatsApp screenshot
+- a printed classified page
+- a scan/PDF/image containing multiple property listings or requirements
+
+YOUR JOB:
+1. Extract EVERY distinct property listing and EVERY distinct property/retail/hospitality requirement visible.
+2. Never merge neighboring advertisements or handwritten rows unless they clearly describe the same property.
+3. Read handwritten text conservatively. If a word/digit is unclear, do NOT invent it.
+4. Phone numbers:
+   - preserve every fully legible phone/mobile number
+   - never pad, complete, or guess truncated digits
+   - if multiple valid contacts are visible for the same record, preserve them in the relevant contact field separated by " | "
+   - short fragments remain only in remarks, prefixed UNCLEAR_CONTACT:
+5. Separate concepts correctly:
+   - property/unit number is NOT locality
+   - BMT=Basement, LGF=Lower Ground Floor, GF=Ground Floor, FF=First Floor, SF=Second Floor, TF=Third Floor, TERR=Terrace
+   - these floor abbreviations are NOT property types
+   - SQYD/YD is plot area unless the source explicitly says built-up/covered/usable area
+   - "rented/preleased" is occupancy, not automatically an offer for rent
+   - "leasehold/freehold" is tenure, not transaction
+6. Use null/unknown when the source does not support a fact.
+7. Keep exact source clues in remarks when they help later reconstruction.
+8. For newspaper grids and dense magazine pages, scan the entire image and return all distinct records, not a sample.
+9. For handwritten notes, treat each bullet/line/row as a potential separate record.
+10. For requirements, capture company/client/contact/location/area/property type/lease-or-sale and the requirement wording.
+
+Return only the required structured schema. No prose outside JSON.
+"""
+
+def _ensure_v10_tables():
+    with engine.begin() as c:
+        c.execute(text("""CREATE TABLE IF NOT EXISTS pi_v10_intake_log(
+            id BIGSERIAL PRIMARY KEY,
+            intake_id UUID UNIQUE NOT NULL,
+            source_id BIGINT,
+            job_id BIGINT,
+            source_type TEXT,
+            original_filename TEXT,
+            capture_mode TEXT,
+            status TEXT DEFAULT 'ACCEPTED',
+            file_size BIGINT,
+            note TEXT,
+            created_by TEXT,
+            created_at TIMESTAMPTZ DEFAULT NOW(),
+            completed_at TIMESTAMPTZ
+        )"""))
+        c.execute(text("CREATE INDEX IF NOT EXISTS idx_pi_v10_intake_source ON pi_v10_intake_log(source_id)"))
+
+def _v10_extract_image(path,sid,jid,page_number=1):
+    """
+    Full image + overlapping tiles using the V10 vision prompt.
+    Reuses current exhaustive scan architecture but with handwriting/newspaper rules.
+    """
+    total={"created":0,"duplicates":0,"property_outputs":0,"requirement_outputs":0,"failed":0}
+    units=[("FULL_PAGE",path,False)]+[(label,tp,True) for label,tp in crop_overlapping_tiles(path)]
+    for label,img,is_temp in units:
+        try:
+            state=scan_tile_state(sid,page_number,"V10_"+label)
+            if state and state.get("status")=="COMPLETED":
+                continue
+            mark_scan_tile(sid,page_number,"V10_"+label,"RUNNING")
+            prompt=(
+                V10_VISION_PROMPT
+                + "\nIMAGE REGION: "+label
+                + "\nOverlapping crops are intentional. Extract every distinct record visible in this region."
+            )
+            env=extract_gemini_batch(img,"image/jpeg",prompt)
+            cr,du,po,ro=save_scanned_envelope(env,sid,f"V10_PAGE_{page_number}_{label}")
+            mark_scan_tile(sid,page_number,"V10_"+label,"COMPLETED",cr,du,None)
+            total["created"]+=cr;total["duplicates"]+=du
+            total["property_outputs"]+=po;total["requirement_outputs"]+=ro
+        except Exception as exc:
+            mark_scan_tile(sid,page_number,"V10_"+label,"FAILED",0,0,str(exc))
+            total["failed"]+=1
+        finally:
+            if is_temp:
+                try:os.unlink(img)
+                except Exception:pass
+    return total
+
+def _v10_reconstruct_source_records(sid):
+    """Run V9 reconstruction only on properties created from this source."""
+    _ensure_v9_columns()
+    with engine.connect() as c:
+        props=[dict(r._mapping) for r in c.execute(
+            text("SELECT * FROM pi_properties WHERE source_id=:sid ORDER BY id"),
+            {"sid":sid}
+        ).fetchall()]
+    updated=0
+    with engine.begin() as c:
+        for p in props:
+            r=_v9_reconstruct(p)
+            c.execute(text("""UPDATE pi_properties SET
+                v9_property_no=:pno,v9_locality=:loc,v9_city=:city,v9_floor=:floor,v9_property_type=:ptype,
+                v9_plot_area_sqft=:plot,v9_builtup_area_sqft=:built,v9_transaction=:tx,v9_occupancy=:occ,
+                v9_recovery_status=:rs,v9_recovery_confidence=:rc,v9_recovery_evidence=CAST(:ev AS JSONB),
+                v9_final_bucket=:bucket,v9_match_eligible=:me,v9_updated_at=NOW()
+                WHERE property_id=:id"""),{
+                "pno":r["property_no"],"loc":r["locality"],"city":r["city"],"floor":r["floor"],
+                "ptype":r["property_type"],"plot":r["plot_area_sqft"],"built":r["builtup_area_sqft"],
+                "tx":r["transaction"],"occ":r["occupancy"],"rs":r["recovery_status"],
+                "rc":r["recovery_confidence"],"ev":json.dumps(r["evidence"]),
+                "bucket":r["final_bucket"],"me":r["match_eligible"],"id":p.get("property_id")
+            })
+            updated+=1
+    return updated
+
+def _v10_file_worker(sid,jid,path,mime,intake_id,capture_mode):
+    try:
+        created=duplicates=failed=0
+        is_pdf=(mime=="application/pdf" or path.lower().endswith(".pdf"))
+        is_image=(mime or "").startswith("image/") or path.lower().endswith((".jpg",".jpeg",".png",".webp"))
+
+        if is_pdf:
+            doc=fitz.open(path)
+            for i in range(doc.page_count):
+                page_img=None
+                try:
+                    page_img=render_pdf_page(doc,i)
+                    r=_v10_extract_image(page_img,sid,jid,i+1)
+                    created+=r["created"];duplicates+=r["duplicates"];failed+=r["failed"]
+                finally:
+                    if page_img:
+                        try:os.unlink(page_img)
+                        except Exception:pass
+            doc.close()
+        elif is_image:
+            fd,jpg=tempfile.mkstemp(suffix=".jpg");os.close(fd)
+            try:
+                Image.open(path).convert("RGB").save(jpg,"JPEG",quality=96)
+                r=_v10_extract_image(jpg,sid,jid,1)
+                created=r["created"];duplicates=r["duplicates"];failed=r["failed"]
+            finally:
+                try:os.unlink(jpg)
+                except Exception:pass
+        else:
+            env=extract_gemini_batch(path,mime,V10_VISION_PROMPT)
+            created,duplicates,_,_=save_scanned_envelope(env,sid,"V10_SOURCE")
+
+        reconstructed=_v10_reconstruct_source_records(sid)
+        status="PROCESSED_WITH_ERRORS" if failed else "PROCESSED"
+        with engine.begin() as c:
+            c.execute(text("""UPDATE pi_sources SET ingestion_status=:st,processed_records=:n,duplicate_records=:d,
+                ai_provider='gemini',ai_model=:m,processed_at=NOW() WHERE id=:id"""),
+                {"st":status,"n":created,"d":duplicates,"m":GEMINI_MODEL,"id":sid})
+            c.execute(text("""UPDATE pi_ai_jobs SET status='COMPLETED',output_summary=:o,completed_at=NOW()
+                WHERE id=:id"""),{
+                "o":f"V10 intake: {created} new, {duplicates} duplicate/overlap, {failed} failed scan units, {reconstructed} reconstructed",
+                "id":jid
+            })
+            c.execute(text("""UPDATE pi_v10_intake_log SET status=:st,completed_at=NOW()
+                WHERE intake_id=CAST(:iid AS UUID)"""),{"st":status,"iid":intake_id})
+    except Exception as ex:
+        with engine.begin() as c:
+            c.execute(text("UPDATE pi_sources SET ingestion_status='FAILED',error_message=:e WHERE id=:id"),{"e":str(ex),"id":sid})
+            c.execute(text("UPDATE pi_ai_jobs SET status='FAILED',error_message=:e,completed_at=NOW() WHERE id=:id"),{"e":str(ex),"id":jid})
+            c.execute(text("""UPDATE pi_v10_intake_log SET status='FAILED',note=:e,completed_at=NOW()
+                WHERE intake_id=CAST(:iid AS UUID)"""),{"e":str(ex),"iid":intake_id})
+    finally:
+        try:os.unlink(path)
+        except Exception:pass
+
+@app.post("/api/v10/intake/file")
+async def v10_intake_file(
+    bg:BackgroundTasks,
+    req:Request,
+    file:UploadFile=File(...),
+    source_type:str=Form("PHOTO"),
+    capture_mode:str=Form("CAMERA"),
+    note:Optional[str]=Form(None)
+):
+    need_login(req)
+    _ensure_v10_tables()
+
+    filename=file.filename or "camera-photo.jpg"
+    ext=os.path.splitext(filename)[1].lower()
+    mime=(file.content_type or "").lower()
+    mimemap={
+        ".jpg":"image/jpeg",".jpeg":"image/jpeg",".png":"image/png",".webp":"image/webp",
+        ".pdf":"application/pdf"
+    }
+    if not mime or mime=="application/octet-stream":
+        mime=mimemap.get(ext,"application/octet-stream")
+
+    allowed={"image/jpeg","image/png","image/webp","application/pdf"}
+    if mime not in allowed:
+        raise HTTPException(400,"V10 accepts JPG, JPEG, PNG, WEBP or PDF.")
+
+    fd,path=tempfile.mkstemp(suffix=ext or ".bin");os.close(fd)
+    total=0
+    try:
+        with open(path,"wb") as out:
+            while True:
+                chunk=await file.read(1024*1024)
+                if not chunk:break
+                total+=len(chunk)
+                if total>MAX_UPLOAD_MB*1024*1024:
+                    raise HTTPException(413,f"Maximum upload is {MAX_UPLOAD_MB} MB.")
+                out.write(chunk)
+
+        sid=source_row(source_type.upper(),filename,filename,mime,reference=note)
+        jid=create_job(sid,"V10_MULTIMODAL_EXTRACTION",f"{source_type} | {capture_mode} | {filename}")
+        iid=str(uuid.uuid4())
+        with engine.begin() as c:
+            c.execute(text("""INSERT INTO pi_v10_intake_log(
+                intake_id,source_id,job_id,source_type,original_filename,capture_mode,status,file_size,note,created_by
+            ) VALUES(CAST(:iid AS UUID),:sid,:jid,:st,:fn,:cm,'ACCEPTED',:sz,:note,:by)"""),{
+                "iid":iid,"sid":sid,"jid":jid,"st":source_type.upper(),"fn":filename,
+                "cm":capture_mode.upper(),"sz":total,"note":note,"by":actor_name(req)
+            })
+        bg.add_task(_v10_file_worker,sid,jid,path,mime,iid,capture_mode)
+        return {"status":"ACCEPTED","intake_id":iid,"source_id":sid,"job_id":jid,
+                "message":"Photo/document received. V10 processing continues in background."}
+    except Exception:
+        try:os.unlink(path)
+        except Exception:pass
+        raise
+
+@app.post("/api/v10/intake/text")
+async def v10_intake_text(req:Request,bg:BackgroundTasks):
+    need_login(req)
+    body=await req.json()
+    content=str(body.get("text") or "").strip()
+    if not content:
+        raise HTTPException(400,"Text is required.")
+    source_type=str(body.get("source_type") or "HANDWRITTEN_TRANSCRIPTION").upper()
+    name=str(body.get("source_name") or "Manual text intake")
+    sid=source_row(source_type,name,reference=content)
+    jid=create_job(sid,"V10_TEXT_EXTRACTION",name)
+    # Existing text extraction is already structured; V10 prompt is prepended.
+    bg.add_task(run_text_job,sid,jid,V10_VISION_PROMPT+"\nSOURCE TEXT:\n"+content)
+    return {"status":"ACCEPTED","source_id":sid,"job_id":jid}
+
+@app.get("/api/v10/intake/status")
+def v10_intake_status(req:Request,limit:int=Query(100,ge=1,le=500)):
+    need_login(req);_ensure_v10_tables()
+    with engine.connect() as c:
+        rows=c.execute(text("""SELECT l.*,s.processed_records,s.duplicate_records,s.error_message,
+            j.output_summary FROM pi_v10_intake_log l
+            LEFT JOIN pi_sources s ON s.id=l.source_id
+            LEFT JOIN pi_ai_jobs j ON j.id=l.job_id
+            ORDER BY l.created_at DESC LIMIT :n"""),{"n":limit}).fetchall()
+    return {"status":"ok","rows":_json_rows(rows)}
+
+@app.get("/capture-intelligence",response_class=HTMLResponse)
+def v10_capture_page(req:Request):
+    role=page_role_or_redirect(req)
+    if not role:return RedirectResponse("/login",status_code=303)
+    return HTMLResponse(r"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>V10 Universal Property Intake</title>
+<style>*{box-sizing:border-box}body{margin:0;background:#f4f7fb;font-family:Arial;color:#142033}header{background:#0d1d2d;color:#fff;padding:16px 22px}.wrap{max-width:1250px;margin:auto;padding:18px}.card{background:#fff;border:1px solid #e4eaf1;border-radius:12px;padding:16px;margin-bottom:12px}.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.btn{display:inline-block;padding:11px 14px;border:0;border-radius:8px;background:#1677ff;color:#fff;text-decoration:none;font-weight:700;cursor:pointer}.gray{background:#edf2f7;color:#24364b}input,select,textarea{width:100%;padding:11px;border:1px solid #ccd7e4;border-radius:7px;margin:5px 0 11px}textarea{min-height:130px}.drop{padding:25px;border:2px dashed #aebdcd;border-radius:10px;text-align:center;background:#fafcff}.tablewrap{overflow:auto}table{width:100%;border-collapse:collapse;font-size:12px}th,td{padding:8px;border-bottom:1px solid #edf1f5;text-align:left}@media(max-width:760px){.grid{grid-template-columns:1fr}}</style></head><body>
+<header><b>V10 Universal Property Intake</b><br><small>Camera · Newspaper · Handwritten Note · WhatsApp Screenshot · PDF</small></header>
+<div class="wrap">
+<div class="card"><a class="btn gray" href="/workspace">Workspace</a> <a class="btn gray" href="/property-database">Property Database</a> <a class="btn gray" href="/property-reconstruction">V9 Reconstruction</a></div>
+<div class="grid">
+<div class="card"><h3>Take Photo / Upload Image</h3><p>Use your phone camera for newspaper ads or handwritten notes. Clear, straight photos work best.</p>
+<form id="photoForm"><label>Source Type</label><select name="source_type"><option>NEWSPAPER</option><option>HANDWRITTEN</option><option>WHATSAPP_SCREENSHOT</option><option>MAGAZINE</option><option>PHOTO</option><option>PDF</option></select>
+<label>Photo / PDF</label><div class="drop"><input name="file" type="file" accept="image/*,.pdf" capture="environment" required></div>
+<label>Optional note</label><input name="note" placeholder="e.g. Sunday newspaper page / broker handwritten sheet">
+<input type="hidden" name="capture_mode" value="CAMERA_OR_UPLOAD"><button class="btn" type="submit">Upload & Extract</button></form><p id="photoMsg"></p></div>
+<div class="card"><h3>Paste Message / Typed Note</h3><select id="textType"><option>WHATSAPP</option><option>HANDWRITTEN_TRANSCRIPTION</option><option>MANUAL_NOTE</option></select>
+<textarea id="textContent" placeholder="Paste property message or manually type a handwritten note..."></textarea>
+<button class="btn" onclick="sendText()">Extract Text</button><p id="textMsg"></p></div>
+</div>
+<div class="card"><h3>Recent Intake Jobs</h3><button class="btn gray" onclick="load()">Refresh Status</button><div class="tablewrap"><table><thead><tr><th>Time</th><th>Type</th><th>File</th><th>Status</th><th>New Records</th><th>Duplicates</th><th>Result</th></tr></thead><tbody id="rows"></tbody></table></div></div>
+</div>
+<script>
+const E=x=>String(x??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+async function load(){let r=await fetch('/api/v10/intake/status'),d=await r.json();document.querySelector('#rows').innerHTML=(d.rows||[]).map(x=>`<tr><td>${E(x.created_at||'')}</td><td>${E(x.source_type||'')}</td><td>${E(x.original_filename||'')}</td><td>${E(x.status||'')}</td><td>${E(x.processed_records||0)}</td><td>${E(x.duplicate_records||0)}</td><td>${E(x.output_summary||x.error_message||'')}</td></tr>`).join('')}
+document.querySelector('#photoForm').addEventListener('submit',async e=>{e.preventDefault();document.querySelector('#photoMsg').textContent='Uploading...';let r=await fetch('/api/v10/intake/file',{method:'POST',body:new FormData(e.target)}),d=await r.json();document.querySelector('#photoMsg').textContent=r.ok?'Accepted. AI extraction is running.':(d.detail||d.message||'Upload failed');if(r.ok){e.target.reset();load()}})
+async function sendText(){let t=document.querySelector('#textContent').value.trim();if(!t)return;document.querySelector('#textMsg').textContent='Sending...';let r=await fetch('/api/v10/intake/text',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({source_type:document.querySelector('#textType').value,text:t})}),d=await r.json();document.querySelector('#textMsg').textContent=r.ok?'Accepted. AI extraction is running.':(d.detail||d.message||'Failed');if(r.ok){document.querySelector('#textContent').value=''}}
+load();setInterval(load,15000);
+</script></body></html>""")
+
+
 @app.get("/api/v4/requirements")
 def v4_requirements(req:Request,limit:int=Query(300,ge=1,le=1000)):
     need_login(req)
@@ -6151,7 +6436,7 @@ def _v4_page(role):
 <title>AI Deal Intelligence OS V4</title><style>{_V4_CSS}</style></head><body><div class="shell">
 <aside class="side"><div class="brand">AI Deal Intelligence OS<small>V4 · Property · Hospitality · Retail · Demand</small></div>
 <div class="group">COMMAND</div><button class="nav active" data-page="command">▣ Command Centre</button><button class="nav" data-page="activity">◎ AI Activity</button><button class="nav" data-page="bots">⚡ Bot Control Room</button>
-<div class="group">PROPERTY</div><button class="nav" data-page="property">⌂ Add Property + Matcher</button><a class="nav" href="/property-database">▦ Full Property Database</a><a class="nav" href="/data-quality">✓ Data Quality / Organizer</a><a class="nav" href="/data-recovery">↻ Intelligent Recovery V5</a><a class="nav" href="/master-data-cleaner">◆ Master Data Cleaner V7</a><a class="nav" href="/smart-master-data">★ Smart Master Data V8</a><a class="nav" href="/property-reconstruction">✦ Property Reconstruction V9</a><a class="nav" href="/retail-requirements">▤ Retail Requirement Leads</a><button class="nav" data-page="owners">● Owners Database</button><button class="nav" data-page="brokers">● Brokers Database</button><a class="nav" href="/legacy-workspace">Original Upload Workspace</a><a class="nav" href="/database-page">Original Database</a>
+<div class="group">PROPERTY</div><button class="nav" data-page="property">⌂ Add Property + Matcher</button><a class="nav" href="/property-database">▦ Full Property Database</a><a class="nav" href="/data-quality">✓ Data Quality / Organizer</a><a class="nav" href="/data-recovery">↻ Intelligent Recovery V5</a><a class="nav" href="/master-data-cleaner">◆ Master Data Cleaner V7</a><a class="nav" href="/smart-master-data">★ Smart Master Data V8</a><a class="nav" href="/property-reconstruction">✦ Property Reconstruction V9</a><a class="nav" href="/capture-intelligence">◉ Camera / Newspaper / Handwritten V10</a><a class="nav" href="/retail-requirements">▤ Retail Requirement Leads</a><button class="nav" data-page="owners">● Owners Database</button><button class="nav" data-page="brokers">● Brokers Database</button><a class="nav" href="/legacy-workspace">Original Upload Workspace</a><a class="nav" href="/database-page">Original Database</a>
 <div class="group">LEAD INTELLIGENCE</div><button class="nav" data-page="hospitality">◆ Hospitality</button><button class="nav" data-page="retail">◈ Retail Expansion</button><button class="nav" data-page="contacts">✉ Marketing Contacts</button><button class="nav" data-page="demand">⌕ Requirement Discovery</button>
 </aside><main class="main"><header class="top"><div><b>Unified Delhi NCR Deal Intelligence</b><div class="sub">Organized database + AI bots + matching</div></div><div>{badge} · <a href="/logout">Logout</a></div></header><div class="content">
 
