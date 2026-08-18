@@ -12275,3 +12275,429 @@ async def v1581_route_fix(request,call_next):
     if request.url.path=="/hospitality-phone-recovery":
         return RedirectResponse("/hospitality-phone-recovery-v2",status_code=307)
     return await call_next(request)
+
+# ============================================================
+# V16 FINAL DEAL INTELLIGENCE OS
+# Single dashboard + Hospitality Contact Enrichment + WhatsApp-ready export
+# ============================================================
+
+def _v16_setup():
+    _v156_setup()
+    with engine.begin() as c:
+        c.execute(text("""CREATE TABLE IF NOT EXISTS pi_hospitality_enrichment_jobs(
+            id BIGSERIAL PRIMARY KEY,
+            status TEXT DEFAULT 'QUEUED',
+            category TEXT DEFAULT 'ALL',
+            total_records INTEGER DEFAULT 0,
+            processed INTEGER DEFAULT 0,
+            mobile_found INTEGER DEFAULT 0,
+            email_found INTEGER DEFAULT 0,
+            website_checked INTEGER DEFAULT 0,
+            google_places_checked INTEGER DEFAULT 0,
+            failed INTEGER DEFAULT 0,
+            current_business TEXT,
+            error_message TEXT,
+            started_at TIMESTAMPTZ DEFAULT NOW(),
+            finished_at TIMESTAMPTZ,
+            updated_at TIMESTAMPTZ DEFAULT NOW()
+        )"""))
+        c.execute(text("""CREATE TABLE IF NOT EXISTS pi_hospitality_enrichment_evidence(
+            id BIGSERIAL PRIMARY KEY,
+            hospitality_master_id BIGINT NOT NULL,
+            provider TEXT,
+            source_url TEXT,
+            recovered_phone TEXT,
+            recovered_email TEXT,
+            recovered_website TEXT,
+            confidence INTEGER DEFAULT 0,
+            evidence_text TEXT,
+            applied BOOLEAN DEFAULT FALSE,
+            created_at TIMESTAMPTZ DEFAULT NOW()
+        )"""))
+        c.execute(text("CREATE INDEX IF NOT EXISTS idx_v16_evidence_master ON pi_hospitality_enrichment_evidence(hospitality_master_id)"))
+        c.execute(text("CREATE INDEX IF NOT EXISTS idx_v16_evidence_phone ON pi_hospitality_enrichment_evidence(recovered_phone)"))
+
+def _v16_valid_mobile(text_value):
+    vals=[]
+    for m in _re.findall(r"(?<!\d)(?:\+?91[\s\-\(\)]*)?([6-9]\d{9})(?!\d)", str(text_value or "")):
+        ph=_v151_digits(m)
+        if ph and ph not in vals:
+            vals.append(ph)
+    return vals
+
+def _v16_all_indian_phones(text_value):
+    mobiles=_v16_valid_mobile(text_value)
+    landlines=[]
+    # conservative Delhi/NCR-ish landline capture, stored separately only
+    for m in _re.findall(r"(?<!\d)(?:\+?91[\s\-]?)?0?([1-9][0-9]{1,3})[\s\-]?([2-9][0-9]{5,7})(?!\d)", str(text_value or "")):
+        num="0"+m[0]+m[1]
+        if num not in landlines:
+            landlines.append(num)
+    return mobiles, landlines
+
+def _v16_extract_email(text_value):
+    found=[]
+    for m in _re.findall(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}",str(text_value or ""),_re.I):
+        e=m.lower()
+        if e not in found and not e.endswith((".png",".jpg",".jpeg",".webp")):
+            found.append(e)
+    return found
+
+def _v16_http_get(url, timeout=15):
+    if not url or not str(url).startswith(("http://","https://")):
+        return None, None
+    try:
+        import urllib.request
+        req=urllib.request.Request(str(url),headers={"User-Agent":"Mozilla/5.0 PropertyIntelligenceBot/1.0"})
+        with urllib.request.urlopen(req,timeout=timeout) as resp:
+            body=resp.read(1500000)
+            ctype=resp.headers.get("Content-Type","")
+        return body.decode("utf-8","ignore"),ctype
+    except Exception:
+        return None,None
+
+def _v16_google_places_lookup(business, location):
+    key=os.getenv("GOOGLE_PLACES_API_KEY") or os.getenv("GOOGLE_MAPS_API_KEY")
+    if not key:
+        return None
+    try:
+        import urllib.request, urllib.error
+        q=(str(business or "")+" "+str(location or "")).strip()
+        payload=json.dumps({"textQuery":q,"maxResultCount":3}).encode("utf-8")
+        req=urllib.request.Request(
+            "https://places.googleapis.com/v1/places:searchText",
+            data=payload,
+            method="POST",
+            headers={
+                "Content-Type":"application/json",
+                "X-Goog-Api-Key":key,
+                "X-Goog-FieldMask":"places.displayName,places.formattedAddress,places.nationalPhoneNumber,places.internationalPhoneNumber,places.websiteUri,places.googleMapsUri"
+            }
+        )
+        with urllib.request.urlopen(req,timeout=20) as resp:
+            d=json.loads(resp.read().decode("utf-8","ignore"))
+        places=d.get("places") or []
+        if not places:
+            return None
+        return places[0]
+    except Exception:
+        return None
+
+def _v16_apply_contact(master_id, phone=None, email=None, website=None, provider=None, source_url=None, confidence=0, evidence=None):
+    _v16_setup()
+    applied=False
+    with engine.begin() as c:
+        row=c.execute(text("""SELECT * FROM pi_ai_hospitality_master WHERE id=:id"""),{"id":master_id}).first()
+        if not row:
+            return False
+        m=dict(row._mapping)
+
+        phones=m.get("all_phones") or []
+        if isinstance(phones,str):
+            try: phones=json.loads(phones)
+            except: phones=[]
+        phones=[str(x) for x in phones if x]
+
+        if phone and phone not in phones:
+            phones.append(phone)
+
+        primary=m.get("primary_phone") or (phone if phone else None)
+        new_email=m.get("email") or email
+        new_website=m.get("website") or website
+        contact_status="CONTACT_READY" if primary or new_email else "NEEDS_ENRICHMENT"
+        enrichment_status="ENRICHED" if primary else ("PARTIAL" if new_email or new_website else "NOT_FOUND")
+
+        c.execute(text("""UPDATE pi_ai_hospitality_master
+            SET primary_phone=:p,
+                all_phones=CAST(:phones AS jsonb),
+                email=:email,
+                website=:website,
+                contact_status=:cs,
+                enrichment_status=:es,
+                updated_at=NOW()
+            WHERE id=:id"""),{
+                "p":primary,"phones":json.dumps(phones),"email":new_email,"website":new_website,
+                "cs":contact_status,"es":enrichment_status,"id":master_id
+            })
+
+        c.execute(text("""INSERT INTO pi_hospitality_enrichment_evidence(
+            hospitality_master_id,provider,source_url,recovered_phone,recovered_email,
+            recovered_website,confidence,evidence_text,applied
+        ) VALUES(:mid,:provider,:source,:ph,:email,:website,:conf,:ev,:applied)"""),{
+            "mid":master_id,"provider":provider,"source":source_url,"ph":phone,"email":email,
+            "website":website,"conf":confidence,"ev":(evidence or "")[:3000],"applied":bool(phone or email or website)
+        })
+        applied=True
+
+    if phone:
+        try:
+            _v151_upsert_contact(
+                phone,
+                company=m.get("business_name"),
+                category=m.get("category"),
+                city=m.get("city"),
+                location=m.get("location"),
+                email=(m.get("email") or email),
+                website=(m.get("website") or website),
+                source="AI_HOSPITALITY",
+                source_detail=f"V16_ENRICHMENT:{provider or 'UNKNOWN'}",
+                notes="Recovered by Hospitality Contact Enrichment"
+            )
+        except Exception:
+            pass
+    return applied
+
+def _v16_enrich_one(m):
+    result={"phone":None,"email":None,"website":None,"provider":None,"source_url":None,"confidence":0,"evidence":"","website_checked":0,"places_checked":0}
+
+    # 1) Existing raw payload/source fields first.
+    raw=" ".join([
+        str(m.get("raw_text") or ""),
+        str(m.get("source_url") or ""),
+        str(m.get("website") or ""),
+        str(m.get("location") or ""),
+        str(m.get("business_name") or "")
+    ])
+    phones=_v16_valid_mobile(raw)
+    emails=_v16_extract_email(raw)
+    if phones:
+        result.update(phone=phones[0],email=(emails[0] if emails else None),provider="EXISTING_RAW",source_url=m.get("source_url"),confidence=95,evidence=raw[:3000])
+        return result
+    if emails:
+        result.update(email=emails[0],provider="EXISTING_RAW",source_url=m.get("source_url"),confidence=80,evidence=raw[:3000])
+
+    # 2) Website/source page scrape.
+    candidates=[]
+    for u in [m.get("website"),m.get("source_url")]:
+        if u and str(u).startswith(("http://","https://")) and u not in candidates:
+            candidates.append(u)
+
+    for u in candidates[:2]:
+        html,_=_v16_http_get(u)
+        result["website_checked"]+=1
+        if not html:
+            continue
+        p=_v16_valid_mobile(html)
+        e=_v16_extract_email(html)
+        if p:
+            result.update(phone=p[0],email=(e[0] if e else result.get("email")),website=(m.get("website") or u),
+                          provider="WEBSITE",source_url=u,confidence=92,evidence=html[:3000])
+            return result
+        if e and not result.get("email"):
+            result.update(email=e[0],website=(m.get("website") or u),provider="WEBSITE",source_url=u,confidence=78,evidence=html[:3000])
+
+    # 3) Google Places Text Search if API key is configured.
+    place=_v16_google_places_lookup(m.get("business_name"),m.get("location"))
+    result["places_checked"]+=1 if (os.getenv("GOOGLE_PLACES_API_KEY") or os.getenv("GOOGLE_MAPS_API_KEY")) else 0
+    if place:
+        phs=_v16_valid_mobile(place.get("nationalPhoneNumber") or place.get("internationalPhoneNumber") or "")
+        website=place.get("websiteUri")
+        gm=place.get("googleMapsUri")
+        ev=json.dumps(place,default=str)
+        if phs:
+            result.update(phone=phs[0],website=(website or result.get("website")),provider="GOOGLE_PLACES",
+                          source_url=(gm or website),confidence=98,evidence=ev[:3000])
+            return result
+        if website and not result.get("website"):
+            result.update(website=website,provider="GOOGLE_PLACES",source_url=(gm or website),confidence=75,evidence=ev[:3000])
+
+    return result
+
+def _v16_job_update(job_id, **vals):
+    if not vals:return
+    sets=[];p={"id":job_id}
+    for i,(k,v) in enumerate(vals.items()):
+        kk=f"v{i}";sets.append(f"{k}=:{kk}");p[kk]=v
+    with engine.begin() as c:
+        c.execute(text("UPDATE pi_hospitality_enrichment_jobs SET "+",".join(sets)+",updated_at=NOW() WHERE id=:id"),p)
+
+def _v16_enrichment_worker(job_id, category="ALL", limit=1000):
+    try:
+        _v16_setup()
+        wh=["(primary_phone IS NULL OR primary_phone='')"]
+        p={}
+        if category!="ALL":
+            wh.append("category=:cat");p["cat"]=category
+        sql="""SELECT * FROM pi_ai_hospitality_master WHERE """+" AND ".join(wh)+" ORDER BY id LIMIT :lim"
+        p["lim"]=int(limit)
+        with engine.connect() as c:
+            rows=[dict(r._mapping) for r in c.execute(text(sql),p).fetchall()]
+
+        _v16_job_update(job_id,status="RUNNING",total_records=len(rows),processed=0)
+
+        processed=mobile_found=email_found=website_checked=places_checked=failed=0
+        for m in rows:
+            _v16_job_update(job_id,current_business=str(m.get("business_name") or "")[:200])
+            try:
+                r=_v16_enrich_one(m)
+                website_checked+=r.get("website_checked",0)
+                places_checked+=r.get("places_checked",0)
+                if r.get("phone"):
+                    mobile_found+=1
+                if r.get("email"):
+                    email_found+=1
+                if r.get("phone") or r.get("email") or r.get("website"):
+                    _v16_apply_contact(
+                        m["id"],r.get("phone"),r.get("email"),r.get("website"),
+                        r.get("provider"),r.get("source_url"),r.get("confidence",0),r.get("evidence")
+                    )
+            except Exception:
+                failed+=1
+            processed+=1
+            if processed % 10 == 0:
+                _v16_job_update(job_id,processed=processed,mobile_found=mobile_found,email_found=email_found,
+                                website_checked=website_checked,google_places_checked=places_checked,failed=failed)
+
+        _v16_job_update(job_id,status="COMPLETED",processed=processed,mobile_found=mobile_found,email_found=email_found,
+                        website_checked=website_checked,google_places_checked=places_checked,failed=failed,
+                        current_business=None,finished_at=datetime.now(timezone.utc))
+    except Exception as ex:
+        _v16_job_update(job_id,status="FAILED",error_message=f"{type(ex).__name__}: {ex}",
+                        finished_at=datetime.now(timezone.utc))
+
+@app.post("/api/v16/hospitality-enrichment/start")
+async def v16_start_enrichment(req:Request, background_tasks:BackgroundTasks):
+    need_login(req);_v16_setup()
+    body=await req.json()
+    category=str(body.get("category") or "ALL").upper()
+    limit=max(1,min(int(body.get("limit") or 1000),5000))
+    with engine.begin() as c:
+        active=c.execute(text("""SELECT id FROM pi_hospitality_enrichment_jobs
+            WHERE status IN ('QUEUED','RUNNING') ORDER BY id DESC LIMIT 1""")).first()
+        if active:
+            return {"status":"already_running","job_id":active._mapping["id"]}
+        row=c.execute(text("""INSERT INTO pi_hospitality_enrichment_jobs(status,category,started_at,updated_at)
+            VALUES('QUEUED',:cat,NOW(),NOW()) RETURNING id"""),{"cat":category}).first()
+        jid=row._mapping["id"]
+    background_tasks.add_task(_v16_enrichment_worker,jid,category,limit)
+    return {"status":"started","job_id":jid}
+
+@app.get("/api/v16/hospitality-enrichment/status")
+def v16_enrichment_status(req:Request):
+    need_login(req);_v16_setup()
+    with engine.connect() as c:
+        row=c.execute(text("SELECT * FROM pi_hospitality_enrichment_jobs ORDER BY id DESC LIMIT 1")).first()
+    if not row:return {"status":"none"}
+    d=dict(row._mapping)
+    d["master_total"]=_v15_safe_count("SELECT COUNT(*) FROM pi_ai_hospitality_master")
+    d["master_with_mobile"]=_v15_safe_count("SELECT COUNT(*) FROM pi_ai_hospitality_master WHERE primary_phone IS NOT NULL AND primary_phone<>''")
+    d["needs_enrichment"]=_v15_safe_count("SELECT COUNT(*) FROM pi_ai_hospitality_master WHERE primary_phone IS NULL OR primary_phone=''")
+    d["whatsapp_ready"]=_v15_safe_count("""SELECT COUNT(*) FROM pi_marketing_contacts
+        WHERE source ILIKE '%AI_HOSPITALITY%' AND primary_phone IS NOT NULL
+        AND primary_phone<>'' AND whatsapp_status IN ('READY','NOT_CONTACTED') AND COALESCE(opt_out,FALSE)=FALSE""")
+    d["google_places_configured"]=bool(os.getenv("GOOGLE_PLACES_API_KEY") or os.getenv("GOOGLE_MAPS_API_KEY"))
+    return d
+
+@app.post("/api/v16/hospitality/{hid}/verify")
+async def v16_verify_hospitality(hid:int, req:Request):
+    need_login(req)
+    body=await req.json()
+    status=str(body.get("verified_status") or "VERIFIED").upper()
+    if status not in {"VERIFIED","UNVERIFIED"}: status="UNVERIFIED"
+    with engine.begin() as c:
+        c.execute(text("UPDATE pi_ai_hospitality_master SET verified_status=:s,updated_at=NOW() WHERE id=:id"),{"s":status,"id":hid})
+    return {"status":"ok"}
+
+@app.get("/api/v16/whatsapp-ready.csv")
+def v16_whatsapp_ready_csv(req:Request,category:str=Query("ALL"),verified:str=Query("ALL")):
+    need_login(req)
+    wh=["primary_phone IS NOT NULL","primary_phone<>''"]
+    p={}
+    if category!="ALL":
+        wh.append("category=:cat");p["cat"]=category
+    if verified!="ALL":
+        wh.append("verified_status=:ver");p["ver"]=verified
+    sql="""SELECT business_name,category,city,location,contact_name,primary_phone,email,website,source_url,verified_status
+        FROM pi_ai_hospitality_master WHERE """+" AND ".join(wh)+" ORDER BY category,business_name"
+    with engine.connect() as c:
+        rows=[dict(r._mapping) for r in c.execute(text(sql),p).fetchall()]
+    import io,csv
+    s=io.StringIO()
+    w=csv.writer(s)
+    w.writerow(["Business Name","Category","City","Location","Contact Name","Mobile","Email","Website","Source URL","Verified"])
+    for r in rows:
+        w.writerow([r.get("business_name"),r.get("category"),r.get("city"),r.get("location"),r.get("contact_name"),
+                    r.get("primary_phone"),r.get("email"),r.get("website"),r.get("source_url"),r.get("verified_status")])
+    return Response(content=s.getvalue(),media_type="text/csv",headers={"Content-Disposition":"attachment; filename=hospitality_whatsapp_ready.csv"})
+
+@app.get("/hospitality-enrichment",response_class=HTMLResponse)
+def v16_hospitality_enrichment(req:Request):
+    role=page_role_or_redirect(req)
+    if not role:return RedirectResponse("/login",303)
+    return HTMLResponse("""<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>Hospitality Contact Enrichment</title>
+<style>*{box-sizing:border-box}body{font-family:Arial;margin:0;background:#f4f7fb;color:#172437}header{background:#102235;color:#fff;padding:18px}.w{max-width:1500px;margin:auto;padding:18px}.bar{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}.btn,a.btn{padding:8px 10px;border:0;border-radius:8px;background:#1677ff;color:#fff;text-decoration:none;font-weight:bold;cursor:pointer}.gray{background:#e9eef5!important;color:#203247!important}.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;margin-bottom:12px}.k{background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:12px}.k b{display:block;font-size:22px}.msg{background:#fff8e8;border:1px solid #eed18f;padding:11px;border-radius:9px}.progress{height:18px;background:#e8edf3;border-radius:9px;overflow:hidden;margin:12px 0}.fill{height:100%;background:#1677ff;width:0}select,input{padding:8px;border:1px solid #ccd6e2;border-radius:7px}.small{font-size:12px;color:#687789}</style></head>
+<body><header><b>Hospitality Contact Enrichment</b><br><small>Phone-first enrichment for WhatsApp marketing</small></header><div class=w>
+<div class=bar><a class="btn gray" href="/final-dashboard">← Final Dashboard</a>
+<select id=cat><option>ALL</option><option>CAFE</option><option>RESTAURANT</option><option>BANQUET</option><option>HOTEL</option><option>GUEST_HOUSE</option><option>LOUNGE</option><option>CLUB</option><option>BAR</option><option>FARMHOUSE</option></select>
+<input id=limit type=number min=1 max=5000 value=1000>
+<button class=btn onclick="start()">Start Enrichment</button>
+<a class="btn gray" href="/api/v16/whatsapp-ready.csv">Export WhatsApp CSV</a></div>
+<div class=kpis>
+<div class=k><b id=total>0</b><span>MASTER BUSINESSES</span></div>
+<div class=k><b id=mobiles>0</b><span>WITH MOBILE</span></div>
+<div class=k><b id=need>0</b><span>NEEDS MOBILE</span></div>
+<div class=k><b id=processed>0</b><span>JOB PROCESSED</span></div>
+<div class=k><b id=found>0</b><span>MOBILES FOUND THIS JOB</span></div>
+<div class=k><b id=wa>0</b><span>WHATSAPP READY</span></div>
+</div>
+<div class=progress><div id=fill class=fill></div></div>
+<div id=msg class=msg>Ready. Existing 1,298 Hospitality businesses are preserved. Enrichment only works on records missing a valid mobile.</div>
+<p class=small>Current business: <b id=current>-</b> · Google Places API configured: <b id=gp>NO</b></p>
+</div>
+<script>
+async function start(){msg.textContent='Starting enrichment...';let r=await fetch('/api/v16/hospitality-enrichment/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({category:cat.value,limit:Number(limit.value||1000)})}),d=await r.json();msg.textContent=d.status==='already_running'?'An enrichment job is already running.':'Enrichment started.';poll()}
+async function poll(){try{let d=await(await fetch('/api/v16/hospitality-enrichment/status')).json();if(d.status==='none')return;total.textContent=d.master_total||0;mobiles.textContent=d.master_with_mobile||0;need.textContent=d.needs_enrichment||0;processed.textContent=d.processed||0;found.textContent=d.mobile_found||0;wa.textContent=d.whatsapp_ready||0;current.textContent=d.current_business||'-';gp.textContent=d.google_places_configured?'YES':'NO';let pct=d.total_records?Math.round((d.processed||0)*100/d.total_records):0;fill.style.width=pct+'%';msg.textContent=d.status+(d.error_message?': '+d.error_message:'');if(['QUEUED','RUNNING'].includes(d.status))setTimeout(poll,3000)}catch(e){msg.textContent='Status error: '+e.message}}poll()
+</script></body></html>""")
+
+@app.get("/final-dashboard",response_class=HTMLResponse)
+def v16_final_dashboard(req:Request):
+    role=page_role_or_redirect(req)
+    if not role:return RedirectResponse("/login",303)
+    return HTMLResponse("""<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>AI Deal Intelligence OS</title>
+<style>*{box-sizing:border-box}body{font-family:Arial;margin:0;background:#f4f7fb;color:#172437}header{background:#102235;color:white;padding:22px}.w{max-width:1500px;margin:auto;padding:20px}.section{margin-bottom:22px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px}.card{background:#fff;border:1px solid #e2e8f0;border-radius:12px;padding:16px;text-decoration:none;color:#172437;min-height:110px;display:block}.card b{font-size:16px}.card p{font-size:12px;color:#687789}.tag{display:inline-block;margin-top:7px;padding:3px 7px;border-radius:10px;background:#edf4ff;font-size:10px}.primary{border:2px solid #1677ff}.danger{border-color:#e5e7eb}.small{color:#9db0c5;font-size:12px}</style></head>
+<body><header><b>AI Deal Intelligence OS</b><br><span class=small>Final Team Dashboard · Property · Requirements · Hospitality · Retail · WhatsApp Marketing</span></header><div class=w>
+<div class=section><h2>Daily Operations</h2><div class=grid>
+<a class="card primary" href="/v14-property-form"><b>Add Property Manually</b><p>Fresh inventory with required fields and verification status.</p><span class=tag>DAILY</span></a>
+<a class="card primary" href="/v14-requirement-form"><b>Add Requirement Manually</b><p>Confirmed requirement entry for accurate matching.</p><span class=tag>DAILY</span></a>
+<a class="card primary" href="/v14-matcher"><b>Property Matcher</b><p>Match only fresh/manual verified inventory.</p><span class=tag>DAILY</span></a>
+<a class="card" href="/v14-inventory"><b>Fresh Inventory Database</b><p>Search and review clean inventory separately.</p></a>
+</div></div>
+
+<div class=section><h2>AI Hospitality</h2><div class=grid>
+<a class="card primary" href="/ai-hospitality-master-final"><b>Hospitality Master</b><p>1,298 cafes, restaurants, banquets, hotels, guest houses, lounges, clubs and bars.</p><span class=tag>MASTER</span></a>
+<a class="card primary" href="/hospitality-enrichment"><b>Find Missing Contact Numbers</b><p>Phone-first enrichment for WhatsApp marketing. Existing records are preserved.</p><span class=tag>ENRICH</span></a>
+<a class="card" href="/marketing-contacts-final"><b>Marketing Contacts</b><p>Segregated contact database with verification and WhatsApp status.</p></a>
+<a class="card" href="/api/v16/whatsapp-ready.csv"><b>Export WhatsApp Contacts</b><p>Download hospitality records that contain usable mobile numbers.</p><span class=tag>CSV</span></a>
+</div></div>
+
+<div class=section><h2>AI Demand</h2><div class=grid>
+<a class="card" href="/retail-expansion"><b>AI Retail Expansion</b><p>Retail demand signals and expansion intelligence.</p></a>
+<a class="card" href="/requirements-match-center"><b>Requirements Centre</b><p>Manual and AI requirements, kept separate for verification.</p></a>
+<a class="card" href="/requirements-entry?division=RETAIL"><b>Add Retail Requirement</b><p>Confirmed retail requirement entry.</p></a>
+<a class="card" href="/requirements-entry?division=HOSPITALITY"><b>Add Hospitality Requirement</b><p>Confirmed hospitality requirement for matching.</p></a>
+</div></div>
+
+<div class=section><h2>Database & Capture</h2><div class=grid>
+<a class="card" href="/capture-intelligence"><b>Camera / Screenshot / Newspaper / PDF</b><p>Capture property information from images, handwritten notes, WhatsApp and documents.</p></a>
+<a class="card" href="/property-database"><b>Full Property Database</b><p>Legacy/master property archive. Not used by the fresh V14 matcher.</p></a>
+<a class="card" href="/contacts-directory"><b>Owner / Broker Contacts</b><p>Property contact verification only. Separate from marketing contacts.</p></a>
+<a class="card" href="/data-doctor"><b>Data Doctor</b><p>Admin reconciliation and database health.</p><span class=tag>ADMIN</span></a>
+</div></div>
+
+<div class=section><h2>Goa</h2><div class=grid>
+<a class="card" href="/goa-property"><b>Goa Property</b><p>Dedicated Goa workflow when enabled.</p></a>
+<a class="card" href="/goa-requirement"><b>Goa Requirement</b><p>Goa demand entry when enabled.</p></a>
+<a class="card" href="/goa-matcher"><b>Goa Matcher</b><p>Separate Goa matching workflow.</p></a>
+</div></div>
+</div></body></html>""")
+
+@app.middleware("http")
+async def v16_final_navigation(request,call_next):
+    if request.url.path in {"/workspace","/v15-dashboard","/simple-dashboard","/team-workspace-clean"}:
+        return RedirectResponse("/final-dashboard",status_code=307)
+    response=await call_next(request)
+    if request.url.path.startswith(("/final-dashboard","/hospitality-enrichment","/ai-hospitality-master-final","/marketing-contacts-final")):
+        response.headers["Cache-Control"]="no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"]="no-cache"
+        response.headers["Expires"]="0"
+    return response
