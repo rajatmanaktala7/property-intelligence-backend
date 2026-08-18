@@ -11138,3 +11138,278 @@ async def v1551_marketing_final_router(request,call_next):
     if request.url.path in {"/marketing-contacts","/marketing-contacts-v2","/marketing-contacts-v3","/marketing-contacts-v4"}:
         return RedirectResponse("/marketing-contacts-final",status_code=307)
     return await call_next(request)
+
+# ============================================================
+# V15.6 RECOVER EXISTING AI HOSPITALITY MASTER
+# Recovers ALL existing ai_marketing_contacts rows first.
+# No Hospitality Bot rerun required.
+# ============================================================
+
+def _v156_setup():
+    with engine.begin() as c:
+        c.execute(text("""CREATE TABLE IF NOT EXISTS pi_ai_hospitality_master(
+            id BIGSERIAL PRIMARY KEY,
+            source_row_key TEXT UNIQUE NOT NULL,
+            source_table TEXT DEFAULT 'ai_marketing_contacts',
+            source_row_id TEXT,
+            business_name TEXT,
+            category TEXT DEFAULT 'OTHER',
+            subcategory TEXT,
+            city TEXT,
+            location TEXT,
+            full_address TEXT,
+            contact_name TEXT,
+            primary_phone TEXT,
+            all_phones JSONB DEFAULT '[]'::jsonb,
+            email TEXT,
+            website TEXT,
+            source_url TEXT,
+            raw_text TEXT,
+            raw_payload JSONB,
+            contact_status TEXT DEFAULT 'NEEDS_ENRICHMENT',
+            verified_status TEXT DEFAULT 'UNVERIFIED',
+            enrichment_status TEXT DEFAULT 'NOT_STARTED',
+            date_fetched TIMESTAMPTZ,
+            recovered_at TIMESTAMPTZ DEFAULT NOW(),
+            updated_at TIMESTAMPTZ DEFAULT NOW()
+        )"""))
+        c.execute(text("CREATE INDEX IF NOT EXISTS idx_ai_hosp_master_category ON pi_ai_hospitality_master(category)"))
+        c.execute(text("CREATE INDEX IF NOT EXISTS idx_ai_hosp_master_contact_status ON pi_ai_hospitality_master(contact_status)"))
+        c.execute(text("CREATE INDEX IF NOT EXISTS idx_ai_hosp_master_phone ON pi_ai_hospitality_master(primary_phone)"))
+
+def _v156_flatten(value, prefix=""):
+    out=[]
+    if value is None:
+        return out
+    if isinstance(value,dict):
+        for k,v in value.items():
+            p=f"{prefix}.{k}" if prefix else str(k)
+            out.extend(_v156_flatten(v,p))
+        return out
+    if isinstance(value,(list,tuple)):
+        for i,v in enumerate(value):
+            out.extend(_v156_flatten(v,f"{prefix}[{i}]"))
+        return out
+    if isinstance(value,str):
+        s=value.strip()
+        if len(s)>=2 and ((s.startswith("{") and s.endswith("}")) or (s.startswith("[") and s.endswith("]"))):
+            try:
+                return _v156_flatten(json.loads(s),prefix)
+            except Exception:
+                pass
+    out.append((prefix,value))
+    return out
+
+def _v156_pairs(row):
+    out=[]
+    for k,v in row.items():
+        out.extend(_v156_flatten(v,str(k)))
+    return out
+
+def _v156_find(row,keywords,max_len=500):
+    pairs=_v156_pairs(row)
+    # exact-ish path preference
+    for path,val in pairs:
+        lp=path.lower()
+        if any(k in lp for k in keywords):
+            s=str(val or "").strip()
+            if s and len(s)<=max_len:
+                return val
+    return None
+
+def _v156_phones(row):
+    found=[]
+    for path,val in _v156_pairs(row):
+        txt=str(val or "")
+        for m in _re.findall(r"(?<!\d)(?:\+?91[\s\-]?)?([6-9]\d{9})(?!\d)",txt):
+            ph=_v151_digits(m)
+            if ph and ph not in found:
+                found.append(ph)
+    return found
+
+def _v156_email(row):
+    direct=_v156_find(row,["contact_email","email_id","email"])
+    if direct:
+        return str(direct).strip()
+    blob=" ".join(str(v or "") for _,v in _v156_pairs(row))
+    m=_re.search(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}",blob,_re.I)
+    return m.group(0) if m else None
+
+def _v156_url(row):
+    direct=_v156_find(row,["website_url","website","source_url","linkedin_url","google_url","url"])
+    if direct:
+        return str(direct).strip()
+    blob=" ".join(str(v or "") for _,v in _v156_pairs(row))
+    m=_re.search(r"https?://[^\s<>\"]+",blob)
+    return m.group(0) if m else None
+
+def _v156_category(row):
+    blob=" ".join(str(v or "") for _,v in _v156_pairs(row)).lower()
+    mapping=[
+        ("CAFE",["cafe","coffee","bakery"]),
+        ("RESTAURANT",["restaurant","restro","diner"]),
+        ("BANQUET",["banquet","wedding venue"]),
+        ("HOTEL",["hotel","resort"]),
+        ("GUEST_HOUSE",["guest house","guesthouse"]),
+        ("LOUNGE",["lounge"]),
+        ("CLUB",["club"]),
+        ("BAR",["bar","pub"]),
+        ("FARMHOUSE",["farmhouse","farm house"])
+    ]
+    for cat,terms in mapping:
+        if any(t in blob for t in terms):
+            return cat
+    return "OTHER"
+
+def _v156_source_id(row,idx):
+    for k in ["id","contact_id","lead_id","prospect_id","record_id","uuid"]:
+        if row.get(k) not in (None,""):
+            return str(row.get(k))
+    return str(idx)
+
+def _v156_recover_all():
+    _v156_setup()
+    if not _v152_table_exists("ai_marketing_contacts"):
+        raise RuntimeError("ai_marketing_contacts table not found")
+
+    with engine.connect() as c:
+        rows=[dict(r._mapping) for r in c.execute(text('SELECT * FROM "ai_marketing_contacts" LIMIT 50000')).fetchall()]
+
+    recovered=0
+    contact_ready=0
+    needs_enrichment=0
+    categories={}
+    promoted=0
+    samples=[]
+
+    for idx,row in enumerate(rows,1):
+        sid=_v156_source_id(row,idx)
+        key="ai_marketing_contacts:"+sid
+
+        phones=_v156_phones(row)
+        business=_v156_find(row,["business_name","company_name","brand_name","venue_name","restaurant_name","hotel_name","brand","company","name"])
+        contact=_v156_find(row,["contact_name","contact_person","person_name","manager_name","owner_name"])
+        city=_v156_find(row,["city","target_city"])
+        location=_v156_find(row,["location","locality","address","target_market","market","area"])
+        full_address=_v156_find(row,["full_address","address"])
+        email=_v156_email(row)
+        website=_v156_find(row,["website_url","website"])
+        source_url=_v156_url(row)
+        cat=_v156_category(row)
+        categories[cat]=categories.get(cat,0)+1
+
+        # preserve readable raw text plus entire source row
+        raw_text=" | ".join(str(v) for v in row.values() if v not in (None,""))[:12000]
+        status="CONTACT_READY" if phones or email else "NEEDS_ENRICHMENT"
+        if status=="CONTACT_READY": contact_ready+=1
+        else: needs_enrichment+=1
+
+        date_fetched=None
+        for k in ["created_at","date_fetched","fetched_at","discovered_at","updated_at"]:
+            if row.get(k):
+                date_fetched=row.get(k)
+                break
+
+        payload=json.dumps(row,default=str)
+
+        with engine.begin() as c:
+            c.execute(text("""INSERT INTO pi_ai_hospitality_master(
+                source_row_key,source_table,source_row_id,business_name,category,city,location,full_address,
+                contact_name,primary_phone,all_phones,email,website,source_url,raw_text,raw_payload,
+                contact_status,date_fetched,recovered_at,updated_at
+            ) VALUES(
+                :key,'ai_marketing_contacts',:sid,:business,:cat,:city,:loc,:addr,
+                :contact,:phone,CAST(:phones AS jsonb),:email,:website,:url,:raw,CAST(:payload AS jsonb),
+                :status,:df,NOW(),NOW()
+            )
+            ON CONFLICT(source_row_key) DO UPDATE SET
+                business_name=EXCLUDED.business_name,category=EXCLUDED.category,city=EXCLUDED.city,
+                location=EXCLUDED.location,full_address=EXCLUDED.full_address,contact_name=EXCLUDED.contact_name,
+                primary_phone=EXCLUDED.primary_phone,all_phones=EXCLUDED.all_phones,email=EXCLUDED.email,
+                website=EXCLUDED.website,source_url=EXCLUDED.source_url,raw_text=EXCLUDED.raw_text,
+                raw_payload=EXCLUDED.raw_payload,contact_status=EXCLUDED.contact_status,
+                date_fetched=EXCLUDED.date_fetched,updated_at=NOW()"""),{
+                "key":key,"sid":sid,"business":business,"cat":cat,"city":city,"loc":location,"addr":full_address,
+                "contact":contact,"phone":phones[0] if phones else None,"phones":json.dumps(phones),
+                "email":email,"website":website,"url":source_url,"raw":raw_text,"payload":payload,
+                "status":status,"df":date_fetched
+            })
+        recovered+=1
+
+        # Promote valid phone records to Marketing Contacts, but preserve master row regardless.
+        if phones:
+            for ph in phones:
+                try:
+                    if _v151_upsert_contact(
+                        ph,name=contact,company=business,category=cat,city=city,location=location,
+                        email=email,website=website,source="AI_HOSPITALITY",
+                        source_detail=f"ai_marketing_contacts:{sid}",notes=raw_text[:1500]
+                    ):
+                        promoted+=1
+                except Exception:
+                    pass
+
+        if len(samples)<25:
+            samples.append({
+                "id":sid,"business":business,"category":cat,"location":location,
+                "contact_name":contact,"phones":phones,"email":email,"status":status
+            })
+
+    return {
+        "source_rows":len(rows),
+        "recovered":recovered,
+        "contact_ready":contact_ready,
+        "needs_enrichment":needs_enrichment,
+        "promoted_to_marketing_contacts":promoted,
+        "categories":categories,
+        "sample":samples
+    }
+
+@app.post("/api/v15-6/recover-ai-hospitality")
+def v156_recover_api(req:Request):
+    need_login(req)
+    try:
+        return {"status":"ok",**_v156_recover_all()}
+    except Exception as ex:
+        raise HTTPException(500,f"{type(ex).__name__}: {ex}")
+
+@app.get("/api/v15-6/ai-hospitality-master")
+def v156_master_list(req:Request,category:str=Query("ALL"),status:str=Query("ALL"),q:str=Query("")):
+    need_login(req);_v156_setup()
+    wh=[];p={}
+    if category!="ALL":
+        wh.append("category=:cat");p["cat"]=category
+    if status!="ALL":
+        wh.append("contact_status=:st");p["st"]=status
+    if q.strip():
+        wh.append("""(
+            COALESCE(business_name,'') ILIKE :q OR COALESCE(location,'') ILIKE :q OR
+            COALESCE(primary_phone,'') ILIKE :q OR COALESCE(email,'') ILIKE :q OR
+            COALESCE(contact_name,'') ILIKE :q
+        )""");p["q"]="%"+q.strip()+"%"
+    sql="SELECT id,source_row_id,business_name,category,city,location,contact_name,primary_phone,all_phones,email,website,source_url,contact_status,verified_status,enrichment_status,date_fetched,recovered_at FROM pi_ai_hospitality_master"
+    if wh: sql+=" WHERE "+" AND ".join(wh)
+    sql+=" ORDER BY recovered_at DESC,id DESC LIMIT 5000"
+    with engine.connect() as c:
+        rows=[dict(r._mapping) for r in c.execute(text(sql),p).fetchall()]
+    return {"status":"ok","rows":rows}
+
+@app.get("/ai-hospitality-master",response_class=HTMLResponse)
+def v156_master_page(req:Request):
+    role=page_role_or_redirect(req)
+    if not role:return RedirectResponse("/login",303)
+    return HTMLResponse("""<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>AI Hospitality Master</title>
+<style>*{box-sizing:border-box}body{font-family:Arial;margin:0;background:#f4f7fb;color:#172437}header{background:#102235;color:#fff;padding:18px}.w{padding:18px}.bar{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}.btn,a.btn{padding:8px 10px;border:0;border-radius:7px;background:#1677ff;color:#fff;text-decoration:none;font-weight:bold;cursor:pointer}.gray{background:#e9eef5!important;color:#203247!important}.kpis{display:grid;grid-template-columns:repeat(4,minmax(150px,1fr));gap:8px;margin-bottom:12px}.k{background:#fff;padding:12px;border-radius:10px;border:1px solid #e2e8f0}.k b{display:block;font-size:22px}.msg{background:#fff8e8;border:1px solid #eed18f;border-radius:9px;padding:10px;margin-bottom:12px}select,input{padding:8px;border:1px solid #ccd6e2;border-radius:7px}.tablewrap{overflow:auto;background:white;border-radius:10px;max-height:70vh}table{width:100%;border-collapse:collapse;font-size:12px}th,td{padding:8px;border-bottom:1px solid #edf1f5;text-align:left;vertical-align:top;white-space:nowrap}th{position:sticky;top:0;background:#f8fafc}.pill{padding:3px 6px;background:#edf4ff;border-radius:8px}.good{background:#dcfce7}.warn{background:#fef3c7}</style></head>
+<body><header><b>AI Hospitality Master Database</b><br><small>Recover all existing AI-generated cafe / restaurant / banquet / hotel records first</small></header><div class=w>
+<div class=bar><a class="btn gray" href="/workspace">← Dashboard</a><button class=btn onclick="recover()">Recover Existing AI Hospitality Data</button><a class="btn gray" href="/marketing-contacts-final">Marketing Contacts</a>
+<select id=category><option>ALL</option><option>CAFE</option><option>RESTAURANT</option><option>BANQUET</option><option>HOTEL</option><option>GUEST_HOUSE</option><option>LOUNGE</option><option>CLUB</option><option>BAR</option><option>FARMHOUSE</option><option>OTHER</option></select>
+<select id=status><option>ALL</option><option>CONTACT_READY</option><option>NEEDS_ENRICHMENT</option></select><input id=q placeholder="Search business, location, phone, email"><button onclick="load()">Search</button></div>
+<div class=kpis><div class=k><b id=src>0</b><span>SOURCE ROWS</span></div><div class=k><b id=rec>0</b><span>RECOVERED</span></div><div class=k><b id=ready>0</b><span>CONTACT READY</span></div><div class=k><b id=need>0</b><span>NEEDS ENRICHMENT</span></div></div>
+<div id=msg class=msg>This recovers the existing AI Hospitality database. It does not rerun the Hospitality Bot.</div>
+<div class=tablewrap><table><thead><tr><th>Business</th><th>Category</th><th>Location</th><th>Contact Person</th><th>Mobile</th><th>Email</th><th>Website / Source</th><th>Status</th><th>Date Fetched</th></tr></thead><tbody id=rows></tbody></table></div></div>
+<script>
+const E=x=>String(x??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+async function recover(){msg.textContent='Recovering existing AI Hospitality rows...';let r=await fetch('/api/v15-6/recover-ai-hospitality',{method:'POST'}),d=await r.json();if(!r.ok){msg.textContent='ERROR: '+(d.detail||'Recovery failed');return}src.textContent=d.source_rows||0;rec.textContent=d.recovered||0;ready.textContent=d.contact_ready||0;need.textContent=d.needs_enrichment||0;msg.textContent=`Recovered ${d.recovered||0} existing AI Hospitality records. ${d.contact_ready||0} are contact-ready; ${d.needs_enrichment||0} need enrichment.`;load()}
+async function load(){let u='/api/v15-6/ai-hospitality-master?category='+category.value+'&status='+status.value+'&q='+encodeURIComponent(q.value||'');let d=await(await fetch(u)).json(),r=d.rows||[];rows.innerHTML=r.map(x=>`<tr><td><b>${E(x.business_name||'Unknown business')}</b></td><td><span class=pill>${E(x.category||'OTHER')}</span></td><td>${E(x.city||'')}<br>${E(x.location||'')}</td><td>${E(x.contact_name||'')}</td><td><b>${E(x.primary_phone||'')}</b><br>${E((x.all_phones||[]).join(', '))}</td><td>${E(x.email||'')}</td><td>${x.website?`<a target=_blank href="${E(x.website)}">Website</a>`:''} ${x.source_url?`<a target=_blank href="${E(x.source_url)}">Source</a>`:''}</td><td><span class="pill ${x.contact_status==='CONTACT_READY'?'good':'warn'}">${E(x.contact_status)}</span></td><td>${E((x.date_fetched||'').slice(0,10))}</td></tr>`).join('')||'<tr><td colspan=9>No recovered records for this filter.</td></tr>'}
+category.onchange=load;status.onchange=load;q.onkeydown=e=>{if(e.key==='Enter')load()};load()
+</script></body></html>""")
