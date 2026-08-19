@@ -12563,6 +12563,16 @@ async def v16_start_enrichment(req:Request, background_tasks:BackgroundTasks):
     category=str(body.get("category") or "ALL").upper()
     limit=max(1,min(int(body.get("limit") or 1000),5000))
     with engine.begin() as c:
+        c.execute(text("""
+            UPDATE pi_hospitality_enrichment_jobs
+            SET status='FAILED',
+                error_message=COALESCE(error_message,'') || ' | Auto-reset stale job before new enrichment run',
+                finished_at=NOW(),
+                updated_at=NOW(),
+                current_business=NULL
+            WHERE status IN ('QUEUED','RUNNING')
+              AND updated_at < NOW() - INTERVAL '15 minutes'
+        """))
         active=c.execute(text("""SELECT id FROM pi_hospitality_enrichment_jobs
             WHERE status IN ('QUEUED','RUNNING') ORDER BY id DESC LIMIT 1""")).first()
         if active:
@@ -13321,6 +13331,24 @@ def v162_final_dashboard(req:Request):
 <a class=card href="/contacts-directory"><b>Owner / Broker Contacts</b><p>Property contacts remain separate.</p></a>
 </div></div>
 
+
+<div class=section><h2>Contacts & Enrichment</h2><div class=grid>
+<a class="card primary" href="/contacts-control-center"><b>All Contacts Control Center</b><p>One place for marketing, hospitality, owner/broker, uploaded and recovered contacts.</p><span class=tag>ALL CONTACTS</span></a>
+<a class="card primary" href="/hospitality-enrichment"><b>Contact Enrichment</b><p>Find missing Hospitality mobile numbers. Stale jobs auto-reset safely.</p><span class=tag>ENRICH</span></a>
+<a class=card href="/marketing-contacts-final"><b>Marketing Contacts</b><p>All WhatsApp marketing contacts with source/category filters.</p></a>
+<a class=card href="/ai-hospitality-master-final"><b>Hospitality Master</b><p>All AI Hospitality businesses, including records still needing enrichment.</p></a>
+<a class=card href="/contacts-directory"><b>Owner / Broker Contacts</b><p>Property owner and broker contacts remain preserved separately.</p></a>
+<a class=card href="/phone-contact-upload"><b>Uploaded Phone Contacts</b><p>VCF, CSV and XLSX contacts already imported or ready to import.</p></a>
+</div></div>
+
+
+<div class=section><h2>Goa Property Intelligence</h2><div class=grid>
+<a class="card primary" href="/goa-property-form"><b>Add Goa Property</b><p>Goa-specific property inventory entry and verification.</p><span class=tag>GOA INVENTORY</span></a>
+<a class="card primary" href="/goa-requirement-form"><b>Add Goa Requirement</b><p>Buyer/investor demand entry for Goa properties.</p><span class=tag>GOA DEMAND</span></a>
+<a class=card href="/goa-matcher"><b>Goa Matcher</b><p>Match verified Goa requirements against Goa inventory.</p></a>
+<a class=card href="/goa-database"><b>Goa Database</b><p>Search and manage Goa inventory separately.</p></a>
+</div></div>
+
 <div class=section><h2>Database & Admin</h2><div class=grid>
 <a class=card href="/capture-intelligence"><b>Capture Property</b><p>Camera, screenshot, newspaper, magazine, handwritten note, PDF.</p></a>
 <a class=card href="/property-database"><b>Full Property Database</b><p>Master property archive.</p></a>
@@ -13339,12 +13367,137 @@ async def v162_final_router(request,call_next):
             return RedirectResponse("/admin-data-tools-v2",status_code=307)
         return RedirectResponse("/final-dashboard-v3",status_code=307)
     response=await call_next(request)
-    if request.url.path.startswith(("/final-dashboard-v3","/admin-data-tools-v2","/phone-contact-upload","/property-discovery","/api/discovery")):
+    if request.url.path.startswith(("/final-dashboard-v3","/admin-data-tools-v2","/phone-contact-upload","/property-discovery","/api/discovery","/contacts-control-center","/api/v17-5","/goa-")):
         response.headers["Cache-Control"]="no-store, no-cache, must-revalidate, max-age=0"
         response.headers["Pragma"]="no-cache"
         response.headers["Expires"]="0"
     return response
 
+
+
+
+
+# ============================================================
+# V17.5 GOA + CONTACTS RECOVERY CONTROL CENTER
+# ============================================================
+
+@app.get("/api/v17-5/contacts/summary")
+def v175_contacts_summary(req:Request):
+    need_login(req)
+    def one(sql):
+        try:
+            with engine.connect() as c:
+                return int(c.execute(text(sql)).scalar_one() or 0)
+        except Exception:
+            return 0
+    return {
+        "status":"ok",
+        "marketing_contacts":one("SELECT COUNT(*) FROM pi_marketing_contacts"),
+        "marketing_with_phone":one("SELECT COUNT(*) FROM pi_marketing_contacts WHERE primary_phone IS NOT NULL AND primary_phone<>''"),
+        "hospitality_master":one("SELECT COUNT(*) FROM pi_ai_hospitality_master"),
+        "hospitality_with_phone":one("SELECT COUNT(*) FROM pi_ai_hospitality_master WHERE primary_phone IS NOT NULL AND primary_phone<>''"),
+        "hospitality_needs_enrichment":one("SELECT COUNT(*) FROM pi_ai_hospitality_master WHERE primary_phone IS NULL OR primary_phone=''"),
+        "property_owner_contacts":one("SELECT COUNT(*) FROM pi_properties WHERE owner_contact IS NOT NULL AND owner_contact<>''"),
+        "property_broker_contacts":one("SELECT COUNT(*) FROM pi_properties WHERE broker_contact IS NOT NULL AND broker_contact<>''"),
+        "phone_upload_batches":one("SELECT COUNT(*) FROM pi_phone_contact_uploads")
+    }
+
+@app.post("/api/v17-5/hospitality-enrichment/reset-stuck")
+def v175_reset_stuck_enrichment(req:Request):
+    need_login(req)
+    _v16_setup()
+    with engine.begin() as c:
+        rows=c.execute(text("""
+            UPDATE pi_hospitality_enrichment_jobs
+            SET status='FAILED',
+                error_message=COALESCE(error_message,'') || ' | Auto-reset stale job after application/Railway restart',
+                finished_at=NOW(),
+                updated_at=NOW(),
+                current_business=NULL
+            WHERE status IN ('QUEUED','RUNNING')
+              AND updated_at < NOW() - INTERVAL '15 minutes'
+            RETURNING id
+        """)).fetchall()
+    return {"status":"ok","stale_jobs_reset":len(rows),"job_ids":[r[0] for r in rows]}
+
+@app.get("/contacts-control-center",response_class=HTMLResponse)
+def v175_contacts_control_center(req:Request):
+    role=page_role_or_redirect(req)
+    if not role:
+        return RedirectResponse("/login",303)
+    return HTMLResponse("""<!doctype html>
+<html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
+<title>All Contacts Control Center</title>
+<style>
+*{box-sizing:border-box}body{font-family:Arial;margin:0;background:#f4f7fb;color:#172437}
+header{background:#102235;color:#fff;padding:20px}.w{max-width:1500px;margin:auto;padding:20px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-bottom:18px}
+.card{background:#fff;border:1px solid #e2e8f0;border-radius:12px;padding:15px;text-decoration:none;color:#172437}
+.card b{display:block;font-size:20px}.card span,.small{font-size:12px;color:#687789}
+.actions{display:flex;gap:8px;flex-wrap:wrap}.btn,a.btn{padding:9px 11px;border:0;border-radius:8px;background:#1677ff;color:#fff;text-decoration:none;font-weight:bold;cursor:pointer}
+.green{background:#08734b}.gray{background:#e9eef5!important;color:#203247!important}.warn{background:#b66a00}
+.msg{margin-top:12px;background:#fff8e8;border:1px solid #eed18f;padding:11px;border-radius:9px}
+</style></head>
+<body><header><b>All Contacts Control Center</b><br><small>Restore, enrich, verify and export existing contacts without deleting data.</small></header>
+<div class=w>
+<div class=actions>
+<a class="btn gray" href="/final-dashboard-v3">← Dashboard</a>
+<a class=btn href="/marketing-contacts-final">Marketing Contacts</a>
+<a class=btn href="/ai-hospitality-master-final">Hospitality Master</a>
+<a class=btn href="/contacts-directory">Owner / Broker Contacts</a>
+<a class=btn href="/phone-contact-upload">Phone Uploads</a>
+<a class=btn href="/hospitality-enrichment">Enrichment</a>
+<a class=btn href="/api/v16/whatsapp-ready.csv">Export WhatsApp CSV</a>
+</div>
+
+<h2>Contact Inventory</h2>
+<div class=grid>
+<div class=card><b id=mkt>0</b><span>Marketing Contacts</span></div>
+<div class=card><b id=mktph>0</b><span>Marketing Contacts With Phone</span></div>
+<div class=card><b id=hosp>0</b><span>Hospitality Master</span></div>
+<div class=card><b id=hospph>0</b><span>Hospitality With Phone</span></div>
+<div class=card><b id=need>0</b><span>Hospitality Needs Enrichment</span></div>
+<div class=card><b id=owners>0</b><span>Property Owner Contacts</span></div>
+<div class=card><b id=brokers>0</b><span>Property Broker Contacts</span></div>
+<div class=card><b id=uploads>0</b><span>Phone Upload Batches</span></div>
+</div>
+
+<h2>Recovery & Repair</h2>
+<div class=actions>
+<button class="btn green" onclick="recoverHospitality()">Recover Existing AI Hospitality Contacts</button>
+<button class="btn green" onclick="recoverPhones()">Recover Historical Phone Numbers</button>
+<button class="btn warn" onclick="resetStuck()">Reset Stuck Enrichment Job</button>
+<a class=btn href="/hospitality-enrichment">Start / Continue Enrichment</a>
+</div>
+<div id=msg class=msg>No records are deleted by these controls.</div>
+</div>
+<script>
+async function summary(){
+ let r=await fetch('/api/v17-5/contacts/summary'),d=await r.json();
+ mkt.textContent=d.marketing_contacts||0;mktph.textContent=d.marketing_with_phone||0;
+ hosp.textContent=d.hospitality_master||0;hospph.textContent=d.hospitality_with_phone||0;
+ need.textContent=d.hospitality_needs_enrichment||0;owners.textContent=d.property_owner_contacts||0;
+ brokers.textContent=d.property_broker_contacts||0;uploads.textContent=d.phone_upload_batches||0;
+}
+async function recoverHospitality(){
+ msg.textContent='Recovering existing AI Hospitality records...';
+ let r=await fetch('/api/v15-6/recover-ai-hospitality',{method:'POST'}),d=await r.json();
+ msg.textContent=r.ok?`Recovered ${d.recovered||0}; contact-ready ${d.contact_ready||0}; needs enrichment ${d.needs_enrichment||0}.`:`ERROR: ${d.detail||d.message||'Recovery failed'}`;
+ await summary();
+}
+async function recoverPhones(){
+ msg.textContent='Scanning historical tables for phone numbers already fetched earlier...';
+ let r=await fetch('/api/v15-8/recover-historical-hospitality-phones',{method:'POST'}),d=await r.json();
+ msg.textContent=r.ok?`Phone recovery complete. Evidence ${d.phone_evidence_found||0}; auto-applied ${d.auto_applied||0}; master with phone ${d.total_with_phone||0}.`:`ERROR: ${d.detail||d.message||'Phone recovery failed'}`;
+ await summary();
+}
+async function resetStuck(){
+ msg.textContent='Checking stale enrichment jobs...';
+ let r=await fetch('/api/v17-5/hospitality-enrichment/reset-stuck',{method:'POST'}),d=await r.json();
+ msg.textContent=r.ok?`Reset ${d.stale_jobs_reset||0} stale job(s). You can start enrichment again.`:`ERROR: ${d.detail||d.message||'Reset failed'}`;
+}
+summary();
+</script></body></html>""")
 
 
 # === PROPERTY DISCOVERY DASHBOARD ALIAS V17.4 ===
