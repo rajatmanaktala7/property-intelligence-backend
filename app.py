@@ -14079,3 +14079,283 @@ async def v172_final_router(request,call_next):
         response.headers["Pragma"]="no-cache"
         response.headers["Expires"]="0"
     return response
+
+# ============================================================
+# V17.4 FINAL TEMPLATE
+# Final consolidated repair:
+# - Fresh Inventory working for Delhi NCR + Goa
+# - Manual vs AI source clearly separated
+# - Manual data saved in clean operational DB
+# - Entry Source / Entry Date / Entered By / Verification shown
+# - AI requirements must be manually confirmed before matching
+# - Manual requirements can run matcher
+# - Rent field starts blank for manual team entry
+# - Goa brochure upload retained
+# - Final unified dashboard
+# ============================================================
+
+def _v174_setup():
+    _v17_setup()
+    with engine.begin() as c:
+        # Add source metadata to operational properties.
+        for stmt in [
+            "ALTER TABLE pi_operational_properties ADD COLUMN IF NOT EXISTS entry_source TEXT DEFAULT 'MANUAL'",
+            "ALTER TABLE pi_operational_properties ADD COLUMN IF NOT EXISTS entered_by TEXT",
+            "ALTER TABLE pi_operational_properties ADD COLUMN IF NOT EXISTS entry_date TIMESTAMPTZ DEFAULT NOW()",
+            "ALTER TABLE pi_operational_requirements ADD COLUMN IF NOT EXISTS entry_source TEXT DEFAULT 'MANUAL'",
+            "ALTER TABLE pi_operational_requirements ADD COLUMN IF NOT EXISTS entered_by TEXT",
+            "ALTER TABLE pi_operational_requirements ADD COLUMN IF NOT EXISTS entry_date TIMESTAMPTZ DEFAULT NOW()",
+        ]:
+            c.execute(text(stmt))
+
+def _v174_num(v):
+    if v in (None,""): return None
+    try:
+        x=float(str(v).replace(",","").strip())
+        return x if x>0 else None
+    except Exception:
+        return None
+
+@app.post("/api/v17-4/property/save")
+async def v174_property_save(
+    req:Request,
+    division:str=Form("DELHI_NCR"),
+    property_name:str=Form(""),
+    property_types:str=Form(...),
+    city:str=Form(""),
+    location:str=Form(...),
+    google_location:str=Form(""),
+    area_sqft:str=Form(...),
+    rent_amount:str=Form(...),
+    rent_unit:str=Form("MONTH"),
+    transaction_type:str=Form("LEASE"),
+    floor:str=Form(""),
+    frontage:str=Form(""),
+    parking:str=Form(""),
+    possession:str=Form(""),
+    suitable_for:str=Form(""),
+    nearby_brands:str=Form(""),
+    owner_broker_name:str=Form(""),
+    contact_number:str=Form(""),
+    contact_role:str=Form("UNVERIFIED"),
+    verification_status:str=Form("UNVERIFIED"),
+    remarks:str=Form(""),
+    images:list[UploadFile]=File(default=[]),
+    videos:list[UploadFile]=File(default=[]),
+    brochure:UploadFile|None=File(default=None)
+):
+    need_login(req); _v174_setup()
+    pts=[x.strip() for x in str(property_types or "").split("|") if x.strip()]
+    if not pts:
+        raise HTTPException(400,"Select at least one Property Type.")
+    if not str(location or "").strip():
+        raise HTTPException(400,"Location is required.")
+    area=_v17_posnum(area_sqft,"Area")
+    rent=_v17_posnum(rent_amount,"Rent")
+    code=_v17_code("PROP")
+    who=actor_name(req)
+
+    with engine.begin() as c:
+        c.execute(text("""INSERT INTO pi_operational_properties(
+            property_code,division,property_name,property_types,city,location,google_location,area_sqft,rent_amount,
+            rent_unit,transaction_type,floor,frontage,parking,possession,suitable_for,nearby_brands,
+            owner_broker_name,contact_number,contact_role,verification_status,remarks,created_by,
+            entry_source,entered_by,entry_date
+        ) VALUES(
+            :code,:div,:name,CAST(:types AS jsonb),:city,:loc,:google,:area,:rent,:ru,:tt,:floor,:front,
+            :park,:poss,:suitable,:nearby,:person,:phone,:role,:ver,:remarks,:by,
+            'MANUAL',:entered_by,NOW()
+        )"""),{
+            "code":code,"div":division.upper(),"name":property_name or None,"types":json.dumps(pts),
+            "city":city or None,"loc":location.strip(),"google":google_location or None,
+            "area":area,"rent":rent,"ru":rent_unit,"tt":transaction_type,"floor":floor or None,
+            "front":frontage or None,"park":parking or None,"poss":possession or None,
+            "suitable":suitable_for or None,"nearby":nearby_brands or None,
+            "person":owner_broker_name or None,"phone":contact_number or None,
+            "role":contact_role,"ver":verification_status,"remarks":remarks or None,
+            "by":who,"entered_by":who
+        })
+
+    saved={"IMAGE":0,"VIDEO":0,"BROCHURE":0}
+    async def save_file(f,typ,limit):
+        if not f or not getattr(f,"filename",None): return
+        data=await f.read()
+        if not data: return
+        if len(data)>limit:
+            raise HTTPException(413,f"{f.filename} is too large.")
+        with engine.begin() as c:
+            c.execute(text("""INSERT INTO pi_operational_property_media(
+                property_code,media_type,filename,mime_type,file_size,content
+            ) VALUES(:p,:t,:f,:m,:s,:b)"""),{
+                "p":code,"t":typ,"f":f.filename,"m":f.content_type,"s":len(data),"b":data
+            })
+        saved[typ]+=1
+
+    for f in images or []: await save_file(f,"IMAGE",12*1024*1024)
+    for f in videos or []: await save_file(f,"VIDEO",80*1024*1024)
+    if brochure and brochure.filename:
+        if brochure.content_type not in {
+            "application/pdf",
+            "application/msword",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        } and not brochure.filename.lower().endswith((".pdf",".doc",".docx")):
+            raise HTTPException(400,"Brochure must be PDF, DOC or DOCX.")
+        await save_file(brochure,"BROCHURE",30*1024*1024)
+
+    return {"status":"ok","property_code":code,"saved":saved}
+
+@app.post("/api/v17-4/requirement/save")
+async def v174_requirement_save(req:Request):
+    need_login(req); _v174_setup()
+    b=await req.json()
+    loc=str(b.get("preferred_locations") or "").strip()
+    if not loc: raise HTTPException(400,"Preferred Locations are required.")
+    mina=_v17_posnum(b.get("minimum_area_sqft"),"Minimum Area")
+    maxa=_v17_posnum(b.get("maximum_area_sqft"),"Maximum Area")
+    if maxa<mina: mina,maxa=maxa,mina
+    maxr=None
+    if str(b.get("maximum_rent") or "").strip():
+        maxr=_v17_posnum(b.get("maximum_rent"),"Maximum Rent")
+    code=_v17_code("REQ")
+    who=actor_name(req)
+    with engine.begin() as c:
+        c.execute(text("""INSERT INTO pi_operational_requirements(
+            requirement_code,division,client_name,company_name,contact_number,requirement_types,city,
+            preferred_locations,minimum_area_sqft,maximum_area_sqft,maximum_rent,transaction_type,
+            additional_points,verification_status,created_by,entry_source,entered_by,entry_date
+        ) VALUES(
+            :code,:div,:client,:company,:phone,CAST(:types AS jsonb),:city,:loc,:mina,:maxa,:rent,:tt,:pts,:ver,:by,
+            'MANUAL',:entered_by,NOW()
+        )"""),{
+            "code":code,"div":str(b.get("division") or "DELHI_NCR").upper(),
+            "client":b.get("client_name"),"company":b.get("company_name"),"phone":b.get("contact_number"),
+            "types":json.dumps(b.get("requirement_types") or []),"city":b.get("city"),
+            "loc":loc,"mina":mina,"maxa":maxa,"rent":maxr,
+            "tt":b.get("transaction_type") or "LEASE","pts":b.get("additional_points"),
+            "ver":b.get("verification_status") or "VERIFIED","by":who,"entered_by":who
+        })
+    return {"status":"ok","requirement_code":code}
+
+@app.get("/api/v17-4/properties")
+def v174_properties(req:Request,division:str=Query("DELHI_NCR"),source:str=Query("ALL"),verified:str=Query("ALL"),q:str=Query("")):
+    need_login(req); _v174_setup()
+    wh=["p.division=:d"]; p={"d":division.upper()}
+    if source!="ALL":
+        wh.append("COALESCE(p.entry_source,'MANUAL')=:source"); p["source"]=source
+    if verified!="ALL":
+        wh.append("p.verification_status=:verified"); p["verified"]=verified
+    if q.strip():
+        wh.append("""(
+            COALESCE(p.property_code,'') ILIKE :q OR COALESCE(p.property_name,'') ILIKE :q OR
+            COALESCE(p.location,'') ILIKE :q OR COALESCE(p.city,'') ILIKE :q OR
+            COALESCE(p.contact_number,'') ILIKE :q OR COALESCE(p.owner_broker_name,'') ILIKE :q
+        )"""); p["q"]="%"+q.strip()+"%"
+    sql="""SELECT p.*,
+        COALESCE(p.entry_source,'MANUAL') AS entry_source,
+        COALESCE(p.entered_by,p.created_by) AS entered_by,
+        COALESCE(p.entry_date,p.created_at) AS entry_date,
+        (SELECT COUNT(*) FROM pi_operational_property_media m WHERE m.property_code=p.property_code AND m.media_type='IMAGE') image_count,
+        (SELECT COUNT(*) FROM pi_operational_property_media m WHERE m.property_code=p.property_code AND m.media_type='VIDEO') video_count,
+        (SELECT COUNT(*) FROM pi_operational_property_media m WHERE m.property_code=p.property_code AND m.media_type='BROCHURE') brochure_count
+        FROM pi_operational_properties p WHERE """+" AND ".join(wh)+" ORDER BY p.id DESC LIMIT 5000"
+    with engine.connect() as c:
+        rows=[dict(r._mapping) for r in c.execute(text(sql),p).fetchall()]
+    return {"status":"ok","rows":rows}
+
+@app.get("/fresh-inventory-final",response_class=HTMLResponse)
+def v174_inventory(req:Request,division:str=Query("DELHI_NCR")):
+    if not page_role_or_redirect(req): return RedirectResponse("/login",303)
+    d=division.upper()
+    title="Goa Fresh Inventory" if d=="GOA" else "Delhi NCR Fresh Inventory"
+    return HTMLResponse(f"""<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
+<title>{title}</title><style>
+body{{font-family:Arial;background:#f4f7fb;margin:0;color:#172437}}header{{background:#102235;color:#fff;padding:18px}}
+.w{{padding:18px}}.bar{{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}}.btn{{padding:9px 11px;background:#1677ff;color:white;text-decoration:none;border-radius:8px;border:0;cursor:pointer}}
+input,select{{padding:9px;border:1px solid #ccd6e2;border-radius:7px}}input{{min-width:300px}}.tablewrap{{overflow:auto;background:white;border-radius:10px}}
+table{{width:100%;border-collapse:collapse;font-size:12px}}th,td{{padding:8px;border-bottom:1px solid #eee;text-align:left;white-space:nowrap}}th{{background:#f8fafc;position:sticky;top:0}}
+</style></head><body><header><b>{title}</b><br><small>Manual data clearly marked in Entry Source column</small></header><div class=w>
+<div class=bar><a class=btn href="/final-dashboard-v8">← Dashboard</a><a class=btn href="/manual-property-final?division={d}">Add Property</a><a class=btn href="/matcher-final?division={d}">Matcher</a></div>
+<div class=bar><input id=q placeholder="Search property, location, contact"><select id=source><option>ALL</option><option>MANUAL</option><option>AI</option><option>PROPERTY_DISCOVERY</option><option>IMPORTED</option><option>MAGAZINE</option></select><select id=verified><option>ALL</option><option>VERIFIED</option><option>UNVERIFIED</option></select><button class=btn onclick=load()>Search</button><span id=count></span></div>
+<div class=tablewrap><table><thead><tr><th>Code</th><th>Property</th><th>Entry Source</th><th>Entry Date</th><th>Entered By</th><th>Verification</th><th>Types</th><th>Location</th><th>Area</th><th>Rent</th><th>Contact</th><th>Google</th><th>Photos</th><th>Videos</th><th>Brochure</th></tr></thead><tbody id=rows></tbody></table></div>
+</div><script>
+const E=x=>String(x??'').replace(/[&<>"]/g,c=>({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}}[c]));
+async function load(){{let u='/api/v17-4/properties?division={d}&source='+source.value+'&verified='+verified.value+'&q='+encodeURIComponent(q.value||'');let d=await(await fetch(u)).json();let a=d.rows||[];count.textContent=a.length+' properties';let out='';for(const x of a){{let bd='';if((x.brochure_count||0)>0){{let m=await(await fetch('/api/v17-2/property/'+encodeURIComponent(x.property_code)+'/media')).json();let b=(m.rows||[]).find(y=>y.media_type==='BROCHURE');if(b)bd=`<a target=_blank href="/api/v17-2/property-media/${{b.id}}">View</a>`}}out+=`<tr><td>${{E(x.property_code)}}</td><td>${{E(x.property_name||'')}}</td><td><b>${{E(x.entry_source||'MANUAL')}}</b></td><td>${{E(String(x.entry_date||'').slice(0,16))}}</td><td>${{E(x.entered_by||'')}}</td><td>${{E(x.verification_status||'')}}</td><td>${{E((x.property_types||[]).join(', '))}}</td><td>${{E(x.location||'')}}</td><td>${{E(x.area_sqft)}}</td><td>${{E(x.rent_amount)}}</td><td>${{E(x.owner_broker_name||'')}}<br><b>${{E(x.contact_number||'')}}</b></td><td>${{x.google_location?`<a target=_blank href="${{E(x.google_location)}}">Map</a>`:''}}</td><td>${{x.image_count||0}}</td><td>${{x.video_count||0}}</td><td>${{bd}}</td></tr>`}}rows.innerHTML=out||'<tr><td colspan=15>No properties found.</td></tr>'}}
+source.onchange=load;verified.onchange=load;load()
+</script></body></html>""")
+
+@app.get("/manual-property-final",response_class=HTMLResponse)
+def v174_property_form(req:Request,division:str=Query("DELHI_NCR")):
+    if not page_role_or_redirect(req): return RedirectResponse("/login",303)
+    d=division.upper()
+    checks="".join(f'<label><input type=checkbox name=ptype value="{escape(x)}"> {escape(x)}</label>' for x in _v17_types())
+    return HTMLResponse(f"""<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>Property Form</title>
+<style>body{{font-family:Arial;background:#f4f7fb;margin:0;color:#172437}}header{{background:#102235;color:#fff;padding:18px}}.w{{max-width:1150px;margin:auto;padding:18px}}.card{{background:#fff;padding:15px;border-radius:12px;margin-bottom:12px}}.g{{display:grid;grid-template-columns:1fr 1fr;gap:10px}}input,select,textarea{{width:100%;padding:9px;border:1px solid #ccd6e2;border-radius:7px}}.checks{{display:grid;grid-template-columns:repeat(3,1fr);gap:6px}}.checks label{{background:#f6f8fb;padding:6px;border-radius:6px}}.checks input{{width:auto}}.drop{{border:2px dashed #9eb6cf;padding:18px;border-radius:10px;text-align:center;cursor:pointer}}.btn{{padding:9px 12px;background:#1677ff;color:#fff;border:0;border-radius:8px;text-decoration:none;cursor:pointer}}.msg{{margin-top:10px;background:#fff8e8;padding:9px}}@media(max-width:800px){{.g,.checks{{grid-template-columns:1fr}}}}</style></head><body>
+<header><b>{'Goa' if d=='GOA' else 'Delhi NCR'} Manual Property Form</b><br><small>Saved with Entry Source = MANUAL · Rent starts blank for team entry</small></header><div class=w>
+<a class=btn href="/final-dashboard-v8">← Dashboard</a><br><br><form id=f enctype=multipart/form-data autocomplete=off><input type=hidden name=division value="{d}">
+<div class=card><div class=g><input name=property_name placeholder="Property Name"><input name=city value="{'Goa' if d=='GOA' else 'Delhi NCR'}">
+<input name=location placeholder="Location *" required><input name=google_location placeholder="Google Maps location/link">
+<input name=area_sqft value="" autocomplete=off placeholder="Area sq ft * — type manually" required><input name=rent_amount value="" autocomplete=off placeholder="Rent amount * — type manually" required>
+<select name=rent_unit><option>MONTH</option><option>SQFT_MONTH</option></select><select name=transaction_type><option>LEASE</option><option>SALE</option><option>LEASE_OR_SALE</option></select>
+<input name=floor placeholder="Floor"><input name=frontage placeholder="Frontage"><input name=parking placeholder="Parking"><input name=possession placeholder="Possession">
+<input name=owner_broker_name placeholder="Owner/Broker/Contact Name"><input name=contact_number placeholder="Contact Number">
+<select name=contact_role><option>UNVERIFIED</option><option>OWNER</option><option>BROKER</option><option>BOTH</option></select><select name=verification_status><option>UNVERIFIED</option><option>VERIFIED</option></select></div></div>
+<div class=card><b>Property Type — select multiple *</b><div class=checks>{checks}</div></div>
+<div class=card><input name=suitable_for placeholder="Suitable For"><br><br><input name=nearby_brands placeholder="Nearby Brands"><br><br><textarea name=remarks placeholder="Remarks"></textarea></div>
+<div class=card><b>Photos optional</b><div class=drop id=idrop>Drag photos or click<input type=file id=images name=images accept="image/*" multiple hidden></div><small id=ip>No photos selected</small></div>
+<div class=card><b>Videos optional</b><div class=drop id=vdrop>Drag videos or click<input type=file id=videos name=videos accept="video/*" multiple hidden></div><small id=vp>No videos selected</small></div>
+<div class=card><b>Brochure optional</b><div class=drop id=bdrop>Drag PDF/DOC/DOCX or click<input type=file id=brochure name=brochure accept=".pdf,.doc,.docx,application/pdf" hidden></div><small id=bp>No brochure selected</small></div>
+<button class=btn>Save Property</button><div id=msg class=msg>Ready.</div></form></div>
+<script>
+function dz(box,input,p){{box.onclick=()=>input.click();['dragover','drop'].forEach(n=>box.addEventListener(n,e=>e.preventDefault()));box.addEventListener('drop',e=>{{input.files=e.dataTransfer.files;p.textContent=input.files.length+' file(s) selected'}});input.onchange=()=>p.textContent=input.files.length+' file(s) selected'}}dz(idrop,images,ip);dz(vdrop,videos,vp);dz(bdrop,brochure,bp);
+f.onsubmit=async e=>{{e.preventDefault();let pts=[...document.querySelectorAll('[name=ptype]:checked')].map(x=>x.value);if(!pts.length){{msg.textContent='Select at least one Property Type.';return}}let fd=new FormData(f);fd.set('property_types',pts.join('|'));msg.textContent='Saving...';let r=await fetch('/api/v17-4/property/save',{{method:'POST',body:fd}}),d=await r.json();msg.textContent=r.ok?'Saved '+d.property_code+' · Entry Source MANUAL':'ERROR: '+(d.detail||d.message||'Save failed')}};</script></body></html>""")
+
+@app.get("/manual-requirement-final",response_class=HTMLResponse)
+def v174_requirement_form(req:Request,division:str=Query("DELHI_NCR")):
+    if not page_role_or_redirect(req): return RedirectResponse("/login",303)
+    d=division.upper(); checks="".join(f'<label><input type=checkbox name=rtype value="{escape(x)}"> {escape(x)}</label>' for x in _v17_types())
+    return HTMLResponse(f"""<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>Requirement Form</title>
+<style>body{{font-family:Arial;background:#f4f7fb;margin:0;color:#172437}}header{{background:#102235;color:#fff;padding:18px}}.w{{max-width:1050px;margin:auto;padding:18px}}.card{{background:#fff;padding:15px;border-radius:12px;margin-bottom:12px}}.g{{display:grid;grid-template-columns:1fr 1fr;gap:10px}}input,select,textarea{{width:100%;padding:9px;border:1px solid #ccd6e2;border-radius:7px}}.checks{{display:grid;grid-template-columns:repeat(3,1fr);gap:6px}}.checks label{{background:#f6f8fb;padding:6px;border-radius:6px}}.checks input{{width:auto}}.btn{{padding:9px 12px;background:#1677ff;color:#fff;border:0;border-radius:8px;text-decoration:none;cursor:pointer}}.msg{{margin-top:10px;background:#fff8e8;padding:9px}}@media(max-width:800px){{.g,.checks{{grid-template-columns:1fr}}}}</style></head><body>
+<header><b>{'Goa' if d=='GOA' else 'Delhi NCR'} Manual Requirement Form</b><br><small>Saved with Entry Source = MANUAL</small></header><div class=w><a class=btn href="/final-dashboard-v8">← Dashboard</a><br><br>
+<div class=card><div class=g><input id=client placeholder="Client Name"><input id=company placeholder="Company"><input id=phone placeholder="Contact Number"><input id=city value="{'Goa' if d=='GOA' else 'Delhi NCR'}">
+<input id=loc placeholder="Preferred Locations *"><input id=mina placeholder="Minimum Area *"><input id=maxa placeholder="Maximum Area *"><input id=rent value="" autocomplete=off placeholder="Maximum Rent — type manually if applicable">
+<select id=tt><option>LEASE</option><option>SALE</option><option>LEASE_OR_SALE</option></select><select id=ver><option>VERIFIED</option><option>UNVERIFIED</option></select></div></div>
+<div class=card><b>Property Types</b><div class=checks>{checks}</div></div><div class=card><textarea id=pts placeholder="Additional Points"></textarea></div>
+<button class=btn onclick=save()>Save Requirement</button><div id=msg class=msg>Ready.</div></div>
+<script>async function save(){{let types=[...document.querySelectorAll('[name=rtype]:checked')].map(x=>x.value);let b={{division:'{d}',client_name:client.value,company_name:company.value,contact_number:phone.value,requirement_types:types,city:city.value,preferred_locations:loc.value,minimum_area_sqft:mina.value,maximum_area_sqft:maxa.value,maximum_rent:rent.value,transaction_type:tt.value,additional_points:pts.value,verification_status:ver.value}};let r=await fetch('/api/v17-4/requirement/save',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify(b)}}),d=await r.json();msg.innerHTML=r.ok?'Saved '+d.requirement_code+' · Entry Source MANUAL · <a href="/matcher-final?division={d}">Open Matcher</a>':'ERROR: '+(d.detail||d.message||'Save failed')}};</script></body></html>""")
+
+@app.get("/final-dashboard-v8",response_class=HTMLResponse)
+def v174_dashboard(req:Request):
+    role=page_role_or_redirect(req)
+    if not role:return RedirectResponse("/login",303)
+    admin='<a class=card href="/admin-data-tools-v2"><b>Admin Data Tools</b><p>Database health and tools.</p></a>' if role=="admin" else ""
+    return HTMLResponse(f"""<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>Final Dashboard</title>
+<style>body{{font-family:Arial;background:#f4f7fb;margin:0;color:#172437}}header{{background:#102235;color:#fff;padding:22px}}.w{{max-width:1500px;margin:auto;padding:20px}}.g{{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px;margin-bottom:24px}}.card{{display:block;background:#fff;border:1px solid #e2e8f0;border-radius:12px;padding:15px;text-decoration:none;color:#172437}}.card p{{font-size:12px;color:#687789}}.primary{{border:2px solid #1677ff}}</style></head><body><header><b>AI Deal Intelligence OS</b><br><small>FINAL EXECUTION DASHBOARD</small></header><div class=w>
+<h2>Delhi NCR</h2><div class=g><a class="card primary" href="/manual-property-final?division=DELHI_NCR"><b>Add Property Manually</b><p>Saved to clean operational database with Entry Source = MANUAL.</p></a><a class="card primary" href="/manual-requirement-final?division=DELHI_NCR"><b>Add Requirement Manually</b><p>Saved with Entry Source = MANUAL.</p></a><a class="card primary" href="/matcher-final?division=DELHI_NCR"><b>Run Matcher</b><p>Clean operational matcher.</p></a><a class=card href="/fresh-inventory-final?division=DELHI_NCR"><b>Fresh Inventory</b><p>Shows Entry Source, Entry Date, Entered By and Verification.</p></a></div>
+<h2>Goa</h2><div class=g><a class="card primary" href="/manual-property-final?division=GOA"><b>Add Goa Property</b><p>Includes optional brochure upload.</p></a><a class="card primary" href="/manual-requirement-final?division=GOA"><b>Add Goa Requirement</b><p>Saved with Entry Source = MANUAL.</p></a><a class="card primary" href="/matcher-final?division=GOA"><b>Goa Matcher</b><p>Clean Goa matcher.</p></a><a class=card href="/fresh-inventory-final?division=GOA"><b>Goa Fresh Inventory</b><p>Shows source metadata.</p></a></div>
+<h2>Requirements & Search</h2><div class=g><a class=card href="/requirements-center-final"><b>Requirements Centre</b><p>AI and manual separated. AI must be manually confirmed before match.</p></a><a class=card href="/property-discovery"><b>Property Discovery / Search Engine</b><p>Existing search engine.</p></a><a class=card href="/retail-expansion"><b>Retail Expansion</b><p>Retail AI signals.</p></a><a class=card href="/capture-intelligence"><b>Capture Property</b><p>Screenshot, camera, magazine, PDF.</p></a></div>
+<h2>AI & Marketing</h2><div class=g><a class=card href="/final-dashboard-v3"><b>Bot Controls</b><p>Hospitality and Retail bots.</p></a><a class=card href="/ai-hospitality-master-final"><b>Hospitality Master</b><p>Hospitality data.</p></a><a class=card href="/hospitality-enrichment"><b>Find Missing Contacts</b><p>Phone-first enrichment.</p></a><a class=card href="/marketing-contacts-final"><b>Marketing Contacts</b><p>WhatsApp marketing database.</p></a><a class=card href="/phone-contact-upload"><b>Upload Phone Contacts</b><p>VCF/CSV/XLSX.</p></a></div>
+<h2>Database</h2><div class=g><a class=card href="/property-database"><b>Full Property Database</b><p>Legacy archive.</p></a><a class=card href="/contacts-directory"><b>Owner / Broker Contacts</b><p>Contact verification.</p></a><a class=card href="/data-doctor"><b>Data Doctor</b><p>Database health.</p></a>{admin}</div>
+</div></body></html>""")
+
+@app.middleware("http")
+async def v174_router(request,call_next):
+    p=request.url.path
+    if p in {"/workspace","/final-dashboard","/final-dashboard-v2","/final-dashboard-v4","/final-dashboard-v5","/final-dashboard-v6","/final-dashboard-v7"}:
+        return RedirectResponse("/final-dashboard-v8",status_code=307)
+    if p=="/requirements-match-center":
+        return RedirectResponse("/requirements-center-final",status_code=307)
+    if p in {"/operational-property-form","/property-form-final","/property-form-v17-3","/property-manual","/v14-property-form"}:
+        div="GOA" if "DIVISION=GOA" in request.url.query.upper() else "DELHI_NCR"
+        return RedirectResponse(f"/manual-property-final?division={div}",status_code=307)
+    if p in {"/operational-requirement-form","/v14-requirement-form"}:
+        div="GOA" if "DIVISION=GOA" in request.url.query.upper() else "DELHI_NCR"
+        return RedirectResponse(f"/manual-requirement-final?division={div}",status_code=307)
+    if p in {"/operational-inventory"}:
+        div="GOA" if "DIVISION=GOA" in request.url.query.upper() else "DELHI_NCR"
+        return RedirectResponse(f"/fresh-inventory-final?division={div}",status_code=307)
+    response=await call_next(request)
+    if p.startswith(("/final-dashboard-v8","/manual-property-final","/manual-requirement-final","/fresh-inventory-final")):
+        response.headers["Cache-Control"]="no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"]="no-cache"
+        response.headers["Expires"]="0"
+    return response
