@@ -13508,6 +13508,30 @@ def property_discovery_dashboard_alias(req: Request):
     return RedirectResponse("/property-discovery?v=17.4", status_code=307)
 # === END PROPERTY DISCOVERY DASHBOARD ALIAS V17.4 ===
 
+
+
+# === V18.1 RELIABLE PROPERTY ENTRY INTEGRATION ===
+from reliable_property_entry import install_reliable_property_entry as _install_reliable_property_entry
+_install_reliable_property_entry(
+    app=app,
+    engine=engine,
+    need_login=need_login,
+    page_role_or_redirect=page_role_or_redirect,
+    actor_name=actor_name,
+)
+
+@app.middleware("http")
+async def v181_manual_property_redirect(request, call_next):
+    if request.url.path in {
+        "/v14-property-form",
+        "/add-property-manual",
+        "/manual-property-entry",
+        "/add-property"
+    }:
+        return RedirectResponse("/property-entry-reliable", status_code=307)
+    return await call_next(request)
+# === END V18.1 RELIABLE PROPERTY ENTRY INTEGRATION ===
+
 # === PROPERTY DISCOVERY V17 INTEGRATION ===
 from property_discovery import install_property_discovery as _install_property_discovery
 _install_property_discovery(
