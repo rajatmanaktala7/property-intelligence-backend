@@ -15010,3 +15010,243 @@ async def v176_router(request,call_next):
         return RedirectResponse(f"/requirements-center-v176?division={div}",status_code=307)
     if p=="/data-recovery-doctor": return RedirectResponse("/universal-recovery-doctor",status_code=307)
     return await call_next(request)
+
+# ============================================================
+# V17.7 MANUAL PROPERTY DATABASE + FULL DETAIL VIEW
+# ============================================================
+
+def _v177_setup():
+    _v174_setup()
+
+def _v177_media_rows(property_code):
+    with engine.connect() as c:
+        return [dict(r._mapping) for r in c.execute(text("""
+            SELECT id,property_code,media_type,filename,mime_type,file_size,created_at
+            FROM pi_operational_property_media
+            WHERE property_code=:p
+            ORDER BY id
+        """),{"p":property_code}).fetchall()]
+
+@app.get("/api/v17-7/manual-properties")
+def v177_manual_properties(req:Request, division:str=Query("ALL"), source:str=Query("MANUAL"),
+                           verified:str=Query("ALL"), q:str=Query("")):
+    need_login(req); _v177_setup()
+    wh=["1=1"]; params={}
+    d=division.upper()
+    if d!="ALL":
+        wh.append("p.division=:division"); params["division"]=d
+    source=source.upper()
+    if source=="MANUAL":
+        wh.append("COALESCE(p.entry_source,'MANUAL') IN ('MANUAL','RECOVERED_MANUAL')")
+    elif source!="ALL":
+        wh.append("COALESCE(p.entry_source,'MANUAL')=:source"); params["source"]=source
+    if verified.upper()!="ALL":
+        wh.append("COALESCE(p.verification_status,'UNVERIFIED')=:verified")
+        params["verified"]=verified.upper()
+    if q.strip():
+        wh.append("""(
+          COALESCE(p.property_code,'') ILIKE :q OR COALESCE(p.property_name,'') ILIKE :q OR
+          COALESCE(p.location,'') ILIKE :q OR COALESCE(p.city,'') ILIKE :q OR
+          COALESCE(p.owner_broker_name,'') ILIKE :q OR COALESCE(p.contact_number,'') ILIKE :q
+        )""")
+        params["q"]="%"+q.strip()+"%"
+
+    sql="""SELECT p.*,
+      COALESCE(p.entry_source,'MANUAL') AS display_source,
+      COALESCE(p.entered_by,p.created_by,'') AS display_entered_by,
+      COALESCE(p.entry_date,p.created_at) AS display_entry_date,
+      (SELECT COUNT(*) FROM pi_operational_property_media m WHERE m.property_code=p.property_code AND m.media_type='IMAGE') image_count,
+      (SELECT COUNT(*) FROM pi_operational_property_media m WHERE m.property_code=p.property_code AND m.media_type='VIDEO') video_count,
+      (SELECT COUNT(*) FROM pi_operational_property_media m WHERE m.property_code=p.property_code AND m.media_type='BROCHURE') brochure_count
+      FROM pi_operational_properties p
+      WHERE """+" AND ".join(wh)+"""
+      ORDER BY COALESCE(p.entry_date,p.created_at) DESC,p.id DESC LIMIT 10000"""
+    with engine.connect() as c:
+        rows=[dict(r._mapping) for r in c.execute(text(sql),params).fetchall()]
+
+    today=date.today().isoformat()
+    summary={
+        "total":len(rows),
+        "added_today":sum(1 for x in rows if str(x.get("display_entry_date") or "")[:10]==today),
+        "verified":sum(1 for x in rows if str(x.get("verification_status") or "").upper()=="VERIFIED"),
+        "unverified":sum(1 for x in rows if str(x.get("verification_status") or "").upper()!="VERIFIED"),
+        "photos":sum(int(x.get("image_count") or 0) for x in rows),
+        "videos":sum(int(x.get("video_count") or 0) for x in rows),
+        "brochures":sum(int(x.get("brochure_count") or 0) for x in rows)
+    }
+    return {"status":"ok","rows":rows,"summary":summary}
+
+@app.get("/api/v17-7/property/{property_code}")
+def v177_property_detail_api(property_code:str,req:Request):
+    need_login(req); _v177_setup()
+    with engine.connect() as c:
+        row=c.execute(text("""
+            SELECT p.*,
+              COALESCE(p.entry_source,'MANUAL') AS display_source,
+              COALESCE(p.entered_by,p.created_by,'') AS display_entered_by,
+              COALESCE(p.entry_date,p.created_at) AS display_entry_date
+            FROM pi_operational_properties p WHERE p.property_code=:p
+        """),{"p":property_code}).first()
+    if not row: raise HTTPException(404,"Property not found.")
+    return {"status":"ok","property":dict(row._mapping),"media":_v177_media_rows(property_code)}
+
+@app.get("/manual-property-database",response_class=HTMLResponse)
+def v177_manual_property_database(req:Request,division:str=Query("ALL")):
+    if not page_role_or_redirect(req): return RedirectResponse("/login",303)
+    d=division.upper()
+    return HTMLResponse(f"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Manual Property Database</title>
+<style>
+*{{box-sizing:border-box}}body{{font-family:Arial;margin:0;background:#f4f7fb;color:#172437}}header{{background:#102235;color:#fff;padding:20px}}
+.w{{max-width:1650px;margin:auto;padding:18px}}.bar{{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;align-items:center}}
+.btn,a.btn{{display:inline-block;padding:9px 11px;border:0;border-radius:8px;background:#1677ff;color:#fff;text-decoration:none;font-weight:bold;cursor:pointer}}
+.gray{{background:#e9eef5!important;color:#203247!important}}input,select{{padding:9px;border:1px solid #ccd6e2;border-radius:7px}}input{{min-width:280px}}
+.kpis{{display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:9px;margin:14px 0}}.k{{background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:12px}}.k b{{display:block;font-size:24px}}
+.tablewrap{{overflow:auto;background:#fff;border:1px solid #e2e8f0;border-radius:10px}}table{{width:100%;border-collapse:collapse;font-size:12px}}
+th,td{{padding:9px;border-bottom:1px solid #edf1f5;text-align:left;vertical-align:top;white-space:nowrap}}th{{background:#f8fafc;position:sticky;top:0;z-index:2}}
+.manualrow td{{font-weight:700}}.small{{font-size:11px;color:#687789;font-weight:normal}}.badge{{display:inline-block;padding:3px 7px;border-radius:10px;background:#dcfce7;color:#166534;font-size:10px;font-weight:bold}}
+.unv{{background:#fef3c7;color:#92400e}}.today{{background:#dbeafe;color:#1d4ed8}}.media{{font-weight:bold}}.no{{font-size:16px;font-weight:800}}
+</style></head><body>
+<header><b>Manual Property Database</b><br><small>Saved operational properties with full details, photos, videos and brochures</small></header><div class=w>
+<div class=bar>
+<a class="btn gray" href="/final-dashboard-v11">← Dashboard</a>
+<a class=btn href="/manual-property-final?division=DELHI_NCR">Add Delhi NCR Property</a>
+<a class=btn href="/manual-property-final?division=GOA">Add Goa Property</a>
+<select id=division><option value="ALL">ALL AREAS</option><option value="DELHI_NCR">DELHI NCR</option><option value="GOA">GOA</option></select>
+<select id=source><option value="MANUAL">MANUAL + RECOVERED MANUAL</option><option value="ALL">ALL OPERATIONAL SOURCES</option><option value="RECOVERED_MANUAL">RECOVERED MANUAL ONLY</option></select>
+<select id=verified><option value="ALL">ALL VERIFICATION</option><option>VERIFIED</option><option>UNVERIFIED</option></select>
+<input id=q placeholder="Search property, location, name or contact"><button class=btn onclick=load()>Search</button>
+</div>
+<div class=kpis>
+<div class=k><b id=kTotal>0</b><span>MANUAL PROPERTIES</span></div><div class=k><b id=kToday>0</b><span>ADDED TODAY</span></div>
+<div class=k><b id=kVerified>0</b><span>VERIFIED</span></div><div class=k><b id=kUnverified>0</b><span>UNVERIFIED</span></div>
+<div class=k><b id=kPhotos>0</b><span>PHOTOS</span></div><div class=k><b id=kVideos>0</b><span>VIDEOS</span></div><div class=k><b id=kBrochures>0</b><span>BROCHURES</span></div>
+</div>
+<div class=tablewrap><table><thead><tr><th>S.No.</th><th>Property</th><th>Source</th><th>Date</th><th>Verification</th><th>Location</th><th>Area</th><th>Rent</th><th>Contact</th><th>Media</th><th>Action</th></tr></thead><tbody id=rows></tbody></table></div>
+</div>
+<script>
+const initialDivision={json.dumps(d)};const E=x=>String(x??'').replace(/[&<>"]/g,c=>({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}}[c]));
+if(['ALL','DELHI_NCR','GOA'].includes(initialDivision)) division.value=initialDivision;
+function money(x){{if(x===null||x===undefined||x==='')return '';let n=Number(x);return Number.isFinite(n)?n.toLocaleString('en-IN'):E(x)}}
+async function load(){{
+ let u='/api/v17-7/manual-properties?division='+division.value+'&source='+source.value+'&verified='+verified.value+'&q='+encodeURIComponent(q.value||'');
+ let r=await fetch(u),d=await r.json();if(!r.ok){{rows.innerHTML='<tr><td colspan=11><b>ERROR: '+E(d.detail||d.message||'Unable to load')+'</b></td></tr>';return}}
+ const s=d.summary||{{}};kTotal.textContent=s.total||0;kToday.textContent=s.added_today||0;kVerified.textContent=s.verified||0;kUnverified.textContent=s.unverified||0;kPhotos.textContent=s.photos||0;kVideos.textContent=s.videos||0;kBrochures.textContent=s.brochures||0;
+ const today=new Date().toISOString().slice(0,10);
+ rows.innerHTML=(d.rows||[]).map((x,i)=>{{const dt=String(x.display_entry_date||x.created_at||'');const isToday=dt.slice(0,10)===today;const ver=String(x.verification_status||'UNVERIFIED').toUpperCase();
+ return `<tr class="manualrow"><td class=no>${{i+1}}</td><td><b>${{E(x.property_name||x.property_code)}}</b><br><span class=small>${{E(x.property_code)}}</span></td>
+ <td><span class=badge>${{E(x.display_source||'MANUAL')}}</span>${{isToday?'<br><span class="badge today">TODAY</span>':''}}</td>
+ <td><b>${{E(dt.slice(0,16).replace('T',' '))}}</b><br><span class=small>${{E(x.display_entered_by||'')}}</span></td>
+ <td><span class="badge ${{ver==='VERIFIED'?'':'unv'}}">${{E(ver)}}</span></td><td><b>${{E(x.location||'')}}</b><br><span class=small>${{E(x.city||'')}}</span></td>
+ <td><b>${{money(x.area_sqft)}} sq ft</b></td><td><b>₹${{money(x.rent_amount)}}</b><br><span class=small>${{E(x.rent_unit||'')}}</span></td>
+ <td><b>${{E(x.owner_broker_name||'')}}</b><br><b>${{E(x.contact_number||'')}}</b></td>
+ <td class=media>Photos ${{x.image_count||0}} | Videos ${{x.video_count||0}} | Brochure ${{x.brochure_count||0}}</td>
+ <td><a class=btn href="/property-detail-final/${{encodeURIComponent(x.property_code)}}">View Full Property</a></td></tr>`}}).join('')||'<tr><td colspan=11><b>No manual operational properties found for this filter.</b></td></tr>';
+}}
+division.onchange=load;source.onchange=load;verified.onchange=load;q.addEventListener('keydown',e=>{{if(e.key==='Enter')load()}});load();
+</script></body></html>""")
+
+@app.get("/property-detail-final/{property_code}",response_class=HTMLResponse)
+def v177_property_detail_page(property_code:str,req:Request):
+    if not page_role_or_redirect(req): return RedirectResponse("/login",303)
+    _v177_setup()
+    with engine.connect() as c:
+        row=c.execute(text("""SELECT p.*,COALESCE(p.entry_source,'MANUAL') AS display_source,
+            COALESCE(p.entered_by,p.created_by,'') AS display_entered_by,
+            COALESCE(p.entry_date,p.created_at) AS display_entry_date
+            FROM pi_operational_properties p WHERE p.property_code=:p"""),{"p":property_code}).first()
+    if not row: return HTMLResponse("<h2>Property not found.</h2>",status_code=404)
+    prop=dict(row._mapping); media=_v177_media_rows(property_code)
+    imgs=[m for m in media if str(m.get("media_type")).upper()=="IMAGE"]
+    vids=[m for m in media if str(m.get("media_type")).upper()=="VIDEO"]
+    bros=[m for m in media if str(m.get("media_type")).upper()=="BROCHURE"]
+
+    def val(x): return escape(str(x if x not in (None,"") else "-"))
+    def arr(v):
+        x=_v17_arr(v); return ", ".join(str(z) for z in x) if x else "-"
+
+    image_html="".join(
+        '<a class="thumb" target="_blank" href="/api/v17-2/property-media/{id}"><img src="/api/v17-2/property-media/{id}" alt="{fn}"><span>{fn}</span></a>'.format(
+            id=m["id"],fn=escape(str(m.get("filename") or "Property photo")))
+        for m in imgs
+    ) or '<div class="empty">No photos uploaded.</div>'
+
+    video_html="".join(
+        '<div class="video"><video controls preload="metadata" src="/api/v17-2/property-media/{id}"></video><div><b>{fn}</b> | <a target="_blank" href="/api/v17-2/property-media/{id}">Open Video</a></div></div>'.format(
+            id=m["id"],fn=escape(str(m.get("filename") or "Property video")))
+        for m in vids
+    ) or '<div class="empty">No videos uploaded.</div>'
+
+    brochure_html="".join(
+        '<a class="brochure" target="_blank" href="/api/v17-2/property-media/{id}">View Brochure | {fn}</a>'.format(
+            id=m["id"],fn=escape(str(m.get("filename") or "Brochure")))
+        for m in bros
+    ) or '<div class="empty">No brochure uploaded.</div>'
+
+    google_html=('-' if not prop.get("google_location") else '<a target="_blank" href="'+escape(str(prop.get("google_location")))+'">Open Google Location</a>')
+
+    return HTMLResponse(f"""<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
+<title>{val(prop.get("property_name") or prop.get("property_code"))}</title>
+<style>
+*{{box-sizing:border-box}}body{{font-family:Arial;margin:0;background:#f4f7fb;color:#172437}}header{{background:#102235;color:#fff;padding:20px}}.w{{max-width:1450px;margin:auto;padding:18px}}
+.actions{{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}}.btn{{padding:9px 11px;border-radius:8px;background:#1677ff;color:white;text-decoration:none;font-weight:bold}}
+.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:10px}}.field{{background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:12px;min-height:80px}}
+.field span{{display:block;font-size:11px;color:#687789;text-transform:uppercase;margin-bottom:6px}}.field b{{font-size:16px;word-break:break-word}}
+.section{{background:#fff;border:1px solid #e2e8f0;border-radius:12px;padding:15px;margin-top:14px}}.photos{{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px}}
+.thumb{{text-decoration:none;color:#172437;border:1px solid #e2e8f0;border-radius:9px;overflow:hidden;background:#fafafa}}.thumb img{{display:block;width:100%;height:180px;object-fit:cover}}.thumb span{{display:block;padding:7px;font-size:11px}}
+.videos{{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:12px}}.video{{border:1px solid #e2e8f0;border-radius:9px;padding:8px}}.video video{{width:100%;max-height:420px;background:#000}}
+.brochure{{display:inline-block;padding:11px 13px;background:#eef4ff;border-radius:8px;text-decoration:none;font-weight:bold;margin:4px}}.big{{font-size:20px!important}}.contact{{font-size:20px!important;color:#102235}}.empty{{color:#687789;padding:10px}}
+</style></head><body>
+<header><b>{val(prop.get("property_name") or prop.get("property_code"))}</b><br><small>{val(prop.get("property_code"))} | {val(prop.get("division"))} | {val(prop.get("display_source"))}</small></header>
+<div class=w><div class=actions><a class=btn href="/manual-property-database?division={val(prop.get("division"))}">← Manual Property Database</a><a class=btn href="/final-dashboard-v11">Dashboard</a></div>
+<div class=grid>
+<div class=field><span>Property Code</span><b>{val(prop.get("property_code"))}</b></div><div class=field><span>Property Name</span><b class=big>{val(prop.get("property_name"))}</b></div>
+<div class=field><span>Entry Source</span><b>{val(prop.get("display_source"))}</b></div><div class=field><span>Entry Date</span><b>{val(prop.get("display_entry_date"))}</b></div>
+<div class=field><span>Entered By</span><b>{val(prop.get("display_entered_by"))}</b></div><div class=field><span>Verification</span><b>{val(prop.get("verification_status"))}</b></div>
+<div class=field><span>Property Types</span><b>{val(arr(prop.get("property_types")))}</b></div><div class=field><span>City</span><b>{val(prop.get("city"))}</b></div>
+<div class=field><span>Location</span><b class=big>{val(prop.get("location"))}</b></div><div class=field><span>Area</span><b class=big>{val(prop.get("area_sqft"))} sq ft</b></div>
+<div class=field><span>Rent</span><b class=big>₹{val(prop.get("rent_amount"))} | {val(prop.get("rent_unit"))}</b></div><div class=field><span>Transaction</span><b>{val(prop.get("transaction_type"))}</b></div>
+<div class=field><span>Floor</span><b>{val(prop.get("floor"))}</b></div><div class=field><span>Frontage</span><b>{val(prop.get("frontage"))}</b></div>
+<div class=field><span>Parking</span><b>{val(prop.get("parking"))}</b></div><div class=field><span>Possession</span><b>{val(prop.get("possession"))}</b></div>
+<div class=field><span>Suitable For</span><b>{val(prop.get("suitable_for"))}</b></div><div class=field><span>Nearby Brands</span><b>{val(prop.get("nearby_brands"))}</b></div>
+<div class=field><span>Owner / Broker / Contact</span><b class=contact>{val(prop.get("owner_broker_name"))}</b></div><div class=field><span>Contact Number</span><b class=contact>{val(prop.get("contact_number"))}</b></div>
+<div class=field><span>Contact Role</span><b>{val(prop.get("contact_role"))}</b></div><div class=field><span>Google Location</span><b>{google_html}</b></div>
+</div>
+<div class=section><h2>Remarks</h2><b>{val(prop.get("remarks"))}</b></div>
+<div class=section><h2>Photos ({len(imgs)})</h2><div class=photos>{image_html}</div></div>
+<div class=section><h2>Videos ({len(vids)})</h2><div class=videos>{video_html}</div></div>
+<div class=section><h2>Brochure ({len(bros)})</h2>{brochure_html}</div>
+</div></body></html>""")
+
+@app.get("/final-dashboard-v11",response_class=HTMLResponse)
+def v177_dashboard(req:Request):
+    role=page_role_or_redirect(req)
+    if not role:return RedirectResponse("/login",303)
+    admin='<a class=card href="/admin-data-tools-v2"><b>Admin Data Tools</b><p>Database health and maintenance.</p></a>' if role=="admin" else ""
+    return HTMLResponse(f"""<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>AI Deal Intelligence OS</title>
+<style>body{{font-family:Arial;margin:0;background:#f4f7fb;color:#172437}}header{{background:#102235;color:white;padding:22px}}.w{{max-width:1500px;margin:auto;padding:20px}}.g{{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px;margin-bottom:24px}}.card{{display:block;background:white;border:1px solid #e2e8f0;border-radius:12px;padding:15px;text-decoration:none;color:#172437}}.card p{{font-size:12px;color:#687789}}.primary{{border:2px solid #1677ff}}.manual{{border:3px solid #08734b}}</style></head><body>
+<header><b>AI Deal Intelligence OS</b><br><small>Operational Dashboard | Manual Property Database with Media</small></header><div class=w>
+<h2>Manual Property Data</h2><div class=g>
+<a class="card manual" href="/manual-property-database"><b>Manual Property Database</b><p>Bold numbered records. Open any property to see all details, photos, videos and brochure.</p></a>
+<a class="card primary" href="/manual-property-final?division=DELHI_NCR"><b>Add Delhi NCR Property</b></a><a class="card primary" href="/manual-property-final?division=GOA"><b>Add Goa Property</b></a>
+<a class=card href="/universal-recovery-doctor"><b>Universal Recovery Doctor</b><p>Recovery staging stays separate from clean manual inventory.</p></a>
+</div>
+<h2>Requirements & Matching</h2><div class=g><a class=card href="/manual-requirement-final?division=DELHI_NCR"><b>Add Delhi NCR Requirement</b></a><a class=card href="/matcher-final?division=DELHI_NCR"><b>Delhi NCR Matcher</b></a><a class=card href="/requirements-center-v176?division=DELHI_NCR"><b>Requirements Centre</b></a><a class=card href="/manual-requirement-final?division=GOA"><b>Add Goa Requirement</b></a><a class=card href="/matcher-final?division=GOA"><b>Goa Matcher</b></a></div>
+<h2>AI, Search & Marketing</h2><div class=g><a class=card href="/property-discovery"><b>Property Discovery / Search Engine</b></a><a class=card href="/retail-expansion"><b>Retail Expansion</b></a><a class=card href="/ai-hospitality-master-final"><b>Hospitality Master</b></a><a class=card href="/hospitality-enrichment"><b>Hospitality Enrichment</b></a><a class=card href="/marketing-contacts-final"><b>Marketing Contacts</b></a><a class=card href="/phone-contact-upload"><b>Upload Phone Contacts</b></a><a class=card href="/capture-intelligence"><b>Capture Property</b></a></div>
+<h2>Database & Admin</h2><div class=g><a class=card href="/property-database"><b>Full Legacy Property Database</b></a><a class=card href="/contacts-directory"><b>Owner / Broker Contacts</b></a><a class=card href="/data-doctor"><b>Data Doctor</b></a>{admin}</div>
+</div></body></html>""")
+
+@app.middleware("http")
+async def v177_router(request,call_next):
+    p=request.url.path
+    if p in {"/workspace","/final-dashboard-v10"}:
+        return RedirectResponse("/final-dashboard-v11",status_code=307)
+    if p=="/fresh-inventory-final":
+        q=request.url.query.upper()
+        div="GOA" if "DIVISION=GOA" in q else ("DELHI_NCR" if "DIVISION=DELHI_NCR" in q else "ALL")
+        return RedirectResponse(f"/manual-property-database?division={div}",status_code=307)
+    response=await call_next(request)
+    if p.startswith(("/final-dashboard-v11","/manual-property-database","/property-detail-final","/api/v17-7")):
+        response.headers["Cache-Control"]="no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"]="no-cache";response.headers["Expires"]="0"
+    return response
