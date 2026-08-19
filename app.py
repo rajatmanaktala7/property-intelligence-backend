@@ -13297,6 +13297,8 @@ def v162_final_dashboard(req:Request):
 <body><header><b>AI Deal Intelligence OS</b><br><small>Final Team Dashboard · One entry point</small></header><div class=w>
 
 <div class=section><h2>Run AI Bots</h2><div class=grid>
+<a class="card" href="/property-discovery?v=17.4"><b>Find Property by Demand</b><p>Search public web sources from a natural-language requirement, review structured individual properties, verify availability, then add selected inventory to the Property Database.</p><span class=tag>AI SEARCH</span></a>
+
 <div class="card bot"><b>Hospitality Bot</b><p>Fetch fresh Hospitality business contacts and signals.</p><button class=btn onclick="runBot('hospitality')">▶ Run Hospitality Bot</button><div id=hmsg class=status>Ready</div></div>
 <div class="card bot"><b>Retail Bot</b><p>Fetch fresh Retail expansion and leasing signals.</p><button class=btn onclick="runBot('retail')">▶ Run Retail Bot</button><div id=rmsg class=status>Ready</div></div>
 <a class=card href="/hospitality-enrichment"><b>Find Missing Hospitality Contacts</b><p>Phone-first enrichment for existing businesses.</p></a>
@@ -13337,11 +13339,21 @@ async def v162_final_router(request,call_next):
             return RedirectResponse("/admin-data-tools-v2",status_code=307)
         return RedirectResponse("/final-dashboard-v3",status_code=307)
     response=await call_next(request)
-    if request.url.path.startswith(("/final-dashboard-v3","/admin-data-tools-v2","/phone-contact-upload")):
+    if request.url.path.startswith(("/final-dashboard-v3","/admin-data-tools-v2","/phone-contact-upload","/property-discovery","/api/discovery")):
         response.headers["Cache-Control"]="no-store, no-cache, must-revalidate, max-age=0"
         response.headers["Pragma"]="no-cache"
         response.headers["Expires"]="0"
     return response
+
+
+
+# === PROPERTY DISCOVERY DASHBOARD ALIAS V17.4 ===
+@app.get("/final-dashboard-v3/property-discovery")
+def property_discovery_dashboard_alias(req: Request):
+    if not page_role_or_redirect(req):
+        return RedirectResponse("/login", status_code=303)
+    return RedirectResponse("/property-discovery?v=17.4", status_code=307)
+# === END PROPERTY DISCOVERY DASHBOARD ALIAS V17.4 ===
 
 # === PROPERTY DISCOVERY V17 INTEGRATION ===
 from property_discovery import install_property_discovery as _install_property_discovery
