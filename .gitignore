@@ -41,3 +41,7 @@ app-before-v15-8-1-background-phone-recovery-*.py
 app-before-v16-final-os-*.py
 app-before-v16-1-bot-control-*.py
 app-before-v16-2-admin-phone-upload-*.py
+app-before-v17-operational-forms-*.py
+*.bak
+install_discovery_dashboard.py
+install_goa_contacts_repair.py

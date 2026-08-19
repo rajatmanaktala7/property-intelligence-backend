@@ -13519,3 +13519,261 @@ _install_property_discovery(
 )
 # === END PROPERTY DISCOVERY V17 INTEGRATION ===
 
+# ============================================================
+# V17 OPERATIONAL FORMS + GOA + MATCHER FIX
+# ============================================================
+def _v17_setup():
+    with engine.begin() as c:
+        c.execute(text("""CREATE TABLE IF NOT EXISTS pi_operational_properties(
+            id BIGSERIAL PRIMARY KEY, property_code TEXT UNIQUE NOT NULL, division TEXT NOT NULL,
+            property_name TEXT, property_types JSONB DEFAULT '[]'::jsonb, city TEXT, location TEXT NOT NULL,
+            google_location TEXT, area_sqft NUMERIC(14,2) NOT NULL, rent_amount NUMERIC(16,2) NOT NULL,
+            rent_unit TEXT DEFAULT 'MONTH', transaction_type TEXT DEFAULT 'LEASE', floor TEXT, frontage TEXT,
+            parking TEXT, possession TEXT, suitable_for TEXT, nearby_brands TEXT, owner_broker_name TEXT,
+            contact_number TEXT, contact_role TEXT DEFAULT 'UNVERIFIED', verification_status TEXT DEFAULT 'UNVERIFIED',
+            remarks TEXT, created_by TEXT, created_at TIMESTAMPTZ DEFAULT NOW(), updated_at TIMESTAMPTZ DEFAULT NOW()
+        )"""))
+        c.execute(text("""CREATE TABLE IF NOT EXISTS pi_operational_property_media(
+            id BIGSERIAL PRIMARY KEY, property_code TEXT NOT NULL, media_type TEXT NOT NULL,
+            filename TEXT, mime_type TEXT, file_size BIGINT, content BYTEA NOT NULL, created_at TIMESTAMPTZ DEFAULT NOW()
+        )"""))
+        c.execute(text("""CREATE TABLE IF NOT EXISTS pi_operational_requirements(
+            id BIGSERIAL PRIMARY KEY, requirement_code TEXT UNIQUE NOT NULL, division TEXT NOT NULL,
+            client_name TEXT, company_name TEXT, contact_number TEXT, requirement_types JSONB DEFAULT '[]'::jsonb,
+            city TEXT, preferred_locations TEXT NOT NULL, minimum_area_sqft NUMERIC(14,2) NOT NULL,
+            maximum_area_sqft NUMERIC(14,2) NOT NULL, maximum_rent NUMERIC(16,2), transaction_type TEXT DEFAULT 'LEASE',
+            additional_points TEXT, verification_status TEXT DEFAULT 'VERIFIED', created_by TEXT,
+            created_at TIMESTAMPTZ DEFAULT NOW(), updated_at TIMESTAMPTZ DEFAULT NOW()
+        )"""))
+        c.execute(text("""CREATE TABLE IF NOT EXISTS pi_operational_matches(
+            id BIGSERIAL PRIMARY KEY, requirement_code TEXT NOT NULL, property_code TEXT NOT NULL,
+            score NUMERIC(5,2), match_band TEXT, reasons JSONB DEFAULT '[]'::jsonb,
+            created_at TIMESTAMPTZ DEFAULT NOW(), UNIQUE(requirement_code,property_code)
+        )"""))
+
+def _v17_code(prefix):
+    return f"{prefix}-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:5].upper()}"
+
+def _v17_posnum(v,label):
+    try:
+        x=float(str(v).replace(",","").strip())
+        if x<=0: raise ValueError
+        return x
+    except Exception:
+        raise HTTPException(400,f"{label} must be greater than 0.")
+
+def _v17_arr(v):
+    if isinstance(v,list): return v
+    try:
+        x=json.loads(v or "[]")
+        return x if isinstance(x,list) else []
+    except Exception:return []
+
+def _v17_tokens(v):
+    return {x for x in _re.sub(r"[^a-z0-9]+"," ",str(v or "").lower()).split() if len(x)>=3}
+
+@app.post("/api/v17/property/save")
+async def v17_property_save(req:Request, division:str=Form("DELHI_NCR"), property_name:str=Form(""),
+    property_types:str=Form(...), city:str=Form(""), location:str=Form(...), google_location:str=Form(""),
+    area_sqft:str=Form(...), rent_amount:str=Form(...), rent_unit:str=Form("MONTH"),
+    transaction_type:str=Form("LEASE"), floor:str=Form(""), frontage:str=Form(""), parking:str=Form(""),
+    possession:str=Form(""), suitable_for:str=Form(""), nearby_brands:str=Form(""),
+    owner_broker_name:str=Form(""), contact_number:str=Form(""), contact_role:str=Form("UNVERIFIED"),
+    verification_status:str=Form("UNVERIFIED"), remarks:str=Form(""),
+    images:list[UploadFile]=File(default=[]), videos:list[UploadFile]=File(default=[])):
+    need_login(req); _v17_setup()
+    pts=[x.strip() for x in property_types.split("|") if x.strip()]
+    if not pts: raise HTTPException(400,"Select at least one Property Type.")
+    if not location.strip(): raise HTTPException(400,"Location is required.")
+    area=_v17_posnum(area_sqft,"Area"); rent=_v17_posnum(rent_amount,"Rent")
+    code=_v17_code("PROP")
+    with engine.begin() as c:
+        c.execute(text("""INSERT INTO pi_operational_properties(
+            property_code,division,property_name,property_types,city,location,google_location,area_sqft,rent_amount,
+            rent_unit,transaction_type,floor,frontage,parking,possession,suitable_for,nearby_brands,
+            owner_broker_name,contact_number,contact_role,verification_status,remarks,created_by
+        ) VALUES(:code,:div,:name,CAST(:types AS jsonb),:city,:loc,:google,:area,:rent,:ru,:tt,:floor,:front,
+            :park,:poss,:suitable,:nearby,:person,:phone,:role,:ver,:remarks,:by)"""),{
+            "code":code,"div":division.upper(),"name":property_name or None,"types":json.dumps(pts),"city":city or None,
+            "loc":location,"google":google_location or None,"area":area,"rent":rent,"ru":rent_unit,"tt":transaction_type,
+            "floor":floor or None,"front":frontage or None,"park":parking or None,"poss":possession or None,
+            "suitable":suitable_for or None,"nearby":nearby_brands or None,"person":owner_broker_name or None,
+            "phone":contact_number or None,"role":contact_role,"ver":verification_status,"remarks":remarks or None,
+            "by":actor_name(req)})
+    saved=0
+    for typ,files,limit in [("IMAGE",images or [],12*1024*1024),("VIDEO",videos or [],80*1024*1024)]:
+        for f in files:
+            if not f or not f.filename: continue
+            data=await f.read()
+            if not data: continue
+            if len(data)>limit: raise HTTPException(413,f"{f.filename} is too large.")
+            with engine.begin() as c:
+                c.execute(text("""INSERT INTO pi_operational_property_media(property_code,media_type,filename,mime_type,file_size,content)
+                    VALUES(:p,:t,:f,:m,:s,:b)"""),{"p":code,"t":typ,"f":f.filename,"m":f.content_type,"s":len(data),"b":data})
+            saved+=1
+    return {"status":"ok","property_code":code,"media_saved":saved}
+
+@app.post("/api/v17/requirement/save")
+async def v17_requirement_save(req:Request):
+    need_login(req); _v17_setup(); b=await req.json()
+    loc=str(b.get("preferred_locations") or "").strip()
+    if not loc: raise HTTPException(400,"Preferred Locations are required.")
+    mina=_v17_posnum(b.get("minimum_area_sqft"),"Minimum Area")
+    maxa=_v17_posnum(b.get("maximum_area_sqft"),"Maximum Area")
+    if maxa<mina: mina,maxa=maxa,mina
+    maxr=None
+    if str(b.get("maximum_rent") or "").strip(): maxr=_v17_posnum(b.get("maximum_rent"),"Maximum Rent")
+    code=_v17_code("REQ")
+    with engine.begin() as c:
+        c.execute(text("""INSERT INTO pi_operational_requirements(
+            requirement_code,division,client_name,company_name,contact_number,requirement_types,city,
+            preferred_locations,minimum_area_sqft,maximum_area_sqft,maximum_rent,transaction_type,
+            additional_points,verification_status,created_by)
+            VALUES(:code,:div,:client,:company,:phone,CAST(:types AS jsonb),:city,:loc,:mina,:maxa,:rent,:tt,:pts,:ver,:by)"""),{
+            "code":code,"div":str(b.get("division") or "DELHI_NCR").upper(),"client":b.get("client_name"),
+            "company":b.get("company_name"),"phone":b.get("contact_number"),"types":json.dumps(b.get("requirement_types") or []),
+            "city":b.get("city"),"loc":loc,"mina":mina,"maxa":maxa,"rent":maxr,
+            "tt":b.get("transaction_type") or "LEASE","pts":b.get("additional_points"),
+            "ver":b.get("verification_status") or "VERIFIED","by":actor_name(req)})
+    return {"status":"ok","requirement_code":code}
+
+def _v17_match(code):
+    _v17_setup()
+    with engine.connect() as c:
+        rr=c.execute(text("SELECT * FROM pi_operational_requirements WHERE requirement_code=:r"),{"r":code}).first()
+        if not rr: raise HTTPException(404,"Requirement not found.")
+        q=dict(rr._mapping)
+        props=[dict(x._mapping) for x in c.execute(text("SELECT * FROM pi_operational_properties WHERE division=:d ORDER BY id DESC"),
+            {"d":q["division"]}).fetchall()]
+    rt={str(x).lower() for x in _v17_arr(q.get("requirement_types"))}
+    qloc=_v17_tokens(q.get("preferred_locations")); mina=float(q["minimum_area_sqft"]); maxa=float(q["maximum_area_sqft"])
+    maxr=float(q.get("maximum_rent") or 0); out=[]
+    for p in props:
+        area=float(p["area_sqft"]); rent=float(p["rent_amount"]); pt={str(x).lower() for x in _v17_arr(p.get("property_types"))}
+        if area < mina*0.75 or area > maxa*1.25: continue
+        score=0; why=[]; ploc=_v17_tokens(p.get("location")); overlap=len(qloc & ploc)
+        if overlap: score+=min(30,10+10*overlap); why.append("Location match")
+        if mina<=area<=maxa: score+=30; why.append("Area within requirement")
+        else: score+=15; why.append("Area within tolerance")
+        if rt and pt and rt&pt: score+=20; why.append("Property type match")
+        if maxr:
+            if rent<=maxr: score+=15; why.append("Rent within budget")
+            elif rent<=maxr*1.15: score+=7; why.append("Rent slightly above budget")
+        else: score+=8
+        if str(p.get("verification_status")).upper()=="VERIFIED": score+=5; why.append("Verified")
+        score=min(100,score); band="EXCELLENT" if score>=85 else "STRONG" if score>=70 else "GOOD" if score>=55 else "POSSIBLE"
+        out.append({"property_code":p["property_code"],"property_name":p.get("property_name"),"property_types":_v17_arr(p.get("property_types")),
+            "location":p.get("location"),"google_location":p.get("google_location"),"area_sqft":area,"rent_amount":rent,
+            "owner_broker_name":p.get("owner_broker_name"),"contact_number":p.get("contact_number"),
+            "verification_status":p.get("verification_status"),"score":score,"match_band":band,"reasons":why})
+    out.sort(key=lambda x:x["score"],reverse=True)
+    with engine.begin() as c:
+        c.execute(text("DELETE FROM pi_operational_matches WHERE requirement_code=:r"),{"r":code})
+        for x in out[:100]:
+            c.execute(text("""INSERT INTO pi_operational_matches(requirement_code,property_code,score,match_band,reasons)
+                VALUES(:r,:p,:s,:b,CAST(:why AS jsonb)) ON CONFLICT(requirement_code,property_code)
+                DO UPDATE SET score=EXCLUDED.score,match_band=EXCLUDED.match_band,reasons=EXCLUDED.reasons,created_at=NOW()"""),
+                {"r":code,"p":x["property_code"],"s":x["score"],"b":x["match_band"],"why":json.dumps(x["reasons"])})
+    return out[:100]
+
+@app.post("/api/v17/match/{requirement_code}")
+def v17_match_api(requirement_code:str,req:Request):
+    need_login(req); out=_v17_match(requirement_code); return {"status":"ok","count":len(out),"matches":out}
+
+@app.get("/api/v17/requirements")
+def v17_requirements_api(req:Request,division:str=Query("DELHI_NCR")):
+    need_login(req); _v17_setup()
+    with engine.connect() as c:
+        rows=[dict(x._mapping) for x in c.execute(text("SELECT * FROM pi_operational_requirements WHERE division=:d ORDER BY id DESC"),
+            {"d":division.upper()}).fetchall()]
+    return {"status":"ok","rows":rows}
+
+def _v17_types():
+    return ["Retail Shop","High Street Retail","Mall Retail","Office","Restaurant","Cafe","Banquet / Wedding Venue","Hotel",
+            "Guest House","Lounge","Club","Bar","Farmhouse","Warehouse","Industrial","Land","Mixed Use","Residential / Villa"]
+
+@app.get("/operational-property-form",response_class=HTMLResponse)
+def v17_property_form(req:Request,division:str=Query("DELHI_NCR")):
+    if not page_role_or_redirect(req): return RedirectResponse("/login",303)
+    d=division.upper(); checks="".join(f'<label><input type=checkbox name=ptype value="{escape(x)}"> {escape(x)}</label>' for x in _v17_types())
+    return HTMLResponse(f"""<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>Property Form</title>
+<style>body{{font-family:Arial;background:#f4f7fb;margin:0;color:#172437}}header{{background:#102235;color:#fff;padding:18px}}.w{{max-width:1150px;margin:auto;padding:18px}}.card{{background:#fff;padding:15px;border-radius:12px;margin-bottom:12px}}.g{{display:grid;grid-template-columns:1fr 1fr;gap:10px}}input,select,textarea{{width:100%;padding:9px;border:1px solid #ccd6e2;border-radius:7px}}.checks{{display:grid;grid-template-columns:repeat(3,1fr);gap:6px}}.checks label{{background:#f6f8fb;padding:6px;border-radius:6px}}.checks input{{width:auto}}.drop{{border:2px dashed #9eb6cf;padding:18px;border-radius:10px;text-align:center;cursor:pointer}}.btn{{padding:9px 12px;background:#1677ff;color:#fff;border:0;border-radius:8px;text-decoration:none;cursor:pointer}}.msg{{margin-top:10px;background:#fff8e8;padding:9px}}@media(max-width:800px){{.g,.checks{{grid-template-columns:1fr}}}}</style></head>
+<body><header><b>{'Goa' if d=='GOA' else 'Delhi NCR'} Manual Property Form</b><br><small>Area + Rent required · Images/Videos optional</small></header><div class=w>
+<a class=btn href="/final-dashboard-v4">← Dashboard</a><br><br><form id=f enctype=multipart/form-data><input type=hidden name=division value="{d}">
+<div class=card><div class=g><input name=property_name placeholder="Property Name"><input name=city value="{'Goa' if d=='GOA' else 'Delhi NCR'}">
+<input name=location placeholder="Location *" required><input name=google_location placeholder="Google Maps location/link">
+<input name=area_sqft placeholder="Area sq ft *" required><input name=rent_amount placeholder="Rent amount *" required>
+<select name=rent_unit><option>MONTH</option><option>SQFT_MONTH</option></select><select name=transaction_type><option>LEASE</option><option>SALE</option><option>LEASE_OR_SALE</option></select>
+<input name=floor placeholder="Floor"><input name=frontage placeholder="Frontage"><input name=parking placeholder="Parking"><input name=possession placeholder="Possession">
+<input name=owner_broker_name placeholder="Owner/Broker/Contact Name"><input name=contact_number placeholder="Contact Number">
+<select name=contact_role><option>UNVERIFIED</option><option>OWNER</option><option>BROKER</option><option>BOTH</option></select>
+<select name=verification_status><option>UNVERIFIED</option><option>VERIFIED</option></select></div></div>
+<div class=card><b>Property Type — select multiple *</b><div class=checks>{checks}</div></div>
+<div class=card><input name=suitable_for placeholder="Suitable For"><br><br><input name=nearby_brands placeholder="Nearby Brands"><br><br><textarea name=remarks placeholder="Remarks"></textarea></div>
+<div class=card><b>Photos optional</b><div class=drop id=idrop>Drag photos or click<input type=file id=images name=images accept="image/*" multiple hidden></div><small id=ip>No photos selected</small></div>
+<div class=card><b>Videos optional</b><div class=drop id=vdrop>Drag videos or click<input type=file id=videos name=videos accept="video/*" multiple hidden></div><small id=vp>No videos selected</small></div>
+<button class=btn>Save Property</button><div id=msg class=msg>Ready.</div></form></div>
+<script>
+function dz(box,input,p){{box.onclick=()=>input.click();['dragover','drop'].forEach(n=>box.addEventListener(n,e=>e.preventDefault()));box.addEventListener('drop',e=>{{input.files=e.dataTransfer.files;p.textContent=input.files.length+' file(s) selected'}});input.onchange=()=>p.textContent=input.files.length+' file(s) selected'}}dz(idrop,images,ip);dz(vdrop,videos,vp);
+f.onsubmit=async e=>{{e.preventDefault();let pts=[...document.querySelectorAll('[name=ptype]:checked')].map(x=>x.value);if(!pts.length){{msg.textContent='Select at least one Property Type.';return}}let fd=new FormData(f);fd.set('property_types',pts.join('|'));msg.textContent='Saving...';let r=await fetch('/api/v17/property/save',{{method:'POST',body:fd}}),d=await r.json();msg.textContent=r.ok?'Saved '+d.property_code+' · media '+d.media_saved:'ERROR: '+(d.detail||d.message||'Save failed')}};</script></body></html>""")
+
+@app.get("/operational-requirement-form",response_class=HTMLResponse)
+def v17_requirement_form(req:Request,division:str=Query("DELHI_NCR")):
+    if not page_role_or_redirect(req): return RedirectResponse("/login",303)
+    d=division.upper(); checks="".join(f'<label><input type=checkbox name=rtype value="{escape(x)}"> {escape(x)}</label>' for x in _v17_types())
+    return HTMLResponse(f"""<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>Requirement Form</title>
+<style>body{{font-family:Arial;background:#f4f7fb;margin:0;color:#172437}}header{{background:#102235;color:#fff;padding:18px}}.w{{max-width:1050px;margin:auto;padding:18px}}.card{{background:#fff;padding:15px;border-radius:12px;margin-bottom:12px}}.g{{display:grid;grid-template-columns:1fr 1fr;gap:10px}}input,select,textarea{{width:100%;padding:9px;border:1px solid #ccd6e2;border-radius:7px}}.checks{{display:grid;grid-template-columns:repeat(3,1fr);gap:6px}}.checks label{{background:#f6f8fb;padding:6px;border-radius:6px}}.checks input{{width:auto}}.btn{{padding:9px 12px;background:#1677ff;color:#fff;border:0;border-radius:8px;text-decoration:none;cursor:pointer}}.msg{{margin-top:10px;background:#fff8e8;padding:9px}}@media(max-width:800px){{.g,.checks{{grid-template-columns:1fr}}}}</style></head><body>
+<header><b>{'Goa' if d=='GOA' else 'Delhi NCR'} Requirement Form</b></header><div class=w><a class=btn href="/final-dashboard-v4">← Dashboard</a><br><br>
+<div class=card><div class=g><input id=client placeholder="Client Name"><input id=company placeholder="Company"><input id=phone placeholder="Contact Number"><input id=city value="{'Goa' if d=='GOA' else 'Delhi NCR'}">
+<input id=loc placeholder="Preferred Locations *"><input id=mina placeholder="Minimum Area *"><input id=maxa placeholder="Maximum Area *"><input id=rent placeholder="Maximum Rent">
+<select id=tt><option>LEASE</option><option>SALE</option><option>LEASE_OR_SALE</option></select><select id=ver><option>VERIFIED</option><option>UNVERIFIED</option></select></div></div>
+<div class=card><b>Property Types</b><div class=checks>{checks}</div></div><div class=card><textarea id=pts placeholder="Additional Points"></textarea></div>
+<button class=btn onclick=save()>Save Requirement</button><div id=msg class=msg>Ready.</div></div>
+<script>async function save(){{let types=[...document.querySelectorAll('[name=rtype]:checked')].map(x=>x.value);let b={{division:'{d}',client_name:client.value,company_name:company.value,contact_number:phone.value,requirement_types:types,city:city.value,preferred_locations:loc.value,minimum_area_sqft:mina.value,maximum_area_sqft:maxa.value,maximum_rent:rent.value,transaction_type:tt.value,additional_points:pts.value,verification_status:ver.value}};let r=await fetch('/api/v17/requirement/save',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify(b)}}),d=await r.json();msg.innerHTML=r.ok?'Saved '+d.requirement_code+' · <a href="/operational-matcher?division={d}">Open Matcher</a>':'ERROR: '+(d.detail||d.message||'Save failed')}};</script></body></html>""")
+
+@app.get("/operational-matcher",response_class=HTMLResponse)
+def v17_matcher_page(req:Request,division:str=Query("DELHI_NCR")):
+    if not page_role_or_redirect(req): return RedirectResponse("/login",303)
+    d=division.upper()
+    return HTMLResponse(f"""<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>Matcher</title>
+<style>body{{font-family:Arial;background:#f4f7fb;margin:0;color:#172437}}header{{background:#102235;color:#fff;padding:18px}}.w{{padding:18px}}.btn{{padding:9px 11px;background:#1677ff;color:#fff;border:0;border-radius:8px;text-decoration:none}}select{{padding:9px;min-width:380px}}table{{width:100%;border-collapse:collapse;background:#fff;font-size:12px;margin-top:12px}}th,td{{padding:8px;border-bottom:1px solid #eee;text-align:left}}.msg{{padding:9px;background:#fff8e8;margin-top:10px}}</style></head><body>
+<header><b>{'Goa' if d=='GOA' else 'Delhi NCR'} Property Matcher</b><br><small>Uses only clean V17 operational data</small></header><div class=w>
+<a class=btn href="/final-dashboard-v4">← Dashboard</a> <a class=btn href="/operational-property-form?division={d}">Add Property</a> <a class=btn href="/operational-requirement-form?division={d}">Add Requirement</a><br><br>
+<select id=reqs><option>Loading...</option></select> <button class=btn onclick=run()>Run Match</button><div id=msg class=msg>Select a requirement.</div>
+<table><thead><tr><th>Score</th><th>Property</th><th>Type</th><th>Location</th><th>Area</th><th>Rent</th><th>Contact</th><th>Verified</th><th>Google</th><th>Reasons</th></tr></thead><tbody id=rows></tbody></table></div>
+<script>async function load(){{let d=await(await fetch('/api/v17/requirements?division={d}')).json();reqs.innerHTML='<option value="">Select requirement</option>'+(d.rows||[]).map(x=>`<option value="${{x.requirement_code}}">${{x.requirement_code}} · ${{x.company_name||x.client_name||''}} · ${{x.preferred_locations}}</option>`).join('')}}async function run(){{if(!reqs.value)return;let r=await fetch('/api/v17/match/'+reqs.value,{{method:'POST'}}),d=await r.json();msg.textContent=r.ok?d.count+' matches found':'ERROR: '+(d.detail||d.message||'Matcher failed');rows.innerHTML=(d.matches||[]).map(x=>`<tr><td><b>${{x.score}}</b><br>${{x.match_band}}</td><td>${{x.property_name||x.property_code}}</td><td>${{(x.property_types||[]).join(', ')}}</td><td>${{x.location||''}}</td><td>${{x.area_sqft}}</td><td>${{x.rent_amount}}</td><td>${{x.owner_broker_name||''}}<br><b>${{x.contact_number||''}}</b></td><td>${{x.verification_status||''}}</td><td>${{x.google_location?`<a target=_blank href="${{x.google_location}}">Map</a>`:''}}</td><td>${{(x.reasons||[]).join(' · ')}}</td></tr>`).join('')}}load()</script></body></html>""")
+
+@app.get("/final-dashboard-v4",response_class=HTMLResponse)
+def v17_dashboard(req:Request):
+    role=page_role_or_redirect(req)
+    if not role:return RedirectResponse("/login",303)
+    admin='<a class=card href="/admin-data-tools-v2"><b>Admin Data Tools</b><p>Database health and tools.</p></a>' if role=="admin" else ""
+    return HTMLResponse(f"""<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>Final Dashboard</title>
+<style>body{{font-family:Arial;background:#f4f7fb;margin:0;color:#172437}}header{{background:#102235;color:#fff;padding:22px}}.w{{max-width:1450px;margin:auto;padding:20px}}.g{{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px;margin-bottom:24px}}.card{{display:block;background:#fff;border:1px solid #e2e8f0;border-radius:12px;padding:15px;text-decoration:none;color:#172437}}.card p{{font-size:12px;color:#687789}}.primary{{border:2px solid #1677ff}}</style></head><body><header><b>AI Deal Intelligence OS</b><br><small>Final Operational Dashboard</small></header><div class=w>
+<h2>Delhi NCR</h2><div class=g><a class="card primary" href="/operational-property-form?division=DELHI_NCR"><b>Add Property</b><p>Area + Rent required, multi-type, Google Location, optional photo/video.</p></a><a class="card primary" href="/operational-requirement-form?division=DELHI_NCR"><b>Add Requirement</b><p>Confirmed manual demand.</p></a><a class="card primary" href="/operational-matcher?division=DELHI_NCR"><b>Run Matcher</b><p>Clean V17 matcher.</p></a></div>
+<h2>Goa</h2><div class=g><a class="card primary" href="/operational-property-form?division=GOA"><b>Add Goa Property</b><p>Working Goa form.</p></a><a class="card primary" href="/operational-requirement-form?division=GOA"><b>Add Goa Requirement</b><p>Working Goa requirement form.</p></a><a class="card primary" href="/operational-matcher?division=GOA"><b>Goa Matcher</b><p>Matches only Goa operational data.</p></a></div>
+<h2>AI & Marketing</h2><div class=g><a class=card href="/final-dashboard-v3"><b>Bot Controls</b><p>Hospitality and Retail bot controls.</p></a><a class=card href="/ai-hospitality-master-final"><b>Hospitality Master</b><p>Hospitality contacts/data.</p></a><a class=card href="/marketing-contacts-final"><b>Marketing Contacts</b><p>WhatsApp marketing database.</p></a><a class=card href="/phone-contact-upload"><b>Upload Phone Contacts</b><p>VCF/CSV/XLSX.</p></a></div>
+<h2>Database</h2><div class=g><a class=card href="/capture-intelligence"><b>Capture Property</b><p>Camera, screenshot, PDF, magazine.</p></a><a class=card href="/property-database"><b>Legacy Property Database</b><p>Historical data, not used by V17 matcher.</p></a><a class=card href="/contacts-directory"><b>Owner/Broker Contacts</b><p>Property contacts.</p></a>{admin}</div>
+</div></body></html>""")
+
+@app.middleware("http")
+async def v17_router(request,call_next):
+    p=request.url.path
+    if p in {"/workspace","/final-dashboard","/final-dashboard-v2","/final-dashboard-v3"}:
+        return RedirectResponse("/final-dashboard-v4",307)
+    if p in {"/property-manual","/v14-property-form"}:
+        return RedirectResponse("/operational-property-form?division=DELHI_NCR",307)
+    if p=="/v14-requirement-form":
+        return RedirectResponse("/operational-requirement-form?division=DELHI_NCR",307)
+    if p=="/v14-matcher":
+        return RedirectResponse("/operational-matcher?division=DELHI_NCR",307)
+    if p in {"/goa-property","/goa-property-form"}:
+        return RedirectResponse("/operational-property-form?division=GOA",307)
+    if p in {"/goa-requirement","/goa-requirement-form"}:
+        return RedirectResponse("/operational-requirement-form?division=GOA",307)
+    if p=="/goa-matcher":
+        return RedirectResponse("/operational-matcher?division=GOA",307)
+    response=await call_next(request)
+    if p.startswith(("/final-dashboard-v4","/operational-property-form","/operational-requirement-form","/operational-matcher")):
+        response.headers["Cache-Control"]="no-store, no-cache, must-revalidate, max-age=0"
+    return response
