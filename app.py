@@ -14719,3 +14719,294 @@ async def v175_router(request,call_next):
         response.headers["Pragma"]="no-cache"
         response.headers["Expires"]="0"
     return response
+
+# ============================================================
+# V17.6 UNIVERSAL RECOVERY + DATA SECURITY REPAIR
+# ============================================================
+
+def _v176_setup():
+    _v174_setup()
+    with engine.begin() as c:
+        c.execute(text("""CREATE TABLE IF NOT EXISTS pi_recovery_staging(
+            id BIGSERIAL PRIMARY KEY,
+            entity_type TEXT NOT NULL,
+            source_table TEXT NOT NULL,
+            source_row_id TEXT,
+            detected_at TIMESTAMPTZ DEFAULT NOW(),
+            confidence INTEGER DEFAULT 0,
+            recovery_status TEXT DEFAULT 'DISCOVERED',
+            reason TEXT,
+            raw_snapshot JSONB NOT NULL,
+            UNIQUE(entity_type,source_table,source_row_id)
+        )"""))
+        c.execute(text("""CREATE TABLE IF NOT EXISTS pi_core_data_history(
+            id BIGSERIAL PRIMARY KEY,
+            entity_type TEXT NOT NULL,
+            entity_key TEXT,
+            action TEXT NOT NULL,
+            snapshot JSONB NOT NULL,
+            changed_at TIMESTAMPTZ DEFAULT NOW(),
+            changed_by TEXT DEFAULT current_user
+        )"""))
+        c.execute(text("""
+        CREATE OR REPLACE FUNCTION pi_property_history_guard()
+        RETURNS trigger AS $$
+        BEGIN
+            IF TG_OP='INSERT' THEN
+                INSERT INTO pi_core_data_history(entity_type,entity_key,action,snapshot)
+                VALUES('PROPERTY',NEW.property_code,'INSERT',to_jsonb(NEW)); RETURN NEW;
+            ELSIF TG_OP='UPDATE' THEN
+                INSERT INTO pi_core_data_history(entity_type,entity_key,action,snapshot)
+                VALUES('PROPERTY',OLD.property_code,'BEFORE_UPDATE',to_jsonb(OLD)); RETURN NEW;
+            ELSE
+                INSERT INTO pi_core_data_history(entity_type,entity_key,action,snapshot)
+                VALUES('PROPERTY',OLD.property_code,'DELETE_BLOCKED',to_jsonb(OLD)); RETURN NULL;
+            END IF;
+        END; $$ LANGUAGE plpgsql;
+        """))
+        c.execute(text("""
+        CREATE OR REPLACE FUNCTION pi_requirement_history_guard()
+        RETURNS trigger AS $$
+        BEGIN
+            IF TG_OP='INSERT' THEN
+                INSERT INTO pi_core_data_history(entity_type,entity_key,action,snapshot)
+                VALUES('REQUIREMENT',NEW.requirement_code,'INSERT',to_jsonb(NEW)); RETURN NEW;
+            ELSIF TG_OP='UPDATE' THEN
+                INSERT INTO pi_core_data_history(entity_type,entity_key,action,snapshot)
+                VALUES('REQUIREMENT',OLD.requirement_code,'BEFORE_UPDATE',to_jsonb(OLD)); RETURN NEW;
+            ELSE
+                INSERT INTO pi_core_data_history(entity_type,entity_key,action,snapshot)
+                VALUES('REQUIREMENT',OLD.requirement_code,'DELETE_BLOCKED',to_jsonb(OLD)); RETURN NULL;
+            END IF;
+        END; $$ LANGUAGE plpgsql;
+        """))
+        for t in ["pi_operational_properties","pi_operational_requirements"]:
+            c.execute(text(f"DROP TRIGGER IF EXISTS trg_{t}_vault ON {t}"))
+        c.execute(text("""CREATE TRIGGER trg_pi_operational_properties_vault
+            BEFORE INSERT OR UPDATE OR DELETE ON pi_operational_properties
+            FOR EACH ROW EXECUTE FUNCTION pi_property_history_guard()"""))
+        c.execute(text("""CREATE TRIGGER trg_pi_operational_requirements_vault
+            BEFORE INSERT OR UPDATE OR DELETE ON pi_operational_requirements
+            FOR EACH ROW EXECUTE FUNCTION pi_requirement_history_guard()"""))
+
+def _v176_tables():
+    with engine.connect() as c:
+        return [r._mapping["table_name"] for r in c.execute(text("""
+            SELECT table_name FROM information_schema.tables
+            WHERE table_schema='public' AND table_type='BASE TABLE' ORDER BY table_name
+        """)).fetchall()]
+
+def _v176_cols(t):
+    with engine.connect() as c:
+        return [r._mapping["column_name"] for r in c.execute(text("""
+            SELECT column_name FROM information_schema.columns
+            WHERE table_schema='public' AND table_name=:t
+        """),{"t":t}).fetchall()]
+
+def _v176_pick(row,*names):
+    low={str(k).lower():v for k,v in row.items()}
+    for n in names:
+        if low.get(n.lower()) not in (None,""): return low[n.lower()]
+    return None
+
+def _v176_num(v):
+    if v in (None,""): return None
+    try:
+        return float(_re.sub(r"[^\d.]","",str(v)))
+    except Exception:
+        return None
+
+def _v176_recent_sql(table,cols):
+    for c in ["created_at","updated_at","entry_date","date_added","created_on"]:
+        if c in cols:
+            return f'SELECT * FROM "{table}" WHERE "{c}" >= NOW() - INTERVAL \'48 hours\' ORDER BY "{c}" DESC LIMIT 10000'
+    return f'SELECT * FROM "{table}" LIMIT 3000'
+
+def _v176_classify(table,cols,row):
+    tl=table.lower(); cset=set(x.lower() for x in cols)
+    pkeys={"property_name","property_type","rent","rent_amount","owner_name","broker_name","available_area","area_sqft","google_location"}
+    rkeys={"requirement_text","minimum_area_sqft","maximum_area_sqft","requirement_sqft","preferred_locations","client_name","company_name"}
+    src=str(_v176_pick(row,"source","entry_source","source_type") or "").upper()
+    manual=("manual" in tl or src=="MANUAL")
+    ps=len(cset&pkeys)+(2 if "property" in tl else 0)+(2 if manual else 0)
+    rs=len(cset&rkeys)+(2 if "requirement" in tl else 0)+(2 if manual else 0)
+    if ps>=3 and ps>=rs:return "PROPERTY",min(100,40+ps*8)
+    if rs>=3:return "REQUIREMENT",min(100,40+rs*8)
+    return None,0
+
+def _v176_stage(entity,table,row,rowid,confidence,reason):
+    with engine.begin() as c:
+        c.execute(text("""INSERT INTO pi_recovery_staging(
+            entity_type,source_table,source_row_id,confidence,recovery_status,reason,raw_snapshot
+        ) VALUES(:e,:t,:rid,:conf,'DISCOVERED',:reason,CAST(:snap AS jsonb))
+        ON CONFLICT(entity_type,source_table,source_row_id)
+        DO UPDATE SET confidence=EXCLUDED.confidence,reason=EXCLUDED.reason,raw_snapshot=EXCLUDED.raw_snapshot
+        """),{"e":entity,"t":table,"rid":str(rowid),"conf":confidence,"reason":reason,"snap":json.dumps(row,default=str)})
+
+def _v176_recover_property(table,row,rowid):
+    loc=_v176_pick(row,"location","locality","micro_market","area","address")
+    area=_v176_num(_v176_pick(row,"area_sqft","available_area","area","size_sqft","super_area"))
+    rent=_v176_num(_v176_pick(row,"rent_amount","rent","monthly_rent","asking_rent"))
+    if not loc or not area or not rent:return False,"Missing location/area/rent"
+    name=_v176_pick(row,"property_name","name","building_name","title")
+    city=_v176_pick(row,"city") or ("Goa" if "goa" in str(loc).lower() else "Delhi NCR")
+    division="GOA" if ("goa" in str(city).lower() or "goa" in str(loc).lower()) else "DELHI_NCR"
+    phone=_v176_pick(row,"contact_number","owner_contact","broker_contact","phone","mobile")
+    person=_v176_pick(row,"owner_name","broker_name","contact_name","owner_broker_name")
+    ptype=_v176_pick(row,"property_type","type","category")
+    with engine.connect() as c:
+        dup=c.execute(text("""SELECT property_code FROM pi_operational_properties
+            WHERE division=:d AND lower(COALESCE(location,''))=lower(:loc)
+            AND area_sqft=:a AND rent_amount=:r AND COALESCE(contact_number,'')=COALESCE(:p,'') LIMIT 1"""),
+            {"d":division,"loc":str(loc),"a":area,"r":rent,"p":phone}).first()
+    if dup:return False,"Duplicate"
+    code=_v17_code("RECOVERED-PROP")
+    with engine.begin() as c:
+        c.execute(text("""INSERT INTO pi_operational_properties(
+            property_code,division,property_name,property_types,city,location,area_sqft,rent_amount,
+            transaction_type,owner_broker_name,contact_number,verification_status,remarks,created_by,
+            entry_source,entered_by,entry_date
+        ) VALUES(:code,:div,:name,CAST(:types AS jsonb),:city,:loc,:area,:rent,'LEASE',
+            :person,:phone,'UNVERIFIED',:remarks,'RECOVERY_DOCTOR','RECOVERED_MANUAL','RECOVERY_DOCTOR',NOW())"""),
+            {"code":code,"div":division,"name":name,"types":json.dumps([str(ptype)] if ptype else []),
+             "city":city,"loc":str(loc),"area":area,"rent":rent,"person":person,"phone":phone,
+             "remarks":f"Recovered from {table} row {rowid}; original preserved."})
+    return True,code
+
+def _v176_recover_requirement(table,row,rowid):
+    loc=_v176_pick(row,"preferred_locations","location","locality","area","city")
+    mina=_v176_num(_v176_pick(row,"minimum_area_sqft","min_area_sqft","minimum_area","min_area"))
+    maxa=_v176_num(_v176_pick(row,"maximum_area_sqft","max_area_sqft","maximum_area","max_area"))
+    one=_v176_num(_v176_pick(row,"area_sqft","requirement_sqft","required_area_sqft"))
+    if mina is None and one:mina=one
+    if maxa is None and one:maxa=one
+    if not loc or not mina or not maxa:return False,"Missing location/area range"
+    if maxa<mina:mina,maxa=maxa,mina
+    company=_v176_pick(row,"company_name","brand_name","company","client_name","name")
+    city=_v176_pick(row,"city") or ("Goa" if "goa" in str(loc).lower() else "Delhi NCR")
+    division="GOA" if ("goa" in str(city).lower() or "goa" in str(loc).lower()) else "DELHI_NCR"
+    ptype=_v176_pick(row,"property_type","requirement_type","category")
+    rent=_v176_num(_v176_pick(row,"maximum_rent","max_rent","rent","budget"))
+    textv=_v176_pick(row,"additional_points","requirement_text","description","remarks")
+    with engine.connect() as c:
+        dup=c.execute(text("""SELECT requirement_code FROM pi_operational_requirements
+            WHERE division=:d AND lower(COALESCE(preferred_locations,''))=lower(:loc)
+            AND minimum_area_sqft=:mina AND maximum_area_sqft=:maxa
+            AND COALESCE(company_name,'')=COALESCE(:company,'') LIMIT 1"""),
+            {"d":division,"loc":str(loc),"mina":mina,"maxa":maxa,"company":company}).first()
+    if dup:return False,"Duplicate"
+    code=_v17_code("RECOVERED-REQ")
+    with engine.begin() as c:
+        c.execute(text("""INSERT INTO pi_operational_requirements(
+            requirement_code,division,company_name,requirement_types,city,preferred_locations,
+            minimum_area_sqft,maximum_area_sqft,maximum_rent,transaction_type,additional_points,
+            verification_status,created_by,entry_source,entered_by,entry_date
+        ) VALUES(:code,:div,:company,CAST(:types AS jsonb),:city,:loc,:mina,:maxa,:rent,'LEASE',:pts,
+            'UNVERIFIED','RECOVERY_DOCTOR','RECOVERED_MANUAL','RECOVERY_DOCTOR',NOW())"""),
+            {"code":code,"div":division,"company":company,"types":json.dumps([str(ptype)] if ptype else []),
+             "city":city,"loc":str(loc),"mina":mina,"maxa":maxa,"rent":rent,"pts":textv})
+    return True,code
+
+@app.post("/api/v17-6/universal-recovery")
+def v176_universal_recovery(req:Request):
+    need_login(req);_v176_setup()
+    protected={"pi_operational_properties","pi_operational_requirements","pi_operational_property_media",
+               "pi_core_data_history","pi_recovery_staging","pi_data_vault_events","pi_recovery_log"}
+    totals={"tables_scanned":0,"rows_scanned":0,"staged":0,"properties_recovered":0,"requirements_recovered":0,"needs_review":0}
+    report=[]
+    for table in _v176_tables():
+        if table in protected:continue
+        try:
+            cols=_v176_cols(table)
+            with engine.connect() as c:
+                rows=[dict(r._mapping) for r in c.execute(text(_v176_recent_sql(table,cols))).fetchall()]
+        except Exception as ex:
+            continue
+        totals["tables_scanned"]+=1
+        rec=rev=stage=0
+        for idx,row in enumerate(rows):
+            totals["rows_scanned"]+=1
+            entity,conf=_v176_classify(table,cols,row)
+            if not entity:continue
+            rowid=_v176_pick(row,"id","property_id","requirement_id","record_id","lead_id") or idx
+            _v176_stage(entity,table,row,rowid,conf,"Universal recent/manual scan")
+            totals["staged"]+=1;stage+=1
+            src=str(_v176_pick(row,"source","entry_source","source_type") or "").upper()
+            if entity=="PROPERTY":
+                ok,reason=_v176_recover_property(table,row,rowid)
+            else:
+                if not ("manual" in table.lower() or src=="MANUAL"):
+                    ok,reason=False,"AI/public requirement requires manual confirmation"
+                else:
+                    ok,reason=_v176_recover_requirement(table,row,rowid)
+            with engine.begin() as c:
+                c.execute(text("""UPDATE pi_recovery_staging SET recovery_status=:s,reason=:r
+                    WHERE entity_type=:e AND source_table=:t AND source_row_id=:rid"""),
+                    {"s":"RECOVERED" if ok else "NEEDS_REVIEW","r":reason,"e":entity,"t":table,"rid":str(rowid)})
+            if ok:
+                rec+=1
+                totals["properties_recovered" if entity=="PROPERTY" else "requirements_recovered"]+=1
+            else:
+                rev+=1;totals["needs_review"]+=1
+        if rows or stage:
+            report.append({"table":table,"rows_scanned":len(rows),"staged":stage,"recovered":rec,"needs_review":rev})
+    totals["report"]=report
+    return {"status":"ok",**totals}
+
+@app.get("/api/v17-6/security-status")
+def v176_security_status(req:Request):
+    need_login(req);_v176_setup()
+    with engine.connect() as c:
+        props=int(c.execute(text("SELECT COUNT(*) FROM pi_operational_properties")).scalar_one() or 0)
+        reqs=int(c.execute(text("SELECT COUNT(*) FROM pi_operational_requirements")).scalar_one() or 0)
+        hist=int(c.execute(text("SELECT COUNT(*) FROM pi_core_data_history")).scalar_one() or 0)
+        stage=int(c.execute(text("SELECT COUNT(*) FROM pi_recovery_staging")).scalar_one() or 0)
+        review=int(c.execute(text("SELECT COUNT(*) FROM pi_recovery_staging WHERE recovery_status='NEEDS_REVIEW'")).scalar_one() or 0)
+    return {"status":"ok","operational_properties":props,"operational_requirements":reqs,
+            "history_snapshots":hist,"staged_records":stage,"needs_review":review}
+
+@app.get("/requirements-center-v176",response_class=HTMLResponse)
+def v176_requirements_center(req:Request,division:str=Query("DELHI_NCR")):
+    if not page_role_or_redirect(req):return RedirectResponse("/login",303)
+    d=division.upper();_v176_setup()
+    return HTMLResponse(f"""<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>Requirements Centre</title>
+<style>body{{font-family:Arial;background:#f4f7fb;margin:0;color:#172437}}header{{background:#102235;color:#fff;padding:18px}}.w{{padding:18px}}.btn{{padding:9px 11px;background:#1677ff;color:#fff;text-decoration:none;border-radius:8px}}table{{width:100%;border-collapse:collapse;background:#fff;font-size:12px;margin-top:12px}}th,td{{padding:8px;border-bottom:1px solid #eee;text-align:left}}</style></head><body>
+<header><b>{'Goa' if d=='GOA' else 'Delhi NCR'} Requirements Centre</b></header><div class=w><a class=btn href="/final-dashboard-v10">← Dashboard</a> <a class=btn href="/manual-requirement-final?division={d}">Add / Confirm Requirement</a> <a class=btn href="/matcher-final?division={d}">Matcher</a>
+<table><thead><tr><th>Code</th><th>Source</th><th>Company</th><th>Location</th><th>Area</th><th>Rent</th><th>Verification</th></tr></thead><tbody id=rows></tbody></table></div>
+<script>async function load(){{let d=await(await fetch('/api/v17/requirements?division={d}')).json();rows.innerHTML=(d.rows||[]).map(x=>`<tr><td>${{x.requirement_code}}</td><td>${{x.entry_source||'MANUAL'}}</td><td>${{x.company_name||x.client_name||''}}</td><td>${{x.preferred_locations||''}}</td><td>${{x.minimum_area_sqft}} - ${{x.maximum_area_sqft}}</td><td>${{x.maximum_rent||''}}</td><td>${{x.verification_status||''}}</td></tr>`).join('')||'<tr><td colspan=7>No confirmed requirements.</td></tr>'}}load()</script>
+</body></html>""")
+
+@app.get("/universal-recovery-doctor",response_class=HTMLResponse)
+def v176_recovery_page(req:Request):
+    if not page_role_or_redirect(req):return RedirectResponse("/login",303)
+    return HTMLResponse("""<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>Recovery Doctor</title>
+<style>body{font-family:Arial;background:#f4f7fb;margin:0;color:#172437}header{background:#102235;color:#fff;padding:18px}.w{max-width:1350px;margin:auto;padding:18px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px}.k{background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:12px}.k b{display:block;font-size:22px}.btn{padding:9px 11px;background:#1677ff;color:#fff;border:0;border-radius:8px;text-decoration:none;cursor:pointer}.msg{margin-top:12px;background:#fff8e8;padding:10px;border-radius:8px}table{width:100%;border-collapse:collapse;background:#fff;font-size:12px;margin-top:12px}th,td{padding:7px;border-bottom:1px solid #eee;text-align:left}</style></head><body>
+<header><b>Universal Data Recovery Doctor</b><br><small>Scans all public tables for recent/manual records</small></header><div class=w><p><a class=btn href="/final-dashboard-v10">← Dashboard</a> <button class=btn onclick=run()>Scan & Recover Recent Manual Data</button></p>
+<div class=grid><div class=k><b id=p>0</b><span>Operational Properties</span></div><div class=k><b id=r>0</b><span>Operational Requirements</span></div><div class=k><b id=h>0</b><span>History Snapshots</span></div><div class=k><b id=s>0</b><span>Staged Records</span></div><div class=k><b id=rv>0</b><span>Needs Review</span></div></div>
+<div id=msg class=msg>Ready.</div><table><thead><tr><th>Table</th><th>Rows Scanned</th><th>Staged</th><th>Recovered</th><th>Needs Review</th></tr></thead><tbody id=rows></tbody></table></div>
+<script>
+async function status(){let d=await(await fetch('/api/v17-6/security-status')).json();p.textContent=d.operational_properties||0;r.textContent=d.operational_requirements||0;h.textContent=d.history_snapshots||0;s.textContent=d.staged_records||0;rv.textContent=d.needs_review||0}
+async function run(){msg.textContent='Scanning all tables...';let q=await fetch('/api/v17-6/universal-recovery',{method:'POST'}),d=await q.json();if(!q.ok){msg.textContent='ERROR: '+(d.detail||d.message||'Recovery failed');return}msg.textContent=`Done. Tables ${d.tables_scanned}; rows ${d.rows_scanned}; properties recovered ${d.properties_recovered}; requirements recovered ${d.requirements_recovered}; review ${d.needs_review}.`;rows.innerHTML=(d.report||[]).map(x=>`<tr><td>${x.table}</td><td>${x.rows_scanned||0}</td><td>${x.staged||0}</td><td>${x.recovered||0}</td><td>${x.needs_review||0}</td></tr>`).join('');status()}status()
+</script></body></html>""")
+
+@app.get("/final-dashboard-v10",response_class=HTMLResponse)
+def v176_dashboard(req:Request):
+    role=page_role_or_redirect(req)
+    if not role:return RedirectResponse("/login",303)
+    return HTMLResponse("""<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>Final Dashboard</title>
+<style>body{font-family:Arial;background:#f4f7fb;margin:0;color:#172437}header{background:#102235;color:#fff;padding:22px}.w{max-width:1500px;margin:auto;padding:20px}.g{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px;margin-bottom:24px}.card{display:block;background:#fff;border:1px solid #e2e8f0;border-radius:12px;padding:15px;text-decoration:none;color:#172437}.card p{font-size:12px;color:#687789}.primary{border:2px solid #1677ff}.secure{border:2px solid #08734b}</style></head><body><header><b>AI Deal Intelligence OS</b><br><small>SECURE EXECUTION DASHBOARD</small></header><div class=w>
+<h2>Recovery & Security</h2><div class=g><a class="card secure" href="/universal-recovery-doctor"><b>Universal Recovery Doctor</b><p>Scan all public tables for recent/manual records.</p></a><a class="card secure" href="/fresh-inventory-final?division=DELHI_NCR"><b>Delhi NCR Fresh Inventory</b></a><a class="card secure" href="/fresh-inventory-final?division=GOA"><b>Goa Fresh Inventory</b></a><a class="card secure" href="/requirements-center-v176?division=DELHI_NCR"><b>Requirements Centre</b></a></div>
+<h2>Delhi NCR</h2><div class=g><a class="card primary" href="/manual-property-final?division=DELHI_NCR"><b>Add Property</b></a><a class="card primary" href="/manual-requirement-final?division=DELHI_NCR"><b>Add Requirement</b></a><a class="card primary" href="/matcher-final?division=DELHI_NCR"><b>Run Matcher</b></a></div>
+<h2>Goa</h2><div class=g><a class="card primary" href="/manual-property-final?division=GOA"><b>Add Goa Property</b></a><a class="card primary" href="/manual-requirement-final?division=GOA"><b>Add Goa Requirement</b></a><a class="card primary" href="/matcher-final?division=GOA"><b>Goa Matcher</b></a><a class=card href="/requirements-center-v176?division=GOA"><b>Goa Requirements Centre</b></a></div>
+<h2>Search, AI & Marketing</h2><div class=g><a class=card href="/property-discovery"><b>Property Discovery</b></a><a class=card href="/retail-expansion"><b>Retail Expansion</b></a><a class=card href="/ai-hospitality-master-final"><b>Hospitality Master</b></a><a class=card href="/marketing-contacts-final"><b>Marketing Contacts</b></a><a class=card href="/phone-contact-upload"><b>Upload Phone Contacts</b></a><a class=card href="/capture-intelligence"><b>Capture Property</b></a></div>
+</div></body></html>""")
+
+@app.middleware("http")
+async def v176_router(request,call_next):
+    p=request.url.path
+    if p in {"/workspace","/final-dashboard-v9"}: return RedirectResponse("/final-dashboard-v10",status_code=307)
+    if p in {"/requirements-match-center","/requirements-center-secure"}:
+        div="GOA" if "DIVISION=GOA" in request.url.query.upper() else "DELHI_NCR"
+        return RedirectResponse(f"/requirements-center-v176?division={div}",status_code=307)
+    if p=="/data-recovery-doctor": return RedirectResponse("/universal-recovery-doctor",status_code=307)
+    return await call_next(request)
