@@ -45,3 +45,4 @@ app-before-v17-operational-forms-*.py
 *.bak
 install_discovery_dashboard.py
 install_goa_contacts_repair.py
+app-before-v17-2-final-execution-*.py
