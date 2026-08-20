@@ -15766,3 +15766,262 @@ async def v1783_redirect_loop_fix(request, call_next):
         response.headers["Expires"]="0"
 
     return response
+
+# ============================================================
+# V17.9 FINAL - BOT RELIABILITY + MANUAL FORM MEDIA/AREA FIX
+# ============================================================
+
+def _v179_setup():
+    _v174_setup()
+    with engine.begin() as c:
+        for stmt in [
+            "ALTER TABLE pi_operational_properties ADD COLUMN IF NOT EXISTS area_input TEXT",
+            "ALTER TABLE pi_operational_properties ADD COLUMN IF NOT EXISTS area_unit TEXT",
+            "ALTER TABLE ai_bot_runs ADD COLUMN IF NOT EXISTS provider_used TEXT",
+            "ALTER TABLE ai_bot_runs ADD COLUMN IF NOT EXISTS provider_report JSONB DEFAULT '{}'::jsonb"
+        ]:
+            try: c.execute(text(stmt))
+            except Exception: pass
+
+def _v179_key(*names):
+    for n in names:
+        v=os.getenv(n,"").strip()
+        if v:return v
+    return ""
+
+def _v179_httpx():
+    import httpx
+    return httpx
+
+def _v179_search_lang(query,num=10):
+    key=_v179_key("LANGSEARCH_API_KEY","LANG_SEARCH_API_KEY")
+    if not key: raise RuntimeError("LANGSEARCH_API_KEY is not configured")
+    r=_v179_httpx().post(
+        "https://api.langsearch.com/v1/web-search",
+        headers={"Authorization":f"Bearer {key}","Content-Type":"application/json"},
+        json={"query":query,"freshness":"noLimit","summary":True,"count":max(1,min(num,10))},
+        timeout=30.0
+    )
+    r.raise_for_status()
+    vals=((((r.json().get("data") or {}).get("webPages") or {}).get("value")) or [])
+    return [{"title":x.get("name") or "","link":x.get("url") or "","snippet":x.get("snippet") or x.get("summary") or ""} for x in vals]
+
+def _v179_jina_read(url):
+    key=_v179_key("JINA_API_KEY","JINA_AI_API_KEY")
+    if not key or not url:return ""
+    try:
+        r=_v179_httpx().get("https://r.jina.ai/"+url,headers={"Authorization":f"Bearer {key}"},timeout=25.0)
+        return (r.text or "")[:150000] if r.status_code<400 else ""
+    except Exception:return ""
+
+_V179_PROVIDER_LOG={}
+
+def _v179_log_provider(name,status,detail=""):
+    _V179_PROVIDER_LOG[name]={"status":status,"detail":str(detail)[:400]}
+
+# Keep original providers before overriding.
+_V179_ORIG_SERPER=_serper_search
+_V179_ORIG_GOOGLE_PLACES=_google_places_search
+_V179_ORIG_FINISH_BOT=_finish_bot
+
+def _serper_search(query,num=10):
+    # Existing Retail/Requirement bots automatically gain fallback.
+    if _v179_key("SERPER_API_KEY"):
+        try:
+            d=_V179_ORIG_SERPER(query,num)
+            _v179_log_provider("SERPER","OK",f"{len(d.get('organic') or [])} results")
+            if d.get("organic"): return d
+        except Exception as ex:
+            _v179_log_provider("SERPER","ERROR",ex)
+
+    try:
+        rows=_v179_search_lang(query,num)
+        _v179_log_provider("LANGSEARCH","OK",f"{len(rows)} results")
+        if rows:return {"organic":rows}
+    except Exception as ex:
+        _v179_log_provider("LANGSEARCH","ERROR",ex)
+
+    raise RuntimeError("No working web search provider. Check SERPER_API_KEY or LANGSEARCH_API_KEY.")
+
+def _v179_contact_from_result(title,snippet,url):
+    phones,emails=_extract_public_contacts((title or "")+" "+(snippet or ""))
+    if not phones:
+        txt=_v179_jina_read(url)
+        p2,e2=_extract_public_contacts(txt)
+        phones.extend(x for x in p2 if x not in phones)
+        emails.extend(x for x in e2 if x not in emails)
+    return (phones[0] if phones else None),(emails[0] if emails else None)
+
+def _google_places_search(query):
+    # Existing Hospitality worker automatically gains fallback.
+    if _v179_key("GOOGLE_PLACES_API_KEY","GOOGLE_MAPS_API_KEY"):
+        try:
+            rows=_V179_ORIG_GOOGLE_PLACES(query)
+            _v179_log_provider("GOOGLE_PLACES","OK",f"{len(rows)} results")
+            if rows:return rows
+        except Exception as ex:
+            _v179_log_provider("GOOGLE_PLACES","ERROR",ex)
+
+    # Web fallback: Serper -> LangSearch; Jina enriches phone/email.
+    d=_serper_search(query+" phone contact",10)
+    out=[]
+    for x in d.get("organic") or []:
+        title=x.get("title") or ""
+        link=x.get("link") or ""
+        snippet=x.get("snippet") or ""
+        phone,email=_v179_contact_from_result(title,snippet,link)
+        out.append({
+            "displayName":{"text":title[:220] or "Hospitality Prospect"},
+            "nationalPhoneNumber":phone,
+            "internationalPhoneNumber":phone,
+            "websiteUri":link,
+            "formattedAddress":query,
+            "googleMapsUri":link,
+            "_v179_email":email
+        })
+    _v179_log_provider("WEB_FALLBACK","OK",f"{len(out)} hospitality results")
+    return out
+
+def _finish_bot(run_id,status,found,created,summary,error=None):
+    _v179_setup()
+    # Preserve existing bot-run update, then attach provider diagnostics.
+    _V179_ORIG_FINISH_BOT(run_id,status,found,created,summary,error)
+    try:
+        report=dict(_V179_PROVIDER_LOG)
+        used=", ".join(k for k,v in report.items() if v.get("status")=="OK")
+        with engine.begin() as c:
+            c.execute(text("""UPDATE ai_bot_runs SET provider_used=:p,provider_report=CAST(:r AS jsonb)
+                              WHERE run_id=:id"""),
+                      {"p":used or "NONE","r":json.dumps(report),"id":run_id})
+    except Exception: pass
+
+@app.get("/api/v17-9/bot-health")
+def v179_bot_health(req:Request):
+    need_login(req);_v179_setup()
+    providers={
+        "GOOGLE_PLACES":bool(_v179_key("GOOGLE_PLACES_API_KEY","GOOGLE_MAPS_API_KEY")),
+        "SERPER":bool(_v179_key("SERPER_API_KEY")),
+        "LANGSEARCH":bool(_v179_key("LANGSEARCH_API_KEY","LANG_SEARCH_API_KEY")),
+        "JINA":bool(_v179_key("JINA_API_KEY","JINA_AI_API_KEY"))
+    }
+    with engine.connect() as c:
+        runs=[dict(r._mapping) for r in c.execute(text("SELECT * FROM ai_bot_runs ORDER BY started_at DESC LIMIT 20")).fetchall()]
+    return {"status":"ok","providers":providers,"runs":runs}
+
+@app.get("/bot-reliability",response_class=HTMLResponse)
+def v179_bot_page(req:Request):
+    if not page_role_or_redirect(req):return RedirectResponse("/login",303)
+    return HTMLResponse(r"""<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>Bot Reliability</title>
+<style>body{font-family:Arial;background:#f4f7fb;margin:0;color:#172437}header{background:#102235;color:#fff;padding:18px}.w{padding:18px}.card{background:#fff;padding:14px;border-radius:10px;margin-bottom:12px}.btn{padding:9px 11px;background:#1677ff;color:#fff;border:0;border-radius:8px;text-decoration:none;cursor:pointer;font-weight:bold}.green{background:#08734b}.g{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:9px}table{width:100%;border-collapse:collapse;font-size:12px}th,td{padding:8px;border-bottom:1px solid #eee;text-align:left;vertical-align:top}.scroll{overflow:auto}.ok{color:#08734b}.bad{color:#b42318}</style></head><body>
+<header><b>Bot Reliability Center · V17.9</b><br><small>Hospitality + Retail with provider fallback</small></header><div class=w>
+<div class=card><a class=btn href="/workspace">← Dashboard</a> <button class=btn onclick="run('/api/v4/hospitality-bot/start')">Run Hospitality Bot</button> <button class="btn green" onclick="run('/api/v4/retail-bot/start')">Run Retail Bot</button> <span id=msg></span></div>
+<div class=card><h3>Providers</h3><div id=p class=g></div></div>
+<div class=card><h3>Recent Runs</h3><div class=scroll><table><thead><tr><th>Bot</th><th>Status</th><th>Provider</th><th>Found</th><th>New</th><th>Summary</th><th>Error</th></tr></thead><tbody id=r></tbody></table></div></div>
+</div><script>
+const E=x=>String(x??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+async function load(){let d=await(await fetch('/api/v17-9/bot-health')).json();p.innerHTML=Object.entries(d.providers||{}).map(([k,v])=>`<div><b>${E(k)}</b><br><span class="${v?'ok':'bad'}">${v?'CONFIGURED':'NOT CONFIGURED'}</span></div>`).join('');r.innerHTML=(d.runs||[]).map(x=>`<tr><td>${E(x.bot_name)}</td><td>${E(x.status)}</td><td>${E(x.provider_used||'')}</td><td>${E(x.records_found||0)}</td><td>${E(x.records_created||0)}</td><td>${E(x.summary||'')}</td><td class=bad>${E(x.error_message||'')}</td></tr>`).join('')}
+async function run(u){msg.textContent='Starting...';let x=await fetch(u,{method:'POST'}),d=await x.json();msg.textContent=x.ok?'Started. Run '+(d.run_id||''):'ERROR '+(d.detail||d.message||'');setTimeout(load,1500)}
+load();setInterval(load,5000);
+</script></body></html>""")
+
+def _v179_area(raw):
+    s=str(raw or "").strip().lower().replace(",","")
+    m=_re.match(r"^(\d+(?:\.\d+)?)\s*(.*)$",s)
+    if not m:raise HTTPException(400,"Area format not understood. Example: 2.5 acre or 1000 sqft.")
+    n=float(m.group(1));u=_re.sub(r"\s+"," ",m.group(2).strip())
+    if n<=0:raise HTTPException(400,"Area must be greater than zero.")
+    if u in {"","sqft","sq ft","sq. ft","square feet","square foot","ft2","ft²"}:return n,"SQFT"
+    if u in {"acre","acres","ac"}:return n*43560,"ACRE"
+    if u in {"sq yd","sqyd","sq yard","sq yards","square yard","square yards","yd2","yd²"}:return n*9,"SQ_YD"
+    if u in {"sqm","sq m","sq meter","sq meters","square meter","square meters","m2","m²"}:return n*10.7639104167,"SQ_M"
+    if u in {"hectare","hectares","ha"}:return n*107639.104167,"HECTARE"
+    if "bigha" in u:raise HTTPException(400,"Bigha varies by region. Please enter acre, sq yd, sq m or sq ft.")
+    raise HTTPException(400,"Use sqft, sq yd, acre, sqm or hectare.")
+
+def _v179_rent(raw):
+    s=_re.sub(r"[₹,\s]","",str(raw or ""))
+    if not s:return None
+    try:return float(s)
+    except:raise HTTPException(400,"Rent must be numeric or left blank.")
+
+async def _v179_media(code,files,typ,limit_mb):
+    count=0
+    for f in files or []:
+        if not f or not f.filename:continue
+        b=await f.read()
+        if not b:continue
+        if len(b)>limit_mb*1024*1024:raise HTTPException(413,f"{f.filename} exceeds {limit_mb} MB.")
+        with engine.begin() as c:
+            c.execute(text("""INSERT INTO pi_operational_property_media(property_code,media_type,filename,mime_type,file_size,content)
+                              VALUES(:p,:t,:f,:m,:s,:b)"""),
+                      {"p":code,"t":typ,"f":f.filename,"m":f.content_type,"s":len(b),"b":b})
+        count+=1
+    return count
+
+@app.post("/api/v17-9/property/save")
+async def v179_save_property(
+    req:Request,division:str=Form("DELHI_NCR"),property_name:str=Form(""),property_types:str=Form(...),
+    city:str=Form(""),location:str=Form(...),google_location:str=Form(""),area_input:str=Form(...),
+    rent_amount:str=Form(""),rent_unit:str=Form("MONTH"),transaction_type:str=Form("LEASE"),
+    floor:str=Form(""),frontage:str=Form(""),parking:str=Form(""),possession:str=Form(""),
+    suitable_for:str=Form(""),nearby_brands:str=Form(""),owner_broker_name:str=Form(""),
+    contact_number:str=Form(""),contact_role:str=Form("UNVERIFIED"),verification_status:str=Form("UNVERIFIED"),
+    remarks:str=Form(""),images:list[UploadFile]=File(default=[]),videos:list[UploadFile]=File(default=[]),
+    brochures:list[UploadFile]=File(default=[])
+):
+    need_login(req);_v179_setup()
+    pts=[x.strip() for x in property_types.split("|") if x.strip()]
+    if not pts:raise HTTPException(400,"Select at least one Property Type.")
+    if not location.strip():raise HTTPException(400,"Location is required.")
+    area,unit=_v179_area(area_input);rent=_v179_rent(rent_amount);code=_v17_code("PROP");who=actor_name(req)
+    with engine.begin() as c:
+        c.execute(text("""INSERT INTO pi_operational_properties(
+        property_code,division,property_name,property_types,city,location,google_location,area_sqft,area_input,area_unit,
+        rent_amount,rent_unit,transaction_type,floor,frontage,parking,possession,suitable_for,nearby_brands,
+        owner_broker_name,contact_number,contact_role,verification_status,remarks,created_by,entry_source,entered_by,entry_date
+        ) VALUES(:code,:div,:name,CAST(:types AS jsonb),:city,:loc,:google,:area,:raw,:unit,:rent,:ru,:tt,:floor,:front,
+        :park,:poss,:suitable,:nearby,:person,:phone,:role,:ver,:remarks,:by,'MANUAL',:by,NOW())"""),
+        {"code":code,"div":division.upper(),"name":property_name,"types":json.dumps(pts),"city":city,"loc":location,
+         "google":google_location,"area":area,"raw":area_input,"unit":unit,"rent":rent,"ru":rent_unit,"tt":transaction_type,
+         "floor":floor,"front":frontage,"park":parking,"poss":possession,"suitable":suitable_for,"nearby":nearby_brands,
+         "person":owner_broker_name,"phone":contact_number,"role":contact_role,"ver":verification_status,"remarks":remarks,"by":who})
+    im=await _v179_media(code,images,"IMAGE",12);vi=await _v179_media(code,videos,"VIDEO",100);br=await _v179_media(code,brochures,"BROCHURE",40)
+    return {"status":"ok","property_code":code,"area_input":area_input,"area_sqft":round(area,2),"images_saved":im,"videos_saved":vi,"brochures_saved":br}
+
+@app.get("/manual-property-v179",response_class=HTMLResponse)
+def v179_form(req:Request,division:str=Query("DELHI_NCR")):
+    if not page_role_or_redirect(req):return RedirectResponse("/login",303)
+    d=division.upper()
+    checks="".join(f'<label><input type=checkbox name=ptype value="{escape(x)}"> {escape(x)}</label>' for x in _v17_types())
+    return HTMLResponse(f"""<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>Manual Property V17.9</title>
+<style>body{{font-family:Arial;background:#f4f7fb;margin:0;color:#172437}}header{{background:#102235;color:#fff;padding:18px}}.w{{max-width:1150px;margin:auto;padding:18px}}.card{{background:#fff;padding:15px;border-radius:12px;margin-bottom:12px}}.g{{display:grid;grid-template-columns:1fr 1fr;gap:10px}}input,select,textarea{{width:100%;padding:10px;border:1px solid #ccd6e2;border-radius:7px}}.checks{{display:grid;grid-template-columns:repeat(3,1fr);gap:6px}}.checks input{{width:auto}}.drop{{border:2px dashed #9eb6cf;padding:18px;border-radius:10px;text-align:center;cursor:pointer}}.btn{{padding:9px 12px;background:#1677ff;color:#fff;border:0;border-radius:8px;text-decoration:none;cursor:pointer}}.help{{font-size:12px;color:#65758a}}@media(max-width:800px){{.g,.checks{{grid-template-columns:1fr}}}}</style></head><body>
+<header><b>{'Goa' if d=='GOA' else 'Delhi NCR'} Manual Property Form · V17.9</b><br><small>Area units + multiple videos + multiple brochures</small></header><div class=w><a class=btn href="/workspace">← Dashboard</a><br><br>
+<form id=f enctype=multipart/form-data><input type=hidden name=division value="{d}">
+<div class=card><div class=g><input name=property_name placeholder="Property Name"><input name=city value="{'Goa' if d=='GOA' else 'Delhi NCR'}"><input name=location placeholder="Location *" required><input name=google_location placeholder="Google Maps location/link">
+<div><input name=area_input placeholder="Area * e.g. 2.5 acre / 1000 sqft / 500 sq yd" required><div class=help>Accepted: sqft, sq yd, acre, sqm, hectare.</div></div>
+<div><input name=rent_amount placeholder="Rent amount"><div class=help>May be left blank if not confirmed.</div></div>
+<select name=rent_unit><option>MONTH</option><option>SQFT_MONTH</option></select><select name=transaction_type><option>LEASE</option><option>SALE</option><option>LEASE_OR_SALE</option></select>
+<input name=floor placeholder="Floor"><input name=frontage placeholder="Frontage"><input name=parking placeholder="Parking"><input name=possession placeholder="Possession"><input name=owner_broker_name placeholder="Owner/Broker/Contact Name"><input name=contact_number placeholder="Contact Number"><select name=contact_role><option>UNVERIFIED</option><option>OWNER</option><option>BROKER</option><option>BOTH</option></select><select name=verification_status><option>UNVERIFIED</option><option>VERIFIED</option></select></div></div>
+<div class=card><b>Property Type — select multiple *</b><div class=checks>{checks}</div></div>
+<div class=card><input name=suitable_for placeholder="Suitable For"><br><br><input name=nearby_brands placeholder="Nearby Brands"><br><br><textarea name=remarks placeholder="Remarks"></textarea></div>
+<div class=card><b>Photos — multiple</b><div class=drop onclick=images.click()>Click to select<input id=images type=file name=images accept="image/*" multiple hidden></div><div id=ip class=help>No files</div></div>
+<div class=card><b>Videos — multiple</b><div class=drop onclick=videos.click()>Click to select<input id=videos type=file name=videos accept="video/*" multiple hidden></div><div id=vp class=help>No files</div></div>
+<div class=card><b>Brochures — multiple</b><div class=drop onclick=brochures.click()>Click to select<input id=brochures type=file name=brochures accept=".pdf,.doc,.docx,.ppt,.pptx" multiple hidden></div><div id=bp class=help>No files</div></div>
+<button class=btn>Save Property</button> <b id=msg>Ready.</b></form></div>
+<script>
+images.onchange=()=>ip.textContent=images.files.length+' selected';videos.onchange=()=>vp.textContent=videos.files.length+' selected';brochures.onchange=()=>bp.textContent=brochures.files.length+' selected';
+f.onsubmit=async e=>{{e.preventDefault();let pts=[...document.querySelectorAll('[name=ptype]:checked')].map(x=>x.value);if(!pts.length){{msg.textContent='Select at least one Property Type.';return}}let fd=new FormData(f);fd.set('property_types',pts.join('|'));msg.textContent='Saving...';let r=await fetch('/api/v17-9/property/save',{{method:'POST',body:fd}}),d=await r.json();msg.textContent=r.ok?`Saved ${{d.property_code}} · ${{d.area_input}} = ${{Number(d.area_sqft).toLocaleString('en-IN')}} sqft · videos ${{d.videos_saved}} · brochures ${{d.brochures_saved}}`:'ERROR: '+(d.detail||d.message||'Save failed')}};
+</script></body></html>""")
+
+@app.middleware("http")
+async def v179_router(request,call_next):
+    p=request.url.path
+    if request.method=="GET" and p in {"/manual-property-final","/property-form-final","/operational-property-form","/property-manual"}:
+        q=("?"+request.url.query) if request.url.query else ""
+        return RedirectResponse("/manual-property-v179"+q,307)
+    if request.method=="GET" and p=="/final-dashboard-v3":
+        return RedirectResponse("/bot-reliability",307)
+    response=await call_next(request)
+    if p.startswith(("/manual-property-v179","/api/v17-9","/bot-reliability")):
+        response.headers["Cache-Control"]="no-store, no-cache, must-revalidate, max-age=0"
+    return response
