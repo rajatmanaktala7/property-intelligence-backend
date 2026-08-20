@@ -16025,3 +16025,379 @@ async def v179_router(request,call_next):
     if p.startswith(("/manual-property-v179","/api/v17-9","/bot-reliability")):
         response.headers["Cache-Control"]="no-store, no-cache, must-revalidate, max-age=0"
     return response
+
+# ============================================================
+# V17.9.1 FINAL EXECUTION
+# Fixes:
+# - photo upload reliability
+# - multiple videos selected across repeated selections
+# - multiple brochures selected across repeated selections
+# - dynamic media BYTEA column support (content/file_data)
+# - hospitality results page with phone-first data
+# - Hospitality + Retail bot controls directly on main dashboard
+# - preserves all V17.7/V17.8 operational links/fields
+# ============================================================
+
+def _v1791_setup():
+    _v179_setup()
+    with engine.begin() as c:
+        for stmt in [
+            "ALTER TABLE pi_operational_properties ADD COLUMN IF NOT EXISTS area_input TEXT",
+            "ALTER TABLE pi_operational_properties ADD COLUMN IF NOT EXISTS area_unit TEXT"
+        ]:
+            try: c.execute(text(stmt))
+            except Exception: pass
+
+def _v1791_media_columns():
+    with engine.connect() as c:
+        rows=c.execute(text("""
+            SELECT column_name FROM information_schema.columns
+            WHERE table_schema='public' AND table_name='pi_operational_property_media'
+        """)).fetchall()
+    return {r._mapping["column_name"] for r in rows}
+
+async def _v1791_save_media(code, files, media_type, limit_mb):
+    cols=_v1791_media_columns()
+    data_col="content" if "content" in cols else ("file_data" if "file_data" in cols else None)
+    if not data_col:
+        raise HTTPException(500,"Media table has no BYTEA content/file_data column.")
+    count=0
+    for f in files or []:
+        if not f or not getattr(f,"filename",None):
+            continue
+        blob=await f.read()
+        if not blob:
+            continue
+        if len(blob)>limit_mb*1024*1024:
+            raise HTTPException(413,f"{f.filename} exceeds {limit_mb} MB.")
+        if media_type=="IMAGE" and not (
+            str(getattr(f,"content_type","") or "").lower().startswith("image/")
+            or f.filename.lower().endswith((".jpg",".jpeg",".png",".webp",".gif",".heic",".heif"))
+        ):
+            raise HTTPException(400,f"{f.filename} is not a supported image.")
+        if media_type=="VIDEO" and not (
+            str(getattr(f,"content_type","") or "").lower().startswith("video/")
+            or f.filename.lower().endswith((".mp4",".mov",".m4v",".webm",".avi",".mkv"))
+        ):
+            raise HTTPException(400,f"{f.filename} is not a supported video.")
+        if media_type=="BROCHURE" and not f.filename.lower().endswith((".pdf",".doc",".docx",".ppt",".pptx")):
+            raise HTTPException(400,f"{f.filename}: brochure must be PDF/DOC/DOCX/PPT/PPTX.")
+        common={"p":code,"t":media_type,"f":f.filename,
+                "m":getattr(f,"content_type",None) or "application/octet-stream",
+                "s":len(blob),"b":blob}
+        # Support whichever schema version is currently live.
+        if "created_at" in cols:
+            sql=f"""INSERT INTO pi_operational_property_media
+                (property_code,media_type,filename,mime_type,file_size,{data_col},created_at)
+                VALUES(:p,:t,:f,:m,:s,:b,NOW())"""
+        else:
+            sql=f"""INSERT INTO pi_operational_property_media
+                (property_code,media_type,filename,mime_type,file_size,{data_col})
+                VALUES(:p,:t,:f,:m,:s,:b)"""
+        with engine.begin() as c:
+            c.execute(text(sql),common)
+        count+=1
+    return count
+
+@app.post("/api/v17-9-1/property/save")
+async def v1791_property_save(
+    req:Request,
+    division:str=Form("DELHI_NCR"),
+    property_name:str=Form(""),
+    property_types:str=Form(...),
+    city:str=Form(""),
+    location:str=Form(...),
+    google_location:str=Form(""),
+    area_input:str=Form(...),
+    rent_amount:str=Form(""),
+    rent_unit:str=Form("MONTH"),
+    transaction_type:str=Form("LEASE"),
+    floor:str=Form(""),
+    frontage:str=Form(""),
+    parking:str=Form(""),
+    possession:str=Form(""),
+    suitable_for:str=Form(""),
+    nearby_brands:str=Form(""),
+    owner_broker_name:str=Form(""),
+    contact_number:str=Form(""),
+    contact_role:str=Form("UNVERIFIED"),
+    verification_status:str=Form("UNVERIFIED"),
+    remarks:str=Form(""),
+    images:list[UploadFile]=File(default=[]),
+    videos:list[UploadFile]=File(default=[]),
+    brochures:list[UploadFile]=File(default=[])
+):
+    need_login(req); _v1791_setup()
+    pts=[x.strip() for x in str(property_types or "").split("|") if x.strip()]
+    if not pts: raise HTTPException(400,"Select at least one Property Type.")
+    if not str(location or "").strip(): raise HTTPException(400,"Location is required.")
+    area,unit=_v179_area(area_input)
+    rent=_v179_rent(rent_amount)
+    code=_v17_code("PROP")
+    who=actor_name(req)
+
+    with engine.begin() as c:
+        c.execute(text("""INSERT INTO pi_operational_properties(
+            property_code,division,property_name,property_types,city,location,google_location,
+            area_sqft,area_input,area_unit,rent_amount,rent_unit,transaction_type,
+            floor,frontage,parking,possession,suitable_for,nearby_brands,
+            owner_broker_name,contact_number,contact_role,verification_status,remarks,
+            created_by,entry_source,entered_by,entry_date
+        ) VALUES(
+            :code,:div,:name,CAST(:types AS jsonb),:city,:loc,:google,
+            :area,:area_input,:area_unit,:rent,:ru,:tt,
+            :floor,:front,:park,:poss,:suitable,:nearby,
+            :person,:phone,:role,:ver,:remarks,:by,'MANUAL',:by,NOW()
+        )"""),{
+            "code":code,"div":str(division or "DELHI_NCR").upper(),"name":property_name.strip(),
+            "types":json.dumps(pts),"city":city.strip(),"loc":location.strip(),"google":google_location.strip(),
+            "area":area,"area_input":str(area_input).strip(),"area_unit":unit,"rent":rent,
+            "ru":rent_unit.strip() or "MONTH","tt":transaction_type.strip() or "LEASE",
+            "floor":floor.strip(),"front":frontage.strip(),"park":parking.strip(),"poss":possession.strip(),
+            "suitable":suitable_for.strip(),"nearby":nearby_brands.strip(),
+            "person":owner_broker_name.strip(),"phone":contact_number.strip(),
+            "role":contact_role.strip(),"ver":verification_status.strip() or "UNVERIFIED",
+            "remarks":remarks.strip(),"by":who
+        })
+
+    im=await _v1791_save_media(code,images,"IMAGE",15)
+    vi=await _v1791_save_media(code,videos,"VIDEO",120)
+    br=await _v1791_save_media(code,brochures,"BROCHURE",50)
+
+    return {
+        "status":"ok","property_code":code,
+        "area_input":str(area_input).strip(),"area_sqft":round(area,2),
+        "images_saved":im,"videos_saved":vi,"brochures_saved":br
+    }
+
+@app.get("/manual-property-final-exec",response_class=HTMLResponse)
+def v1791_property_form(req:Request,division:str=Query("DELHI_NCR")):
+    if not page_role_or_redirect(req): return RedirectResponse("/login",303)
+    d=division.upper()
+    checks="".join(f'<label><input type=checkbox name=ptype value="{escape(x)}"> {escape(x)}</label>' for x in _v17_types())
+    return HTMLResponse(f"""<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
+<title>Manual Property Final</title>
+<style>
+*{{box-sizing:border-box}}body{{font-family:Arial;background:#f4f7fb;margin:0;color:#172437}}header{{background:#102235;color:#fff;padding:18px}}
+.w{{max-width:1180px;margin:auto;padding:18px}}.card{{background:#fff;padding:15px;border-radius:12px;margin-bottom:12px;border:1px solid #e2e8f0}}
+.g{{display:grid;grid-template-columns:1fr 1fr;gap:10px}}input,select,textarea{{width:100%;padding:10px;border:1px solid #ccd6e2;border-radius:7px}}
+.checks{{display:grid;grid-template-columns:repeat(3,1fr);gap:6px}}.checks label{{background:#f6f8fb;padding:7px;border-radius:6px}}.checks input{{width:auto}}
+.drop{{border:2px dashed #86a9ca;padding:20px;border-radius:10px;text-align:center;cursor:pointer;background:#fbfdff}}
+.drop.drag{{background:#edf6ff;border-color:#1677ff}}.btn{{padding:10px 13px;background:#1677ff;color:#fff;border:0;border-radius:8px;text-decoration:none;cursor:pointer;font-weight:bold}}
+.help{{font-size:12px;color:#65758a;margin-top:6px}}.files{{font-size:12px;color:#203247;margin-top:8px;white-space:pre-wrap}}
+.msg{{padding:10px;background:#fff8e8;border-radius:8px;margin-top:10px}}@media(max-width:800px){{.g,.checks{{grid-template-columns:1fr}}}}
+</style></head><body>
+<header><b>{'Goa' if d=='GOA' else 'Delhi NCR'} Manual Property Form · FINAL EXECUTION</b><br>
+<small>All operational fields retained · flexible area · multiple photos/videos/brochures</small></header>
+<div class=w>
+<a class=btn href="/workspace">← Dashboard</a><br><br>
+<form id=f enctype=multipart/form-data autocomplete=off><input type=hidden name=division value="{d}">
+<div class=card><div class=g>
+<input name=property_name placeholder="Property Name">
+<input name=city value="{'Goa' if d=='GOA' else 'Delhi NCR'}">
+<input name=location placeholder="Location *" required>
+<input name=google_location placeholder="Google Maps location/link">
+<div><input name=area_input placeholder="Area * e.g. 2.5 acre / 1000 sqft / 500 sq yd / 100 sqm" required>
+<div class=help>Bare number = sq ft. Accepted: sqft, sq yd, acre, sqm, hectare.</div></div>
+<div><input name=rent_amount placeholder="Rent amount">
+<div class=help>May remain blank if not yet confirmed.</div></div>
+<select name=rent_unit><option>MONTH</option><option>SQFT_MONTH</option></select>
+<select name=transaction_type><option>LEASE</option><option>SALE</option><option>LEASE_OR_SALE</option></select>
+<input name=floor placeholder="Floor">
+<input name=frontage placeholder="Frontage">
+<input name=parking placeholder="Parking">
+<input name=possession placeholder="Possession">
+<input name=owner_broker_name placeholder="Owner/Broker/Contact Name">
+<input name=contact_number placeholder="Contact Number">
+<select name=contact_role><option>UNVERIFIED</option><option>OWNER</option><option>BROKER</option><option>BOTH</option></select>
+<select name=verification_status><option>UNVERIFIED</option><option>VERIFIED</option></select>
+</div></div>
+
+<div class=card><b>Property Type — select multiple *</b><div class=checks>{checks}</div></div>
+<div class=card>
+<input name=suitable_for placeholder="Suitable For"><br><br>
+<input name=nearby_brands placeholder="Nearby Brands"><br><br>
+<textarea name=remarks placeholder="Remarks"></textarea>
+</div>
+
+<div class=card><b>Photos · multiple</b>
+<div class=drop id=idrop>Drag photos here or click to add more</div>
+<input id=imagesPicker type=file accept="image/*" multiple hidden>
+<div id=imagesList class=files>No photos selected</div></div>
+
+<div class=card><b>Videos · multiple</b>
+<div class=drop id=vdrop>Drag videos here or click to add more</div>
+<input id=videosPicker type=file accept="video/*,.mov,.mp4,.m4v,.webm,.avi,.mkv" multiple hidden>
+<div id=videosList class=files>No videos selected</div></div>
+
+<div class=card><b>Brochures · multiple</b>
+<div class=drop id=bdrop>Drag PDF/DOC/DOCX/PPT/PPTX here or click to add more</div>
+<input id=brochuresPicker type=file accept=".pdf,.doc,.docx,.ppt,.pptx" multiple hidden>
+<div id=brochuresList class=files>No brochures selected</div></div>
+
+<button class=btn type=submit>Save Property</button>
+<div id=msg class=msg>Ready.</div>
+</form></div>
+<script>
+const selected={{images:[],videos:[],brochures:[]}};
+function key(f){{return [f.name,f.size,f.lastModified].join('|')}}
+function render(kind){{
+  const el=document.getElementById(kind+'List'), a=selected[kind];
+  el.textContent=a.length ? a.length+' selected\\n'+a.map((f,i)=>(i+1)+'. '+f.name).join('\\n') : 'No '+kind+' selected';
+}}
+function addFiles(kind,files){{
+  const seen=new Set(selected[kind].map(key));
+  for(const f of Array.from(files||[])){{if(!seen.has(key(f))){{selected[kind].push(f);seen.add(key(f))}}}}
+  render(kind);
+}}
+function setup(kind,dropId,pickerId){{
+  const drop=document.getElementById(dropId), picker=document.getElementById(pickerId);
+  drop.onclick=()=>picker.click();
+  picker.onchange=()=>{{addFiles(kind,picker.files);picker.value=''}};
+  drop.addEventListener('dragover',e=>{{e.preventDefault();drop.classList.add('drag')}});
+  drop.addEventListener('dragleave',()=>drop.classList.remove('drag'));
+  drop.addEventListener('drop',e=>{{e.preventDefault();drop.classList.remove('drag');addFiles(kind,e.dataTransfer.files)}});
+}}
+setup('images','idrop','imagesPicker');
+setup('videos','vdrop','videosPicker');
+setup('brochures','bdrop','brochuresPicker');
+
+f.onsubmit=async e=>{{
+  e.preventDefault();
+  let pts=[...document.querySelectorAll('[name=ptype]:checked')].map(x=>x.value);
+  if(!pts.length){{msg.textContent='Select at least one Property Type.';return}}
+  let fd=new FormData(f);fd.set('property_types',pts.join('|'));
+  selected.images.forEach(x=>fd.append('images',x,x.name));
+  selected.videos.forEach(x=>fd.append('videos',x,x.name));
+  selected.brochures.forEach(x=>fd.append('brochures',x,x.name));
+  msg.textContent='Saving property and media...';
+  try{{
+    let r=await fetch('/api/v17-9-1/property/save',{{method:'POST',body:fd}}),d=await r.json();
+    msg.textContent=r.ok
+      ? `Saved ${{d.property_code}} · Area ${{d.area_input}} = ${{Number(d.area_sqft).toLocaleString('en-IN')}} sq ft · Photos ${{d.images_saved}} · Videos ${{d.videos_saved}} · Brochures ${{d.brochures_saved}}`
+      : 'ERROR: '+(d.detail||d.message||'Save failed');
+  }}catch(err){{msg.textContent='ERROR: '+err.message}}
+}};
+</script></body></html>""")
+
+@app.get("/api/v17-9-1/hospitality-results")
+def v1791_hospitality_results(req:Request,limit:int=Query(1000,ge=1,le=5000)):
+    need_login(req)
+    with engine.connect() as c:
+        rows=[dict(r._mapping) for r in c.execute(text("""
+            SELECT contact_id,business_type,brand_name,contact_name,phone,email,website,
+                   location,city,source_name,source_url,verification_status,created_at
+            FROM ai_marketing_contacts
+            WHERE COALESCE(brand_name,'')<>'' OR COALESCE(phone,'')<>''
+            ORDER BY created_at DESC
+            LIMIT :n
+        """),{"n":limit}).fetchall()]
+    return {"status":"ok","rows":rows}
+
+@app.get("/hospitality-results-final",response_class=HTMLResponse)
+def v1791_hospitality_results_page(req:Request):
+    if not page_role_or_redirect(req): return RedirectResponse("/login",303)
+    return HTMLResponse(r"""<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
+<title>Hospitality Results</title>
+<style>
+body{font-family:Arial;margin:0;background:#f4f7fb;color:#172437}header{background:#102235;color:#fff;padding:18px}.w{padding:18px}.bar{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}.btn{padding:9px 11px;background:#1677ff;color:white;border:0;border-radius:8px;text-decoration:none;cursor:pointer;font-weight:bold}
+input,select{padding:9px;border:1px solid #ccd6e2;border-radius:7px}.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px;margin-bottom:12px}.k{background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:12px}.k b{font-size:24px;display:block}.tablewrap{overflow:auto;background:#fff;border-radius:10px;max-height:72vh}
+table{width:100%;border-collapse:collapse;font-size:12px}th,td{padding:8px;border-bottom:1px solid #eee;text-align:left;vertical-align:top}th{position:sticky;top:0;background:#f8fafc}.phone{font-weight:bold;font-size:14px}.muted{color:#687789}
+</style></head><body><header><b>Hospitality Bot Results · FINAL</b><br><small>Newest fetched hospitality marketing contacts · phone-first view</small></header><div class=w>
+<div class=bar><a class=btn href="/workspace">← Dashboard</a><button class=btn onclick="run()">Run Hospitality Bot</button><a class=btn href="/bot-reliability">Bot Reliability</a><a class=btn href="/marketing-contacts-final">Marketing Contacts</a>
+<input id=q placeholder="Search brand, phone, category, location"><select id=cat><option value="">ALL CATEGORIES</option></select><select id=phone><option value="">ALL</option><option value="YES">WITH PHONE</option><option value="NO">NEEDS PHONE</option></select></div>
+<div class=stats><div class=k><b id=total>0</b>Total Results</div><div class=k><b id=withPhone>0</b>With Phone</div><div class=k><b id=withoutPhone>0</b>Needs Enrichment</div><div class=k><b id=today>0</b>Fetched Today</div></div>
+<div class=tablewrap><table><thead><tr><th>No.</th><th>Business</th><th>Category</th><th>Phone</th><th>Contact</th><th>Email</th><th>Location</th><th>Website/Source</th><th>Source</th><th>Fetched</th></tr></thead><tbody id=rows></tbody></table></div>
+</div><script>
+const E=x=>String(x??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));let D=[];
+function render(){let qq=(q.value||'').toLowerCase(),cc=cat.value,pp=phone.value;let a=D.filter(x=>(!qq||JSON.stringify(x).toLowerCase().includes(qq))&&(!cc||String(x.business_type||'')===cc)&&(!pp||(pp==='YES'?!!String(x.phone||'').trim():!String(x.phone||'').trim())));rows.innerHTML=a.map((x,i)=>`<tr><td><b>${i+1}</b></td><td><b>${E(x.brand_name||'')}</b></td><td>${E(x.business_type||'')}</td><td class=phone>${E(x.phone||'NEEDS ENRICHMENT')}</td><td>${E(x.contact_name||'')}</td><td>${E(x.email||'')}</td><td>${E(x.location||'')}</td><td>${x.website?`<a target=_blank href="${E(x.website)}">Website</a>`:(x.source_url?`<a target=_blank href="${E(x.source_url)}">Source</a>`:'')}</td><td>${E(x.source_name||'')}</td><td>${E(String(x.created_at||'').slice(0,16))}</td></tr>`).join('')||'<tr><td colspan=10>No matching results.</td></tr>'}
+async function load(){let d=await(await fetch('/api/v17-9-1/hospitality-results?limit=3000')).json();D=d.rows||[];total.textContent=D.length;withPhone.textContent=D.filter(x=>String(x.phone||'').trim()).length;withoutPhone.textContent=D.filter(x=>!String(x.phone||'').trim()).length;let td=new Date().toISOString().slice(0,10);today.textContent=D.filter(x=>String(x.created_at||'').slice(0,10)===td).length;let cs=[...new Set(D.map(x=>x.business_type).filter(Boolean))].sort();cat.innerHTML='<option value="">ALL CATEGORIES</option>'+cs.map(x=>`<option>${E(x)}</option>`).join('');render()}
+async function run(){let r=await fetch('/api/v4/hospitality-bot/start',{method:'POST'}),d=await r.json();alert(r.ok?'Hospitality Bot started: '+(d.run_id||''):'Error: '+(d.detail||d.message||''));setTimeout(load,5000)}
+q.oninput=render;cat.onchange=render;phone.onchange=render;load();
+</script></body></html>""")
+
+@app.get("/final-execution-dashboard",response_class=HTMLResponse)
+def v1791_dashboard(req:Request):
+    role=page_role_or_redirect(req)
+    if not role: return RedirectResponse("/login",303)
+    admin='<a class=card href="/admin-data-tools-v2"><b>Admin Data Tools</b><p>Database health and maintenance.</p></a>' if role=="admin" else ""
+    return HTMLResponse(f"""<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
+<title>AI Deal Intelligence OS</title><style>
+body{{font-family:Arial;margin:0;background:#f4f7fb;color:#172437}}header{{background:#102235;color:#fff;padding:22px}}.w{{max-width:1550px;margin:auto;padding:20px}}.g{{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px;margin-bottom:24px}}
+.card{{display:block;background:#fff;border:1px solid #e2e8f0;border-radius:12px;padding:15px;text-decoration:none;color:#172437;cursor:pointer}}.card p{{font-size:12px;color:#687789}}.primary{{border:2px solid #1677ff}}.manual{{border:3px solid #08734b}}.bot{{border:2px solid #7c3aed}}button.card{{text-align:left;width:100%;font:inherit}}
+#botmsg{{background:#fff8e8;padding:10px;border-radius:8px;margin-bottom:15px}}
+</style></head><body><header><b>AI Deal Intelligence OS</b><br><small>FINAL EXECUTION DASHBOARD · app.allianceinfrastructure.co.in</small></header><div class=w>
+
+<h2>Manual Property Data</h2><div class=g>
+<a class="card manual" href="/manual-property-database"><b>Manual Property Database</b><p>Bold numbered records. View full property details, photos, videos and brochures.</p></a>
+<a class="card primary" href="/manual-property-final-exec?division=DELHI_NCR"><b>Add Delhi NCR Property</b><p>Flexible area + multiple media.</p></a>
+<a class="card primary" href="/manual-property-final-exec?division=GOA"><b>Add Goa Property</b><p>Flexible area + multiple media.</p></a>
+<a class=card href="/universal-recovery-doctor"><b>Universal Recovery Doctor</b><p>Historical/manual recovery staging.</p></a>
+</div>
+
+<h2>Requirements & Matching</h2><div class=g>
+<a class=card href="/manual-requirement-final?division=DELHI_NCR"><b>Add Delhi NCR Requirement</b></a>
+<a class=card href="/matcher-final?division=DELHI_NCR"><b>Delhi NCR Matcher</b></a>
+<a class=card href="/requirements-center-v176?division=DELHI_NCR"><b>Requirements Centre</b></a>
+<a class=card href="/manual-requirement-final?division=GOA"><b>Add Goa Requirement</b></a>
+<a class=card href="/matcher-final?division=GOA"><b>Goa Matcher</b></a>
+<a class=card href="/requirements-center-v176?division=GOA"><b>Goa Requirements Centre</b></a>
+</div>
+
+<h2>AI Bots & Live Results</h2><div id=botmsg>Ready.</div><div class=g>
+<button class="card bot" onclick="runBot('/api/v4/hospitality-bot/start','Hospitality')"><b>▶ Run Hospitality Bot</b><p>Fetch fresh restaurant, cafe, lounge, club, banquet, hotel, guest house, wedding venue and farmhouse contacts.</p></button>
+<a class="card bot" href="/hospitality-results-final"><b>Hospitality Bot Results</b><p>Newest fetched contacts with phone-first filtering.</p></a>
+<button class="card bot" onclick="runBot('/api/v4/retail-bot/start','Retail')"><b>▶ Run Retail Bot</b><p>Fetch fresh retail expansion + requirement signals.</p></button>
+<a class="card bot" href="/bot-reliability"><b>Bot Reliability Center</b><p>Provider status, runs, found/new/error results.</p></a>
+</div>
+
+<h2>AI, Search & Marketing</h2><div class=g>
+<a class=card href="/property-discovery"><b>Property Discovery / Search Engine</b></a>
+<a class=card href="/retail-expansion"><b>Retail Expansion</b></a>
+<a class=card href="/ai-hospitality-master-final"><b>Hospitality Master</b></a>
+<a class=card href="/hospitality-enrichment"><b>Hospitality Enrichment</b></a>
+<a class=card href="/marketing-contacts-final"><b>Marketing Contacts</b></a>
+<a class=card href="/phone-contact-upload"><b>Upload Phone Contacts</b></a>
+<a class=card href="/capture-intelligence"><b>Capture Property</b></a>
+<a class=card href="/api/v16/whatsapp-ready.csv"><b>Export WhatsApp CSV</b></a>
+</div>
+
+<h2>Database & Admin</h2><div class=g>
+<a class=card href="/property-database"><b>Full Legacy Property Database</b></a>
+<a class=card href="/contacts-directory"><b>Owner / Broker Contacts</b></a>
+<a class=card href="/data-doctor"><b>Data Doctor</b></a>
+<a class=card href="/data-recovery-doctor"><b>Data Recovery + Vault</b></a>
+{admin}
+</div>
+</div><script>
+async function runBot(url,name){{
+  botmsg.textContent='Starting '+name+' Bot...';
+  try{{
+    let r=await fetch(url,{{method:'POST'}}),d=await r.json();
+    botmsg.textContent=r.ok?name+' Bot started · Run '+(d.run_id||'')+' · Open Bot Reliability / Results to watch progress.':'ERROR: '+(d.detail||d.message||'Failed');
+  }}catch(e){{botmsg.textContent='ERROR: '+e.message}}
+}}
+</script></body></html>""")
+
+@app.middleware("http")
+async def v1791_final_router(request,call_next):
+    p=request.url.path
+    # Make this the single team entry point.
+    if request.method=="GET" and p in {
+        "/workspace","/final-dashboard","/final-dashboard-v9","/final-dashboard-v10",
+        "/final-dashboard-v11","/final-dashboard-v12","/final-dashboard-v8"
+    }:
+        return RedirectResponse("/final-execution-dashboard",307)
+    # Every "add property" legacy route uses the repaired form.
+    if request.method=="GET" and p in {
+        "/manual-property-final","/property-form-final","/operational-property-form",
+        "/property-manual","/manual-property-v179"
+    }:
+        q=("?"+request.url.query) if request.url.query else ""
+        return RedirectResponse("/manual-property-final-exec"+q,307)
+    response=await call_next(request)
+    if p.startswith(("/final-execution-dashboard","/manual-property-final-exec","/hospitality-results-final","/api/v17-9-1")):
+        response.headers["Cache-Control"]="no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"]="no-cache"
+        response.headers["Expires"]="0"
+    return response
