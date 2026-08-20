@@ -15274,3 +15274,164 @@ async def v177_router(request,call_next):
         response.headers["Cache-Control"]="no-store, no-cache, must-revalidate, max-age=0"
         response.headers["Pragma"]="no-cache";response.headers["Expires"]="0"
     return response
+
+# ============================================================
+# V17.8 SAFE MANUAL PROPERTY EDIT
+# ============================================================
+
+@app.get("/api/v17-8/property/{property_code}")
+def v178_get_property(property_code:str,req:Request):
+    need_login(req)
+    _v177_setup()
+    with engine.connect() as c:
+        row=c.execute(text("SELECT * FROM pi_operational_properties WHERE property_code=:p"),{"p":property_code}).first()
+    if not row: raise HTTPException(404,"Property not found.")
+    return {"status":"ok","property":dict(row._mapping),"media":_v177_media_rows(property_code)}
+
+@app.post("/api/v17-8/property/{property_code}/edit")
+async def v178_edit_property(
+    property_code:str, req:Request,
+    property_name:str=Form(""), property_types:list[str]=Form([]),
+    city:str=Form(""), location:str=Form(""), area_sqft:str=Form(""),
+    rent_amount:str=Form(""), rent_unit:str=Form("MONTH"),
+    transaction_type:str=Form("LEASE"), floor:str=Form(""),
+    frontage:str=Form(""), parking:str=Form(""), possession:str=Form(""),
+    suitable_for:str=Form(""), nearby_brands:str=Form(""),
+    owner_broker_name:str=Form(""), contact_number:str=Form(""),
+    contact_role:str=Form(""), verification_status:str=Form("UNVERIFIED"),
+    google_location:str=Form(""), remarks:str=Form(""), entered_by:str=Form(""),
+    images:list[UploadFile]=File([]), videos:list[UploadFile]=File([]),
+    brochure:UploadFile|None=File(None)
+):
+    need_login(req); _v177_setup()
+    with engine.connect() as c:
+        old=c.execute(text("SELECT property_code FROM pi_operational_properties WHERE property_code=:p"),{"p":property_code}).first()
+    if not old: raise HTTPException(404,"Property not found.")
+
+    def num(v,label,required=False):
+        s=str(v or "").replace(",","").strip()
+        if not s:
+            if required: raise HTTPException(400,f"{label} is required.")
+            return None
+        try:return float(s)
+        except:raise HTTPException(400,f"{label} must be numeric.")
+
+    area=num(area_sqft,"Area",True)
+    rent=num(rent_amount,"Rent",False)
+    if area<=0: raise HTTPException(400,"Area must be greater than 0.")
+    if not location.strip(): raise HTTPException(400,"Location is required.")
+    types=[x.strip() for x in property_types if x.strip()]
+    if not types: raise HTTPException(400,"Select at least one Property Type.")
+
+    with engine.begin() as c:
+        c.execute(text("""UPDATE pi_operational_properties SET
+          property_name=:pn,property_types=CAST(:pt AS jsonb),city=:city,location=:loc,
+          area_sqft=:area,rent_amount=:rent,rent_unit=:ru,transaction_type=:tt,
+          floor=:floor,frontage=:frontage,parking=:parking,possession=:possession,
+          suitable_for=:sf,nearby_brands=:nb,owner_broker_name=:ob,
+          contact_number=:phone,contact_role=:cr,verification_status=:vs,
+          google_location=:gl,remarks=:remarks,
+          entered_by=COALESCE(NULLIF(:eb,''),entered_by),updated_at=NOW()
+          WHERE property_code=:pc"""),{
+          "pn":property_name.strip(),"pt":json.dumps(types),"city":city.strip(),"loc":location.strip(),
+          "area":area,"rent":rent,"ru":rent_unit.strip() or "MONTH","tt":transaction_type.strip() or "LEASE",
+          "floor":floor.strip(),"frontage":frontage.strip(),"parking":parking.strip(),"possession":possession.strip(),
+          "sf":suitable_for.strip(),"nb":nearby_brands.strip(),"ob":owner_broker_name.strip(),
+          "phone":contact_number.strip(),"cr":contact_role.strip(),"vs":verification_status.upper(),
+          "gl":google_location.strip(),"remarks":remarks.strip(),"eb":entered_by.strip(),"pc":property_code})
+
+    async def add_media(files,kind):
+        for f in files or []:
+            if not f or not f.filename: continue
+            data=await f.read()
+            if not data: continue
+            with engine.begin() as c:
+                c.execute(text("""INSERT INTO pi_operational_property_media
+                (property_code,media_type,filename,mime_type,file_size,file_data,created_at)
+                VALUES(:pc,:mt,:fn,:mime,:sz,:data,NOW())"""),
+                {"pc":property_code,"mt":kind,"fn":f.filename,
+                 "mime":f.content_type or "application/octet-stream","sz":len(data),"data":data})
+    await add_media(images,"IMAGE")
+    await add_media(videos,"VIDEO")
+    if brochure and brochure.filename: await add_media([brochure],"BROCHURE")
+    return {"status":"ok","property_code":property_code,"message":"Property updated safely."}
+
+@app.delete("/api/v17-8/property/{property_code}/media/{media_id}")
+def v178_remove_media(property_code:str,media_id:int,req:Request):
+    need_login(req)
+    with engine.begin() as c:
+        found=c.execute(text("SELECT id FROM pi_operational_property_media WHERE id=:id AND property_code=:pc"),
+                        {"id":media_id,"pc":property_code}).first()
+        if not found: raise HTTPException(404,"Media not found.")
+        c.execute(text("DELETE FROM pi_operational_property_media WHERE id=:id AND property_code=:pc"),
+                  {"id":media_id,"pc":property_code})
+    return {"status":"ok"}
+
+@app.get("/edit-property/{property_code}",response_class=HTMLResponse)
+def v178_edit_page(property_code:str,req:Request):
+    if not page_role_or_redirect(req): return RedirectResponse("/login",303)
+    _v177_setup()
+    with engine.connect() as c:
+        row=c.execute(text("SELECT * FROM pi_operational_properties WHERE property_code=:p"),{"p":property_code}).first()
+    if not row:return HTMLResponse("<h2>Property not found.</h2>",404)
+    p=dict(row._mapping); media=_v177_media_rows(property_code)
+    current=set(_v17_arr(p.get("property_types")))
+    choices=["SHOP","RETAIL","RESTAURANT","CAFE","BANQUET","HOTEL","OFFICE","SHOWROOM","WAREHOUSE","INDUSTRIAL","COMMERCIAL","VILLA","APARTMENT","LAND","FARMHOUSE","OTHER"]
+    checks="".join(f'<label><input type=checkbox name=property_types value="{escape(x)}" {"checked" if x in current else ""}> {escape(x)}</label>' for x in choices)
+    media_html="".join(f'<div class=media><b>{escape(str(m["media_type"]))}</b> · {escape(str(m["filename"]))} · <a target=_blank href="/api/v17-2/property-media/{m["id"]}">View</a> · <button type=button onclick="rm({m["id"]})">Remove</button></div>' for m in media) or "No existing media."
+    def V(k):
+        x=p.get(k); return escape(str(x if x not in (None,"") else ""))
+    ver=str(p.get("verification_status") or "UNVERIFIED").upper()
+    tx=str(p.get("transaction_type") or "LEASE").upper()
+    return HTMLResponse(f"""<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>Edit Property</title>
+<style>*{{box-sizing:border-box}}body{{font-family:Arial;margin:0;background:#f4f7fb;color:#172437}}header{{background:#102235;color:white;padding:20px}}.w{{max-width:1250px;margin:auto;padding:18px}}form,.box{{background:white;padding:16px;border-radius:12px;margin-bottom:14px}}.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px}}input,select,textarea{{width:100%;padding:10px;border:1px solid #ccd6e2;border-radius:7px}}textarea{{min-height:90px}}label small{{display:block;font-weight:bold;margin-bottom:5px}}.types{{display:flex;gap:12px;flex-wrap:wrap}}.types input{{width:auto}}.btn,button{{padding:9px 12px;background:#1677ff;color:white;border:0;border-radius:7px;text-decoration:none;font-weight:bold;cursor:pointer}}.media{{padding:8px;border-bottom:1px solid #eee}}.notice{{background:#eefbf4;padding:10px;border-radius:8px;margin-bottom:12px}}</style></head><body>
+<header><b>Edit Property</b><br><small>{V("property_code")} · same record, no duplicate</small></header><div class=w>
+<div class=notice><b>Safe Edit:</b> Existing photos/videos/brochure stay attached unless Remove is clicked. Previous property values remain protected by the existing history trigger.</div>
+<form id=f enctype=multipart/form-data><div class=grid>
+<label><small>Property Name</small><input name=property_name value="{V("property_name")}"></label>
+<label><small>City</small><input name=city value="{V("city")}"></label>
+<label><small>Location *</small><input required name=location value="{V("location")}"></label>
+<label><small>Google Location</small><input name=google_location value="{V("google_location")}"></label>
+<label><small>Area sq ft *</small><input required name=area_sqft value="{V("area_sqft")}"></label>
+<label><small>Rent</small><input name=rent_amount value="{V("rent_amount")}" placeholder="Can remain blank"></label>
+<label><small>Rent Unit</small><input name=rent_unit value="{V("rent_unit")}"></label>
+<label><small>Transaction</small><select name=transaction_type><option {"selected" if tx=="LEASE" else ""}>LEASE</option><option {"selected" if tx=="SALE" else ""}>SALE</option></select></label>
+<label><small>Floor</small><input name=floor value="{V("floor")}"></label>
+<label><small>Frontage</small><input name=frontage value="{V("frontage")}"></label>
+<label><small>Parking</small><input name=parking value="{V("parking")}"></label>
+<label><small>Possession</small><input name=possession value="{V("possession")}"></label>
+<label><small>Suitable For</small><input name=suitable_for value="{V("suitable_for")}"></label>
+<label><small>Nearby Brands</small><input name=nearby_brands value="{V("nearby_brands")}"></label>
+<label><small>Owner/Broker/Contact</small><input name=owner_broker_name value="{V("owner_broker_name")}"></label>
+<label><small>Contact Number</small><input name=contact_number value="{V("contact_number")}"></label>
+<label><small>Contact Role</small><input name=contact_role value="{V("contact_role")}"></label>
+<label><small>Verification</small><select name=verification_status><option {"selected" if ver=="UNVERIFIED" else ""}>UNVERIFIED</option><option {"selected" if ver=="VERIFIED" else ""}>VERIFIED</option></select></label>
+<label><small>Updated By</small><input name=entered_by value="{V("entered_by")}"></label>
+</div><h3>Property Type *</h3><div class=types>{checks}</div><h3>Remarks</h3><textarea name=remarks>{V("remarks")}</textarea>
+<h3>Add More Media</h3><div class=grid><label><small>Photos</small><input type=file name=images accept="image/*" multiple></label><label><small>Videos</small><input type=file name=videos accept="video/*" multiple></label><label><small>Brochure</small><input type=file name=brochure accept=".pdf,application/pdf"></label></div>
+<p><button type=submit>Save Changes</button> <a class=btn href="/property-detail-final/{escape(property_code)}">Cancel</a> <b id=msg></b></p></form>
+<div class=box><h2>Existing Media</h2>{media_html}</div></div>
+<script>const code={json.dumps(property_code)};f.onsubmit=async e=>{{e.preventDefault();msg.textContent='Saving...';let r=await fetch('/api/v17-8/property/'+encodeURIComponent(code)+'/edit',{{method:'POST',body:new FormData(f)}}),d=await r.json();if(!r.ok){{msg.textContent='ERROR: '+(d.detail||'Save failed');return}}location.href='/property-detail-final/'+encodeURIComponent(code)}};async function rm(id){{if(!confirm('Remove this media file?'))return;let r=await fetch('/api/v17-8/property/'+encodeURIComponent(code)+'/media/'+id,{{method:'DELETE'}});if(r.ok)location.reload();else alert('Unable to remove media')}};</script></body></html>""")
+
+@app.get("/manual-property-database-v178",response_class=HTMLResponse)
+def v178_database(req:Request,division:str=Query("ALL")):
+    if not page_role_or_redirect(req):return RedirectResponse("/login",303)
+    d=division.upper()
+    return HTMLResponse(f"""<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>Manual Property Database</title>
+<style>body{{font-family:Arial;margin:0;background:#f4f7fb;color:#172437}}header{{background:#102235;color:white;padding:20px}}.w{{padding:18px}}.btn{{padding:8px 10px;background:#1677ff;color:white;text-decoration:none;border-radius:7px;font-weight:bold}}.edit{{background:#08734b}}table{{width:100%;border-collapse:collapse;background:white;margin-top:15px}}th,td{{padding:9px;border-bottom:1px solid #eee;text-align:left}}td{{font-weight:bold}}select{{padding:8px}}</style></head><body><header><b>Manual Property Database · View / Edit</b></header><div class=w><a class=btn href="/final-dashboard-v12">← Dashboard</a> <select id=division><option value=ALL>ALL</option><option value=DELHI_NCR>DELHI NCR</option><option value=GOA>GOA</option></select><table><thead><tr><th>No.</th><th>Property</th><th>Location</th><th>Area</th><th>Rent</th><th>Contact</th><th>Media</th><th>Actions</th></tr></thead><tbody id=rows></tbody></table></div>
+<script>const init={json.dumps(d)};if(['ALL','DELHI_NCR','GOA'].includes(init))division.value=init;const E=x=>String(x??'');async function load(){{let d=await(await fetch('/api/v17-7/manual-properties?division='+division.value+'&source=MANUAL&verified=ALL&q=')).json();rows.innerHTML=(d.rows||[]).map((x,i)=>`<tr><td>${{i+1}}</td><td>${{E(x.property_name||x.property_code)}}<br>${{E(x.property_code)}}</td><td>${{E(x.location)}}</td><td>${{E(x.area_sqft)}} sq ft</td><td>${{x.rent_amount==null?'':('₹'+E(x.rent_amount))}}</td><td>${{E(x.owner_broker_name)}}<br>${{E(x.contact_number)}}</td><td>Photos ${{x.image_count||0}} | Videos ${{x.video_count||0}} | Brochure ${{x.brochure_count||0}}</td><td><a class=btn href="/property-detail-final/${{encodeURIComponent(x.property_code)}}">View</a> <a class="btn edit" href="/edit-property/${{encodeURIComponent(x.property_code)}}">Edit Property</a></td></tr>`).join('')||'<tr><td colspan=8>No properties found.</td></tr>'}}division.onchange=load;load()</script></body></html>""")
+
+@app.get("/final-dashboard-v12",response_class=HTMLResponse)
+def v178_dashboard(req:Request):
+    if not page_role_or_redirect(req):return RedirectResponse("/login",303)
+    return HTMLResponse("""<!doctype html><html><head><meta charset=utf-8><title>AI Deal Intelligence OS</title><style>body{font-family:Arial;margin:0;background:#f4f7fb;color:#172437}header{background:#102235;color:white;padding:22px}.w{padding:20px}.g{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px}.card{display:block;background:white;padding:15px;border-radius:12px;text-decoration:none;color:#172437;border:1px solid #ddd}.main{border:3px solid #08734b}</style></head><body><header><b>AI Deal Intelligence OS · V17.8</b></header><div class=w><div class=g><a class="card main" href="/manual-property-database-v178"><b>Manual Property Database · View / Edit</b></a><a class=card href="/manual-property-final?division=DELHI_NCR"><b>Add Delhi NCR Property</b></a><a class=card href="/manual-property-final?division=GOA"><b>Add Goa Property</b></a><a class=card href="/requirements-center-v176?division=DELHI_NCR"><b>Requirements Centre</b></a><a class=card href="/matcher-final?division=DELHI_NCR"><b>Property Matcher</b></a><a class=card href="/property-discovery"><b>Property Discovery / Search Engine</b></a><a class=card href="/retail-expansion"><b>Retail Bot</b></a><a class=card href="/ai-hospitality-master-final"><b>Hospitality Bot / Master</b></a><a class=card href="/marketing-contacts-final"><b>Marketing Contacts</b></a><a class=card href="/phone-contact-upload"><b>Upload Phone Contacts</b></a><a class=card href="/universal-recovery-doctor"><b>Recovery Doctor</b></a></div></div></body></html>""")
+
+@app.middleware("http")
+async def v178_router(request,call_next):
+    p=request.url.path
+    if p in {"/workspace","/final-dashboard-v11"}:return RedirectResponse("/final-dashboard-v12",307)
+    if p=="/manual-property-database":return RedirectResponse("/manual-property-database-v178"+(("?"+request.url.query) if request.url.query else ""),307)
+    response=await call_next(request)
+    if p.startswith(("/final-dashboard-v12","/manual-property-database-v178","/edit-property","/api/v17-8")):
+        response.headers["Cache-Control"]="no-store, no-cache, must-revalidate, max-age=0"
+    return response
