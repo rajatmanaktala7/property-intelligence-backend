@@ -15435,3 +15435,289 @@ async def v178_router(request,call_next):
     if p.startswith(("/final-dashboard-v12","/manual-property-database-v178","/edit-property","/api/v17-8")):
         response.headers["Cache-Control"]="no-store, no-cache, must-revalidate, max-age=0"
     return response
+
+# ============================================================
+# V17.8.2 FINAL UI REPAIR
+# Restore full V17.7 dashboard.
+# Repair ONLY Manual Property Database.
+# Keep existing V17.8 Edit Property route/functions.
+# ============================================================
+
+@app.get("/manual-property-database-v1782", response_class=HTMLResponse)
+def v1782_manual_property_database(req:Request, division:str=Query("ALL")):
+    if not page_role_or_redirect(req):
+        return RedirectResponse("/login",303)
+
+    d=division.upper()
+
+    return HTMLResponse(f"""<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Manual Property Database</title>
+<style>
+*{{box-sizing:border-box}}
+body{{font-family:Arial;margin:0;background:#f4f7fb;color:#172437}}
+header{{background:#102235;color:#fff;padding:20px}}
+.w{{width:100%;padding:18px}}
+.toolbar{{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:12px}}
+.btn{{display:inline-block;padding:9px 11px;border:0;border-radius:8px;background:#1677ff;color:#fff;text-decoration:none;font-weight:700;cursor:pointer;white-space:nowrap}}
+.btn.edit{{background:#08734b}}
+.btn.gray{{background:#e8edf3;color:#243447}}
+input,select{{padding:9px;border:1px solid #ccd6e2;border-radius:7px}}
+input{{min-width:280px}}
+.notice{{background:#eef4ff;border-radius:9px;padding:10px;margin:10px 0;font-size:12px}}
+.kpis{{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:9px;margin:14px 0}}
+.kpi{{background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:12px}}
+.kpi b{{font-size:23px;display:block}}
+.tablebox{{width:100%;overflow:auto;background:#fff;border:1px solid #e2e8f0;border-radius:10px;max-height:73vh}}
+table{{border-collapse:collapse;min-width:2650px;width:100%;font-size:12px}}
+th,td{{padding:9px;border-bottom:1px solid #edf1f5;text-align:left;vertical-align:top;white-space:nowrap}}
+th{{background:#f8fafc;position:sticky;top:0;z-index:4}}
+td{{font-weight:700}}
+.sno{{font-size:16px;font-weight:900}}
+.wrap{{white-space:normal;min-width:170px;max-width:280px}}
+.small{{font-size:11px;color:#687789;font-weight:400}}
+.badge{{display:inline-block;border-radius:10px;padding:3px 7px;background:#dcfce7;color:#166534;font-size:10px;font-weight:800}}
+.badge.unv{{background:#fef3c7;color:#92400e}}
+.badge.today{{background:#dbeafe;color:#1d4ed8}}
+.actions{{display:flex;gap:6px;min-width:220px}}
+.actions .btn{{padding:7px 9px}}
+.sticky1{{position:sticky;left:0;background:#fff;z-index:2}}
+.sticky2{{position:sticky;left:58px;background:#fff;z-index:2}}
+thead .sticky1,thead .sticky2{{background:#f8fafc;z-index:6}}
+</style>
+</head>
+<body>
+
+<header>
+<b>Manual Property Database · View / Edit</b><br>
+<small>Complete manual property fields · bold values · full media view · safe editing</small>
+</header>
+
+<div class="w">
+
+<div class="toolbar">
+<a class="btn gray" href="/final-dashboard-v11">← Full Dashboard</a>
+<a class="btn" href="/manual-property-final?division=DELHI_NCR">Add Delhi NCR Property</a>
+<a class="btn" href="/manual-property-final?division=GOA">Add Goa Property</a>
+
+<select id="division">
+<option value="ALL">ALL AREAS</option>
+<option value="DELHI_NCR">DELHI NCR</option>
+<option value="GOA">GOA</option>
+</select>
+
+<select id="source">
+<option value="MANUAL">MANUAL + RECOVERED MANUAL</option>
+<option value="ALL">ALL OPERATIONAL SOURCES</option>
+<option value="RECOVERED_MANUAL">RECOVERED MANUAL ONLY</option>
+</select>
+
+<select id="verified">
+<option value="ALL">ALL VERIFICATION</option>
+<option value="VERIFIED">VERIFIED</option>
+<option value="UNVERIFIED">UNVERIFIED</option>
+</select>
+
+<input id="q" placeholder="Search property, location, contact or name">
+<button class="btn" onclick="load()">Search</button>
+</div>
+
+<div class="notice">
+<b>All fields are preserved.</b> Scroll horizontally for the complete record.
+Use <b>View Full Property</b> for pictures/videos/brochure and <b>Edit Property</b> to change the same property record.
+</div>
+
+<div class="kpis">
+<div class="kpi"><b id="kTotal">0</b>Total Manual Properties</div>
+<div class="kpi"><b id="kToday">0</b>Added Today</div>
+<div class="kpi"><b id="kVerified">0</b>Verified</div>
+<div class="kpi"><b id="kUnverified">0</b>Unverified</div>
+<div class="kpi"><b id="kPhotos">0</b>Photos</div>
+<div class="kpi"><b id="kVideos">0</b>Videos</div>
+<div class="kpi"><b id="kBrochures">0</b>Brochures</div>
+</div>
+
+<div class="tablebox">
+<table>
+<thead>
+<tr>
+<th class="sticky1">S.No.</th>
+<th class="sticky2">Property / Code</th>
+<th>Entry Source</th>
+<th>Entry Date</th>
+<th>Entered By</th>
+<th>Verification</th>
+<th>Property Type</th>
+<th>City</th>
+<th>Location</th>
+<th>Area</th>
+<th>Rent</th>
+<th>Rent Unit</th>
+<th>Transaction</th>
+<th>Floor</th>
+<th>Frontage</th>
+<th>Parking</th>
+<th>Possession</th>
+<th>Suitable For</th>
+<th>Nearby Brands</th>
+<th>Owner / Broker / Contact</th>
+<th>Contact No.</th>
+<th>Contact Role</th>
+<th>Google Location</th>
+<th>Photos</th>
+<th>Videos</th>
+<th>Brochure</th>
+<th>Remarks</th>
+<th>Actions</th>
+</tr>
+</thead>
+<tbody id="rows"></tbody>
+</table>
+</div>
+</div>
+
+<script>
+const initialDivision={json.dumps(d)};
+if(['ALL','DELHI_NCR','GOA'].includes(initialDivision)) division.value=initialDivision;
+
+const E=x=>String(x??'').replace(/[&<>"]/g,c=>({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}}[c]));
+
+const M=x=>{{
+  if(x===null||x===undefined||x==='') return '';
+  const n=Number(x);
+  return Number.isFinite(n)?n.toLocaleString('en-IN'):E(x);
+}};
+
+const TYPES=x=>{{
+  if(Array.isArray(x)) return x.join(', ');
+  if(!x) return '';
+  if(typeof x==='string'){{
+    try{{
+      const v=JSON.parse(x);
+      if(Array.isArray(v)) return v.join(', ');
+    }}catch(e){{}}
+  }}
+  return String(x);
+}};
+
+async function load(){{
+  const u='/api/v17-7/manual-properties'
+    +'?division='+encodeURIComponent(division.value)
+    +'&source='+encodeURIComponent(source.value)
+    +'&verified='+encodeURIComponent(verified.value)
+    +'&q='+encodeURIComponent(q.value||'');
+
+  const r=await fetch(u,{{cache:'no-store'}});
+  const d=await r.json();
+
+  if(!r.ok){{
+    rows.innerHTML='<tr><td colspan="28"><b>ERROR: '+E(d.detail||d.message||'Unable to load records')+'</b></td></tr>';
+    return;
+  }}
+
+  const s=d.summary||{{}};
+  kTotal.textContent=s.total||0;
+  kToday.textContent=s.added_today||0;
+  kVerified.textContent=s.verified||0;
+  kUnverified.textContent=s.unverified||0;
+  kPhotos.textContent=s.photos||0;
+  kVideos.textContent=s.videos||0;
+  kBrochures.textContent=s.brochures||0;
+
+  const today=new Date().toISOString().slice(0,10);
+
+  rows.innerHTML=(d.rows||[]).map((x,i)=>{{
+    const dt=String(x.display_entry_date||x.created_at||'');
+    const isToday=dt.slice(0,10)===today;
+    const ver=String(x.verification_status||'UNVERIFIED').toUpperCase();
+
+    const mapLink=x.google_location
+      ? `<a target="_blank" href="${{E(x.google_location)}}">Open Map</a>`
+      : '';
+
+    return `<tr>
+      <td class="sticky1 sno">${{i+1}}</td>
+
+      <td class="sticky2 wrap">
+        <b>${{E(x.property_name||x.property_code)}}</b><br>
+        <span class="small">${{E(x.property_code)}}</span>
+      </td>
+
+      <td>
+        <span class="badge">${{E(x.display_source||'MANUAL')}}</span>
+        ${{isToday?'<br><span class="badge today">TODAY</span>':''}}
+      </td>
+
+      <td><b>${{E(dt.slice(0,16).replace('T',' '))}}</b></td>
+      <td>${{E(x.display_entered_by||'')}}</td>
+
+      <td>
+        <span class="badge ${{ver==='VERIFIED'?'':'unv'}}">${{E(ver)}}</span>
+      </td>
+
+      <td class="wrap">${{E(TYPES(x.property_types))}}</td>
+      <td>${{E(x.city||'')}}</td>
+      <td class="wrap"><b>${{E(x.location||'')}}</b></td>
+      <td><b>${{M(x.area_sqft)}} sq ft</b></td>
+      <td><b>${{x.rent_amount===null||x.rent_amount===''?'':'₹'+M(x.rent_amount)}}</b></td>
+      <td>${{E(x.rent_unit||'')}}</td>
+      <td>${{E(x.transaction_type||'')}}</td>
+      <td>${{E(x.floor||'')}}</td>
+      <td>${{E(x.frontage||'')}}</td>
+      <td>${{E(x.parking||'')}}</td>
+      <td>${{E(x.possession||'')}}</td>
+      <td class="wrap">${{E(x.suitable_for||'')}}</td>
+      <td class="wrap">${{E(x.nearby_brands||'')}}</td>
+      <td class="wrap"><b>${{E(x.owner_broker_name||'')}}</b></td>
+      <td><b>${{E(x.contact_number||'')}}</b></td>
+      <td>${{E(x.contact_role||'')}}</td>
+      <td>${{mapLink}}</td>
+      <td><b>${{x.image_count||0}}</b></td>
+      <td><b>${{x.video_count||0}}</b></td>
+      <td><b>${{x.brochure_count||0}}</b></td>
+      <td class="wrap">${{E(x.remarks||'')}}</td>
+
+      <td>
+        <div class="actions">
+          <a class="btn" href="/property-detail-final/${{encodeURIComponent(x.property_code)}}">View Full Property</a>
+          <a class="btn edit" href="/edit-property/${{encodeURIComponent(x.property_code)}}">Edit Property</a>
+        </div>
+      </td>
+    </tr>`;
+  }}).join('') || '<tr><td colspan="28"><b>No manual properties found for this filter.</b></td></tr>';
+}}
+
+division.onchange=load;
+source.onchange=load;
+verified.onchange=load;
+q.addEventListener('keydown',e=>{{if(e.key==='Enter') load();}});
+load();
+</script>
+
+</body>
+</html>""")
+
+@app.middleware("http")
+async def v1782_final_ui_router(request,call_next):
+    p=request.url.path
+
+    # Restore the complete V17.7 dashboard, not the simplified V17.8 dashboard.
+    if p in {"/workspace","/final-dashboard-v12"}:
+        return RedirectResponse("/final-dashboard-v11",status_code=307)
+
+    # Replace only Manual Property Database.
+    if p in {"/manual-property-database","/manual-property-database-v178","/manual-property-database-v1781"}:
+        suffix=("?"+request.url.query) if request.url.query else ""
+        return RedirectResponse("/manual-property-database-v1782"+suffix,status_code=307)
+
+    response=await call_next(request)
+
+    if p.startswith("/manual-property-database-v1782"):
+        response.headers["Cache-Control"]="no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"]="no-cache"
+        response.headers["Expires"]="0"
+
+    return response
