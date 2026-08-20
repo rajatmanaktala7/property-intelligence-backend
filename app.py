@@ -15721,3 +15721,48 @@ async def v1782_final_ui_router(request,call_next):
         response.headers["Expires"]="0"
 
     return response
+
+# ============================================================
+# V17.8.3 REDIRECT LOOP FIX
+# Breaks V17.7 <-> V17.8 dashboard redirect loop.
+# Uses the full existing V17.7 dashboard content via v177_dashboard().
+# Keeps V17.8.2 Manual Property Database repair.
+# ============================================================
+
+@app.get("/final-dashboard-v13", response_class=HTMLResponse)
+def v1783_final_dashboard(req:Request):
+    # Reuse the complete V17.7 dashboard renderer without redirecting through v11/v12.
+    return v177_dashboard(req)
+
+@app.middleware("http")
+async def v1783_redirect_loop_fix(request, call_next):
+    p=request.url.path
+
+    # Send every old dashboard entry to one neutral final route
+    # that older middleware does not know about.
+    if p in {
+        "/workspace",
+        "/final-dashboard",
+        "/final-dashboard-v11",
+        "/final-dashboard-v12"
+    }:
+        return RedirectResponse("/final-dashboard-v13", status_code=307)
+
+    # Ensure every old Manual Property Database entry reaches the repaired V17.8.2 page
+    # before older middleware can redirect it elsewhere.
+    if p in {
+        "/manual-property-database",
+        "/manual-property-database-v178",
+        "/manual-property-database-v1781"
+    }:
+        suffix=("?"+request.url.query) if request.url.query else ""
+        return RedirectResponse("/manual-property-database-v1782"+suffix, status_code=307)
+
+    response=await call_next(request)
+
+    if p.startswith(("/final-dashboard-v13","/manual-property-database-v1782")):
+        response.headers["Cache-Control"]="no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"]="no-cache"
+        response.headers["Expires"]="0"
+
+    return response
