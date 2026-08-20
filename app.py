@@ -16401,3 +16401,464 @@ async def v1791_final_router(request,call_next):
         response.headers["Pragma"]="no-cache"
         response.headers["Expires"]="0"
     return response
+
+# ============================================================
+# V18.0 MANUAL FORM + MEDIA DOCTOR
+#
+# Architecture:
+# 1) Save property DATA first in a small JSON request.
+# 2) Upload each media file separately in 4 MB chunks.
+# 3) Finalize each file into pi_operational_property_media.
+# 4) Detect live media-table schema dynamically.
+# 5) One failed media file NEVER destroys the property record.
+#
+# Fixes:
+# - photos not saving
+# - multiple videos
+# - multiple brochures
+# - large video/body upload failures
+# - schema drift: content vs file_data vs other BYTEA columns
+# - exact per-file progress/error messages
+# ============================================================
+
+def _v18_setup():
+    _v1791_setup()
+    with engine.begin() as c:
+        c.execute(text("""CREATE TABLE IF NOT EXISTS pi_v18_media_upload_sessions(
+            upload_id TEXT PRIMARY KEY,
+            property_code TEXT NOT NULL,
+            media_type TEXT NOT NULL,
+            filename TEXT NOT NULL,
+            mime_type TEXT,
+            total_size BIGINT DEFAULT 0,
+            total_chunks INTEGER NOT NULL,
+            received_chunks INTEGER DEFAULT 0,
+            status TEXT DEFAULT 'UPLOADING',
+            error_message TEXT,
+            created_at TIMESTAMPTZ DEFAULT NOW(),
+            completed_at TIMESTAMPTZ
+        )"""))
+        c.execute(text("""CREATE TABLE IF NOT EXISTS pi_v18_media_upload_chunks(
+            upload_id TEXT NOT NULL REFERENCES pi_v18_media_upload_sessions(upload_id) ON DELETE CASCADE,
+            chunk_no INTEGER NOT NULL,
+            chunk_data BYTEA NOT NULL,
+            chunk_size INTEGER NOT NULL,
+            created_at TIMESTAMPTZ DEFAULT NOW(),
+            PRIMARY KEY(upload_id,chunk_no)
+        )"""))
+        c.execute(text("CREATE INDEX IF NOT EXISTS idx_v18_media_sessions_property ON pi_v18_media_upload_sessions(property_code)"))
+
+def _v18_media_schema():
+    with engine.connect() as c:
+        rows=c.execute(text("""
+            SELECT column_name,data_type,udt_name,is_nullable,column_default
+            FROM information_schema.columns
+            WHERE table_schema='public' AND table_name='pi_operational_property_media'
+            ORDER BY ordinal_position
+        """)).fetchall()
+    return [dict(r._mapping) for r in rows]
+
+def _v18_binary_columns():
+    cols=_v18_media_schema()
+    return [x["column_name"] for x in cols if (x.get("udt_name")=="bytea" or x.get("data_type")=="bytea")]
+
+def _v18_insert_media(property_code,media_type,filename,mime_type,blob):
+    cols=_v18_media_schema()
+    names={x["column_name"] for x in cols}
+    binary=_v18_binary_columns()
+    if not binary:
+        raise RuntimeError("pi_operational_property_media has no BYTEA column for file content.")
+
+    values={}
+    candidates={
+        "property_code":property_code,
+        "property_id":property_code,
+        "media_type":media_type,
+        "type":media_type,
+        "filename":filename,
+        "file_name":filename,
+        "mime_type":mime_type or "application/octet-stream",
+        "content_type":mime_type or "application/octet-stream",
+        "file_size":len(blob),
+        "size_bytes":len(blob),
+    }
+    for k,v in candidates.items():
+        if k in names:
+            values[k]=v
+
+    # Populate every BYTEA column. This handles historic content/file_data schema drift
+    # and any NOT NULL BYTEA column introduced by older versions.
+    for bcol in binary:
+        values[bcol]=blob
+
+    # Fail early if essential relation fields are impossible.
+    if not any(k in values for k in ("property_code","property_id")):
+        raise RuntimeError("Media table has no property_code/property_id column.")
+    if not any(k in values for k in ("media_type","type")):
+        raise RuntimeError("Media table has no media_type/type column.")
+
+    # Check non-null columns with no default that our dynamic mapper did not satisfy.
+    ignored={"id","created_at","updated_at"}
+    missing=[]
+    for col in cols:
+        name=col["column_name"]
+        if name in values or name in ignored:
+            continue
+        if col.get("is_nullable")=="NO" and not col.get("column_default"):
+            missing.append(name)
+    if missing:
+        raise RuntimeError("Media table requires unmapped column(s): "+", ".join(missing))
+
+    keys=list(values)
+    sql='INSERT INTO pi_operational_property_media ('+",".join(f'"{k}"' for k in keys)+') VALUES ('+",".join(":"+k for k in keys)+')'
+    with engine.begin() as c:
+        c.execute(text(sql),values)
+
+def _v18_validate_media(meta):
+    typ=str(meta.get("media_type") or "").upper()
+    fn=str(meta.get("filename") or "")
+    size=int(meta.get("total_size") or 0)
+    mime=str(meta.get("mime_type") or "").lower()
+    if typ not in {"IMAGE","VIDEO","BROCHURE"}:
+        raise HTTPException(400,"Invalid media type.")
+    if not fn:
+        raise HTTPException(400,"Filename is required.")
+    if size<0:
+        raise HTTPException(400,"Invalid file size.")
+    if typ=="IMAGE":
+        ok=mime.startswith("image/") or fn.lower().endswith((".jpg",".jpeg",".png",".webp",".gif",".heic",".heif"))
+        if not ok: raise HTTPException(400,f"{fn} is not a supported image.")
+        if size>30*1024*1024: raise HTTPException(413,f"{fn} exceeds 30 MB image limit.")
+    elif typ=="VIDEO":
+        ok=mime.startswith("video/") or fn.lower().endswith((".mp4",".mov",".m4v",".webm",".avi",".mkv",".3gp"))
+        if not ok: raise HTTPException(400,f"{fn} is not a supported video.")
+        if size>500*1024*1024: raise HTTPException(413,f"{fn} exceeds 500 MB video limit.")
+    else:
+        if not fn.lower().endswith((".pdf",".doc",".docx",".ppt",".pptx")):
+            raise HTTPException(400,f"{fn}: brochure must be PDF, DOC, DOCX, PPT or PPTX.")
+        if size>150*1024*1024: raise HTTPException(413,f"{fn} exceeds 150 MB brochure limit.")
+
+class V18PropertyInput(BaseModel):
+    division:str="DELHI_NCR"
+    property_name:Optional[str]=""
+    property_types:list[str]
+    city:Optional[str]=""
+    location:str
+    google_location:Optional[str]=""
+    area_input:str
+    rent_amount:Optional[str]=""
+    rent_unit:Optional[str]="MONTH"
+    transaction_type:Optional[str]="LEASE"
+    floor:Optional[str]=""
+    frontage:Optional[str]=""
+    parking:Optional[str]=""
+    possession:Optional[str]=""
+    suitable_for:Optional[str]=""
+    nearby_brands:Optional[str]=""
+    owner_broker_name:Optional[str]=""
+    contact_number:Optional[str]=""
+    contact_role:Optional[str]="UNVERIFIED"
+    verification_status:Optional[str]="UNVERIFIED"
+    remarks:Optional[str]=""
+
+@app.post("/api/v18/property/create")
+def v18_property_create(p:V18PropertyInput,req:Request):
+    need_login(req);_v18_setup()
+    pts=[str(x).strip() for x in (p.property_types or []) if str(x).strip()]
+    if not pts: raise HTTPException(400,"Select at least one Property Type.")
+    if not str(p.location or "").strip(): raise HTTPException(400,"Location is required.")
+    area,unit=_v179_area(p.area_input)
+    rent=_v179_rent(p.rent_amount)
+    code=_v17_code("PROP")
+    who=actor_name(req)
+    with engine.begin() as c:
+        c.execute(text("""INSERT INTO pi_operational_properties(
+            property_code,division,property_name,property_types,city,location,google_location,
+            area_sqft,area_input,area_unit,rent_amount,rent_unit,transaction_type,
+            floor,frontage,parking,possession,suitable_for,nearby_brands,
+            owner_broker_name,contact_number,contact_role,verification_status,remarks,
+            created_by,entry_source,entered_by,entry_date
+        ) VALUES(
+            :code,:div,:name,CAST(:types AS jsonb),:city,:loc,:google,
+            :area,:raw,:unit,:rent,:ru,:tt,:floor,:front,:park,:poss,:suitable,:nearby,
+            :person,:phone,:role,:ver,:remarks,:by,'MANUAL',:by,NOW()
+        )"""),{
+            "code":code,"div":str(p.division or "DELHI_NCR").upper(),"name":(p.property_name or "").strip(),
+            "types":json.dumps(pts),"city":(p.city or "").strip(),"loc":p.location.strip(),
+            "google":(p.google_location or "").strip(),"area":area,"raw":p.area_input.strip(),"unit":unit,
+            "rent":rent,"ru":(p.rent_unit or "MONTH").strip(),"tt":(p.transaction_type or "LEASE").strip(),
+            "floor":(p.floor or "").strip(),"front":(p.frontage or "").strip(),
+            "park":(p.parking or "").strip(),"poss":(p.possession or "").strip(),
+            "suitable":(p.suitable_for or "").strip(),"nearby":(p.nearby_brands or "").strip(),
+            "person":(p.owner_broker_name or "").strip(),"phone":(p.contact_number or "").strip(),
+            "role":(p.contact_role or "UNVERIFIED").strip(),"ver":(p.verification_status or "UNVERIFIED").strip(),
+            "remarks":(p.remarks or "").strip(),"by":who
+        })
+    return {"status":"PROPERTY_SAVED","property_code":code,"area_input":p.area_input,"area_sqft":round(area,2)}
+
+@app.post("/api/v18/media/start")
+async def v18_media_start(req:Request):
+    need_login(req);_v18_setup()
+    b=await req.json()
+    _v18_validate_media(b)
+    code=str(b.get("property_code") or "").strip()
+    if not code: raise HTTPException(400,"property_code is required.")
+    with engine.connect() as c:
+        exists=c.execute(text("SELECT 1 FROM pi_operational_properties WHERE property_code=:p"),{"p":code}).first()
+    if not exists: raise HTTPException(404,"Property not found.")
+    total_chunks=max(1,int(b.get("total_chunks") or 1))
+    upload_id="UPL-"+uuid.uuid4().hex.upper()
+    with engine.begin() as c:
+        c.execute(text("""INSERT INTO pi_v18_media_upload_sessions(
+            upload_id,property_code,media_type,filename,mime_type,total_size,total_chunks,status
+        ) VALUES(:id,:p,:t,:f,:m,:s,:n,'UPLOADING')"""),{
+            "id":upload_id,"p":code,"t":str(b.get("media_type")).upper(),
+            "f":str(b.get("filename")),"m":str(b.get("mime_type") or "application/octet-stream"),
+            "s":int(b.get("total_size") or 0),"n":total_chunks
+        })
+    return {"status":"READY","upload_id":upload_id,"total_chunks":total_chunks}
+
+@app.post("/api/v18/media/chunk/{upload_id}/{chunk_no}")
+async def v18_media_chunk(upload_id:str,chunk_no:int,req:Request,file:UploadFile=File(...)):
+    need_login(req);_v18_setup()
+    if chunk_no<0: raise HTTPException(400,"Invalid chunk number.")
+    blob=await file.read()
+    if not blob: raise HTTPException(400,"Empty chunk.")
+    if len(blob)>6*1024*1024: raise HTTPException(413,"Chunk too large. Use 4 MB chunks.")
+    with engine.connect() as c:
+        ses=c.execute(text("SELECT total_chunks,status FROM pi_v18_media_upload_sessions WHERE upload_id=:id"),{"id":upload_id}).first()
+    if not ses: raise HTTPException(404,"Upload session not found.")
+    if str(ses._mapping["status"]) not in {"UPLOADING","RETRY"}:
+        raise HTTPException(409,"Upload session is not accepting chunks.")
+    if chunk_no>=int(ses._mapping["total_chunks"]):
+        raise HTTPException(400,"Chunk number exceeds total chunks.")
+    with engine.begin() as c:
+        c.execute(text("""INSERT INTO pi_v18_media_upload_chunks(upload_id,chunk_no,chunk_data,chunk_size)
+                          VALUES(:id,:n,:b,:s)
+                          ON CONFLICT(upload_id,chunk_no) DO UPDATE SET chunk_data=EXCLUDED.chunk_data,chunk_size=EXCLUDED.chunk_size"""),
+                  {"id":upload_id,"n":chunk_no,"b":blob,"s":len(blob)})
+        count=int(c.execute(text("SELECT COUNT(*) FROM pi_v18_media_upload_chunks WHERE upload_id=:id"),{"id":upload_id}).scalar_one() or 0)
+        c.execute(text("UPDATE pi_v18_media_upload_sessions SET received_chunks=:n,status='UPLOADING' WHERE upload_id=:id"),
+                  {"n":count,"id":upload_id})
+    return {"status":"CHUNK_SAVED","chunk_no":chunk_no,"received_chunks":count}
+
+@app.post("/api/v18/media/finalize/{upload_id}")
+def v18_media_finalize(upload_id:str,req:Request):
+    need_login(req);_v18_setup()
+    with engine.connect() as c:
+        s=c.execute(text("SELECT * FROM pi_v18_media_upload_sessions WHERE upload_id=:id"),{"id":upload_id}).first()
+        if not s: raise HTTPException(404,"Upload session not found.")
+        ses=dict(s._mapping)
+        rows=c.execute(text("SELECT chunk_no,chunk_data FROM pi_v18_media_upload_chunks WHERE upload_id=:id ORDER BY chunk_no"),
+                       {"id":upload_id}).fetchall()
+    if len(rows)!=int(ses["total_chunks"]):
+        raise HTTPException(409,f"Only {len(rows)} of {ses['total_chunks']} chunks received.")
+    blob=b"".join(bytes(r._mapping["chunk_data"]) for r in rows)
+    expected=int(ses.get("total_size") or 0)
+    if expected and len(blob)!=expected:
+        with engine.begin() as c:
+            c.execute(text("UPDATE pi_v18_media_upload_sessions SET status='RETRY',error_message=:e WHERE upload_id=:id"),
+                      {"e":f"Size mismatch {len(blob)} vs {expected}","id":upload_id})
+        raise HTTPException(409,f"Upload size mismatch. Received {len(blob)} bytes, expected {expected}.")
+
+    try:
+        _v18_insert_media(ses["property_code"],ses["media_type"],ses["filename"],ses.get("mime_type"),blob)
+    except Exception as ex:
+        with engine.begin() as c:
+            c.execute(text("UPDATE pi_v18_media_upload_sessions SET status='FAILED',error_message=:e WHERE upload_id=:id"),
+                      {"e":str(ex)[:1000],"id":upload_id})
+        raise HTTPException(500,"Media DB save failed: "+str(ex))
+
+    with engine.begin() as c:
+        c.execute(text("""UPDATE pi_v18_media_upload_sessions SET status='COMPLETED',received_chunks=total_chunks,
+                          error_message=NULL,completed_at=NOW() WHERE upload_id=:id"""),{"id":upload_id})
+        c.execute(text("DELETE FROM pi_v18_media_upload_chunks WHERE upload_id=:id"),{"id":upload_id})
+    return {"status":"MEDIA_SAVED","property_code":ses["property_code"],"media_type":ses["media_type"],
+            "filename":ses["filename"],"file_size":len(blob)}
+
+@app.get("/api/v18/property/{property_code}/media-status")
+def v18_media_status(property_code:str,req:Request):
+    need_login(req);_v18_setup()
+    with engine.connect() as c:
+        counts={r._mapping["media_type"]:int(r._mapping["n"]) for r in c.execute(text("""
+            SELECT media_type,COUNT(*) n FROM pi_operational_property_media
+            WHERE property_code=:p GROUP BY media_type
+        """),{"p":property_code}).fetchall()}
+        sessions=[dict(r._mapping) for r in c.execute(text("""
+            SELECT upload_id,media_type,filename,total_size,total_chunks,received_chunks,status,error_message,created_at,completed_at
+            FROM pi_v18_media_upload_sessions WHERE property_code=:p ORDER BY created_at DESC LIMIT 100
+        """),{"p":property_code}).fetchall()]
+    return {"status":"ok","counts":{"IMAGE":counts.get("IMAGE",0),"VIDEO":counts.get("VIDEO",0),"BROCHURE":counts.get("BROCHURE",0)},
+            "uploads":sessions}
+
+@app.get("/api/v18/media/schema-health")
+def v18_media_schema_health(req:Request):
+    need_login(req);_v18_setup()
+    schema=_v18_media_schema()
+    return {"status":"ok","columns":schema,"binary_columns":_v18_binary_columns(),
+            "ready":bool(_v18_binary_columns())}
+
+@app.get("/manual-property-v18",response_class=HTMLResponse)
+def v18_manual_property_form(req:Request,division:str=Query("DELHI_NCR")):
+    if not page_role_or_redirect(req): return RedirectResponse("/login",303)
+    d=division.upper()
+    checks="".join(f'<label><input type=checkbox name=ptype value="{escape(x)}"> {escape(x)}</label>' for x in _v17_types())
+    return HTMLResponse(f"""<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
+<title>Manual Property V18</title>
+<style>
+*{{box-sizing:border-box}}body{{font-family:Arial;margin:0;background:#f4f7fb;color:#172437}}header{{background:#102235;color:#fff;padding:20px}}
+.w{{max-width:1200px;margin:auto;padding:18px}}.card{{background:#fff;border:1px solid #e2e8f0;border-radius:12px;padding:15px;margin-bottom:12px}}
+.g{{display:grid;grid-template-columns:1fr 1fr;gap:10px}}input,select,textarea{{width:100%;padding:10px;border:1px solid #ccd6e2;border-radius:7px}}
+.checks{{display:grid;grid-template-columns:repeat(3,1fr);gap:6px}}.checks label{{padding:7px;background:#f6f8fb;border-radius:7px}}.checks input{{width:auto}}
+.drop{{border:2px dashed #8aaac7;border-radius:10px;padding:18px;text-align:center;background:#fbfdff;cursor:pointer}}.drop.drag{{border-color:#1677ff;background:#edf6ff}}
+.btn{{padding:10px 13px;border:0;border-radius:8px;background:#1677ff;color:#fff;font-weight:bold;text-decoration:none;cursor:pointer}}.green{{background:#08734b}}
+.help{{font-size:12px;color:#65758a;margin-top:5px}}.files{{margin-top:8px;font-size:12px;white-space:pre-wrap}}.msg{{padding:11px;background:#fff8e8;border-radius:8px;margin-top:10px;white-space:pre-wrap}}
+.progress{{height:8px;background:#e8eef5;border-radius:6px;overflow:hidden;margin-top:5px}}.bar{{height:100%;width:0;background:#1677ff}}.fileRow{{padding:8px;border-bottom:1px solid #edf1f5}}
+@media(max-width:800px){{.g,.checks{{grid-template-columns:1fr}}}}
+</style></head><body>
+<header><b>{'Goa' if d=='GOA' else 'Delhi NCR'} Manual Property Form · V18 MEDIA DOCTOR</b><br>
+<small>Property saves first · media uploads separately · multiple photos/videos/brochures · large files chunked</small></header>
+<div class=w><a class=btn href="/workspace">← Dashboard</a><br><br>
+<form id=f autocomplete=off><input type=hidden name=division value="{d}">
+<div class=card><div class=g>
+<input name=property_name placeholder="Property Name">
+<input name=city value="{'Goa' if d=='GOA' else 'Delhi NCR'}">
+<input name=location placeholder="Location *" required>
+<input name=google_location placeholder="Google Maps location/link">
+<div><input name=area_input placeholder="Area * e.g. 2.5 acre / 1000 sqft / 500 sq yd / 100 sqm" required><div class=help>Accepted: sqft, sq yd, acre, sqm, hectare.</div></div>
+<div><input name=rent_amount placeholder="Rent amount"><div class=help>May remain blank until confirmed.</div></div>
+<select name=rent_unit><option>MONTH</option><option>SQFT_MONTH</option></select>
+<select name=transaction_type><option>LEASE</option><option>SALE</option><option>LEASE_OR_SALE</option></select>
+<input name=floor placeholder="Floor">
+<input name=frontage placeholder="Frontage">
+<input name=parking placeholder="Parking">
+<input name=possession placeholder="Possession">
+<input name=owner_broker_name placeholder="Owner/Broker/Contact Name">
+<input name=contact_number placeholder="Contact Number">
+<select name=contact_role><option>UNVERIFIED</option><option>OWNER</option><option>BROKER</option><option>BOTH</option></select>
+<select name=verification_status><option>UNVERIFIED</option><option>VERIFIED</option></select>
+</div></div>
+<div class=card><b>Property Type — select multiple *</b><div class=checks>{checks}</div></div>
+<div class=card><input name=suitable_for placeholder="Suitable For"><br><br><input name=nearby_brands placeholder="Nearby Brands"><br><br><textarea name=remarks placeholder="Remarks"></textarea></div>
+
+<div class=card><b>Photos · multiple</b><div class=drop id=idrop>Drag photos or click repeatedly to add</div><input id=ipick type=file accept="image/*,.heic,.heif" multiple hidden><div id=ilist class=files>No photos selected.</div></div>
+<div class=card><b>Videos · multiple</b><div class=drop id=vdrop>Drag videos or click repeatedly to add</div><input id=vpick type=file accept="video/*,.mov,.mp4,.m4v,.webm,.avi,.mkv,.3gp" multiple hidden><div id=vlist class=files>No videos selected.</div></div>
+<div class=card><b>Brochures · multiple</b><div class=drop id=bdrop>Drag brochures or click repeatedly to add</div><input id=bpick type=file accept=".pdf,.doc,.docx,.ppt,.pptx" multiple hidden><div id=blist class=files>No brochures selected.</div></div>
+
+<button class="btn green" type=submit id=saveBtn>Save Property + Upload Media</button>
+<div id=msg class=msg>Ready.</div>
+<div id=progressBox class=card style="display:none"><b>Upload Progress</b><div id=fileProgress></div></div>
+</form></div>
+<script>
+const selected={{IMAGE:[],VIDEO:[],BROCHURE:[]}};
+const CHUNK=4*1024*1024;
+function k(f){{return [f.name,f.size,f.lastModified].join('|')}}
+function add(kind,files){{
+  const seen=new Set(selected[kind].map(k));
+  for(const f of Array.from(files||[]))if(!seen.has(k(f))){{selected[kind].push(f);seen.add(k(f))}}
+  show(kind);
+}}
+function show(kind){{
+  const ids={{IMAGE:'ilist',VIDEO:'vlist',BROCHURE:'blist'}};
+  const a=selected[kind];
+  document.getElementById(ids[kind]).textContent=a.length?a.length+' selected\\n'+a.map((f,i)=>(i+1)+'. '+f.name+' ('+Math.round(f.size/1024/1024*10)/10+' MB)').join('\\n'):'No files selected.';
+}}
+function setup(kind,dropId,pickId){{
+ const drop=document.getElementById(dropId),pick=document.getElementById(pickId);
+ drop.onclick=()=>pick.click();
+ pick.onchange=()=>{{add(kind,pick.files);pick.value=''}};
+ drop.ondragover=e=>{{e.preventDefault();drop.classList.add('drag')}};
+ drop.ondragleave=()=>drop.classList.remove('drag');
+ drop.ondrop=e=>{{e.preventDefault();drop.classList.remove('drag');add(kind,e.dataTransfer.files)}};
+}}
+setup('IMAGE','idrop','ipick');setup('VIDEO','vdrop','vpick');setup('BROCHURE','bdrop','bpick');
+
+async function jsonCall(url,opts={{}}){{
+ const r=await fetch(url,opts);let d={{}};
+ try{{d=await r.json()}}catch(e){{d={{detail:'Server returned non-JSON response'}}}}
+ if(!r.ok)throw new Error(d.detail||d.message||('HTTP '+r.status));
+ return d;
+}}
+function rowFor(file,kind){{
+ const id='p_'+Math.random().toString(36).slice(2);
+ fileProgress.insertAdjacentHTML('beforeend',`<div class=fileRow id="${{id}}"><b>${{kind}} · ${{file.name}}</b><div class=progress><div class=bar></div></div><span>Waiting</span></div>`);
+ return document.getElementById(id);
+}}
+async function uploadOne(propertyCode,file,kind,row){{
+ const total=Math.max(1,Math.ceil(file.size/CHUNK));
+ const start=await jsonCall('/api/v18/media/start',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{
+   property_code:propertyCode,media_type:kind,filename:file.name,mime_type:file.type||'application/octet-stream',
+   total_size:file.size,total_chunks:total
+ }})}});
+ const uploadId=start.upload_id;
+ for(let i=0;i<total;i++){{
+   const blob=file.slice(i*CHUNK,Math.min(file.size,(i+1)*CHUNK));
+   let ok=false,lastErr='';
+   for(let attempt=1;attempt<=3&&!ok;attempt++){{
+     try{{
+       const fd=new FormData();fd.append('file',blob,file.name+'.part'+i);
+       await jsonCall('/api/v18/media/chunk/'+encodeURIComponent(uploadId)+'/'+i,{{method:'POST',body:fd}});
+       ok=true;
+     }}catch(e){{lastErr=e.message;if(attempt<3)await new Promise(r=>setTimeout(r,800*attempt))}}
+   }}
+   if(!ok)throw new Error('Chunk '+(i+1)+'/'+total+' failed: '+lastErr);
+   const pct=Math.round((i+1)/total*90);
+   row.querySelector('.bar').style.width=pct+'%';
+   row.querySelector('span').textContent='Uploading '+pct+'%';
+ }}
+ const fin=await jsonCall('/api/v18/media/finalize/'+encodeURIComponent(uploadId),{{method:'POST'}});
+ row.querySelector('.bar').style.width='100%';row.querySelector('span').textContent='SAVED';
+ return fin;
+}}
+f.onsubmit=async e=>{{
+ e.preventDefault();saveBtn.disabled=true;msg.textContent='Saving property data first...';
+ const pts=[...document.querySelectorAll('[name=ptype]:checked')].map(x=>x.value);
+ if(!pts.length){{msg.textContent='Select at least one Property Type.';saveBtn.disabled=false;return}}
+ const fd=new FormData(f);
+ const payload={{division:fd.get('division'),property_name:fd.get('property_name'),property_types:pts,city:fd.get('city'),
+ location:fd.get('location'),google_location:fd.get('google_location'),area_input:fd.get('area_input'),rent_amount:fd.get('rent_amount'),
+ rent_unit:fd.get('rent_unit'),transaction_type:fd.get('transaction_type'),floor:fd.get('floor'),frontage:fd.get('frontage'),
+ parking:fd.get('parking'),possession:fd.get('possession'),suitable_for:fd.get('suitable_for'),nearby_brands:fd.get('nearby_brands'),
+ owner_broker_name:fd.get('owner_broker_name'),contact_number:fd.get('contact_number'),contact_role:fd.get('contact_role'),
+ verification_status:fd.get('verification_status'),remarks:fd.get('remarks')}};
+ let property;
+ try{{
+   property=await jsonCall('/api/v18/property/create',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify(payload)}});
+ }}catch(err){{msg.textContent='PROPERTY SAVE FAILED: '+err.message;saveBtn.disabled=false;return}}
+ const code=property.property_code;
+ msg.textContent='Property '+code+' SAVED. Now uploading media safely...';
+ progressBox.style.display='block';fileProgress.innerHTML='';
+ let saved=0,failed=0,failures=[];
+ for(const kind of ['IMAGE','VIDEO','BROCHURE']){{
+   for(const file of selected[kind]){{
+     const row=rowFor(file,kind);
+     try{{await uploadOne(code,file,kind,row);saved++}}
+     catch(err){{failed++;failures.push(kind+' '+file.name+': '+err.message);row.querySelector('span').textContent='FAILED: '+err.message;row.querySelector('span').style.color='#b42318'}}
+   }}
+ }}
+ let status;
+ try{{status=await jsonCall('/api/v18/property/'+encodeURIComponent(code)+'/media-status')}}catch(e){{status=null}}
+ const counts=status?status.counts:{{}};
+ msg.textContent='PROPERTY SAVED: '+code+
+   '\\nPhotos in DB: '+(counts.IMAGE||0)+' · Videos in DB: '+(counts.VIDEO||0)+' · Brochures in DB: '+(counts.BROCHURE||0)+
+   '\\nThis save uploaded '+saved+' file(s); failed '+failed+'.'+(failures.length?'\\n'+failures.join('\\n'):'');
+ saveBtn.disabled=false;
+}};
+</script></body></html>""")
+
+@app.middleware("http")
+async def v18_manual_form_router(request,call_next):
+    p=request.url.path
+    # Final authoritative manual-property form route.
+    if request.method=="GET" and p in {
+        "/manual-property-final","/property-form-final","/operational-property-form","/property-manual",
+        "/manual-property-v179","/manual-property-final-exec","/manual-property-v18-final"
+    }:
+        q=("?"+request.url.query) if request.url.query else ""
+        return RedirectResponse("/manual-property-v18"+q,307)
+    response=await call_next(request)
+    if p.startswith(("/manual-property-v18","/api/v18")):
+        response.headers["Cache-Control"]="no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"]="no-cache"
+        response.headers["Expires"]="0"
+    return response
