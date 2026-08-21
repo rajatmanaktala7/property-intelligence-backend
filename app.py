@@ -16862,3 +16862,9 @@ async def v18_manual_form_router(request,call_next):
         response.headers["Pragma"]="no-cache"
         response.headers["Expires"]="0"
     return response
+
+# === V19 FAST ENTRY INTEGRATION ===
+from fast_manual_forms import install_fast_forms as _install_fast_forms
+_install_fast_forms(app=app,engine=engine,need_login=need_login,page_role_or_redirect=page_role_or_redirect,actor_name=actor_name)
+# === END V19 FAST ENTRY INTEGRATION ===
+
