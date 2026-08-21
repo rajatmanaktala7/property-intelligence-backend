@@ -6,7 +6,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel
 from sqlalchemy import text
 
-V19_VERSION='19.0-FAST-ENTRY-EDIT-DELETE'
+V19_VERSION='19.2-STABLE-BACK-DASHBOARD'
 PROPERTY_TYPES=['Retail Shop','High Street Retail','Mall Retail','Office','Restaurant','Cafe','Banquet / Wedding Venue','Hotel','Guest House','Lounge','Club','Bar','Farmhouse','Warehouse','Industrial','Land','Mixed Use','Residential / Villa']
 
 class FastProperty(BaseModel):
@@ -70,7 +70,7 @@ def _property_page(d):
     checks=''.join(f"<label><input type=checkbox name=ptype value='{x}'> {x}</label>" for x in PROPERTY_TYPES)
     return f'''<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>Fast Property Entry</title>
 <style>body{{font-family:Arial;background:#f4f7fb;margin:0;color:#172437}}header{{background:#102235;color:#fff;padding:18px}}.w{{max-width:1250px;margin:auto;padding:18px}}.card{{background:#fff;padding:15px;border-radius:12px;margin-bottom:12px}}.g{{display:grid;grid-template-columns:1fr 1fr;gap:10px}}input,select,textarea{{width:100%;padding:9px;border:1px solid #ccd6e2;border-radius:7px;box-sizing:border-box}}.checks{{display:grid;grid-template-columns:repeat(3,1fr);gap:6px}}.checks input{{width:auto}}.btn{{padding:9px 12px;background:#1677ff;color:#fff;border:0;border-radius:8px;cursor:pointer}}.red{{background:#b42318}}.gray{{background:#e9eef5;color:#203247}}table{{width:100%;border-collapse:collapse;font-size:12px}}th,td{{padding:8px;border-bottom:1px solid #eee;text-align:left}}.hidden{{display:none}}.msg{{margin-top:10px;background:#fff8e8;padding:9px}}@media(max-width:800px){{.g,.checks{{grid-template-columns:1fr}}}}</style></head>
-<body><header><b>{'Goa' if d=='GOA' else 'Delhi NCR'} Fast Property Entry V19</b><br><small>Fast save · Edit/Delete · Images after save</small></header><div class=w>
+<body><header><b>{'Goa' if d=='GOA' else 'Delhi NCR'} Fast Property Entry V19.2</b><br><small>Fast save · Edit/Delete · Images after save</small></header><div class=w><p><a class='btn gray' style='text-decoration:none;display:inline-block' href='/'>← Back to Dashboard</a></p>
 <div class=card><form id=f><input id=editcode type=hidden><div class=g>
 <div><b>Property Name</b><input name=property_name></div><div><b>City</b><input name=city></div>
 <div style="grid-column:1/-1"><b>Property Types *</b><div class=checks>{checks}</div></div>
@@ -84,7 +84,7 @@ def _property_page(d):
 <div style="grid-column:1/-1"><b>Remarks</b><textarea name=remarks></textarea></div></div><br>
 <button id=save class=btn>Save Property</button> <button id=cancel type=button class="btn gray hidden" onclick=resetForm()>Cancel Edit</button><div id=msg class=msg>Ready.</div></form></div>
 <div id=media class="card hidden"><b>Upload Images After Save</b><p id=mediaPid></p><input id=imgs type=file accept="image/*" multiple><br><br><button class=btn onclick=uploadMedia()>Upload Images</button> <button class="btn gray" onclick='media.classList.add("hidden")'>Skip / Done</button><div id=mmsg class=msg>Property is already saved.</div></div>
-<div class=card><h3>Recent Manual Properties</h3><table><thead><tr><th>Code</th><th>Property</th><th>Location</th><th>Area</th><th>Rent</th><th>Actions</th></tr></thead><tbody id=rows></tbody></table></div></div>
+<div class=card><h3>Recent Manual Properties</h3><table><thead><tr><th>Code</th><th>Date</th><th>Property</th><th>Location</th><th>Area</th><th>Rent</th><th>Actions</th></tr></thead><tbody id=rows></tbody></table></div></div>
 <script>
 const DIV='{d}';let currentMedia=null,submitting=false;
 function bodyFromForm(){{let fd=new FormData(f),b={{property_types:[...document.querySelectorAll('[name=ptype]:checked')].map(x=>x.value)}};for(let [k,v] of fd.entries())if(k!=='ptype')b[k]=String(v).trim()||null;return b}}
@@ -101,14 +101,14 @@ def _requirement_page(d):
     checks=''.join(f"<label><input type=checkbox name=rtype value='{x}'> {x}</label>" for x in PROPERTY_TYPES)
     return f'''<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>Fast Requirement Entry</title>
 <style>body{{font-family:Arial;background:#f4f7fb;margin:0;color:#172437}}header{{background:#102235;color:#fff;padding:18px}}.w{{max-width:1150px;margin:auto;padding:18px}}.card{{background:#fff;padding:15px;border-radius:12px;margin-bottom:12px}}.g{{display:grid;grid-template-columns:1fr 1fr;gap:10px}}input,select,textarea{{width:100%;padding:9px;border:1px solid #ccd6e2;border-radius:7px;box-sizing:border-box}}.checks{{display:grid;grid-template-columns:repeat(3,1fr);gap:6px}}.checks input{{width:auto}}.btn{{padding:9px 12px;background:#1677ff;color:#fff;border:0;border-radius:8px;cursor:pointer}}.red{{background:#b42318}}.gray{{background:#e9eef5;color:#203247}}table{{width:100%;border-collapse:collapse;font-size:12px}}th,td{{padding:8px;border-bottom:1px solid #eee;text-align:left}}.hidden{{display:none}}.msg{{margin-top:10px;background:#fff8e8;padding:9px}}@media(max-width:800px){{.g,.checks{{grid-template-columns:1fr}}}}</style></head>
-<body><header><b>{'Goa' if d=='GOA' else 'Delhi NCR'} Fast Requirement Entry V19</b><br><small>Fast save · Edit/Delete · Form clears after save</small></header><div class=w>
+<body><header><b>{'Goa' if d=='GOA' else 'Delhi NCR'} Fast Requirement Entry V19.2</b><br><small>Fast save · Edit/Delete · Form clears after save</small></header><div class=w><p><a class='btn gray' style='text-decoration:none;display:inline-block' href='/'>← Back to Dashboard</a></p>
 <div class=card><form id=f><input id=editcode type=hidden><div class=g><div><b>Client Name</b><input name=client_name></div><div><b>Company Name</b><input name=company_name></div><div><b>Contact Number</b><input name=contact_number></div><div><b>City</b><input name=city></div>
 <div style="grid-column:1/-1"><b>Requirement Types *</b><div class=checks>{checks}</div></div><div style="grid-column:1/-1"><b>Preferred Locations *</b><input name=preferred_locations required></div>
 <div><b>Minimum Area *</b><input name=minimum_area_text placeholder="4000 sqft" required></div><div><b>Maximum Area *</b><input name=maximum_area_text placeholder="5000 sqft" required></div>
 <div><b>Maximum Rent *</b><input name=maximum_rent_text placeholder="5 lakhs" required></div><div><b>Transaction</b><select name=transaction_type><option>LEASE</option><option>SALE</option></select></div>
 <div><b>Verification</b><select name=verification_status><option>VERIFIED</option><option>UNVERIFIED</option></select></div><div style="grid-column:1/-1"><b>Additional Points</b><textarea name=additional_points></textarea></div></div><br>
 <button id=save class=btn>Save Requirement</button> <button id=cancel type=button class="btn gray hidden" onclick=resetForm()>Cancel Edit</button><div id=msg class=msg>Ready.</div></form></div>
-<div class=card><h3>Recent Manual Requirements</h3><table><thead><tr><th>Code</th><th>Company</th><th>Location</th><th>Area</th><th>Rent</th><th>Actions</th></tr></thead><tbody id=rows></tbody></table></div></div>
+<div class=card><h3>Recent Manual Requirements</h3><table><thead><tr><th>Code</th><th>Date</th><th>Company</th><th>Location</th><th>Area</th><th>Rent</th><th>Actions</th></tr></thead><tbody id=rows></tbody></table></div></div>
 <script>
 const DIV='{d}';let submitting=false;
 function bodyFromForm(){{let fd=new FormData(f),b={{requirement_types:[...document.querySelectorAll('[name=rtype]:checked')].map(x=>x.value)}};for(let [k,v] of fd.entries())if(k!=='rtype')b[k]=String(v).trim()||null;return b}}
