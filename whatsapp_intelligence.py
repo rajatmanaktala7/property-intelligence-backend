@@ -214,7 +214,7 @@ HEADER_PATTERNS = [
     re.compile(r"^(?P<date>\d{1,2}/\d{1,2}/\d{2,4}),\s*(?P<time>\d{1,2}:\d{2}\s*(?:am|pm)?)\s*-\s*(?P<sender>[^:]+):\s*(?P<text>.*)$", re.I),
 ]
 
-PHONE_RE = re.compile(r"(?<!\d)(?:\+?91[\s-]?)?[6-9]\d{9}(?!\d)")
+PHONE_RE = re.compile(r"(?<!\d)(?:(?:\+?91)[\s-]?|0)?[6-9]\d{9}(?!\d)")
 PROPERTY_WORDS = [
     "sqft","sq ft","sft","gaj","yard","sqm","sq m","acre","rent","lease","sale","shop",
     "showroom","office","warehouse","plot","floor","kothi","villa","apartment","flat",
@@ -335,7 +335,7 @@ def parse_chat(raw: str):
 def all_phones(text_value):
     found=[]
     for m in PHONE_RE.finditer(text_value or ""):
-        d=re.sub(r"\\D","",m.group(0))
+        d=re.sub(r"\D","",m.group(0))
         if len(d)==11 and d.startswith("0"):
             d=d[1:]
         elif len(d)==12 and d.startswith("91"):
@@ -385,41 +385,81 @@ def area_sqft(txt):
 
 def all_areas(txt):
     range_patterns=[
-        (r"(\\d[\\d,]*(?:\\.\\d+)?)\\s*(?:-|–|to)\\s*(\\d[\\d,]*(?:\\.\\d+)?)\\s*(?:sq\\.?\\s*ft|sqft|sft)\\b",1.0),
-        (r"(\\d[\\d,]*(?:\\.\\d+)?)\\s*(?:-|–|to)\\s*(\\d[\\d,]*(?:\\.\\d+)?)\\s*(?:gaj|sq\\.?\\s*yd|sq\\.?\\s*yard|sqyd|yards?)\\b",9.0),
-        (r"(\\d[\\d,]*(?:\\.\\d+)?)\\s*(?:-|–|to)\\s*(\\d[\\d,]*(?:\\.\\d+)?)\\s*(?:sq\\.?\\s*m|sqm)\\b",10.7639),
-        (r"(\\d[\\d,]*(?:\\.\\d+)?)\\s*(?:-|–|to)\\s*(\\d[\\d,]*(?:\\.\\d+)?)\\s*(?:acre|acres)\\b",43560.0),
+        (r"(\d[\d,]*(?:\.\d+)?)\s*(?:-|–|to)\s*(\d[\d,]*(?:\.\d+)?)\s*(?:sq\.?\s*ft|sqft|sft)\b",1.0),
+        (r"(\d[\d,]*(?:\.\d+)?)\s*(?:-|–|to)\s*(\d[\d,]*(?:\.\d+)?)\s*(?:gaj|sq\.?\s*yd|sq\.?\s*yard|sqyd|yards?)\b",9.0),
+        (r"(\d[\d,]*(?:\.\d+)?)\s*(?:-|–|to)\s*(\d[\d,]*(?:\.\d+)?)\s*(?:sq\.?\s*m|sqm)\b",10.7639),
+        (r"(\d[\d,]*(?:\.\d+)?)\s*(?:-|–|to)\s*(\d[\d,]*(?:\.\d+)?)\s*(?:acre|acres)\b",43560.0),
     ]
     for pat,mul in range_patterns:
         m=re.search(pat,txt,re.I)
         if m:
-            a=round(float(m.group(1).replace(",",""))*mul,2)
-            b=round(float(m.group(2).replace(",",""))*mul,2)
-            return sorted([a,b])
-
+            return sorted([
+                round(float(m.group(1).replace(",",""))*mul,2),
+                round(float(m.group(2).replace(",",""))*mul,2)
+            ])
     vals=[]
     for pat,mul in [
-        (r"(\\d[\\d,]*(?:\\.\\d+)?)\\s*(?:sq\\.?\\s*ft|sqft|sft)\\b",1.0),
-        (r"(\\d[\\d,]*(?:\\.\\d+)?)\\s*(?:gaj|sq\\.?\\s*yd|sq\\.?\\s*yard|sqyd|yards?)\\b",9.0),
-        (r"(\\d[\\d,]*(?:\\.\\d+)?)\\s*(?:sq\\.?\\s*m|sqm)\\b",10.7639),
-        (r"(\\d[\\d,]*(?:\\.\\d+)?)\\s*(?:acre|acres)\\b",43560.0),
+        (r"(\d[\d,]*(?:\.\d+)?)\s*(?:sq\.?\s*ft|sqft|sft)\b",1.0),
+        (r"(\d[\d,]*(?:\.\d+)?)\s*(?:gaj|sq\.?\s*yd|sq\.?\s*yard|sqyd|yards?)\b",9.0),
+        (r"(\d[\d,]*(?:\.\d+)?)\s*(?:sq\.?\s*m|sqm)\b",10.7639),
+        (r"(\d[\d,]*(?:\.\d+)?)\s*(?:acre|acres)\b",43560.0),
     ]:
         for m in re.finditer(pat,txt,re.I):
             vals.append(round(float(m.group(1).replace(",",""))*mul,2))
     return vals
 
+def _money_token_to_inr(number_text, suffix=""):
+    raw=(number_text or "").strip().replace(" ","")
+    suf=(suffix or "").lower().strip()
+
+    # Indian shorthand: 2,25CR = 2.25 Cr, not 225 Cr.
+    if suf in {"cr","crore","crores"} and re.fullmatch(r"\d{1,2},\d{1,2}",raw):
+        raw=raw.replace(",",".")
+    else:
+        raw=raw.replace(",","")
+
+    try:
+        v=float(raw)
+    except:
+        return None
+
+    if suf=="k": v*=1_000
+    elif suf in {"l","lac","lakh","lakhs"}: v*=100_000
+    elif suf in {"cr","crore","crores"}: v*=10_000_000
+    return v
+
 def money_values(txt):
     vals=[]
-    for m in re.finditer(r"(?:₹|rs\.?|inr)?\s*(\d[\d,]*(?:\.\d+)?)\s*(k|l|lac|lakh|lakhs|cr|crore|crores)?\b",txt,re.I):
+    pat=r"(?:₹|rs\.?|inr)?\s*(\d[\d,]*(?:\.\d+)?)\s*(k|l|lac|lakh|lakhs|cr|crore|crores)?\b"
+    for m in re.finditer(pat,txt,re.I):
         suf=(m.group(2) or "").lower()
         token=m.group(0).lower()
-        if not suf and not ("₹" in token or "rs" in token or "inr" in token): continue
-        v=float(m.group(1).replace(",",""))
-        if suf=="k":v*=1_000
-        elif suf in {"l","lac","lakh","lakhs"}:v*=100_000
-        elif suf in {"cr","crore","crores"}:v*=10_000_000
-        vals.append(v)
+        if not suf and not ("₹" in token or "rs" in token or "inr" in token):
+            continue
+        v=_money_token_to_inr(m.group(1),suf)
+        if v is not None:
+            vals.append(v)
     return vals
+
+def _context_money(txt, labels):
+    label="|".join(re.escape(x) for x in labels)
+    patterns=[
+        rf"(?:{label})\s*[-:=@]?\s*(?:₹|rs\.?|inr)?\s*(\d[\d,]*(?:\.\d+)?)\s*(k|l|lac|lakh|lakhs|cr|crore|crores)?\b",
+        rf"(?:₹|rs\.?|inr)?\s*(\d[\d,]*(?:\.\d+)?)\s*(k|l|lac|lakh|lakhs|cr|crore|crores)?\s*(?:pm|per\s*month|monthly)?\s*(?:{label})\b",
+    ]
+    for pat in patterns:
+        m=re.search(pat,txt,re.I)
+        if m:
+            v=_money_token_to_inr(m.group(1),m.group(2) or "")
+            if v is not None:
+                return v
+    return None
+
+def extract_rent_inr(txt):
+    return _context_money(txt,["coming rent","asking rent","rent","lease rent","monthly rent"])
+
+def extract_sale_price_inr(txt):
+    return _context_money(txt,["sale demand","selling price","sale price","asking price","price","demand"])
 
 def location(txt):
     low=txt.lower()
@@ -432,6 +472,8 @@ def location(txt):
 
 def ptype(txt):
     low=txt.lower()
+    if re.search(r"\b[1-9](?:\.5)?\s*-?\s*bhk\b",low):
+        return "Apartment"
     for k,v in sorted(PROPERTY_TYPES.items(),key=lambda x:len(x[0]),reverse=True):
         if k in low:return v
     return "UNKNOWN"
@@ -450,7 +492,10 @@ def role(txt):
 
 def txn(txt, requirement=False):
     low=txt.lower()
-    if any(x in low for x in ["for sale","buy","buyer","purchase","sale"]): return "SALE"
+    sale=any(x in low for x in ["for sale","sale","selling","buy","buyer","purchase","sale demand","selling price"])
+    rent=any(x in low for x in ["for rent","rent","lease","letting","coming rent","asking rent"])
+    if sale and rent:return "SALE_RENT"
+    if sale:return "SALE"
     return "RENT"
 
 def extract_broker_identity(raw_text, sender):
@@ -526,6 +571,196 @@ def split_inventory(txt):
 
     return [raw.strip()]
 
+
+def _norm_ws(v):
+    return re.sub(r"\s+"," ",(v or "")).strip()
+
+def is_broker_footer_fragment(txt):
+    t=_norm_ws(txt)
+    low=t.lower()
+    if not t:
+        return True
+
+    # phone-only or contact-only line
+    if all_phones(t) and len(re.sub(r"[^A-Za-z]","",t)) < 5:
+        return True
+
+    if re.search(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}",t) and len(t)<120:
+        return True
+
+    footer_words=[
+        "for more info","for more information","please call","for details",
+        "site visit","chawla realty","realtychawla","jai shree","contact us"
+    ]
+    asset_words=PROPERTY_WORDS+[
+        "bhk","sqft","sq yd","sqyd","floor","shop","plot",
+        "apartment","flat","office","showroom"
+    ]
+
+    if any(w in low for w in footer_words) and not any(w in low for w in asset_words):
+        return True
+
+    if len(t)<80 and not re.search(r"\d",t) and not any(w in low for w in PROPERTY_WORDS+["bhk","floor"]):
+        if any(w in low for w in ["realty","properties","estate","consultant"]):
+            return True
+
+    return False
+
+def property_entity_score(txt):
+    low=(txt or "").lower()
+    score=0
+
+    if ptype(txt)!="UNKNOWN" or re.search(r"\b[1-9](?:\.5)?\s*-?\s*bhk\b",low):
+        score+=3
+    if all_areas(txt):
+        score+=3
+    if location(txt)!="UNKNOWN":
+        score+=2
+    if floor_value(txt)!="UNKNOWN" or "higher floor" in low or "middle floor" in low:
+        score+=1
+    if any(x in low for x in ["sale","rent","lease","buy","demand","price"]):
+        score+=1
+    if money_values(txt) or extract_rent_inr(txt) or extract_sale_price_inr(txt):
+        score+=1
+    if re.search(r"\b(mall|society|tower|project|residency|residence|plaza|market|sector[-\s]?\d+)\b",low):
+        score+=1
+
+    return score
+
+def is_meaningful_property_entity(txt):
+    if is_broker_footer_fragment(txt):
+        return False
+
+    low=(txt or "").lower()
+
+    asset_signal=(
+        ptype(txt)!="UNKNOWN"
+        or bool(all_areas(txt))
+        or location(txt)!="UNKNOWN"
+        or bool(re.search(r"\b[1-9](?:\.5)?\s*-?\s*bhk\b",low))
+    )
+
+    detail_signal=(
+        bool(all_areas(txt))
+        or floor_value(txt)!="UNKNOWN"
+        or any(x in low for x in ["sale","rent","lease","demand","price"])
+        or bool(money_values(txt))
+    )
+
+    return asset_signal and detail_signal and property_entity_score(txt)>=4
+
+def assemble_property_fragments(parts):
+    """Merge attribute fragments; never promote footer/contact lines to properties."""
+    clean=[_norm_ws(p) for p in parts if _norm_ws(p)]
+    out=[]
+    current=[]
+    pending=[]
+
+    for frag in clean:
+        if is_broker_footer_fragment(frag):
+            continue
+
+        strong=is_meaningful_property_entity(frag)
+        loc_only=(
+            location(frag)!="UNKNOWN"
+            or bool(re.search(r"\b(mall|society|tower|project|sector[-\s]?\d+)\b",frag,re.I))
+        ) and property_entity_score(frag)<4
+
+        if strong:
+            if current and is_meaningful_property_entity("\n".join(current)):
+                out.append("\n".join(current))
+            current=pending+[frag]
+            pending=[]
+
+        elif current:
+            if any(x in frag.lower() for x in [
+                "rent","demand","price","sqft","sqyd","sq yd","floor","bhk",
+                "facing","parking","washroom","bathroom","best for"
+            ]):
+                current.append(frag)
+
+            elif loc_only and location("\n".join(current))=="UNKNOWN":
+                current.insert(0,frag)
+
+            elif loc_only:
+                if is_meaningful_property_entity("\n".join(current)):
+                    out.append("\n".join(current))
+                current=[]
+                pending=[frag]
+
+        elif loc_only or property_entity_score(frag)>0:
+            pending.append(frag)
+
+    if current and is_meaningful_property_entity("\n".join(current)):
+        out.append("\n".join(current))
+    elif pending and is_meaningful_property_entity("\n".join(pending)):
+        out.append("\n".join(pending))
+
+    return out or [p for p in clean if is_meaningful_property_entity(p)]
+
+def ai_segment_inventory(raw):
+    """
+    Gemini groups complex broker advertisements into complete properties.
+    It is only accepted when source_text is verbatim from the original message.
+    """
+    if not wa_client or len(raw or "")<180:
+        return None
+
+    prompt=f"""You are a zero-hallucination real-estate WhatsApp segmentation engine.
+
+The input is ONE broker message and may contain several physical properties plus broker/footer/contact/marketing lines.
+
+Return JSON only:
+{{"properties":[{{"source_text":"..."}}]}}
+
+Rules:
+- ONE object = ONE physical property.
+- Merge all details belonging to the same property: project/location, unit/type, BHK, floor, area, rent, sale demand, amenities.
+- NEVER create a property from a phone number, broker/person name, company name, email, greeting, "for more info", price-only, rent-only, area-only, or project-heading-only fragment.
+- Broker/footer/contact lines must not become property objects.
+- source_text MUST be copied verbatim from the original message.
+- Do not paraphrase, correct, infer, or add words.
+- If uncertain, keep related details together rather than over-splitting.
+
+INPUT:
+{raw}"""
+
+    try:
+        r=wa_client.models.generate_content(
+            model=WA_GEMINI_MODEL,
+            contents=prompt,
+            config={"response_mime_type":"application/json"}
+        )
+        parsed=json.loads(r.text)
+        props=parsed.get("properties",[]) if isinstance(parsed,dict) else []
+        raw_norm=_norm_ws(raw)
+        valid=[]
+
+        for item in props:
+            if not isinstance(item,dict):
+                continue
+
+            st=_norm_ws(item.get("source_text"))
+            if st and st in raw_norm and is_meaningful_property_entity(st):
+                valid.append(st)
+
+        return valid or None
+
+    except Exception:
+        return None
+
+def segment_inventory(raw):
+    deterministic=split_inventory(raw)
+    assembled=assemble_property_fragments(deterministic)
+
+    # Complex advertisements get one AI segmentation pass.
+    if len(raw or "")>350 or len(deterministic)>2:
+        ai_parts=ai_segment_inventory(raw)
+        if ai_parts:
+            return ai_parts
+
+    return assembled or ([raw.strip()] if is_meaningful_property_entity(raw) else [])
+
 def deterministic_extract(txt, kind, sender):
     areas=all_areas(txt); cash=money_values(txt); low=txt.lower()
     loc=location(txt); typ=ptype(txt); t=txn(txt,kind=="PROPERTY_REQUIREMENT"); ph=phone(txt); ct=role(txt)
@@ -538,12 +773,15 @@ def deterministic_extract(txt, kind, sender):
             "floor_preference":floor_value(txt),"frontage_requirement":None,"suitable_category":typ,
             "contact_name":sender or "UNKNOWN","contact_phone":ph,"contact_type":ct
         }
-    cashv=max(cash) if cash else None
+    rentv=extract_rent_inr(txt)
+    salev=extract_sale_price_inr(txt)
+    if t=="RENT" and rentv is None and len(cash)==1:rentv=cash[0]
+    if t=="SALE" and salev is None and len(cash)==1:salev=cash[0]
     return {
         "property_type":typ,"transaction_type":t,"city":"Delhi NCR" if loc!="UNKNOWN" else "UNKNOWN",
         "location":loc,"locality":loc,"address":None,"landmark":None,"area_sqft":areas[0] if areas else None,
         "available_area_sqft":areas[0] if areas else None,"floor":floor_value(txt),"frontage":None,
-        "rent_inr":cashv if t=="RENT" else None,"sale_price_inr":cashv if t=="SALE" else None,
+        "rent_inr":rentv,"sale_price_inr":salev,
         "cam_inr":None,"possession":"Immediate" if "immediate" in low else None,"parking":None,
         "suitable_for":None,"nearby_brands":None,
         "availability":"AVAILABLE" if any(x in low for x in ["available","for rent","for sale","vacant","ready to move"]) else "UNKNOWN",
@@ -669,8 +907,8 @@ def match_score(req,prop):
         target=float(mn or mx)
         if num_sim(float(a),target)>=.80:score+=12;reasons.append("Area near requirement")
     if req["property_type"]!="UNKNOWN" and req["property_type"]==prop["property_type"]:score+=10;reasons.append("Property type")
-    if req["transaction_type"]==prop["transaction_type"]:score+=10;reasons.append("Transaction")
-    budget=req["budget_max_inr"]; price=prop["rent_inr"] if prop["transaction_type"]=="RENT" else prop["sale_price_inr"]
+    if req["transaction_type"]==prop["transaction_type"] or prop["transaction_type"]=="SALE_RENT":score+=10;reasons.append("Transaction")
+    budget=req["budget_max_inr"]; price=prop["rent_inr"] if req["transaction_type"]=="RENT" else prop["sale_price_inr"]
     if budget and price and float(price)<=float(budget):score+=15;reasons.append("Within budget")
     if prop["verification_status"]=="VERIFIED_AVAILABLE":score+=10;reasons.append("Verified available")
     elif prop["availability"]=="AVAILABLE":score+=5;reasons.append("Availability signal")
@@ -694,12 +932,32 @@ def mark_legacy_combined_properties():
             except Exception:
                 continue
 
+def mark_invalid_property_fragments():
+    """Hide old fragment rows without deleting source/audit history."""
+    if wa_engine is None:
+        return
+
+    with wa_engine.begin() as c:
+        rows=c.execute(text("""SELECT wa_property_id,raw_text FROM wa_properties
+                               WHERE COALESCE(record_status,'ACTIVE')='ACTIVE'""")).mappings().all()
+
+        for row in rows:
+            try:
+                if not is_meaningful_property_entity(row["raw_text"] or ""):
+                    c.execute(
+                        text("UPDATE wa_properties SET record_status='FRAGMENT',updated_at=NOW() WHERE wa_property_id=:p"),
+                        {"p":row["wa_property_id"]}
+                    )
+            except Exception:
+                continue
+
 @router.on_event("startup")
 def wa_startup():
     if wa_engine is not None:
         try:
             init_wa_db()
             mark_legacy_combined_properties()
+            mark_invalid_property_fragments()
         except Exception as e:print("WhatsApp Intelligence DB init warning:",e)
 
 @router.get("",response_class=HTMLResponse)
@@ -712,7 +970,7 @@ def dashboard():
             "Properties":"SELECT COUNT(*) FROM wa_properties WHERE COALESCE(record_status,'ACTIVE')='ACTIVE' AND duplicate_status<>'DUPLICATE'",
             "Requirements":"SELECT COUNT(*) FROM wa_requirements",
             "Contacts":"SELECT COUNT(*) FROM wa_contacts",
-            "Verified":"SELECT COUNT(*) FROM wa_properties WHERE verification_status='VERIFIED_AVAILABLE'",
+            "Verified":"SELECT COUNT(*) FROM wa_properties WHERE verification_status='VERIFIED_AVAILABLE' AND COALESCE(record_status,'ACTIVE')='ACTIVE'",
             "Review":"SELECT COUNT(*) FROM wa_review_queue WHERE status='OPEN'",
             "Rejected":"SELECT COUNT(*) FROM wa_rejected",
             "Duplicates":"SELECT COUNT(*) FROM wa_properties WHERE duplicate_status<>'UNIQUE'"
@@ -767,8 +1025,16 @@ async def process_import(group_name: str=Form(""), chat_file: UploadFile=File(..
                 ph=phone(rawtxt); upsert_contact(c,m["sender"],ph,"UNKNOWN",m["timestamp"],source_name,None,None,True)
                 if ph:counts["contacts"]+=1
                 continue
-            parts=split_inventory(rawtxt) if kind=="PROPERTY_INVENTORY" else [rawtxt]
+            parts=segment_inventory(rawtxt) if kind=="PROPERTY_INVENTORY" else [rawtxt]
             parent_broker_name,parent_broker_phone=extract_broker_identity(rawtxt,m["sender"])
+
+            if kind=="PROPERTY_INVENTORY" and not parts:
+                c.execute(text("""INSERT INTO wa_review_queue(message_id,source_id,review_reason,confidence)
+                VALUES(:mid,:sid,'Could not assemble a complete property entity',:conf)"""),
+                {"mid":mid,"sid":sid,"conf":round(base*100,2)})
+                counts["review"]+=1
+                continue
+
             for item_no,part in enumerate(parts, start=1):
                 data=deterministic_extract(part,kind,m["sender"])
                 data=enrich_missing(data,ai_enrich(part,kind))
