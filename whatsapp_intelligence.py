@@ -4,7 +4,7 @@ from difflib import SequenceMatcher
 from typing import Optional
 from urllib.parse import quote_plus
 
-from fastapi import APIRouter, Request, UploadFile, File, Form, Query, HTTPException
+from fastapi import APIRouter, Request, UploadFile, File, Form, Query, HTTPException, BackgroundTasks
 from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse, JSONResponse
 from sqlalchemy import create_engine, text
 from google import genai
@@ -733,104 +733,191 @@ def import_page():
     <p class=muted>On WhatsApp: open group → More → Export chat → Without media → upload the .txt file.</p></div>"""
     return HTMLResponse(shell("Import WhatsApp",body,"Import"))
 
+def _needs_ai(data, kind):
+    if not wa_client:
+        return False
+    if kind=="PROPERTY_INVENTORY":
+        important=[
+            data.get("location"), data.get("property_type"), data.get("area_sqft"),
+            data.get("rent_inr"), data.get("sale_price_inr")
+        ]
+        return sum(v not in (None,"","UNKNOWN") for v in important) < 3
+    important=[
+        data.get("preferred_locations"), data.get("property_type"),
+        data.get("minimum_area_sqft"), data.get("budget_max_inr")
+    ]
+    return sum(v not in (None,"","UNKNOWN") for v in important) < 2
+
+def _process_import_job(sid, source_name, original_filename, msgs):
+    counts={"inventory":0,"requirements":0,"contacts":0,"duplicates":0,"review":0,"rejected":0}
+    try:
+        for idx,m in enumerate(msgs, start=1):
+            with wa_engine.begin() as c:
+                mid=uuid.uuid4(); rawtxt=m["text"]; noise,reason=is_noise(rawtxt)
+                if noise:
+                    c.execute(text("""INSERT INTO wa_messages(message_id,source_id,message_timestamp,sender_name,sender_phone,raw_text,classification,confidence,rejection_reason)
+                    VALUES(:mid,:sid,:ts,:sn,:sp,:raw,'REJECTED',99,:reason)"""),
+                    {"mid":mid,"sid":sid,"ts":m["timestamp"],"sn":m["sender"],"sp":phone(m["sender"]),"raw":rawtxt,"reason":reason})
+                    c.execute(text("INSERT INTO wa_rejected(message_id,source_id,rejection_reason,raw_text) VALUES(:mid,:sid,:r,:raw)"),
+                              {"mid":mid,"sid":sid,"r":reason,"raw":rawtxt})
+                    counts["rejected"]+=1
+                else:
+                    kind,base=classify(rawtxt)
+                    c.execute(text("""INSERT INTO wa_messages(message_id,source_id,message_timestamp,sender_name,sender_phone,raw_text,classification,confidence)
+                    VALUES(:mid,:sid,:ts,:sn,:sp,:raw,:k,:conf)"""),
+                    {"mid":mid,"sid":sid,"ts":m["timestamp"],"sn":m["sender"],"sp":phone(m["sender"]),"raw":rawtxt,"k":kind,"conf":round(base*100,2)})
+
+                    if kind=="NEEDS_REVIEW":
+                        c.execute(text("""INSERT INTO wa_review_queue(message_id,source_id,review_reason,confidence)
+                        VALUES(:mid,:sid,'Ambiguous property message',:conf)"""),
+                        {"mid":mid,"sid":sid,"conf":round(base*100,2)})
+                        counts["review"]+=1
+
+                    elif kind=="PROPERTY_CONTACT":
+                        ph=phone(rawtxt)
+                        upsert_contact(c,m["sender"],ph,"UNKNOWN",m["timestamp"],source_name,None,None,True)
+                        if ph:counts["contacts"]+=1
+
+                    else:
+                        parts=split_inventory(rawtxt) if kind=="PROPERTY_INVENTORY" else [rawtxt]
+                        parent_broker_name,parent_broker_phone=extract_broker_identity(rawtxt,m["sender"])
+
+                        for item_no,part in enumerate(parts, start=1):
+                            data=deterministic_extract(part,kind,m["sender"])
+                            if _needs_ai(data,kind):
+                                data=enrich_missing(data,ai_enrich(part,kind))
+
+                            if kind=="PROPERTY_INVENTORY":
+                                data["sender_name"]=parent_broker_name or data.get("sender_name")
+                                data["sender_phone"]=parent_broker_phone or data.get("sender_phone")
+                                if not data.get("broker_name"): data["broker_name"]=parent_broker_name
+                                if not data.get("broker_phone"): data["broker_phone"]=parent_broker_phone
+
+                            conf=confidence(data,base)
+                            fp=fingerprint(data,kind)
+
+                            if kind=="PROPERTY_INVENTORY":
+                                best,dupof=duplicate_candidate(c,data)
+                                ds="DUPLICATE" if best>=.88 else "POSSIBLE_DUPLICATE" if best>=.70 else "UNIQUE"
+                                if ds!="UNIQUE":counts["duplicates"]+=1
+
+                                if ds=="DUPLICATE" and dupof:
+                                    c.execute(text("""UPDATE wa_properties SET
+                                      last_seen=:seen,
+                                      availability=CASE WHEN :availability='AVAILABLE' THEN 'AVAILABLE' ELSE availability END,
+                                      broker_name=COALESCE(NULLIF(broker_name,''),:broker_name),
+                                      broker_phone=COALESCE(NULLIF(broker_phone,''),:broker_phone),
+                                      sender_name=COALESCE(NULLIF(sender_name,''),:sender_name),
+                                      sender_phone=COALESCE(NULLIF(sender_phone,''),:sender_phone),
+                                      updated_at=NOW()
+                                      WHERE wa_property_id=:dupof"""),
+                                      dict(data,seen=m["timestamp"],dupof=dupof))
+                                else:
+                                    pid="WAP-"+uuid.uuid4().hex[:10].upper()
+                                    c.execute(text("""INSERT INTO wa_properties(
+                                    wa_property_id,source_id,message_id,source_item_no,parent_message_text,record_status,fingerprint,property_type,transaction_type,city,location,locality,address,landmark,
+                                    area_sqft,available_area_sqft,floor,frontage,rent_inr,sale_price_inr,cam_inr,possession,parking,suitable_for,nearby_brands,
+                                    availability,broker_name,broker_phone,owner_name,owner_phone,sender_name,sender_phone,duplicate_status,duplicate_of,confidence,raw_text,first_seen,last_seen)
+                                    VALUES(:pid,:sid,:mid,:item_no,:parent_raw,'ACTIVE',:fp,:property_type,:transaction_type,:city,:location,:locality,:address,:landmark,:area_sqft,:available_area_sqft,:floor,:frontage,
+                                    :rent_inr,:sale_price_inr,:cam_inr,:possession,:parking,:suitable_for,:nearby_brands,:availability,:broker_name,:broker_phone,:owner_name,:owner_phone,
+                                    :sender_name,:sender_phone,:ds,:dupof,:conf,:raw,:seen,:seen)"""),
+                                    dict(data,pid=pid,sid=sid,mid=mid,item_no=item_no,parent_raw=rawtxt,fp=fp,ds=ds,dupof=dupof,conf=conf,raw=part,seen=m["timestamp"]))
+                                    counts["inventory"]+=1
+
+                                ph=data.get("owner_phone") or data.get("broker_phone") or data.get("sender_phone")
+                                nm=data.get("owner_name") or data.get("broker_name") or data.get("sender_name")
+                                ct="OWNER" if data.get("owner_phone") else "BROKER" if data.get("broker_phone") else "UNKNOWN"
+                                upsert_contact(c,nm,ph,ct,m["timestamp"],source_name,data.get("location"),data.get("property_type"),True)
+                                if ph:counts["contacts"]+=1
+
+                            else:
+                                rid="WAR-"+uuid.uuid4().hex[:10].upper()
+                                c.execute(text("""INSERT INTO wa_requirements(
+                                wa_requirement_id,source_id,message_id,fingerprint,client_name,company_name,property_type,transaction_type,city,preferred_locations,
+                                minimum_area_sqft,maximum_area_sqft,budget_min_inr,budget_max_inr,floor_preference,frontage_requirement,suitable_category,
+                                contact_name,contact_phone,contact_type,confidence,raw_text)
+                                VALUES(:rid,:sid,:mid,:fp,:client_name,:company_name,:property_type,:transaction_type,:city,:preferred_locations,:minimum_area_sqft,
+                                :maximum_area_sqft,:budget_min_inr,:budget_max_inr,:floor_preference,:frontage_requirement,:suitable_category,:contact_name,:contact_phone,:contact_type,:conf,:raw)"""),
+                                dict(data,rid=rid,sid=sid,mid=mid,fp=fp,conf=conf,raw=part))
+                                upsert_contact(c,data.get("contact_name"),data.get("contact_phone"),data.get("contact_type"),m["timestamp"],source_name,data.get("preferred_locations"),data.get("property_type"),False)
+                                counts["requirements"]+=1
+                                if data.get("contact_phone"):counts["contacts"]+=1
+
+                # Lightweight progress update every 10 messages.
+                if idx % 10 == 0 or idx == len(msgs):
+                    c.execute(text("""UPDATE wa_sources SET
+                    inventory_found=:i,requirements_found=:rq,contacts_found=:ct,
+                    duplicates_found=:d,review_found=:rv,rejected_found=:rj,
+                    error_message=:progress
+                    WHERE source_id=:sid"""),
+                    {"i":counts["inventory"],"rq":counts["requirements"],"ct":counts["contacts"],
+                     "d":counts["duplicates"],"rv":counts["review"],"rj":counts["rejected"],
+                     "progress":f"Processed {idx} of {len(msgs)} messages","sid":sid})
+
+        with wa_engine.begin() as c:
+            c.execute(text("""UPDATE wa_sources SET ingestion_status='COMPLETED',
+            inventory_found=:i,requirements_found=:rq,contacts_found=:ct,
+            duplicates_found=:d,review_found=:rv,rejected_found=:rj,
+            error_message=NULL,processed_at=NOW() WHERE source_id=:sid"""),
+            {"i":counts["inventory"],"rq":counts["requirements"],"ct":counts["contacts"],
+             "d":counts["duplicates"],"rv":counts["review"],"rj":counts["rejected"],"sid":sid})
+
+    except Exception as e:
+        with wa_engine.begin() as c:
+            c.execute(text("""UPDATE wa_sources SET ingestion_status='FAILED',
+            error_message=:err,processed_at=NOW() WHERE source_id=:sid"""),
+            {"err":str(e)[:1500],"sid":sid})
+        print("WhatsApp background import failed:",repr(e))
+
 @router.post("/import")
-async def process_import(group_name: str=Form(""), chat_file: UploadFile=File(...)):
+async def process_import(background_tasks: BackgroundTasks, group_name: str=Form(""), chat_file: UploadFile=File(...)):
     require_wa_db(); init_wa_db()
     if not (chat_file.filename or "").lower().endswith(".txt"):
         raise HTTPException(400,"Please upload a .txt WhatsApp export")
+
     raw=(await chat_file.read()).decode("utf-8-sig",errors="replace")
     msgs=parse_chat(raw)
     sid=uuid.uuid4()
-    counts={"inventory":0,"requirements":0,"contacts":0,"duplicates":0,"review":0,"rejected":0}
     source_name=group_name.strip() or (chat_file.filename or "WhatsApp Export")
+
     with wa_engine.begin() as c:
-        c.execute(text("""INSERT INTO wa_sources(source_id,source_name,original_filename,group_name,ingestion_status,total_messages)
-        VALUES(:sid,:sn,:fn,:g,'PROCESSING',:n)"""),{"sid":sid,"sn":source_name,"fn":chat_file.filename,"g":source_name,"n":len(msgs)})
-        for m in msgs:
-            mid=uuid.uuid4(); rawtxt=m["text"]; noise,reason=is_noise(rawtxt)
-            if noise:
-                c.execute(text("""INSERT INTO wa_messages(message_id,source_id,message_timestamp,sender_name,sender_phone,raw_text,classification,confidence,rejection_reason)
-                VALUES(:mid,:sid,:ts,:sn,:sp,:raw,'REJECTED',99,:reason)"""),
-                {"mid":mid,"sid":sid,"ts":m["timestamp"],"sn":m["sender"],"sp":phone(m["sender"]),"raw":rawtxt,"reason":reason})
-                c.execute(text("INSERT INTO wa_rejected(message_id,source_id,rejection_reason,raw_text) VALUES(:mid,:sid,:r,:raw)"),
-                          {"mid":mid,"sid":sid,"r":reason,"raw":rawtxt})
-                counts["rejected"]+=1;continue
-            kind,base=classify(rawtxt)
-            c.execute(text("""INSERT INTO wa_messages(message_id,source_id,message_timestamp,sender_name,sender_phone,raw_text,classification,confidence)
-            VALUES(:mid,:sid,:ts,:sn,:sp,:raw,:k,:conf)"""),
-            {"mid":mid,"sid":sid,"ts":m["timestamp"],"sn":m["sender"],"sp":phone(m["sender"]),"raw":rawtxt,"k":kind,"conf":round(base*100,2)})
-            if kind=="NEEDS_REVIEW":
-                c.execute(text("""INSERT INTO wa_review_queue(message_id,source_id,review_reason,confidence)
-                VALUES(:mid,:sid,'Ambiguous property message',:conf)"""),{"mid":mid,"sid":sid,"conf":round(base*100,2)})
-                counts["review"]+=1;continue
-            if kind=="PROPERTY_CONTACT":
-                ph=phone(rawtxt); upsert_contact(c,m["sender"],ph,"UNKNOWN",m["timestamp"],source_name,None,None,True)
-                if ph:counts["contacts"]+=1
-                continue
-            parts=split_inventory(rawtxt) if kind=="PROPERTY_INVENTORY" else [rawtxt]
-            parent_broker_name,parent_broker_phone=extract_broker_identity(rawtxt,m["sender"])
-            for item_no,part in enumerate(parts, start=1):
-                data=deterministic_extract(part,kind,m["sender"])
-                data=enrich_missing(data,ai_enrich(part,kind))
-                if kind=="PROPERTY_INVENTORY":
-                    data["sender_name"]=parent_broker_name or data.get("sender_name")
-                    data["sender_phone"]=parent_broker_phone or data.get("sender_phone")
-                    if not data.get("broker_name"):
-                        data["broker_name"]=parent_broker_name
-                    if not data.get("broker_phone"):
-                        data["broker_phone"]=parent_broker_phone
-                conf=confidence(data,base)
-                fp=fingerprint(data,kind)
-                if kind=="PROPERTY_INVENTORY":
-                    best,dupof=duplicate_candidate(c,data)
-                    ds="DUPLICATE" if best>=.88 else "POSSIBLE_DUPLICATE" if best>=.70 else "UNIQUE"
-                    if ds!="UNIQUE":counts["duplicates"]+=1
-                    if ds=="DUPLICATE" and dupof:
-                        c.execute(text("""UPDATE wa_properties SET
-                          last_seen=:seen,
-                          availability=CASE WHEN :availability='AVAILABLE' THEN 'AVAILABLE' ELSE availability END,
-                          broker_name=COALESCE(NULLIF(broker_name,''),:broker_name),
-                          broker_phone=COALESCE(NULLIF(broker_phone,''),:broker_phone),
-                          sender_name=COALESCE(NULLIF(sender_name,''),:sender_name),
-                          sender_phone=COALESCE(NULLIF(sender_phone,''),:sender_phone),
-                          updated_at=NOW()
-                          WHERE wa_property_id=:dupof"""),
-                          dict(data,seen=m["timestamp"],dupof=dupof))
-                        ph=data.get("broker_phone") or data.get("owner_phone") or data.get("sender_phone")
-                        nm=data.get("broker_name") or data.get("owner_name") or data.get("sender_name")
-                        upsert_contact(c,nm,ph,"BROKER",m["timestamp"],source_name,data.get("location"),data.get("property_type"),True)
-                        continue
-                    pid="WAP-"+uuid.uuid4().hex[:10].upper()
-                    c.execute(text("""INSERT INTO wa_properties(
-                    wa_property_id,source_id,message_id,source_item_no,parent_message_text,record_status,fingerprint,property_type,transaction_type,city,location,locality,address,landmark,
-                    area_sqft,available_area_sqft,floor,frontage,rent_inr,sale_price_inr,cam_inr,possession,parking,suitable_for,nearby_brands,
-                    availability,broker_name,broker_phone,owner_name,owner_phone,sender_name,sender_phone,duplicate_status,duplicate_of,confidence,raw_text,first_seen,last_seen)
-                    VALUES(:pid,:sid,:mid,:item_no,:parent_raw,'ACTIVE',:fp,:property_type,:transaction_type,:city,:location,:locality,:address,:landmark,:area_sqft,:available_area_sqft,:floor,:frontage,
-                    :rent_inr,:sale_price_inr,:cam_inr,:possession,:parking,:suitable_for,:nearby_brands,:availability,:broker_name,:broker_phone,:owner_name,:owner_phone,
-                    :sender_name,:sender_phone,:ds,:dupof,:conf,:raw,:seen,:seen)"""),
-                    dict(data,pid=pid,sid=sid,mid=mid,item_no=item_no,parent_raw=rawtxt,fp=fp,ds=ds,dupof=dupof,conf=conf,raw=part,seen=m["timestamp"]))
-                    ph=data.get("owner_phone") or data.get("broker_phone") or data.get("sender_phone")
-                    nm=data.get("owner_name") or data.get("broker_name") or data.get("sender_name")
-                    ct="OWNER" if data.get("owner_phone") else "BROKER" if data.get("broker_phone") else "UNKNOWN"
-                    upsert_contact(c,nm,ph,ct,m["timestamp"],source_name,data.get("location"),data.get("property_type"),True)
-                    counts["inventory"]+=1
-                    if ph:counts["contacts"]+=1
-                else:
-                    rid="WAR-"+uuid.uuid4().hex[:10].upper()
-                    c.execute(text("""INSERT INTO wa_requirements(
-                    wa_requirement_id,source_id,message_id,fingerprint,client_name,company_name,property_type,transaction_type,city,preferred_locations,
-                    minimum_area_sqft,maximum_area_sqft,budget_min_inr,budget_max_inr,floor_preference,frontage_requirement,suitable_category,
-                    contact_name,contact_phone,contact_type,confidence,raw_text)
-                    VALUES(:rid,:sid,:mid,:fp,:client_name,:company_name,:property_type,:transaction_type,:city,:preferred_locations,:minimum_area_sqft,
-                    :maximum_area_sqft,:budget_min_inr,:budget_max_inr,:floor_preference,:frontage_requirement,:suitable_category,:contact_name,:contact_phone,:contact_type,:conf,:raw)"""),
-                    dict(data,rid=rid,sid=sid,mid=mid,fp=fp,conf=conf,raw=part))
-                    upsert_contact(c,data.get("contact_name"),data.get("contact_phone"),data.get("contact_type"),m["timestamp"],source_name,data.get("preferred_locations"),data.get("property_type"),False)
-                    counts["requirements"]+=1
-                    if data.get("contact_phone"):counts["contacts"]+=1
-        c.execute(text("""UPDATE wa_sources SET ingestion_status='COMPLETED',inventory_found=:i,requirements_found=:rq,contacts_found=:ct,
-        duplicates_found=:d,review_found=:rv,rejected_found=:rj,processed_at=NOW() WHERE source_id=:sid"""),
-        {"i":counts["inventory"],"rq":counts["requirements"],"ct":counts["contacts"],"d":counts["duplicates"],"rv":counts["review"],"rj":counts["rejected"],"sid":sid})
-    return RedirectResponse("/whatsapp-intelligence",303)
+        c.execute(text("""INSERT INTO wa_sources(
+        source_id,source_name,original_filename,group_name,ingestion_status,total_messages,error_message)
+        VALUES(:sid,:sn,:fn,:g,'QUEUED',:n,'Waiting to start')"""),
+        {"sid":sid,"sn":source_name,"fn":chat_file.filename,"g":source_name,"n":len(msgs)})
+
+    background_tasks.add_task(_process_import_job,sid,source_name,chat_file.filename,msgs)
+    return RedirectResponse(f"/whatsapp-intelligence/import-status/{sid}",303)
+
+@router.get("/import-status/{sid}",response_class=HTMLResponse)
+def import_status(sid: str):
+    require_wa_db()
+    with wa_engine.begin() as c:
+        r=c.execute(text("SELECT * FROM wa_sources WHERE source_id=:sid"),{"sid":sid}).mappings().first()
+
+    if not r:
+        raise HTTPException(404,"Import job not found")
+
+    status=r["ingestion_status"] or "UNKNOWN"
+    progress=r["error_message"] or ""
+    done=(status in {"COMPLETED","FAILED"})
+
+    body=f"""<h2>WhatsApp Import</h2>
+    <div class=card>
+      <div class=muted>Status</div><div class=num style="font-size:24px">{esc(status)}</div>
+      <p>{esc(progress)}</p>
+      <div class=grid>
+        <div><b>Total messages</b><br>{esc(r['total_messages'])}</div>
+        <div><b>Properties</b><br>{esc(r['inventory_found'])}</div>
+        <div><b>Requirements</b><br>{esc(r['requirements_found'])}</div>
+        <div><b>Contacts</b><br>{esc(r['contacts_found'])}</div>
+        <div><b>Review</b><br>{esc(r['review_found'])}</div>
+        <div><b>Rejected</b><br>{esc(r['rejected_found'])}</div>
+      </div>
+      <br><a class=btn href="/whatsapp-intelligence">Dashboard</a>
+    </div>
+    {"<script>setTimeout(()=>location.reload(),3000)</script>" if not done else ""}"""
+    return HTMLResponse(shell("WhatsApp Import Progress",body,"Import"))
 
 def filter_properties(c,q="",location_q="",ptype_q="",txn_q="",verification="",availability="",min_area=None,max_area=None,min_price=None,max_price=None):
     sql="SELECT * FROM wa_properties WHERE duplicate_status<>'DUPLICATE' AND COALESCE(record_status,'ACTIVE')='ACTIVE'"; p={}
