@@ -16886,3 +16886,8 @@ app.include_router(whatsapp_intelligence_router)
 from whatsapp_hot_lead_engine import router as whatsapp_hot_lead_router
 app.include_router(whatsapp_hot_lead_router)
 # === END WHATSAPP HOT LEAD AUTOMATION ===
+
+# === WHATSAPP LIVE BRIDGE ===
+from whatsapp_live_bridge import router as whatsapp_live_router
+app.include_router(whatsapp_live_router)
+# === END WHATSAPP LIVE BRIDGE ===
