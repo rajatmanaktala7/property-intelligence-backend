@@ -16874,3 +16874,10 @@ from fast_manual_forms import install_fast_forms as _install_fast_forms
 _install_fast_forms(app=app,engine=engine,need_login=need_login,page_role_or_redirect=page_role_or_redirect,actor_name=actor_name)
 # === END V19 FAST ENTRY INTEGRATION ===
 
+
+
+# === WHATSAPP INTELLIGENCE MODULE ===
+from whatsapp_intelligence import router as whatsapp_intelligence_router
+app.include_router(whatsapp_intelligence_router)
+# === END WHATSAPP INTELLIGENCE MODULE ===
+
