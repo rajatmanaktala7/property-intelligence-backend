@@ -15386,6 +15386,12 @@ def v178_edit_page(property_code:str,req:Request):
     return HTMLResponse(f"""<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>Edit Property</title>
 <style>*{{box-sizing:border-box}}body{{font-family:Arial;margin:0;background:#f4f7fb;color:#172437}}header{{background:#102235;color:white;padding:20px}}.w{{max-width:1250px;margin:auto;padding:18px}}form,.box{{background:white;padding:16px;border-radius:12px;margin-bottom:14px}}.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px}}input,select,textarea{{width:100%;padding:10px;border:1px solid #ccd6e2;border-radius:7px}}textarea{{min-height:90px}}label small{{display:block;font-weight:bold;margin-bottom:5px}}.types{{display:flex;gap:12px;flex-wrap:wrap}}.types input{{width:auto}}.btn,button{{padding:9px 12px;background:#1677ff;color:white;border:0;border-radius:7px;text-decoration:none;font-weight:bold;cursor:pointer}}.media{{padding:8px;border-bottom:1px solid #eee}}.notice{{background:#eefbf4;padding:10px;border-radius:8px;margin-bottom:12px}}</style></head><body>
 <header><b>Edit Property</b><br><small>{V("property_code")} · same record, no duplicate</small></header><div class=w>
+<!-- V19.3 EDIT PAGE NAVIGATION -->
+<div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px">
+<a class=btn href="/manual-property-database-v178">← Back to Property Database</a>
+<a class=btn href="/final-dashboard-v12" style="background:#102235">🏠 Back to Dashboard</a>
+<button type=button onclick="history.back()" style="background:#687789">← Previous Page</button>
+</div>
 <div class=notice><b>Safe Edit:</b> Existing photos/videos/brochure stay attached unless Remove is clicked. Previous property values remain protected by the existing history trigger.</div>
 <form id=f enctype=multipart/form-data><div class=grid>
 <label><small>Property Name</small><input name=property_name value="{V("property_name")}"></label>
