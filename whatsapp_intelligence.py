@@ -286,6 +286,7 @@ def shell(title, body, active=""):
         ("Properties","/whatsapp-intelligence/properties"),
         ("Requirements","/whatsapp-intelligence/requirements"),
         ("Contacts","/whatsapp-intelligence/contacts"),
+        ("Brokers","/whatsapp-intelligence/brokers"),
         ("Search","/whatsapp-intelligence/search"),
         ("Review","/whatsapp-intelligence/review"),
         ("Rejected","/whatsapp-intelligence/rejected"),
@@ -445,12 +446,66 @@ def txn(txt, requirement=False):
     if any(x in low for x in ["for sale","buy","buyer","purchase","sale"]): return "SALE"
     return "RENT"
 
+def extract_broker_identity(raw_text, sender):
+    sender_name=(sender or "").strip() or "UNKNOWN"
+    sender_phone=phone(sender_name)
+    phones=all_phones(raw_text) if "all_phones" in globals() else ([phone(raw_text)] if phone(raw_text) else [])
+    broker_phone=sender_phone or (phones[0] if phones else None)
+
+    lines=[x.strip(" *-_") for x in (raw_text or "").splitlines() if x.strip()]
+    first_numbered=None
+    for i,line in enumerate(lines):
+        if re.match(r"^\d{1,3}(?:[\.\)\-:]|\s)\s*", line):
+            first_numbered=i
+            break
+
+    if first_numbered is not None and first_numbered>0:
+        for candidate in reversed(lines[:first_numbered]):
+            low=candidate.lower()
+            if not any(w in low for w in ["property","properties","estate","realty","group","available","sale","rent"]):
+                if 2 <= len(candidate.split()) <= 6 and not phone(candidate):
+                    sender_name=candidate
+                    break
+    return sender_name, broker_phone
+
 def split_inventory(txt):
-    parts=[x.strip() for x in txt.split("|") if x.strip()]
-    if len(parts)>1 and sum(any(w in p.lower() for w in PROPERTY_WORDS) for p in parts)>=2:return parts
-    numbered=[x.strip() for x in re.split(r"\n(?=\s*(?:\d+[\).\:-]|\*|-)\s*)",txt) if x.strip()]
-    if len(numbered)>1 and sum(any(w in p.lower() for w in PROPERTY_WORDS) for p in numbered)>=2:return numbered
-    return [txt]
+    raw=txt or ""
+
+    pipe_parts=[x.strip() for x in raw.split("|") if x.strip()]
+    if len(pipe_parts)>1 and sum(any(w in p.lower() for w in PROPERTY_WORDS) for p in pipe_parts)>=2:
+        return pipe_parts
+
+    lines=raw.splitlines()
+    items=[]
+    current=[]
+    started=False
+    numbered_re=re.compile(r"^\s*(\d{1,3})(?:[\.\)\-:]|\s)\s*(.+?)\s*$")
+
+    for line in lines:
+        m=numbered_re.match(line)
+        if m:
+            if current:
+                item="\n".join(current).strip()
+                if item:
+                    items.append(item)
+            started=True
+            current=[m.group(2).strip()]
+        elif started and line.strip():
+            current.append(line.strip())
+
+    if current:
+        item="\n".join(current).strip()
+        if item:
+            items.append(item)
+
+    if len(items)>=2 and sum(any(w in p.lower() for w in PROPERTY_WORDS) for p in items)>=2:
+        return items
+
+    numbered=[x.strip() for x in re.split(r"\n(?=\s*(?:\d+[\).\:-]|\*|-)\s*)",raw) if x.strip()]
+    if len(numbered)>1 and sum(any(w in p.lower() for w in PROPERTY_WORDS) for p in numbered)>=2:
+        return numbered
+
+    return [raw]
 
 def deterministic_extract(txt, kind, sender):
     areas=all_areas(txt); cash=money_values(txt); low=txt.lower()
@@ -676,15 +731,38 @@ async def process_import(group_name: str=Form(""), chat_file: UploadFile=File(..
                 if ph:counts["contacts"]+=1
                 continue
             parts=split_inventory(rawtxt) if kind=="PROPERTY_INVENTORY" else [rawtxt]
+            parent_broker_name,parent_broker_phone=extract_broker_identity(rawtxt,m["sender"])
             for part in parts:
                 data=deterministic_extract(part,kind,m["sender"])
                 data=enrich_missing(data,ai_enrich(part,kind))
+                if kind=="PROPERTY_INVENTORY":
+                    data["sender_name"]=parent_broker_name or data.get("sender_name")
+                    data["sender_phone"]=parent_broker_phone or data.get("sender_phone")
+                    if not data.get("broker_name"):
+                        data["broker_name"]=parent_broker_name
+                    if not data.get("broker_phone"):
+                        data["broker_phone"]=parent_broker_phone
                 conf=confidence(data,base)
                 fp=fingerprint(data,kind)
                 if kind=="PROPERTY_INVENTORY":
                     best,dupof=duplicate_candidate(c,data)
                     ds="DUPLICATE" if best>=.88 else "POSSIBLE_DUPLICATE" if best>=.70 else "UNIQUE"
                     if ds!="UNIQUE":counts["duplicates"]+=1
+                    if ds=="DUPLICATE" and dupof:
+                        c.execute(text("""UPDATE wa_properties SET
+                          last_seen=:seen,
+                          availability=CASE WHEN :availability='AVAILABLE' THEN 'AVAILABLE' ELSE availability END,
+                          broker_name=COALESCE(NULLIF(broker_name,''),:broker_name),
+                          broker_phone=COALESCE(NULLIF(broker_phone,''),:broker_phone),
+                          sender_name=COALESCE(NULLIF(sender_name,''),:sender_name),
+                          sender_phone=COALESCE(NULLIF(sender_phone,''),:sender_phone),
+                          updated_at=NOW()
+                          WHERE wa_property_id=:dupof"""),
+                          dict(data,seen=m["timestamp"],dupof=dupof))
+                        ph=data.get("broker_phone") or data.get("owner_phone") or data.get("sender_phone")
+                        nm=data.get("broker_name") or data.get("owner_name") or data.get("sender_name")
+                        upsert_contact(c,nm,ph,"BROKER",m["timestamp"],source_name,data.get("location"),data.get("property_type"),True)
+                        continue
                     pid="WAP-"+uuid.uuid4().hex[:10].upper()
                     c.execute(text("""INSERT INTO wa_properties(
                     wa_property_id,source_id,message_id,fingerprint,property_type,transaction_type,city,location,locality,address,landmark,
@@ -718,7 +796,7 @@ async def process_import(group_name: str=Form(""), chat_file: UploadFile=File(..
     return RedirectResponse("/whatsapp-intelligence",303)
 
 def filter_properties(c,q="",location_q="",ptype_q="",txn_q="",verification="",availability="",min_area=None,max_area=None,min_price=None,max_price=None):
-    sql="SELECT * FROM wa_properties WHERE 1=1"; p={}
+    sql="SELECT * FROM wa_properties WHERE duplicate_status<>'DUPLICATE'"; p={}
     if q:
         sql+=" AND (raw_text ILIKE :q OR sender_name ILIKE :q OR sender_phone ILIKE :q OR broker_phone ILIKE :q OR owner_phone ILIKE :q)";p["q"]=f"%{q}%"
     if location_q:sql+=" AND location ILIKE :loc";p["loc"]=f"%{location_q}%"
@@ -737,20 +815,90 @@ def filter_properties(c,q="",location_q="",ptype_q="",txn_q="",verification="",a
 def properties(q:str="",location:str="",property_type:str="",transaction_type:str="",verification_status:str="",availability:str="",
                min_area:Optional[float]=None,max_area:Optional[float]=None,min_price:Optional[float]=None,max_price:Optional[float]=None):
     require_wa_db();init_wa_db()
-    with wa_engine.begin() as c:rows=filter_properties(c,q,location,property_type,transaction_type,verification_status,availability,min_area,max_area,min_price,max_price)
-    forms="""<form class=gridform method=get><input name=q placeholder="Keyword / phone / sender"><input name=location placeholder=Location>
-    <input name=property_type placeholder="Property type"><select name=transaction_type><option value="">Rent/Sale</option><option>RENT</option><option>SALE</option></select>
-    <select name=verification_status><option value="">Verification</option><option>UNVERIFIED</option><option>VERIFIED_AVAILABLE</option><option>VERIFIED_UNAVAILABLE</option></select>
-    <input name=min_area type=number placeholder="Min area sqft"><input name=max_area type=number placeholder="Max area sqft">
-    <input name=max_price type=number placeholder="Max rent/sale INR"><button class=btn>Search</button></form><br>"""
-    trs=""
+    with wa_engine.begin() as c:
+        rows=filter_properties(c,q,location,property_type,transaction_type,verification_status,availability,min_area,max_area,min_price,max_price)
+
+    cards=[]
     for r in rows:
-        contact=r["owner_phone"] or r["broker_phone"] or r["sender_phone"]
-        trs+=f"""<tr><td>{esc(r['wa_property_id'])}</td><td>{esc(r['location'])}</td><td>{esc(r['property_type'])}</td><td>{esc(r['area_sqft'])}</td>
-        <td>{esc(r['floor'])}</td><td>{money(r['rent_inr'])}</td><td>{money(r['sale_price_inr'])}</td><td>{esc(contact)}</td>
-        <td>{esc(r['verification_status'])}</td><td>{esc(r['duplicate_status'])}</td><td>{esc(r['confidence'])}%</td>
-        <td><a href="/whatsapp-intelligence/property/{esc(r['wa_property_id'])}">Open</a></td></tr>"""
-    body=f"<h2>WhatsApp Property Database</h2>{forms}<div class=scroll><table><tr><th>ID</th><th>Location</th><th>Type</th><th>Area</th><th>Floor</th><th>Rent</th><th>Sale</th><th>Contact</th><th>Verification</th><th>Duplicate</th><th>AI</th><th></th></tr>{trs}</table></div>"
+        pid=esc(r["wa_property_id"])
+        contact=r["broker_phone"] or r["owner_phone"] or r["sender_phone"] or "—"
+        broker=r["broker_name"] or r["sender_name"] or "Unknown broker"
+        price=money(r["rent_inr"]) if r["transaction_type"]=="RENT" else money(r["sale_price_inr"])
+        price_label="Rent" if r["transaction_type"]=="RENT" else "Sale Price"
+        verification=r["verification_status"] or "UNVERIFIED"
+        if verification=="VERIFIED_AVAILABLE":
+            verification_html='<span class="good">VERIFIED AVAILABLE</span>'
+        elif verification=="VERIFIED_UNAVAILABLE":
+            verification_html='<span class="bad">VERIFIED UNAVAILABLE</span>'
+        else:
+            verification_html='<span class="warn">UNVERIFIED</span>'
+        description=esc(r["raw_text"] or "No WhatsApp description available.")
+
+        cards.append(f"""
+        <section class="wa-property-card">
+          <div class="wa-card-head">
+            <div>
+              <div class="wa-id">{pid}</div>
+              <div class="wa-location">{esc(r['location'] or 'UNKNOWN')}</div>
+            </div>
+            <div>{verification_html}</div>
+          </div>
+          <div class="wa-key-grid">
+            <div><span>Property Type</span><strong>{esc(r['property_type'] or 'UNKNOWN')}</strong></div>
+            <div><span>Transaction</span><strong>{esc(r['transaction_type'] or 'UNKNOWN')}</strong></div>
+            <div><span>Area</span><strong>{esc(r['area_sqft'] or '—')} sqft</strong></div>
+            <div><span>Floor</span><strong>{esc(r['floor'] or 'UNKNOWN')}</strong></div>
+            <div><span>{price_label}</span><strong>{price}</strong></div>
+            <div><span>Broker Contact</span><strong>{esc(contact)}</strong></div>
+          </div>
+          <div class="wa-description">
+            <div class="wa-description-title">PROPERTY DESCRIPTION - ORIGINAL WHATSAPP ITEM</div>
+            <div class="wa-description-text">{description}</div>
+          </div>
+          <div class="wa-broker-strip">
+            <div><b>Broker:</b> {esc(broker)}</div>
+            <div><b>Phone:</b> {esc(contact)}</div>
+            <div><b>AI Confidence:</b> {esc(r['confidence'])}%</div>
+            <div><b>Last Seen:</b> {esc(r['last_seen'] or '—')}</div>
+          </div>
+          <div class="wa-actions">
+            <a class=btn href="/whatsapp-intelligence/property/{pid}/verify/available">Verified Available</a>
+            <a class="btn btn2" href="/whatsapp-intelligence/property/{pid}/verify/unavailable">Mark Unavailable</a>
+            <a class="wa-open" href="/whatsapp-intelligence/property/{pid}">Open Details →</a>
+          </div>
+        </section>""")
+
+    css="""<style>
+    .wa-property-list{display:grid;gap:16px}.wa-property-card{background:#fff;border:1px solid #d0d5dd;border-radius:14px;padding:18px;box-shadow:0 2px 7px rgba(16,24,40,.06)}
+    .wa-card-head{display:flex;justify-content:space-between;gap:16px;align-items:flex-start;padding-bottom:12px;border-bottom:1px solid #eaecf0}
+    .wa-id{font-size:12px;color:#667085;font-weight:700}.wa-location{font-size:22px;font-weight:800;margin-top:3px}
+    .wa-key-grid{display:grid;grid-template-columns:repeat(6,minmax(120px,1fr));gap:10px;margin:14px 0}
+    .wa-key-grid>div{background:#f8fafc;border:1px solid #eaecf0;border-radius:9px;padding:10px}
+    .wa-key-grid span{display:block;font-size:11px;color:#667085;text-transform:uppercase;margin-bottom:5px}
+    .wa-description{border:2px solid #f0b429;background:#fff8db;border-radius:11px;padding:14px 16px;margin:12px 0}
+    .wa-description-title{font-size:12px;font-weight:800;color:#8a5800;margin-bottom:8px}
+    .wa-description-text{font-size:15px;line-height:1.55;font-weight:650;white-space:pre-wrap;overflow-wrap:anywhere}
+    .wa-broker-strip{display:flex;flex-wrap:wrap;gap:10px 22px;padding:10px 12px;background:#eef4ff;border-radius:9px;color:#344054}
+    .wa-actions{display:flex;flex-wrap:wrap;gap:9px;align-items:center;margin-top:14px;padding-top:13px;border-top:1px solid #eaecf0}
+    .wa-open{font-weight:700;color:#344054;text-decoration:none;margin-left:auto}
+    @media(max-width:1100px){.wa-key-grid{grid-template-columns:repeat(3,1fr)}}@media(max-width:650px){.wa-key-grid{grid-template-columns:repeat(2,1fr)}.wa-open{margin-left:0}}
+    </style>"""
+
+    body=f"""{css}
+    <div style="display:flex;justify-content:space-between;gap:12px;align-items:end;flex-wrap:wrap">
+      <div><h2>WhatsApp Property Database</h2><p class=muted>Broker lists are split into individual properties. Exact duplicates are hidden.</p></div>
+      <a class="btn btn2" href="/whatsapp-intelligence/brokers">Broker Accounts</a>
+    </div>
+    <div class=card style="margin-bottom:14px"><form class=gridform method=get>
+      <input name=q value="{esc(q)}" placeholder="Keyword / broker / phone / description">
+      <input name=location value="{esc(location)}" placeholder="Location">
+      <input name=property_type value="{esc(property_type)}" placeholder="Property type">
+      <select name=transaction_type><option value="">Rent/Sale</option><option value="RENT">RENT</option><option value="SALE">SALE</option></select>
+      <input name=min_area type=number placeholder="Min area sqft"><input name=max_area type=number placeholder="Max area sqft">
+      <input name=max_price type=number placeholder="Max rent/sale INR"><button class=btn>Search</button>
+    </form></div>
+    <div class=muted style="margin-bottom:10px"><b>{len(rows)}</b> individual properties shown</div>
+    <div class="wa-property-list">{''.join(cards) if cards else '<div class=card>No properties found.</div>'}</div>"""
     return HTMLResponse(shell("WhatsApp Properties",body,"Properties"))
 
 @router.get("/property/{pid}",response_class=HTMLResponse)
@@ -813,6 +961,61 @@ def run_matches(rid:str):
     <td>{money(p['rent_inr'] or p['sale_price_inr'])}</td><td>{esc(p['verification_status'])}</td><td>{esc(", ".join(rs))}</td><td><a href="/whatsapp-intelligence/property/{esc(p['wa_property_id'])}">Open</a></td></tr>""" for p,s,g,rs in results)
     body=f"<h2>Matches: {esc(rid)}</h2><div class=card><pre>{esc(req['raw_text'])}</pre></div><br><div class=scroll><table><tr><th>Score</th><th>Grade</th><th>Property</th><th>Location</th><th>Area</th><th>Price</th><th>Verification</th><th>Why</th><th></th></tr>{trs}</table></div>"
     return HTMLResponse(shell("Requirement Matches",body,"Requirements"))
+
+@router.get("/brokers",response_class=HTMLResponse)
+def brokers(q:str=""):
+    require_wa_db();init_wa_db()
+    sql="""
+    SELECT
+      COALESCE(NULLIF(broker_name,''), NULLIF(sender_name,''), 'Unknown Broker') AS broker_name,
+      COALESCE(NULLIF(broker_phone,''), NULLIF(sender_phone,''), 'No phone') AS broker_phone,
+      COUNT(*) AS property_count,
+      COUNT(*) FILTER (WHERE verification_status='VERIFIED_AVAILABLE') AS verified_count,
+      MAX(last_seen) AS last_seen,
+      STRING_AGG(DISTINCT NULLIF(location,'UNKNOWN'), ', ') AS locations
+    FROM wa_properties
+    WHERE duplicate_status<>'DUPLICATE'
+    """
+    params={}
+    if q:
+        sql+=" AND (COALESCE(broker_name,sender_name,'') ILIKE :q OR COALESCE(broker_phone,sender_phone,'') ILIKE :q)"
+        params["q"]=f"%{q}%"
+    sql+="""
+    GROUP BY
+      COALESCE(NULLIF(broker_name,''), NULLIF(sender_name,''), 'Unknown Broker'),
+      COALESCE(NULLIF(broker_phone,''), NULLIF(sender_phone,''), 'No phone')
+    ORDER BY property_count DESC, broker_name
+    """
+    with wa_engine.begin() as c:
+        rows=c.execute(text(sql),params).mappings().all()
+
+    cards=[]
+    for r in rows:
+        key=str(r["broker_phone"] if r["broker_phone"]!="No phone" else r["broker_name"])
+        cards.append(f"""
+        <div class=card style="margin-bottom:12px">
+          <div style="display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap">
+            <div><h3 style="margin:0 0 6px">{esc(r['broker_name'])}</h3>
+            <div><b>Contact:</b> {esc(r['broker_phone'])}</div>
+            <div class=muted style="margin-top:5px">{esc(r['locations'] or 'Locations not identified')}</div></div>
+            <div style="display:flex;gap:18px;text-align:center">
+              <div><div class=num>{r['property_count']}</div><small>Properties</small></div>
+              <div><div class=num>{r['verified_count']}</div><small>Verified</small></div>
+            </div>
+          </div>
+          <div style="margin-top:10px"><b>Last Seen:</b> {esc(r['last_seen'] or '—')}</div>
+          <div style="margin-top:12px"><a class=btn href="/whatsapp-intelligence/properties?q={quote_plus(key)}">View Broker Properties</a></div>
+        </div>""")
+
+    body=f"""<div style="display:flex;justify-content:space-between;align-items:end;gap:12px;flex-wrap:wrap">
+      <div><h2>Broker Accounts</h2><p class=muted>One broker account with live count of unique properties posted.</p></div>
+      <form method=get style="display:flex;gap:8px;min-width:320px"><input name=q value="{esc(q)}" placeholder="Broker name or phone"><button class=btn>Search</button></form>
+    </div>
+    <div class=card style="margin:14px 0;background:#fff8db;border:1px solid #f0b429">
+      Exact duplicates are excluded from broker totals and normal inventory.
+    </div>
+    {''.join(cards) if cards else '<div class=card>No broker accounts found.</div>'}"""
+    return HTMLResponse(shell("Broker Accounts",body,"Brokers"))
 
 @router.get("/contacts",response_class=HTMLResponse)
 def contacts(q:str=""):
