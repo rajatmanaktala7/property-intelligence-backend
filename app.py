@@ -16881,3 +16881,8 @@ from whatsapp_intelligence import router as whatsapp_intelligence_router
 app.include_router(whatsapp_intelligence_router)
 # === END WHATSAPP INTELLIGENCE MODULE ===
 
+
+# === WHATSAPP HOT LEAD AUTOMATION ===
+from whatsapp_hot_lead_engine import router as whatsapp_hot_lead_router
+app.include_router(whatsapp_hot_lead_router)
+# === END WHATSAPP HOT LEAD AUTOMATION ===
