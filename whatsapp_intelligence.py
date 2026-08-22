@@ -658,24 +658,119 @@ def upsert_contact(c,name,ph,ctype,seen,group,loc,typ,is_property):
           VALUES(:id,:n,:p,:ct,:seen,:seen,:g,:loc,:typ,:ps,:rs)"""),
           {"id":"WAC-"+uuid.uuid4().hex[:10].upper(),"n":name or "UNKNOWN","p":ph,"ct":ctype,"seen":seen,"g":group,"loc":loc,"typ":typ,"ps":1 if is_property else 0,"rs":0 if is_property else 1})
 
+def _wa_parse_post_date(value):
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    raw=str(value).strip().replace(",", " ")
+    raw=re.sub(r"\s+"," ",raw)
+    for fmt in (
+        "%d/%m/%Y %I:%M %p","%d/%m/%y %I:%M %p",
+        "%m/%d/%Y %I:%M %p","%m/%d/%y %I:%M %p",
+        "%d/%m/%Y %H:%M","%d/%m/%y %H:%M",
+        "%m/%d/%Y %H:%M","%m/%d/%y %H:%M",
+        "%Y-%m-%d %H:%M:%S","%Y-%m-%dT%H:%M:%S"
+    ):
+        try:
+            return datetime.strptime(raw,fmt).replace(tzinfo=timezone.utc)
+        except Exception:
+            pass
+    try:
+        dt=datetime.fromisoformat(raw.replace("Z","+00:00"))
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    except Exception:
+        return None
+
+def _wa_age_days(value):
+    dt=_wa_parse_post_date(value)
+    if not dt:
+        return None
+    now=datetime.now(timezone.utc)
+    return max(0,(now-dt.astimezone(timezone.utc)).days)
+
+def _wa_post_label(value, fallback=None):
+    raw=value or fallback
+    dt=_wa_parse_post_date(raw)
+    if not dt:
+        return str(raw or "Unknown date")
+    days=_wa_age_days(dt)
+    age="Today" if days==0 else "1 day old" if days==1 else f"{days} days old"
+    return f"{dt.strftime('%d %b %Y')} ? {age}"
+
 def match_score(req,prop):
     score=0; reasons=[]
-    req_loc=str(req["preferred_locations"] or "").lower(); p_loc=str(prop["location"] or "").lower()
-    if req_loc and p_loc and (req_loc in p_loc or p_loc in req_loc):score+=30;reasons.append("Strong location match")
-    elif sim(req_loc,p_loc)>=.70:score+=22;reasons.append("Similar location")
+
+    req_loc=str(req["preferred_locations"] or "").strip()
+    p_loc=str(prop["location"] or "").strip()
+    req_loc_valid=req_loc and req_loc.upper()!="UNKNOWN"
+    p_loc_valid=p_loc and p_loc.upper()!="UNKNOWN"
+
+    if req_loc_valid and p_loc_valid:
+        rlow=req_loc.lower(); plow=p_loc.lower()
+        if rlow in plow or plow in rlow:
+            score+=30; reasons.append("Exact/strong location match")
+        elif sim(rlow,plow)>=.70:
+            score+=22; reasons.append("Similar location")
+    elif req_loc_valid and not p_loc_valid:
+        reasons.append("Location missing on property")
+
+    if req["property_type"] not in (None,"","UNKNOWN") and req["property_type"]==prop["property_type"]:
+        score+=15; reasons.append("Property type match")
+
     a=prop["area_sqft"]; mn=req["minimum_area_sqft"]; mx=req["maximum_area_sqft"]
-    if a and mn and mx and float(mn)<=float(a)<=float(mx):score+=20;reasons.append("Area fits")
+    if a and mn and mx and float(mn)<=float(a)<=float(mx):
+        score+=15; reasons.append("Area fits")
     elif a and (mn or mx):
         target=float(mn or mx)
-        if num_sim(float(a),target)>=.80:score+=12;reasons.append("Area near requirement")
-    if req["property_type"]!="UNKNOWN" and req["property_type"]==prop["property_type"]:score+=10;reasons.append("Property type")
-    if req["transaction_type"]==prop["transaction_type"]:score+=10;reasons.append("Transaction")
-    budget=req["budget_max_inr"]; price=prop["rent_inr"] if prop["transaction_type"]=="RENT" else prop["sale_price_inr"]
-    if budget and price and float(price)<=float(budget):score+=15;reasons.append("Within budget")
-    if prop["verification_status"]=="VERIFIED_AVAILABLE":score+=10;reasons.append("Verified available")
-    elif prop["availability"]=="AVAILABLE":score+=5;reasons.append("Availability signal")
-    if prop["sender_phone"] or prop["broker_phone"] or prop["owner_phone"]:score+=5;reasons.append("Contact available")
-    grade="EXCELLENT" if score>=90 else "STRONG" if score>=80 else "POSSIBLE" if score>=70 else "WEAK"
+        if num_sim(float(a),target)>=.80:
+            score+=10; reasons.append("Area close to requirement")
+    elif mn or mx:
+        reasons.append("Property area missing")
+
+    if req["transaction_type"]==prop["transaction_type"]:
+        score+=10; reasons.append("Transaction match")
+
+    budget=req["budget_max_inr"]
+    price=prop["rent_inr"] if req["transaction_type"]=="RENT" else prop["sale_price_inr"]
+    if budget and price:
+        if float(price)<=float(budget):
+            score+=15; reasons.append("Within budget")
+        elif num_sim(float(price),float(budget))>=.90:
+            score+=8; reasons.append("Price close to budget")
+
+    if prop["verification_status"]=="VERIFIED_AVAILABLE":
+        score+=5; reasons.append("Verified available")
+    elif prop["availability"]=="AVAILABLE":
+        score+=3; reasons.append("Availability signal")
+
+    posted=prop.get("property_posted_at") or prop.get("first_seen") or prop.get("created_at")
+    age=_wa_age_days(posted)
+    if age is not None:
+        if age<=7:
+            score+=5; reasons.append("Fresh property ?7 days")
+        elif age<=30:
+            score+=3; reasons.append("Recent property ?30 days")
+        elif age<=90:
+            score+=1; reasons.append("Property ?90 days old")
+        else:
+            reasons.append("Older inventory")
+
+    fields=[
+        p_loc_valid,
+        prop["property_type"] not in (None,"","UNKNOWN"),
+        bool(prop["area_sqft"]),
+        bool(price),
+        prop["floor"] not in (None,"","UNKNOWN"),
+        bool(prop["sender_phone"] or prop["broker_phone"] or prop["owner_phone"])
+    ]
+    complete=sum(bool(x) for x in fields)
+    if complete>=5:
+        score+=5; reasons.append("High data completeness")
+    elif complete>=4:
+        score+=3; reasons.append("Good data completeness")
+
+    grade="EXCELLENT" if score>=90 else "STRONG" if score>=80 else "GOOD" if score>=70 else "POSSIBLE" if score>=60 else "WEAK"
     return min(score,100),grade,reasons
 
 def mark_legacy_combined_properties():
@@ -1066,11 +1161,20 @@ def requirements():
 def run_matches(rid:str):
     require_wa_db()
     with wa_engine.begin() as c:
-        req=c.execute(text("SELECT * FROM wa_requirements WHERE wa_requirement_id=:r"),{"r":rid}).mappings().first()
+        req=c.execute(text("""SELECT r.*,m.message_timestamp AS requirement_posted_at
+        FROM wa_requirements r
+        LEFT JOIN wa_messages m ON m.message_id=r.message_id
+        WHERE r.wa_requirement_id=:r"""),{"r":rid}).mappings().first()
         if not req:raise HTTPException(404,"Requirement not found")
-        props=c.execute(text("""SELECT * FROM wa_properties WHERE duplicate_status<>'DUPLICATE'
-        AND COALESCE(record_status,'ACTIVE')='ACTIVE'
-        AND verification_status<>'VERIFIED_UNAVAILABLE' ORDER BY id DESC LIMIT 2000""")).mappings().all()
+
+        props=c.execute(text("""SELECT p.*,m.message_timestamp AS property_posted_at
+        FROM wa_properties p
+        LEFT JOIN wa_messages m ON m.message_id=p.message_id
+        WHERE p.duplicate_status<>'DUPLICATE'
+          AND COALESCE(p.record_status,'ACTIVE')='ACTIVE'
+          AND p.verification_status<>'VERIFIED_UNAVAILABLE'
+        ORDER BY p.id DESC LIMIT 2000""")).mappings().all()
+
         c.execute(text("DELETE FROM wa_matches WHERE wa_requirement_id=:r"),{"r":rid})
         results=[]
         for p in props:
@@ -1081,11 +1185,123 @@ def run_matches(rid:str):
                 DO UPDATE SET score=EXCLUDED.score,grade=EXCLUDED.grade,reasons=EXCLUDED.reasons,created_at=NOW()"""),
                 {"r":rid,"p":p["wa_property_id"],"s":s,"g":g,"rs":json.dumps(rs)})
                 results.append((p,s,g,rs))
-        results.sort(key=lambda x:x[1],reverse=True)
-    trs="".join(f"""<tr><td class=score>{s}%</td><td>{esc(g)}</td><td>{esc(p['wa_property_id'])}</td><td>{esc(p['location'])}</td><td>{esc(p['area_sqft'])}</td>
-    <td>{money(p['rent_inr'] or p['sale_price_inr'])}</td><td>{esc(p['verification_status'])}</td><td>{esc(", ".join(rs))}</td><td><a href="/whatsapp-intelligence/property/{esc(p['wa_property_id'])}">Open</a></td></tr>""" for p,s,g,rs in results)
-    body=f"<h2>Matches: {esc(rid)}</h2><div class=card><pre>{esc(req['raw_text'])}</pre></div><br><div class=scroll><table><tr><th>Score</th><th>Grade</th><th>Property</th><th>Location</th><th>Area</th><th>Price</th><th>Verification</th><th>Why</th><th></th></tr>{trs}</table></div>"
-    return HTMLResponse(shell("Requirement Matches",body,"Requirements"))
+        results.sort(key=lambda x:(x[1], _wa_parse_post_date(x[0].get("property_posted_at") or x[0].get("first_seen") or x[0].get("created_at")) or datetime(1970,1,1,tzinfo=timezone.utc)),reverse=True)
+
+    req_date=_wa_post_label(req.get("requirement_posted_at"),req.get("created_at"))
+    req_area="?"
+    if req["minimum_area_sqft"] and req["maximum_area_sqft"]:
+        req_area=f"{esc(req['minimum_area_sqft'])}?{esc(req['maximum_area_sqft'])} sqft"
+    elif req["minimum_area_sqft"] or req["maximum_area_sqft"]:
+        req_area=f"{esc(req['minimum_area_sqft'] or req['maximum_area_sqft'])} sqft"
+
+    req_summary=f"""
+    <section class="decision-requirement">
+      <div class="decision-eyebrow">REQUIREMENT ? {esc(rid)}</div>
+      <div class="decision-title">{esc(req['preferred_locations'] or 'UNKNOWN')} ? {esc(req['property_type'] or 'UNKNOWN')}</div>
+      <div class="decision-meta">
+        <span><b>Posted:</b> {esc(req_date)}</span>
+        <span><b>Transaction:</b> {esc(req['transaction_type'])}</span>
+        <span><b>Area:</b> {req_area}</span>
+        <span><b>Budget:</b> {money(req['budget_max_inr'])}</span>
+      </div>
+      <div class="decision-requirement-text">
+        <div class="decision-label">ORIGINAL REQUIREMENT</div>
+        {esc(req['raw_text'])}
+      </div>
+    </section>
+    """
+
+    cards=[]
+    for p,s,g,rs in results:
+        pid=esc(p["wa_property_id"])
+        posted=_wa_post_label(p.get("property_posted_at"),p.get("first_seen") or p.get("created_at"))
+        price=p["rent_inr"] if req["transaction_type"]=="RENT" else p["sale_price_inr"]
+        contact=p["owner_phone"] or p["broker_phone"] or p["sender_phone"] or "?"
+        broker=p["owner_name"] or p["broker_name"] or p["sender_name"] or "Unknown"
+        description=esc(p["raw_text"] or "No property description available")
+        reason_html="".join(f"<span class='reason-chip'>{esc(x)}</span>" for x in rs)
+        grade_class="excellent" if g=="EXCELLENT" else "strong" if g=="STRONG" else "good" if g=="GOOD" else "possible" if g=="POSSIBLE" else "weak"
+
+        cards.append(f"""
+        <section class="decision-card {grade_class}">
+          <div class="decision-card-head">
+            <div class="decision-score-wrap">
+              <div class="decision-score">{s}%</div>
+              <div class="decision-grade">{esc(g)}</div>
+            </div>
+            <div class="decision-property-title">
+              <div class="decision-id">{pid}</div>
+              <div class="decision-location">{esc(p['location'] or 'UNKNOWN')}</div>
+              <div class="decision-posted">Posted: {esc(posted)}</div>
+            </div>
+            <div class="decision-status">{esc(p['verification_status'] or 'UNVERIFIED')}</div>
+          </div>
+
+          <div class="decision-grid">
+            <div><span>Property Type</span><strong>{esc(p['property_type'] or 'UNKNOWN')}</strong></div>
+            <div><span>Area</span><strong>{esc(p['area_sqft'] or '?')} sqft</strong></div>
+            <div><span>Floor</span><strong>{esc(p['floor'] or 'UNKNOWN')}</strong></div>
+            <div><span>Price</span><strong>{money(price)}</strong></div>
+            <div><span>Broker / Owner</span><strong>{esc(broker)}</strong></div>
+            <div><span>Contact</span><strong>{esc(contact)}</strong></div>
+          </div>
+
+          <div class="decision-description">
+            <div class="decision-label">PROPERTY DESCRIPTION</div>
+            <div>{description}</div>
+          </div>
+
+          <div class="decision-why">
+            <div class="decision-label">WHY THIS MATCH</div>
+            <div class="reason-list">{reason_html}</div>
+          </div>
+
+          <div class="decision-actions">
+            <a class=btn href="/whatsapp-intelligence/property/{pid}">Open Full Property</a>
+            <a class="btn btn2" href="/whatsapp-intelligence/property/{pid}/verify/available">Verify Available</a>
+          </div>
+        </section>
+        """)
+
+    css="""
+    <style>
+      .decision-requirement{background:#101828;color:#fff;border-radius:14px;padding:18px;margin-bottom:18px}
+      .decision-eyebrow,.decision-label{font-size:11px;font-weight:800;letter-spacing:.6px;text-transform:uppercase}
+      .decision-eyebrow{color:#98a2b3}.decision-title{font-size:23px;font-weight:800;margin:5px 0 10px}
+      .decision-meta{display:flex;flex-wrap:wrap;gap:10px 22px;color:#d0d5dd;font-size:13px}
+      .decision-requirement-text{margin-top:14px;background:#1d2939;border-radius:10px;padding:13px;white-space:pre-wrap;line-height:1.5}
+      .decision-requirement-text .decision-label{color:#fdb022;margin-bottom:7px}
+      .decision-list{display:grid;gap:16px}
+      .decision-card{background:#fff;border:1px solid #d0d5dd;border-left:6px solid #98a2b3;border-radius:14px;padding:16px;box-shadow:0 2px 8px rgba(16,24,40,.05)}
+      .decision-card.excellent{border-left-color:#039855}.decision-card.strong{border-left-color:#1570ef}
+      .decision-card.good{border-left-color:#7f56d9}.decision-card.possible{border-left-color:#f79009}.decision-card.weak{border-left-color:#d92d20}
+      .decision-card-head{display:grid;grid-template-columns:110px 1fr auto;gap:14px;align-items:start;padding-bottom:12px;border-bottom:1px solid #eaecf0}
+      .decision-score{font-size:31px;font-weight:850}.decision-grade{font-size:12px;font-weight:800}
+      .decision-id{font-size:11px;color:#667085;font-weight:700}.decision-location{font-size:21px;font-weight:800;margin-top:2px}
+      .decision-posted{font-size:12px;color:#475467;margin-top:4px}.decision-status{font-size:11px;font-weight:800;background:#fffaeb;color:#b54708;padding:6px 9px;border-radius:999px}
+      .decision-grid{display:grid;grid-template-columns:repeat(6,minmax(120px,1fr));gap:9px;margin:13px 0}
+      .decision-grid>div{background:#f8fafc;border:1px solid #eaecf0;border-radius:9px;padding:9px}
+      .decision-grid span{display:block;font-size:10px;text-transform:uppercase;color:#667085;margin-bottom:5px}
+      .decision-description{background:#fff8db;border:2px solid #f0b429;border-radius:11px;padding:13px 15px;white-space:pre-wrap;line-height:1.5;font-weight:650}
+      .decision-description .decision-label{color:#8a5800;margin-bottom:7px}
+      .decision-why{margin-top:12px}.reason-list{display:flex;flex-wrap:wrap;gap:7px;margin-top:7px}
+      .reason-chip{font-size:12px;background:#eef4ff;color:#344054;border-radius:999px;padding:6px 9px}
+      .decision-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:13px}
+      @media(max-width:1100px){.decision-grid{grid-template-columns:repeat(3,1fr)}}
+      @media(max-width:700px){.decision-card-head{grid-template-columns:1fr}.decision-grid{grid-template-columns:repeat(2,1fr)}}
+    </style>
+    """
+
+    body=f"""{css}
+    <div style="display:flex;justify-content:space-between;align-items:end;gap:10px;flex-wrap:wrap">
+      <div><h2 style="margin-bottom:4px">Requirement Match Decision Board</h2>
+      <p class=muted style="margin-top:0">Descriptions and post dates are visible here so the team can decide without opening every property.</p></div>
+      <div class=muted><b>{len(results)}</b> candidate matches</div>
+    </div>
+    {req_summary}
+    <div class="decision-list">{''.join(cards) if cards else '<div class=card>No matches scored 40% or above.</div>'}</div>
+    """
+    return HTMLResponse(shell("Requirement Match Decision Board",body,"Requirements"))
 
 @router.get("/brokers",response_class=HTMLResponse)
 def brokers(q:str=""):
