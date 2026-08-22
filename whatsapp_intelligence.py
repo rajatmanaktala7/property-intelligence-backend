@@ -100,6 +100,9 @@ CREATE TABLE IF NOT EXISTS wa_properties(
  raw_text TEXT NOT NULL,
  first_seen TEXT,
  last_seen TEXT,
+ source_item_no INTEGER,
+ parent_message_text TEXT,
+ record_status TEXT DEFAULT 'ACTIVE',
  approved_to_main BOOLEAN DEFAULT FALSE,
  main_property_id TEXT,
  created_at TIMESTAMPTZ DEFAULT NOW(),
@@ -194,6 +197,10 @@ CREATE TABLE IF NOT EXISTS wa_audit_log(
  performed_by TEXT,
  created_at TIMESTAMPTZ DEFAULT NOW()
 );
+
+ALTER TABLE wa_properties ADD COLUMN IF NOT EXISTS source_item_no INTEGER;
+ALTER TABLE wa_properties ADD COLUMN IF NOT EXISTS parent_message_text TEXT;
+ALTER TABLE wa_properties ADD COLUMN IF NOT EXISTS record_status TEXT DEFAULT 'ACTIVE';
 
 CREATE INDEX IF NOT EXISTS idx_wa_properties_location ON wa_properties(location);
 CREATE INDEX IF NOT EXISTS idx_wa_properties_phone ON wa_properties(sender_phone);
@@ -469,43 +476,55 @@ def extract_broker_identity(raw_text, sender):
     return sender_name, broker_phone
 
 def split_inventory(txt):
-    raw=txt or ""
+    """
+    ONE returned item = ONE physical property entity.
 
-    pipe_parts=[x.strip() for x in raw.split("|") if x.strip()]
-    if len(pipe_parts)>1 and sum(any(w in p.lower() for w in PROPERTY_WORDS) for p in pipe_parts)>=2:
-        return pipe_parts
+    Supported broker formats:
+      1 Kalkaji builder floor for sale...
+      2 Vasant Kunj apartment for sale...
+      3. Vasant Vihar ground floor for rent...
+      4) GK-1 showroom...
+      5- Defence Colony office...
 
-    lines=raw.splitlines()
+    The broker/contact preamble before item 1 is not copied into child property text.
+    Wrapped lines after an item stay only with that property.
+    """
+    raw=(txt or "").replace("\r\n","\n").replace("\r","\n")
+    lines=raw.split("\n")
     items=[]
+    current_no=None
     current=[]
-    started=False
-    numbered_re=re.compile(r"^\s*(\d{1,3})(?:[\.\)\-:]|\s)\s*(.+?)\s*$")
+    item_re=re.compile(r"^\s*(\d{1,3})\s*(?:[\.\)\-:]|\s)\s*(.+?)\s*$")
 
     for line in lines:
-        m=numbered_re.match(line)
+        m=item_re.match(line)
         if m:
-            if current:
-                item="\n".join(current).strip()
-                if item:
-                    items.append(item)
-            started=True
+            if current_no is not None and current:
+                child="\n".join(current).strip()
+                if child:
+                    items.append(child)
+            current_no=int(m.group(1))
             current=[m.group(2).strip()]
-        elif started and line.strip():
+        elif current_no is not None and line.strip():
             current.append(line.strip())
 
-    if current:
-        item="\n".join(current).strip()
-        if item:
-            items.append(item)
+    if current_no is not None and current:
+        child="\n".join(current).strip()
+        if child:
+            items.append(child)
 
-    if len(items)>=2 and sum(any(w in p.lower() for w in PROPERTY_WORDS) for p in items)>=2:
-        return items
+    if len(items)>=2:
+        property_like=sum(1 for item in items if any(word in item.lower() for word in PROPERTY_WORDS + SUPPLY_WORDS))
+        if property_like>=2:
+            return items
 
-    numbered=[x.strip() for x in re.split(r"\n(?=\s*(?:\d+[\).\:-]|\*|-)\s*)",raw) if x.strip()]
-    if len(numbered)>1 and sum(any(w in p.lower() for w in PROPERTY_WORDS) for p in numbered)>=2:
-        return numbered
+    pipe_parts=[p.strip() for p in raw.split("|") if p.strip()]
+    if len(pipe_parts)>=2:
+        property_like=sum(1 for item in pipe_parts if any(word in item.lower() for word in PROPERTY_WORDS + SUPPLY_WORDS))
+        if property_like>=2:
+            return pipe_parts
 
-    return [raw]
+    return [raw.strip()]
 
 def deterministic_extract(txt, kind, sender):
     areas=all_areas(txt); cash=money_values(txt); low=txt.lower()
@@ -659,10 +678,28 @@ def match_score(req,prop):
     grade="EXCELLENT" if score>=90 else "STRONG" if score>=80 else "POSSIBLE" if score>=70 else "WEAK"
     return min(score,100),grade,reasons
 
+def mark_legacy_combined_properties():
+    """Hide old pre-upgrade rows that still contain multiple physical properties."""
+    if wa_engine is None:
+        return
+    with wa_engine.begin() as c:
+        rows=c.execute(text("""SELECT wa_property_id,raw_text FROM wa_properties
+                               WHERE COALESCE(record_status,'ACTIVE')='ACTIVE'
+                                 AND source_item_no IS NULL""")).mappings().all()
+        for row in rows:
+            try:
+                if len(split_inventory(row["raw_text"] or "")) > 1:
+                    c.execute(text("UPDATE wa_properties SET record_status='LEGACY_COMBINED',updated_at=NOW() WHERE wa_property_id=:p"),
+                              {"p":row["wa_property_id"]})
+            except Exception:
+                continue
+
 @router.on_event("startup")
 def wa_startup():
     if wa_engine is not None:
-        try:init_wa_db()
+        try:
+            init_wa_db()
+            mark_legacy_combined_properties()
         except Exception as e:print("WhatsApp Intelligence DB init warning:",e)
 
 @router.get("",response_class=HTMLResponse)
@@ -672,7 +709,7 @@ def dashboard():
         stats={}
         for key,q in {
             "Messages":"SELECT COUNT(*) FROM wa_messages",
-            "Properties":"SELECT COUNT(*) FROM wa_properties",
+            "Properties":"SELECT COUNT(*) FROM wa_properties WHERE COALESCE(record_status,'ACTIVE')='ACTIVE' AND duplicate_status<>'DUPLICATE'",
             "Requirements":"SELECT COUNT(*) FROM wa_requirements",
             "Contacts":"SELECT COUNT(*) FROM wa_contacts",
             "Verified":"SELECT COUNT(*) FROM wa_properties WHERE verification_status='VERIFIED_AVAILABLE'",
@@ -732,7 +769,7 @@ async def process_import(group_name: str=Form(""), chat_file: UploadFile=File(..
                 continue
             parts=split_inventory(rawtxt) if kind=="PROPERTY_INVENTORY" else [rawtxt]
             parent_broker_name,parent_broker_phone=extract_broker_identity(rawtxt,m["sender"])
-            for part in parts:
+            for item_no,part in enumerate(parts, start=1):
                 data=deterministic_extract(part,kind,m["sender"])
                 data=enrich_missing(data,ai_enrich(part,kind))
                 if kind=="PROPERTY_INVENTORY":
@@ -765,13 +802,13 @@ async def process_import(group_name: str=Form(""), chat_file: UploadFile=File(..
                         continue
                     pid="WAP-"+uuid.uuid4().hex[:10].upper()
                     c.execute(text("""INSERT INTO wa_properties(
-                    wa_property_id,source_id,message_id,fingerprint,property_type,transaction_type,city,location,locality,address,landmark,
+                    wa_property_id,source_id,message_id,source_item_no,parent_message_text,record_status,fingerprint,property_type,transaction_type,city,location,locality,address,landmark,
                     area_sqft,available_area_sqft,floor,frontage,rent_inr,sale_price_inr,cam_inr,possession,parking,suitable_for,nearby_brands,
                     availability,broker_name,broker_phone,owner_name,owner_phone,sender_name,sender_phone,duplicate_status,duplicate_of,confidence,raw_text,first_seen,last_seen)
-                    VALUES(:pid,:sid,:mid,:fp,:property_type,:transaction_type,:city,:location,:locality,:address,:landmark,:area_sqft,:available_area_sqft,:floor,:frontage,
+                    VALUES(:pid,:sid,:mid,:item_no,:parent_raw,'ACTIVE',:fp,:property_type,:transaction_type,:city,:location,:locality,:address,:landmark,:area_sqft,:available_area_sqft,:floor,:frontage,
                     :rent_inr,:sale_price_inr,:cam_inr,:possession,:parking,:suitable_for,:nearby_brands,:availability,:broker_name,:broker_phone,:owner_name,:owner_phone,
                     :sender_name,:sender_phone,:ds,:dupof,:conf,:raw,:seen,:seen)"""),
-                    dict(data,pid=pid,sid=sid,mid=mid,fp=fp,ds=ds,dupof=dupof,conf=conf,raw=part,seen=m["timestamp"]))
+                    dict(data,pid=pid,sid=sid,mid=mid,item_no=item_no,parent_raw=rawtxt,fp=fp,ds=ds,dupof=dupof,conf=conf,raw=part,seen=m["timestamp"]))
                     ph=data.get("owner_phone") or data.get("broker_phone") or data.get("sender_phone")
                     nm=data.get("owner_name") or data.get("broker_name") or data.get("sender_name")
                     ct="OWNER" if data.get("owner_phone") else "BROKER" if data.get("broker_phone") else "UNKNOWN"
@@ -796,7 +833,7 @@ async def process_import(group_name: str=Form(""), chat_file: UploadFile=File(..
     return RedirectResponse("/whatsapp-intelligence",303)
 
 def filter_properties(c,q="",location_q="",ptype_q="",txn_q="",verification="",availability="",min_area=None,max_area=None,min_price=None,max_price=None):
-    sql="SELECT * FROM wa_properties WHERE duplicate_status<>'DUPLICATE'"; p={}
+    sql="SELECT * FROM wa_properties WHERE duplicate_status<>'DUPLICATE' AND COALESCE(record_status,'ACTIVE')='ACTIVE'"; p={}
     if q:
         sql+=" AND (raw_text ILIKE :q OR sender_name ILIKE :q OR sender_phone ILIKE :q OR broker_phone ILIKE :q OR owner_phone ILIKE :q)";p["q"]=f"%{q}%"
     if location_q:sql+=" AND location ILIKE :loc";p["loc"]=f"%{location_q}%"
@@ -945,6 +982,7 @@ def run_matches(rid:str):
         req=c.execute(text("SELECT * FROM wa_requirements WHERE wa_requirement_id=:r"),{"r":rid}).mappings().first()
         if not req:raise HTTPException(404,"Requirement not found")
         props=c.execute(text("""SELECT * FROM wa_properties WHERE duplicate_status<>'DUPLICATE'
+        AND COALESCE(record_status,'ACTIVE')='ACTIVE'
         AND verification_status<>'VERIFIED_UNAVAILABLE' ORDER BY id DESC LIMIT 2000""")).mappings().all()
         c.execute(text("DELETE FROM wa_matches WHERE wa_requirement_id=:r"),{"r":rid})
         results=[]
@@ -975,6 +1013,7 @@ def brokers(q:str=""):
       STRING_AGG(DISTINCT NULLIF(location,'UNKNOWN'), ', ') AS locations
     FROM wa_properties
     WHERE duplicate_status<>'DUPLICATE'
+      AND COALESCE(record_status,'ACTIVE')='ACTIVE'
     """
     params={}
     if q:
