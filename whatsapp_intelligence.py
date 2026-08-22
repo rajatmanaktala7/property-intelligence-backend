@@ -239,8 +239,8 @@ PROPERTY_TYPES = {
     "guest house":"Guest House","hotel":"Hotel"
 }
 LOCATION_ALIASES = {
-    "gk 1":"Greater Kailash 1","gk-1":"Greater Kailash 1","gk1":"Greater Kailash 1",
-    "greater kailash 1":"Greater Kailash 1","south ex":"South Extension",
+    "gk 1":"Greater Kailash 1","gk-1":"Greater Kailash 1","gk1":"Greater Kailash 1","gk 2":"Greater Kailash 2","gk-2":"Greater Kailash 2","gk2":"Greater Kailash 2",
+    "greater kailash 1":"Greater Kailash 1","greater kailash 2":"Greater Kailash 2","eok":"East of Kailash","east of kailash":"East of Kailash","kailash colony":"Kailash Colony","green park":"Green Park","south ex":"South Extension",
     "south extension":"South Extension","cp":"Connaught Place","connaught place":"Connaught Place",
     "gurgaon":"Gurugram","gurugram":"Gurugram","defence colony":"Defence Colony",
     "vasant vihar":"Vasant Vihar","saket":"Saket","hauz khas":"Hauz Khas",
@@ -324,13 +324,23 @@ def parse_chat(raw: str):
     if cur: out.append(cur)
     return out
 
+def all_phones(text_value):
+    found=[]
+    for m in PHONE_RE.finditer(text_value or ""):
+        d=re.sub(r"\\D","",m.group(0))
+        if len(d)==11 and d.startswith("0"):
+            d=d[1:]
+        elif len(d)==12 and d.startswith("91"):
+            d=d[2:]
+        if len(d)==10 and d[0] in "6789":
+            p="+91"+d
+            if p not in found:
+                found.append(p)
+    return found
+
 def phone(text_value):
-    m=PHONE_RE.search(text_value or "")
-    if not m: return None
-    d=re.sub(r"\D","",m.group(0))
-    if len(d)==10: return "+91"+d
-    if len(d)==12 and d.startswith("91"): return "+"+d
-    return m.group(0)
+    vals=all_phones(text_value)
+    return vals[0] if vals else None
 
 def is_noise(txt):
     low=txt.lower().strip()
@@ -366,11 +376,25 @@ def area_sqft(txt):
     return None
 
 def all_areas(txt):
+    range_patterns=[
+        (r"(\\d[\\d,]*(?:\\.\\d+)?)\\s*(?:-|–|to)\\s*(\\d[\\d,]*(?:\\.\\d+)?)\\s*(?:sq\\.?\\s*ft|sqft|sft)\\b",1.0),
+        (r"(\\d[\\d,]*(?:\\.\\d+)?)\\s*(?:-|–|to)\\s*(\\d[\\d,]*(?:\\.\\d+)?)\\s*(?:gaj|sq\\.?\\s*yd|sq\\.?\\s*yard|sqyd|yards?)\\b",9.0),
+        (r"(\\d[\\d,]*(?:\\.\\d+)?)\\s*(?:-|–|to)\\s*(\\d[\\d,]*(?:\\.\\d+)?)\\s*(?:sq\\.?\\s*m|sqm)\\b",10.7639),
+        (r"(\\d[\\d,]*(?:\\.\\d+)?)\\s*(?:-|–|to)\\s*(\\d[\\d,]*(?:\\.\\d+)?)\\s*(?:acre|acres)\\b",43560.0),
+    ]
+    for pat,mul in range_patterns:
+        m=re.search(pat,txt,re.I)
+        if m:
+            a=round(float(m.group(1).replace(",",""))*mul,2)
+            b=round(float(m.group(2).replace(",",""))*mul,2)
+            return sorted([a,b])
+
     vals=[]
     for pat,mul in [
-        (r"(\d[\d,]*(?:\.\d+)?)\s*(?:sq\.?\s*ft|sqft|sft)\b",1.0),
-        (r"(\d[\d,]*(?:\.\d+)?)\s*(?:gaj|sq\.?\s*yd|sq\.?\s*yard|yards?)\b",9.0),
-        (r"(\d[\d,]*(?:\.\d+)?)\s*(?:sq\.?\s*m|sqm)\b",10.7639),
+        (r"(\\d[\\d,]*(?:\\.\\d+)?)\\s*(?:sq\\.?\\s*ft|sqft|sft)\\b",1.0),
+        (r"(\\d[\\d,]*(?:\\.\\d+)?)\\s*(?:gaj|sq\\.?\\s*yd|sq\\.?\\s*yard|sqyd|yards?)\\b",9.0),
+        (r"(\\d[\\d,]*(?:\\.\\d+)?)\\s*(?:sq\\.?\\s*m|sqm)\\b",10.7639),
+        (r"(\\d[\\d,]*(?:\\.\\d+)?)\\s*(?:acre|acres)\\b",43560.0),
     ]:
         for m in re.finditer(pat,txt,re.I):
             vals.append(round(float(m.group(1).replace(",",""))*mul,2))
@@ -466,7 +490,7 @@ def ai_enrich(txt, kind):
         "contact_name,contact_phone,contact_type"
     )
     prompt=f"""Extract ONLY explicitly supported Indian real-estate data from this WhatsApp message.
-Never guess. Never invent. Use null for missing values. Contact role OWNER/BROKER only when explicit.
+Never guess. Never invent. Use null for missing values. Contact role OWNER/BROKER only when explicit. If a budget or price has no explicit currency unit such as lakh, lac, L, crore, Cr, rupees, Rs or ₹, return null for that money field.
 Return one flat JSON object with only these fields:
 {fields}
 Message:
@@ -477,14 +501,39 @@ Message:
             contents=prompt,
             config={"response_mime_type":"application/json"}
         )
-        return json.loads(r.text)
+        parsed = json.loads(r.text)
+        if isinstance(parsed, dict):
+            return parsed
+        if isinstance(parsed, list):
+            return next((item for item in parsed if isinstance(item, dict)), None)
+        return None
     except Exception:
         return None
 
 def enrich_missing(base, ai):
-    if not ai:return base
+    # AI is enrichment only. Deterministic parsers are authoritative for
+    # money, area and phone fields so invalid strings never reach NUMERIC columns.
+    if not ai:
+        return base
+
+    if isinstance(ai, list):
+        ai = next((item for item in ai if isinstance(item, dict)), None)
+
+    if not isinstance(ai, dict):
+        return base
+
+    protected_numeric_fields={
+        "area_sqft","available_area_sqft","rent_inr","sale_price_inr","cam_inr",
+        "minimum_area_sqft","maximum_area_sqft","budget_min_inr","budget_max_inr"
+    }
+    protected_phone_fields={"contact_phone","broker_phone","owner_phone","sender_phone"}
+
     for k,v in ai.items():
-        if k in base and base.get(k) in (None,"","UNKNOWN") and v not in (None,"","UNKNOWN"):
+        if k not in base:
+            continue
+        if k in protected_numeric_fields or k in protected_phone_fields:
+            continue
+        if base.get(k) in (None,"","UNKNOWN") and v not in (None,"","UNKNOWN"):
             base[k]=v
     return base
 
