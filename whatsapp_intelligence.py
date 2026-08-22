@@ -1147,15 +1147,240 @@ def verify_property(pid:str,status:str):
         VALUES('PROPERTY',:p,'VERIFICATION_CHANGED',CAST(:d AS JSONB))"""),{"p":pid,"d":json.dumps({"verification_status":value})})
     return RedirectResponse(f"/whatsapp-intelligence/property/{pid}",303)
 
-@router.get("/requirements",response_class=HTMLResponse)
-def requirements():
+def _wa_req_quality(r):
+    location=str(r.get("preferred_locations") or "").strip()
+    ptype=str(r.get("property_type") or "").strip()
+    raw=str(r.get("raw_text") or "").strip()
+    has_location=bool(location and location.upper()!="UNKNOWN")
+    has_type=bool(ptype and ptype.upper()!="UNKNOWN")
+    has_area=bool(r.get("minimum_area_sqft") or r.get("maximum_area_sqft"))
+    has_budget=bool(r.get("budget_max_inr"))
+    has_contact=bool(r.get("contact_phone"))
+    points=(30 if has_location else 0)+(20 if has_type else 0)+(15 if has_area else 0)+(10 if has_budget else 0)+(10 if has_contact else 0)+(15 if len(raw)>=30 else 0)
+    return min(points,100),has_location,has_type
+
+def _wa_req_date_label(v,created=None):
+    raw=v or created
+    if not raw:
+        return "Unknown date"
+    try:
+        dt=_wa_parse_post_date(raw)
+        if dt:
+            days=_wa_age_days(dt)
+            age="Today" if days==0 else "1 day old" if days==1 else f"{days} days old"
+            return f"{dt.strftime('%d %b %Y')} · {age}"
+    except Exception:
+        pass
+    return str(raw)
+
+def _wa_req_status(best_score,quality,has_location,has_type,match_count):
+    s=float(best_score or 0)
+    if not has_location or not has_type:
+        return "REVIEW DATA","review","Complete location/type before Hot Lead"
+    if quality<60:
+        return "REVIEW DATA","review","Requirement data incomplete"
+    if s>=90:
+        return "CRITICAL HOT LEAD","critical","Verify availability now"
+    if s>=80:
+        return "HOT LEAD","hot","Strong inventory match"
+    if s>=70:
+        return "GOOD MATCH","good","Review matching properties"
+    if match_count:
+        return "POSSIBLE MATCH","possible","Review before outreach"
+    return "MONITOR","monitor","No strong property match yet"
+
+@router.post("/requirements/refresh-ai")
+def requirements_refresh_ai(background_tasks: BackgroundTasks):
     require_wa_db()
-    with wa_engine.begin() as c:rows=c.execute(text("SELECT * FROM wa_requirements ORDER BY id DESC LIMIT 1000")).mappings().all()
-    trs="".join(f"""<tr><td>{esc(r['wa_requirement_id'])}</td><td>{esc(r['preferred_locations'])}</td><td>{esc(r['property_type'])}</td>
-    <td>{esc(r['minimum_area_sqft'])}–{esc(r['maximum_area_sqft'])}</td><td>{money(r['budget_max_inr'])}</td><td>{esc(r['contact_name'])}</td><td>{esc(r['contact_phone'])}</td>
-    <td><a class=btn href="/whatsapp-intelligence/requirement/{esc(r['wa_requirement_id'])}/matches">Find Matches</a></td></tr>""" for r in rows)
-    body=f"<h2>WhatsApp Requirements</h2><div class=scroll><table><tr><th>ID</th><th>Locations</th><th>Type</th><th>Area</th><th>Budget</th><th>Contact</th><th>Phone</th><th></th></tr>{trs}</table></div>"
-    return HTMLResponse(shell("WhatsApp Requirements",body,"Requirements"))
+    try:
+        from whatsapp_hot_lead_engine import _match_requirement
+        def worker():
+            try:
+                with wa_engine.begin() as c:
+                    reqs=c.execute(text("""SELECT * FROM wa_requirements
+                    WHERE status='ACTIVE' ORDER BY id DESC LIMIT 300""")).mappings().all()
+                    for req in reqs:
+                        _match_requirement(c,req)
+            except Exception as e:
+                print("Requirement AI refresh failed:",repr(e))
+        background_tasks.add_task(worker)
+        return RedirectResponse("/whatsapp-intelligence/requirements?refresh=started",303)
+    except Exception as e:
+        raise HTTPException(500,f"Hot Lead engine unavailable: {e}")
+
+@router.get("/requirements",response_class=HTMLResponse)
+def requirements(request: Request):
+    require_wa_db()
+    with wa_engine.begin() as c:
+        hot_table=bool(c.execute(text("SELECT to_regclass('public.wa_hot_leads') IS NOT NULL")).scalar())
+        if hot_table:
+            rows=c.execute(text("""SELECT r.*,
+                m.message_timestamp AS requirement_posted_at,
+                COALESCE(ms.match_count,0) AS match_count,
+                COALESCE(ms.best_score,0) AS best_score,
+                COALESCE(h.hot_count,0) AS hot_count,
+                h.hot_status,
+                h.hot_priority
+            FROM wa_requirements r
+            LEFT JOIN wa_messages m ON m.message_id=r.message_id
+            LEFT JOIN (
+                SELECT wa_requirement_id,COUNT(*) AS match_count,MAX(score) AS best_score
+                FROM wa_matches GROUP BY wa_requirement_id
+            ) ms ON ms.wa_requirement_id=r.wa_requirement_id
+            LEFT JOIN (
+                SELECT wa_requirement_id,COUNT(*) AS hot_count,
+                       MAX(status) AS hot_status,MAX(priority) AS hot_priority
+                FROM wa_hot_leads
+                WHERE status NOT IN ('NOT_RELEVANT','CLOSED')
+                GROUP BY wa_requirement_id
+            ) h ON h.wa_requirement_id=r.wa_requirement_id
+            WHERE r.status='ACTIVE'
+            ORDER BY
+              CASE WHEN COALESCE(ms.best_score,0)>=90 THEN 1
+                   WHEN COALESCE(ms.best_score,0)>=80 THEN 2
+                   WHEN COALESCE(ms.best_score,0)>=70 THEN 3 ELSE 4 END,
+              COALESCE(m.message_timestamp,r.created_at::text) DESC,
+              r.id DESC
+            LIMIT 1000""")).mappings().all()
+        else:
+            rows=c.execute(text("""SELECT r.*,m.message_timestamp AS requirement_posted_at,
+            0 AS match_count,0 AS best_score,0 AS hot_count,NULL AS hot_status,NULL AS hot_priority
+            FROM wa_requirements r
+            LEFT JOIN wa_messages m ON m.message_id=r.message_id
+            WHERE r.status='ACTIVE' ORDER BY r.id DESC LIMIT 1000""")).mappings().all()
+
+    q=str(request.query_params.get("q") or "").strip().lower()
+    view=str(request.query_params.get("view") or "action").lower()
+    prepared=[]
+    for row in rows:
+        r=dict(row)
+        quality,has_location,has_type=_wa_req_quality(r)
+        label,css,action=_wa_req_status(r.get("best_score"),quality,has_location,has_type,int(r.get("match_count") or 0))
+        r["_quality"]=quality;r["_status"]=label;r["_css"]=css;r["_action"]=action
+        blob=" ".join(str(r.get(k) or "") for k in ("wa_requirement_id","preferred_locations","property_type","raw_text","contact_name","contact_phone")).lower()
+        if q and q not in blob: continue
+        if view=="hot" and float(r.get("best_score") or 0)<80: continue
+        if view=="good" and not (70<=float(r.get("best_score") or 0)<80): continue
+        if view=="review" and label!="REVIEW DATA": continue
+        prepared.append(r)
+
+    rank={"CRITICAL HOT LEAD":0,"HOT LEAD":1,"GOOD MATCH":2,"POSSIBLE MATCH":3,"REVIEW DATA":4,"MONITOR":5}
+    prepared.sort(key=lambda r:(rank.get(r["_status"],9),-float(r.get("best_score") or 0),-int(r.get("id") or 0)))
+
+    hot=sum(1 for r in prepared if r["_status"] in {"CRITICAL HOT LEAD","HOT LEAD"})
+    critical=sum(1 for r in prepared if r["_status"]=="CRITICAL HOT LEAD")
+    review=sum(1 for r in prepared if r["_status"]=="REVIEW DATA")
+    good=sum(1 for r in prepared if r["_status"]=="GOOD MATCH")
+
+    cards=[]
+    for r in prepared:
+        rid=esc(r["wa_requirement_id"])
+        score=float(r.get("best_score") or 0)
+        area="—"
+        if r.get("minimum_area_sqft") and r.get("maximum_area_sqft"):
+            area=f"{esc(r['minimum_area_sqft'])}–{esc(r['maximum_area_sqft'])} sqft"
+        elif r.get("minimum_area_sqft") or r.get("maximum_area_sqft"):
+            area=f"{esc(r.get('minimum_area_sqft') or r.get('maximum_area_sqft'))} sqft"
+        posted=_wa_req_date_label(r.get("requirement_posted_at"),r.get("created_at"))
+        desc=esc(r.get("raw_text") or "No requirement description available")
+        score_html=f"<div class='ai-score'>{score:.0f}%<small>BEST MATCH</small></div>" if score else "<div class='ai-score zero'>—<small>NO MATCH YET</small></div>"
+        cards.append(f"""
+        <section class="req-card {r['_css']}">
+          <div class="req-top">
+            {score_html}
+            <div class="req-head">
+              <div class="req-date">{esc(posted)}</div>
+              <div class="req-id">{rid}</div>
+              <h3>{esc(r.get('preferred_locations') or 'UNKNOWN')} · {esc(r.get('property_type') or 'UNKNOWN')}</h3>
+            </div>
+            <div class="status-box">
+              <b>{esc(r['_status'])}</b>
+              <span>{esc(r['_action'])}</span>
+            </div>
+          </div>
+
+          <div class="req-description">
+            <div class="label">REQUIREMENT DESCRIPTION</div>
+            {desc}
+          </div>
+
+          <div class="req-grid">
+            <div><span>Location</span><b>{esc(r.get('preferred_locations') or 'UNKNOWN')}</b></div>
+            <div><span>Type</span><b>{esc(r.get('property_type') or 'UNKNOWN')}</b></div>
+            <div><span>Area</span><b>{area}</b></div>
+            <div><span>Budget</span><b>{money(r.get('budget_max_inr'))}</b></div>
+            <div><span>Contact</span><b>{esc(r.get('contact_name') or '—')}</b></div>
+            <div><span>Phone</span><b>{esc(r.get('contact_phone') or '—')}</b></div>
+          </div>
+
+          <div class="match-strip">
+            <div><strong>{int(r.get('match_count') or 0)}</strong><span>Matching Properties</span></div>
+            <div><strong>{int(r.get('hot_count') or 0)}</strong><span>Hot Properties</span></div>
+            <div><strong>{int(r['_quality'])}%</strong><span>Requirement Quality</span></div>
+          </div>
+
+          <div class="req-actions">
+            <a class="btn" href="/whatsapp-intelligence/requirement/{rid}/matches">View Matching Properties</a>
+            {f'<a class="btn hotbtn" href="/whatsapp-automation">Open Hot Lead Queue</a>' if score>=80 and r['_status']!='REVIEW DATA' else ''}
+          </div>
+        </section>
+        """)
+
+    notice=""
+    if request.query_params.get("refresh")=="started":
+        notice="<div class='notice'>AI matching refresh started in background. This page remains usable. Refresh after a short while to see updated match scores.</div>"
+
+    css="""
+    <style>
+    .req-toolbar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:14px}
+    .req-toolbar form{display:flex;gap:8px;flex:1;min-width:280px}.req-toolbar input{min-width:220px}
+    .filters{display:flex;gap:7px;flex-wrap:wrap;margin:12px 0 18px}.filters a{padding:8px 11px;border-radius:999px;background:#fff;border:1px solid #d0d5dd;text-decoration:none;color:#344054;font-size:12px;font-weight:700}
+    .kpis2{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:16px}.kpis2 .card{padding:13px}.kpis2 b{font-size:27px;display:block}
+    .req-list{display:grid;gap:14px}.req-card{background:#fff;border:1px solid #e4e7ec;border-left:6px solid #98a2b3;border-radius:13px;padding:15px;box-shadow:0 1px 3px rgba(16,24,40,.05)}
+    .req-card.critical{border-left-color:#b42318}.req-card.hot{border-left-color:#039855}.req-card.good{border-left-color:#1570ef}.req-card.possible{border-left-color:#f79009}.req-card.review{border-left-color:#7f56d9}
+    .req-top{display:grid;grid-template-columns:105px 1fr 190px;gap:13px;align-items:start}.ai-score{font-size:31px;font-weight:850}.ai-score small{font-size:10px;display:block;color:#667085}.ai-score.zero{color:#98a2b3}
+    .req-head h3{margin:4px 0;font-size:19px}.req-date{font-size:12px;font-weight:800;color:#344054}.req-id{font-size:10px;color:#667085}
+    .status-box{padding:9px 10px;border-radius:9px;background:#f9fafb}.status-box b{display:block;font-size:12px}.status-box span{font-size:11px;color:#667085}
+    .req-description{white-space:pre-wrap;background:#fff8db;border:2px solid #f0b429;border-radius:10px;padding:12px;margin:12px 0;line-height:1.45;font-weight:600}
+    .label{font-size:10px;letter-spacing:.5px;font-weight:850;color:#8a5800;margin-bottom:6px}
+    .req-grid{display:grid;grid-template-columns:repeat(6,1fr);gap:8px}.req-grid>div{background:#f8fafc;border:1px solid #eaecf0;border-radius:8px;padding:8px}.req-grid span,.match-strip span{display:block;font-size:10px;color:#667085;text-transform:uppercase;margin-bottom:4px}
+    .match-strip{display:flex;gap:10px;margin-top:11px}.match-strip>div{min-width:130px;background:#f2f4f7;border-radius:8px;padding:8px}.match-strip strong{font-size:19px;display:block}
+    .req-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:11px}.hotbtn{background:#039855}.notice{background:#ecfdf3;color:#027a48;border:1px solid #abefc6;border-radius:9px;padding:10px;margin-bottom:12px}
+    @media(max-width:1000px){.req-grid{grid-template-columns:repeat(3,1fr)}.req-top{grid-template-columns:90px 1fr}.status-box{grid-column:1/-1}.kpis2{grid-template-columns:repeat(2,1fr)}}
+    @media(max-width:650px){.req-grid{grid-template-columns:repeat(2,1fr)}.req-top{grid-template-columns:1fr}.match-strip{flex-wrap:wrap}}
+    </style>
+    """
+
+    body=f"""{css}
+    <div style="display:flex;justify-content:space-between;gap:12px;align-items:end;flex-wrap:wrap">
+      <div><h2 style="margin-bottom:3px">WhatsApp Requirements · AI Action Centre</h2>
+      <p class=muted style="margin-top:0">Newest actionable requirements first. Requirement description, quality, matches and recommended action are visible on one page.</p></div>
+    </div>
+    {notice}
+    <div class="kpis2">
+      <div class=card>Critical 90%+<b>{critical}</b></div>
+      <div class=card>Hot Leads 80%+<b>{hot}</b></div>
+      <div class=card>Good Matches 70%+<b>{good}</b></div>
+      <div class=card>Needs Data Review<b>{review}</b></div>
+    </div>
+    <div class="req-toolbar">
+      <form method=get action="/whatsapp-intelligence/requirements">
+        <input name=q value="{esc(request.query_params.get('q') or '')}" placeholder="Search location, description, contact, phone...">
+        <button class=btn type=submit>Search</button>
+      </form>
+      <form method=post action="/whatsapp-intelligence/requirements/refresh-ai" style="flex:0">
+        <button class="btn hotbtn" type=submit>Refresh AI Matches</button>
+      </form>
+    </div>
+    <div class=filters>
+      <a href="/whatsapp-intelligence/requirements?view=action">All Actionable</a>
+      <a href="/whatsapp-intelligence/requirements?view=hot">🔥 Hot Leads</a>
+      <a href="/whatsapp-intelligence/requirements?view=good">🟢 Good Matches</a>
+      <a href="/whatsapp-intelligence/requirements?view=review">🟣 Review Data</a>
+    </div>
+    <div class=req-list>{''.join(cards) if cards else '<div class=card>No requirements in this view.</div>'}</div>
+    """
+    return HTMLResponse(shell("WhatsApp Requirements · AI Action Centre",body,"Requirements"))
 
 @router.get("/requirement/{rid}/matches",response_class=HTMLResponse)
 def run_matches(rid:str):
