@@ -16351,6 +16351,7 @@ body{{font-family:Arial;margin:0;background:#f4f7fb;color:#172437}}header{{backg
 </div>
 
 <h2>AI Bots & Live Results</h2><div id=botmsg>Ready.</div><div class=g>
+<a class="card bot" href="/whatsapp-live"><b>WhatsApp Group Dashboard</b><p>Live WhatsApp group intake, approved mobile numbers/groups, live feed, date-wise requirements and Hot Lead automation.</p></a>
 <button class="card bot" onclick="runBot('/api/v4/hospitality-bot/start','Hospitality')"><b>▶ Run Hospitality Bot</b><p>Fetch fresh restaurant, cafe, lounge, club, banquet, hotel, guest house, wedding venue and farmhouse contacts.</p></button>
 <a class="card bot" href="/hospitality-results-final"><b>Hospitality Bot Results</b><p>Newest fetched contacts with phone-first filtering.</p></a>
 <button class="card bot" onclick="runBot('/api/v4/retail-bot/start','Retail')"><b>▶ Run Retail Bot</b><p>Fetch fresh retail expansion + requirement signals.</p></button>
