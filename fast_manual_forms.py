@@ -6,7 +6,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel
 from sqlalchemy import text
 
-V19_VERSION='19.3-MEDIA-RESTORED'
+V19_VERSION='19.3.1-PROPERTY-TYPE-RENDER-FIX'
 PROPERTY_TYPES=['Retail Shop','High Street Retail','Mall Retail','Office','Restaurant','Cafe','Banquet / Wedding Venue','Hotel','Guest House','Lounge','Club','Bar','Farmhouse','Warehouse','Industrial','Land','Mixed Use','Residential / Villa']
 
 class FastProperty(BaseModel):
@@ -115,7 +115,7 @@ f.onsubmit=async e=>{{e.preventDefault();if(submitting)return;let b=bodyFromForm
 async function load(){{let d=await J('/api/v19/properties?division='+DIV);rows.innerHTML=(d.rows||[]).map(x=>`<tr><td>${{x.property_code}}</td><td>${{x.property_name||''}}</td><td>${{x.location||''}}</td><td>${{x.area_text||x.area_sqft||''}}</td><td>${{x.rent_text||x.rent_amount||''}}</td><td><button class=btn onclick='editP("${{x.property_code}}")'>Edit</button></td></tr>`).join('')}}
 async function editP(c){{let d=await J('/api/v19/property/'+encodeURIComponent(c)),x=d.property||{{}};f.reset();for(let el of f.elements)if(el.name&&el.name!=='ptype'&&x[el.name]!=null)el.value=x[el.name];document.querySelectorAll('[name=ptype]').forEach(z=>z.checked=(x.property_types||[]).includes(z.value));editcode.value=c;cancel.classList.remove('hidden');save.textContent='Save Changes + Upload Media';clearMedia();scrollTo(0,0)}}
 load();
-</script></body></html>""".replace("{{city}}",city).replace("{{checks}}",checks).replace("{{d}}",d)
+</script></body></html>""".replace("{{city}}",city).replace("{checks}",checks).replace("{{checks}}",checks).replace("{{d}}",d)
 
 def _requirement_page(d):
     checks=''.join(f"<label><input type=checkbox name=rtype value='{x}'> {x}</label>" for x in PROPERTY_TYPES)
