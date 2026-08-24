@@ -6,7 +6,7 @@ from sqlalchemy import create_engine, text
 # === V8.1 CLEAN DATABASE IMPORT ===
 from whatsapp_clean_refinery_v81 import init_clean_db, rebuild_clean_database
 
-router = APIRouter(prefix='/whatsapp-capture', tags=['WhatsApp Capture V8'])
+router = APIRouter(prefix='/whatsapp-capture', tags=['WhatsApp Group Property OS'])
 WA_DATABASE_URL = os.getenv('WHATSAPP_DATABASE_URL','').strip()
 
 def _db_url(url):
@@ -66,7 +66,7 @@ def init_v8():
 def startup():
     if engine is not None:
         try: init_v8()
-        except Exception as e: print('WhatsApp Capture V8 init warning:',e)
+        except Exception as e: print('WhatsApp Group Property OS init warning:',e)
 
 def esc(v):
     return html.escape('' if v is None else str(v))
@@ -116,7 +116,7 @@ def shell(title,body,active='Dashboard'):
     nav=[('Dashboard','/whatsapp-capture'),('WhatsApp Sources','/whatsapp-capture/sources'),('Master Database','/whatsapp-capture/database'),('Property Database','/whatsapp-capture/properties'),('Requirements','/whatsapp-capture/requirements'),('AI Matches','/whatsapp-capture/matches'),('Verification','/whatsapp-capture/verification'),('System Health','/whatsapp-capture/system-health')]
     links=''.join(f'<a class="{"active" if n==active else ""}" href="{u}">{esc(n)}</a>' for n,u in nav)
     return f'''<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{esc(title)}</title><style>
-*{{box-sizing:border-box}}body{{margin:0;font-family:Inter,Arial,sans-serif;background:#f5f7fa;color:#101828}}header{{background:#101828;color:white;padding:18px 24px}}header h1{{margin:0;font-size:23px}}header small{{color:#98a2b3}}nav{{display:flex;gap:6px;flex-wrap:wrap;background:white;padding:10px 18px;border-bottom:1px solid #e4e7ec;position:sticky;top:0;z-index:10}}nav a{{text-decoration:none;color:#344054;padding:9px 12px;border-radius:8px}}nav a.active,nav a:hover{{background:#101828;color:white}}main{{max-width:1550px;margin:22px auto;padding:0 18px}}.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:14px}}.card{{background:white;border:1px solid #e4e7ec;border-radius:12px;padding:17px}}.num{{font-size:30px;font-weight:750}}.muted{{color:#667085}}.btn{{display:inline-block;border:0;background:#101828;color:white;padding:10px 14px;border-radius:8px;text-decoration:none;cursor:pointer}}.btn2{{background:#175cd3}}.btn3{{background:#039855}}table{{width:100%;border-collapse:collapse;background:white;font-size:13px}}th,td{{padding:10px;border-bottom:1px solid #eaecf0;text-align:left;vertical-align:top}}th{{background:#f9fafb;position:sticky;top:58px}}.scroll{{overflow:auto;max-height:72vh;border:1px solid #e4e7ec;border-radius:12px}}input,select,textarea{{width:100%;padding:10px;border:1px solid #d0d5dd;border-radius:8px;background:white}}form.gridform{{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px}}.full{{grid-column:1/-1}}.pill{{padding:4px 8px;border-radius:999px;background:#eef4ff;color:#3538cd;display:inline-block}}</style></head><body><header><h1>Alliance WhatsApp Property Capture V8</h1><small>Additive team workspace · existing property and WhatsApp fields remain untouched</small></header><nav>{links}<a href="/workspace">← Main Workspace</a></nav><main>{body}</main></body></html>'''
+*{{box-sizing:border-box}}body{{margin:0;font-family:Inter,Arial,sans-serif;background:#f5f7fa;color:#101828}}header{{background:#101828;color:white;padding:18px 24px}}header h1{{margin:0;font-size:23px}}header small{{color:#98a2b3}}nav{{display:flex;gap:6px;flex-wrap:wrap;background:white;padding:10px 18px;border-bottom:1px solid #e4e7ec;position:sticky;top:0;z-index:10}}nav a{{text-decoration:none;color:#344054;padding:9px 12px;border-radius:8px}}nav a.active,nav a:hover{{background:#101828;color:white}}main{{max-width:1550px;margin:22px auto;padding:0 18px}}.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:14px}}.card{{background:white;border:1px solid #e4e7ec;border-radius:12px;padding:17px}}.num{{font-size:30px;font-weight:750}}.muted{{color:#667085}}.btn{{display:inline-block;border:0;background:#101828;color:white;padding:10px 14px;border-radius:8px;text-decoration:none;cursor:pointer}}.btn2{{background:#175cd3}}.btn3{{background:#039855}}table{{width:100%;border-collapse:collapse;background:white;font-size:13px}}th,td{{padding:10px;border-bottom:1px solid #eaecf0;text-align:left;vertical-align:top}}th{{background:#f9fafb;position:sticky;top:58px}}.scroll{{overflow:auto;max-height:72vh;border:1px solid #e4e7ec;border-radius:12px}}input,select,textarea{{width:100%;padding:10px;border:1px solid #d0d5dd;border-radius:8px;background:white}}form.gridform{{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px}}.full{{grid-column:1/-1}}.pill{{padding:4px 8px;border-radius:999px;background:#eef4ff;color:#3538cd;display:inline-block}}</style></head><body><header><h1>Alliance WhatsApp Group Property OS</h1><small>Team workspace · WhatsApp Groups · Listings · Requirements · Contacts · AI Matching</small></header><nav>{links}<a href="/workspace">← Main Workspace</a></nav><main>{body}</main></body></html>'''
 
 @router.get('',response_class=HTMLResponse)
 def dashboard():
@@ -130,8 +130,8 @@ def dashboard():
         recent=c.execute(text('SELECT requirement_id,client_name,preferred_location,property_type,minimum_area_sqft,maximum_area_sqft FROM v8_manual_requirements ORDER BY id DESC LIMIT 8')).mappings().all()
     cards=''.join(f'<div class=card><div class=muted>{esc(k)}</div><div class=num>{v}</div></div>' for k,v in stats.items())
     rows=''.join(f"<tr><td>{esc(r['requirement_id'])}</td><td>{esc(r['client_name'])}</td><td>{esc(r['preferred_location'])}</td><td>{esc(r['property_type'])}</td><td>{esc(r['minimum_area_sqft'])}–{esc(r['maximum_area_sqft'])}</td><td><a class=btn href='/whatsapp-capture/requirements/{esc(r['requirement_id'])}/matches'>Find Matches</a></td></tr>" for r in recent)
-    body=f'''<div style="display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap"><div><h2>Team Command Centre</h2><p class=muted>V8 reads existing WhatsApp/property tables and writes only to new v8_* tables.</p></div><a class="btn btn3" href="/whatsapp-capture/requirements/new">+ Add Offline Requirement</a></div><div class=grid>{cards}</div><h3>Recent Manual Requirements</h3><div class=scroll><table><tr><th>ID</th><th>Client</th><th>Location</th><th>Type</th><th>Area</th><th></th></tr>{rows}</table></div>'''
-    return HTMLResponse(shell('WhatsApp Capture V8',body,'Dashboard'))
+    body=f'''<div style="display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap"><div><h2>Team Command Centre</h2><p class=muted>WhatsApp Group Property OS combines selected WhatsApp groups, clean listings, requirements, contacts and AI matching in one team workspace.</p></div><a class="btn btn3" href="/whatsapp-capture/requirements/new">+ Add Offline Requirement</a></div><div class=grid>{cards}</div><h3>Recent Manual Requirements</h3><div class=scroll><table><tr><th>ID</th><th>Client</th><th>Location</th><th>Type</th><th>Area</th><th></th></tr>{rows}</table></div>'''
+    return HTMLResponse(shell('WhatsApp Group Property OS',body,'Dashboard'))
 
 @router.get('/sources',response_class=HTMLResponse)
 def sources():
