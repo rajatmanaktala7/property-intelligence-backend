@@ -646,8 +646,19 @@ def dashboard():
 
 @router.get("/run-pipeline")
 def run_pipeline():
-    ingest_current_whatsapp_source()
-    rebuild_matches()
+    with engine.connect() as lock_conn:
+        locked=bool(lock_conn.execute(text("SELECT pg_try_advisory_lock(:k)"),{"k":918811955}).scalar())
+        if not locked:
+            return RedirectResponse("/whatsapp-capture/intelligence/accounts",303)
+        try:
+            ingest_current_whatsapp_source()
+            rebuild_matches()
+        finally:
+            try:
+                lock_conn.execute(text("SELECT pg_advisory_unlock(:k)"),{"k":918811955})
+                lock_conn.commit()
+            except Exception:
+                pass
     return RedirectResponse("/whatsapp-capture/intelligence",303)
 
 @router.get("/sources",response_class=HTMLResponse)

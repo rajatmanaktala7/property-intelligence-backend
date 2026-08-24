@@ -79,6 +79,81 @@ def install(router, engine, require_db, init_db, shell, esc,
             if cand in cols: return cand
         return None
 
+    def canonical_group_name(name):
+        import unicodedata
+        x=str(name or "").replace("\u00a0"," ")
+        x=x.replace("WhatsApp Chat with ","").replace("whatsapp chat with ","")
+        if x.lower().endswith(".txt"):
+            x=x[:-4]
+        x=unicodedata.normalize("NFKD",x)
+        x="".join(ch for ch in x if ch.isalnum() or ch.isspace())
+        return " ".join(x.lower().split())
+
+    def group_similarity(a,b):
+        from difflib import SequenceMatcher
+        ca,cb=canonical_group_name(a),canonical_group_name(b)
+        if not ca or not cb:
+            return 0.0
+        if ca==cb:
+            return 1.0
+        return SequenceMatcher(None,ca,cb).ratio()
+
+    KNOWN_ACCOUNT_GROUPS = {
+        "9811895500": [
+            "Western line property 1",
+            "Goa Brokers & Builders...",
+            "Preleased/Prerented NCR",
+            "WELCOME P -19",
+            "HOTELS, BANQUETS & RESTRO",
+            "Hotels & Resorts ~ Sale",
+            "Real Estate Brokers 🏛️",
+            "Hotel, Banquet & Restro B",
+            "Commercial Properties GGN",
+            "Janakpuri dealers",
+            "Vke A1 comeplax showroom shops at D6 Vasant Kunj Delhi 70",
+            "Priyankas Housing Delhi 2",
+            "🏠ONLY FARM HOUSE FARM LAND",
+            "LEASED/RENTED PROPERTIES FOR SALE",
+            "Gurgaon Delhi Properties Only✅✅🙏🙏",
+            "WEST DELHI 05 Real Estate Lisiting Group",
+            "Briicx3 Reality",
+            "Real#Estate South Delhi (4)",
+            "PROPERTY PROPOSAL",
+            "PRE-RENTED / PRE-LEASED properties only (No other deals pls)",
+            "Kuber Prop latest",
+            "GOA TOP REAL ESTATE AGENT",
+        ],
+        "8076209947": [
+            "Omvira estates buy sell rent.",
+            "D RANGE GROUP GOA-your ultimate service hub",
+        ],
+    }
+
+    def auto_assign_known_groups(c):
+        rows=c.execute(text("""
+            SELECT source_group_name,account_phone
+            FROM wai_source_group_map
+            WHERE COALESCE(source_group_name,'')<>''
+        """)).mappings().all()
+        for row in rows:
+            if row.get("account_phone"):
+                continue
+            grp=row["source_group_name"]
+            best_phone=None
+            best_score=0.0
+            for phone,names in KNOWN_ACCOUNT_GROUPS.items():
+                for known in names:
+                    sc=group_similarity(grp,known)
+                    if sc>best_score:
+                        best_score=sc
+                        best_phone=phone
+            if best_phone and best_score>=0.74:
+                c.execute(text("""
+                    UPDATE wai_source_group_map
+                    SET account_phone=:p,updated_at=NOW()
+                    WHERE source_group_name=:g AND account_phone IS NULL
+                """),{"p":best_phone,"g":grp})
+
     def sync_source_group_map():
         ensure_tables()
         with engine.begin() as c:
@@ -247,8 +322,8 @@ def install(router, engine, require_db, init_db, shell, esc,
                 <select name=account_phone>{options}</select><button class='btn green'>ASSIGN</button></form></td></tr>"""
                 for g in unassigned
             )
-            unassigned_html=f"""<div class=card style='margin-top:14px'><h3>Unassigned WhatsApp Groups</h3>
-              <p class=muted>Assign each group once to the correct number. This mapping stays saved.</p>
+            unassigned_html=f"""<div class=card style='margin-top:14px'><h3>Unassigned / New WhatsApp Groups</h3>
+              <p class=muted>Known groups are auto-assigned. Only genuinely new or uncertain groups remain here for one-time assignment.</p>
               <div class=scroll><table><tr><th>Group</th><th>Messages</th><th>Inventory</th><th>Requirements</th><th>Assign</th></tr>{rows}</table></div></div>"""
 
         body=f"""<h2>WhatsApp AI Source Control</h2>
@@ -317,9 +392,32 @@ def install(router, engine, require_db, init_db, shell, esc,
                     last_auto_result=:r,updated_at=NOW() WHERE id=1"""),{"r":str(e)[:2000]})
             raise
 
+    LOCK_KEY = 918811955
+
+    def run_serialized():
+        with engine.connect() as lock_conn:
+            locked=bool(lock_conn.execute(text("SELECT pg_try_advisory_lock(:k)"),{"k":LOCK_KEY}).scalar())
+            if not locked:
+                with engine.begin() as c:
+                    c.execute(text("""UPDATE wai_auto_settings SET
+                        last_auto_run=NOW(),
+                        last_auto_status='BUSY',
+                        last_auto_result='Another AI segregation run is already active.',
+                        updated_at=NOW()
+                        WHERE id=1"""))
+                return {"status":"busy"}
+            try:
+                return process_once()
+            finally:
+                try:
+                    lock_conn.execute(text("SELECT pg_advisory_unlock(:k)"),{"k":LOCK_KEY})
+                    lock_conn.commit()
+                except Exception:
+                    pass
+
     @router.get("/accounts/process-now")
     def process_now():
-        process_once()
+        run_serialized()
         return RedirectResponse("/whatsapp-capture/intelligence/accounts",303)
 
     @router.get("/accounts/auto/{state}")
@@ -336,12 +434,8 @@ def install(router, engine, require_db, init_db, shell, esc,
                 ensure_tables()
                 with engine.begin() as c:
                     setting=c.execute(text("SELECT auto_process,interval_seconds FROM wai_auto_settings WHERE id=1")).mappings().first()
-                    locked=bool(c.execute(text("SELECT pg_try_advisory_lock(918811955)")).scalar())
-                if setting and setting["auto_process"] and locked:
-                    try: process_once()
-                    finally:
-                        with engine.begin() as c:
-                            c.execute(text("SELECT pg_advisory_unlock(918811955)"))
+                if setting and setting["auto_process"]:
+                    run_serialized()
                 time.sleep(max(60,int(setting["interval_seconds"] if setting else 120)))
             except Exception as e:
                 print("WAI auto source worker warning:",e)
