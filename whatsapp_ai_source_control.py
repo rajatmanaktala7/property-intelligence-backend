@@ -195,6 +195,9 @@ def install(router, engine, require_db, init_db, shell, esc,
                         "label":"WhatsApp "+phone[-4:],"p":phone
                     })
 
+            # Apply known group-to-number mapping after source sync.
+            auto_assign_known_groups(c)
+
     def status_label(last_message, ai_last):
         if not last_message: return "NO DATA"
         now=datetime.now(timezone.utc)
