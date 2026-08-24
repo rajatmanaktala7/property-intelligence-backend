@@ -592,6 +592,7 @@ def shell(title,body,active="Dashboard"):
     nav=[
       ("Dashboard","/whatsapp-capture/intelligence"),
       ("WhatsApp Sources","/whatsapp-capture/intelligence/sources"),
+      ("Clean Database","/whatsapp-capture/intelligence/clean"),
       ("Property Database","/whatsapp-capture/intelligence/properties"),
       ("Requirements","/whatsapp-capture/intelligence/requirements"),
       ("AI Matches","/whatsapp-capture/intelligence/matches"),
@@ -859,3 +860,10 @@ try:
     )
 except Exception as _source_control_error:
     print("WAI AI Source Control warning:", _source_control_error)
+
+# Canonical clean WhatsApp database
+try:
+    from whatsapp_clean_database_final import router as _clean_database_router
+    router.include_router(_clean_database_router)
+except Exception as _clean_db_error:
+    print("WhatsApp clean database warning:", _clean_db_error)

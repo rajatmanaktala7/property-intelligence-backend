@@ -385,6 +385,11 @@ def install(router, engine, require_db, init_db, shell, esc,
         try:
             result=ingest_current_whatsapp_source()
             rebuild_matches()
+            try:
+                from whatsapp_clean_database_final import refresh_clean_database
+                clean_result=refresh_clean_database(False)
+            except Exception as clean_error:
+                clean_result={"status":"warning","error":str(clean_error)}
             with engine.begin() as c:
                 c.execute(text("""UPDATE wai_auto_settings SET last_auto_run=NOW(),last_auto_status='SUCCESS',
                     last_auto_result=:r,updated_at=NOW() WHERE id=1"""),{"r":str(result)[:2000]})
