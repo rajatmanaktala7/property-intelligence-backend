@@ -308,6 +308,16 @@ def split_multi_listing_message(raw):
     good=[x for x in parts if looks_like_property_piece(x)]
     if len(good)>=2:return good
 
+    # Emoji/keycap numbered lists: 1️⃣, 2️⃣, 3️⃣ ...
+    parts=[norm(x) for x in re.split(r"(?m)(?=^\s*[0-9]\ufe0f?\u20e3\s*)",raw) if norm(x)]
+    good=[x for x in parts if looks_like_property_piece(x)]
+    if len(good)>=2:return good
+
+    # Circled-number lists: ① ② ③ ...
+    parts=[norm(x) for x in re.split(r"(?m)(?=^\s*[①②③④⑤⑥⑦⑧⑨⑩]\s*)",raw) if norm(x)]
+    good=[x for x in parts if looks_like_property_piece(x)]
+    if len(good)>=2:return good
+
     # OPTION markers even when inline
     parts=[norm(x) for x in re.split(r"(?i)(?=(?:OPTION|OPT)\s*\d+\b)",raw) if norm(x)]
     good=[x for x in parts if looks_like_property_piece(x)]
@@ -816,3 +826,10 @@ def export_excel():
     bio=io.BytesIO();wb.save(bio);bio.seek(0)
     return StreamingResponse(bio,media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                              headers={"Content-Disposition":"attachment; filename=Alliance_WhatsApp_Property_Intelligence.xlsx"})
+
+# Database Improvement V2: triage + source health
+try:
+    from whatsapp_database_improvement_v2 import install as _install_db_improvement_v2
+    _install_db_improvement_v2(router, engine, require_db, init_db, shell, esc)
+except Exception as _dbv2_error:
+    print('WAI Database Improvement V2 warning:', _dbv2_error)
