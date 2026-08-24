@@ -3,6 +3,8 @@ from typing import Optional
 from fastapi import APIRouter, Form, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import create_engine, text
+# === V8.1 CLEAN DATABASE IMPORT ===
+from whatsapp_clean_refinery_v81 import init_clean_db, rebuild_clean_database
 
 router = APIRouter(prefix='/whatsapp-capture', tags=['WhatsApp Capture V8'])
 WA_DATABASE_URL = os.getenv('WHATSAPP_DATABASE_URL','').strip()
@@ -139,24 +141,107 @@ def sources():
     trs=''.join(f"<tr><td>{esc(r['group_name'])}</td><td>{r['messages']}</td><td>{esc(r['last_seen'])}</td></tr>" for r in rows)
     return HTMLResponse(shell('WhatsApp Sources',f'<h2>WhatsApp Sources</h2><p class=muted>Read-only view of existing WhatsApp data.</p><div class=scroll><table><tr><th>Group</th><th>Messages</th><th>Last Seen</th></tr>{trs}</table></div>','WhatsApp Sources'))
 
-@router.get('/properties',response_class=HTMLResponse)
+@router.get("/properties", response_class=HTMLResponse)
 def properties():
-    require_db()
+    require_db(); init_clean_db(engine)
     with engine.begin() as c:
-        rows=c.execute(text("""SELECT wa_property_id,raw_text,COALESCE(broker_phone,owner_phone,sender_phone) AS contact,CASE WHEN transaction_type='RENT' THEN rent_inr ELSE sale_price_inr END AS price,area_sqft,location,property_type,verification_status FROM wa_properties WHERE COALESCE(record_status,'ACTIVE')='ACTIVE' AND duplicate_status<>'DUPLICATE' ORDER BY id DESC LIMIT 1000""")).mappings().all()
-    trs=''.join(f"<tr><td style='min-width:360px'>{esc(r['raw_text'])}</td><td>{esc(r['contact'])}</td><td>{money(r['price'])}</td><td>{esc(r['area_sqft'])}</td><td>{esc(r['location'])}</td><td>{esc(r['property_type'])}</td><td>{esc(r['verification_status'])}</td><td><a class=btn href='/whatsapp-intelligence/property/{esc(r['wa_property_id'])}'>Open</a></td></tr>" for r in rows)
-    return HTMLResponse(shell('Property Database',f'<h2>Property Database</h2><p class=muted>Existing WhatsApp property records. No field/schema changes.</p><div class=scroll><table><tr><th>Raw Message</th><th>Contact</th><th>Price/Rent</th><th>Area</th><th>Location</th><th>Type</th><th>Verification</th><th></th></tr>{trs}</table></div>','Property Database'))
+        clean_count=c.execute(text("SELECT COUNT(*) FROM v81_wa_clean_properties WHERE record_status='ACTIVE'")).scalar() or 0
+    if clean_count==0:
+        rebuild_clean_database(engine)
+    with engine.begin() as c:
+        rows=c.execute(text("""
+            SELECT * FROM v81_wa_clean_properties
+            WHERE record_status='ACTIVE'
+            ORDER BY id DESC LIMIT 2000
+        """)).mappings().all()
 
-@router.get('/requirements',response_class=HTMLResponse)
-def requirements():
+    trs="".join(
+      f"<tr><td style='min-width:420px;white-space:pre-wrap'>{esc(r['raw_property_text'])}</td>"
+      f"<td>{esc(r['contact_numbers'])}</td><td>{money(r['price_inr'])}</td>"
+      f"<td>{esc(r['area_display'] or r['area_sqft'])}</td><td>{esc(r['source_group'])}</td>"
+      f"<td>{esc(r['locality'])}</td><td>{esc(r['property_type'])}</td><td>{esc(r['transaction_type'])}</td>"
+      f"<td>{esc(r['floor'])}</td><td>{esc(r['agency_brand'])}</td><td>{esc(r['contact_person'])}</td>"
+      f"<td>{esc(r['completeness'])}</td><td>{esc(r['extraction_confidence'])}</td></tr>"
+      for r in rows
+    )
+
+    body=f"""<div style='display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap'>
+      <div><h2>Clean WhatsApp Property Database</h2>
+      <p class=muted>Newspaper-style model: one physical property per row. Attribute fragments are excluded.</p></div>
+      <a class='btn btn3' href='/whatsapp-capture/refine-database'>REFINE / REBUILD DATABASE</a>
+    </div>
+    <div class=scroll><table>
+      <tr><th>Raw Property Details</th><th>Contact No.</th><th>Price / Rent</th><th>Area</th>
+      <th>Source Group</th><th>Location</th><th>Property Type</th><th>Transaction</th><th>Floor</th>
+      <th>Agency / Brand</th><th>Contact Person</th><th>Completeness</th><th>AI Confidence %</th></tr>
+      {trs}
+    </table></div>"""
+    return HTMLResponse(shell("Clean Property Database",body,"Property Database"))
+
+@router.get("/refine-database")
+def refine_database():
     require_db()
+    rebuild_clean_database(engine)
+    return RedirectResponse("/whatsapp-capture/properties",303)
+
+@router.get("/requirements", response_class=HTMLResponse)
+def requirements():
+    require_db(); init_clean_db(engine)
     with engine.begin() as c:
-        manual=c.execute(text('SELECT * FROM v8_manual_requirements ORDER BY id DESC LIMIT 1000')).mappings().all()
-        wa=c.execute(text("SELECT wa_requirement_id AS requirement_id,client_name,contact_phone,preferred_locations AS preferred_location,property_type,minimum_area_sqft,maximum_area_sqft,budget_max_inr FROM wa_requirements ORDER BY id DESC LIMIT 500")).mappings().all()
-    mtrs=''.join(f"<tr><td>{esc(r['requirement_id'])}</td><td>{esc(r['client_name'])}</td><td>{esc(r['contact_phone'])}</td><td>{esc(r['preferred_location'])}</td><td>{esc(r['property_type'])}</td><td>{esc(r['minimum_area_sqft'])}–{esc(r['maximum_area_sqft'])}</td><td>{money(r['budget_max_inr'])}</td><td><a class=btn href='/whatsapp-capture/requirements/{esc(r['requirement_id'])}/matches'>Match</a></td></tr>" for r in manual)
-    wtrs=''.join(f"<tr><td>{esc(r['requirement_id'])}</td><td>{esc(r['client_name'])}</td><td>{esc(r['contact_phone'])}</td><td>{esc(r['preferred_location'])}</td><td>{esc(r['property_type'])}</td><td>{esc(r['minimum_area_sqft'])}–{esc(r['maximum_area_sqft'])}</td><td>{money(r['budget_max_inr'])}</td><td><a class=btn href='/whatsapp-intelligence/requirement/{esc(r['requirement_id'])}/matches'>Existing Matcher</a></td></tr>" for r in wa)
-    body=f"<div style='display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap'><h2>Requirements</h2><a class='btn btn3' href='/whatsapp-capture/requirements/new'>+ Add Offline Requirement</a></div><h3>Manual / Offline</h3><div class=scroll><table><tr><th>ID</th><th>Client</th><th>Phone</th><th>Location</th><th>Type</th><th>Area</th><th>Budget</th><th></th></tr>{mtrs}</table></div><h3>WhatsApp Extracted</h3><div class=scroll><table><tr><th>ID</th><th>Client</th><th>Phone</th><th>Location</th><th>Type</th><th>Area</th><th>Budget</th><th></th></tr>{wtrs}</table></div>"
-    return HTMLResponse(shell('Requirements',body,'Requirements'))
+        clean_count=c.execute(text("SELECT COUNT(*) FROM v81_wa_clean_requirements WHERE record_status='ACTIVE'")).scalar() or 0
+    if clean_count==0:
+        rebuild_clean_database(engine)
+
+    with engine.begin() as c:
+        manual=c.execute(text("SELECT * FROM v8_manual_requirements ORDER BY id DESC LIMIT 1000")).mappings().all()
+        wa=c.execute(text("""
+            SELECT * FROM v81_wa_clean_requirements
+            WHERE record_status='ACTIVE'
+            ORDER BY id DESC LIMIT 2000
+        """)).mappings().all()
+
+    mtrs="".join(
+      f"<tr><td style='min-width:340px;white-space:pre-wrap'>{esc((r['remarks'] or '') or ((r['client_name'] or '')+' requirement for '+(r['preferred_location'] or '')))}</td>"
+      f"<td>{esc(r['contact_phone'])}</td><td>{money(r['budget_max_inr'])}</td>"
+      f"<td>{esc(r['minimum_area_sqft'])}–{esc(r['maximum_area_sqft'])}</td><td><b>MANUAL / OFFLINE</b></td>"
+      f"<td>{esc(r['preferred_location'])}</td><td>{esc(r['property_type'])}</td><td>{esc(r['transaction_type'])}</td>"
+      f"<td>{esc(r['client_name'])}</td><td>{esc(r['team_member'])}</td>"
+      f"<td><a class=btn href='/whatsapp-capture/requirements/{esc(r['requirement_id'])}/matches'>Find Matches</a></td></tr>"
+      for r in manual
+    )
+
+    wtrs="".join(
+      f"<tr><td style='min-width:420px;white-space:pre-wrap'>{esc(r['raw_message'])}</td>"
+      f"<td>{esc(r['contact_numbers'])}</td><td>{money(r['budget_max_inr'])}</td>"
+      f"<td>{esc(r['minimum_area_sqft'])}–{esc(r['maximum_area_sqft'])}</td><td>{esc(r['source_group'])}</td>"
+      f"<td>{esc(r['preferred_location'])}</td><td>{esc(r['property_type'])}</td><td>{esc(r['transaction_type'])}</td>"
+      f"<td>{esc(r['contact_person'] or r['client_name'])}</td><td>{esc(r['completeness'])}</td>"
+      f"<td>{esc(r['extraction_confidence'])}</td>"
+      f"<td><a class=btn href='/whatsapp-intelligence/requirement/{esc(r['source_requirement_id'])}/matches'>Find Matches</a></td></tr>"
+      for r in wa
+    )
+
+    body=f"""<div style='display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px'>
+      <div><h2>Requirements Database</h2>
+      <p class=muted>Full requirement details are visible here in the same front-page format as the property database.</p></div>
+      <a class='btn btn3' href='/whatsapp-capture/requirements/new'>+ Add Offline Requirement</a>
+    </div>
+
+    <h3>Manual / Offline Requirements</h3>
+    <div class=scroll><table>
+      <tr><th>Requirement Details</th><th>Contact No.</th><th>Budget / Rent</th><th>Area</th>
+      <th>Source</th><th>Location</th><th>Property Type</th><th>Transaction</th><th>Client</th><th>Team Member</th><th></th></tr>
+      {mtrs}
+    </table></div>
+
+    <h3>WhatsApp Extracted Requirements</h3>
+    <div class=scroll><table>
+      <tr><th>Raw Requirement Details</th><th>Contact No.</th><th>Budget / Rent</th><th>Area</th>
+      <th>Source Group</th><th>Location</th><th>Property Type</th><th>Transaction</th><th>Contact / Client</th>
+      <th>Completeness</th><th>AI Confidence %</th><th></th></tr>
+      {wtrs}
+    </table></div>"""
+    return HTMLResponse(shell("Requirements",body,"Requirements"))
 
 @router.get('/requirements/new',response_class=HTMLResponse)
 def new_requirement():
