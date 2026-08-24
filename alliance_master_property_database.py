@@ -9,7 +9,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.utils import get_column_letter
 
-router = APIRouter(prefix="/property-database", tags=["Alliance Master Property Database"])
+router = APIRouter(prefix="/whatsapp-capture/database", tags=["Alliance WhatsApp Group Master Database"])
 
 DATABASE_URL = (
     os.getenv("WHATSAPP_DATABASE_URL")
@@ -191,12 +191,12 @@ def fingerprint(values):
 
 def shell(title, body, active="Dashboard"):
     nav = [
-        ("Dashboard","/property-database"),
-        ("Listings","/property-database/listings"),
-        ("Requirements","/property-database/requirements"),
-        ("Contacts","/property-database/contacts"),
-        ("AI Matches","/property-database/matches"),
-        ("System Health","/property-database/system-health"),
+        ("Dashboard","/whatsapp-capture/database"),
+        ("Listings","/whatsapp-capture/database/listings"),
+        ("Requirements","/whatsapp-capture/database/requirements"),
+        ("Contacts","/whatsapp-capture/database/contacts"),
+        ("AI Matches","/whatsapp-capture/database/matches"),
+        ("System Health","/whatsapp-capture/database/system-health"),
     ]
     links="".join(
         f'<a class="{"active" if n==active else ""}" href="{u}">{esc(n)}</a>'
@@ -228,7 +228,7 @@ form.gridform{{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1
 .pill{{padding:4px 8px;border-radius:999px;background:#eef4ff;color:#3538cd;display:inline-block}}
 </style></head>
 <body>
-<header><h1>Alliance Master Property Database</h1><small>Listings · Requirements · Contacts · AI Matching · WhatsApp Sync</small></header>
+<header><h1>Alliance WhatsApp Group Property Database</h1><small>WhatsApp Groups · Listings · Requirements · Contacts · AI Matching</small></header>
 <nav>{links}<a href="/workspace">← Main Workspace</a></nav>
 <main>{body}</main></body></html>"""
 
@@ -542,16 +542,16 @@ def dashboard():
         f"<tr><td style='min-width:360px'>{esc(r['raw_summary'])}</td><td>{esc(r['contact_no'])}</td><td>{esc(r['budget_text'])}</td>"
         f"<td>{esc(r['area_text'])}</td><td>{esc(r['source_group'])}</td><td>{esc(r['location'])}</td>"
         f"<td>{esc(r['property_type'])}</td><td>{esc(r['transaction'])}</td><td>{esc(r['status'])}</td>"
-        f"<td><a class=btn href='/property-database/requirements/{esc(r['req_id'])}/matches'>Match</a></td></tr>"
+        f"<td><a class=btn href='/whatsapp-capture/database/requirements/{esc(r['req_id'])}/matches'>Match</a></td></tr>"
         for r in recent
     )
     body=f"""
     <div style='display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap'>
       <div><h2>Command Centre</h2><p class=muted>This is the final master structure. Existing wa_* source tables remain untouched.</p></div>
       <div>
-        <a class='btn btn3' href='/property-database/sync-whatsapp'>SYNC WHATSAPP DATABASE</a>
-        <a class='btn btn2' href='/property-database/requirements/new'>+ ADD OFFLINE REQUIREMENT</a>
-        <a class='btn' href='/property-database/export.xlsx'>EXPORT EXCEL</a>
+        <a class='btn btn3' href='/whatsapp-capture/database/sync-whatsapp'>SYNC WHATSAPP DATABASE</a>
+        <a class='btn btn2' href='/whatsapp-capture/database/requirements/new'>+ ADD OFFLINE REQUIREMENT</a>
+        <a class='btn' href='/whatsapp-capture/database/export.xlsx'>EXPORT EXCEL</a>
       </div>
     </div>
     <div class=grid>{cards}</div>
@@ -560,12 +560,12 @@ def dashboard():
     <tr><th>Requirement Details</th><th>Contact No.</th><th>Budget</th><th>Area</th><th>Source Group</th><th>Location</th>
     <th>Property Type</th><th>Transaction</th><th>Status</th><th></th></tr>{rows}</table></div>
     """
-    return HTMLResponse(shell("Alliance Master Property Database",body,"Dashboard"))
+    return HTMLResponse(shell("Alliance WhatsApp Group Property Database",body,"Dashboard"))
 
 @router.get("/sync-whatsapp")
 def sync_whatsapp():
     sync_from_whatsapp()
-    return RedirectResponse("/property-database",303)
+    return RedirectResponse("/whatsapp-capture/database",303)
 
 @router.get("/listings", response_class=HTMLResponse)
 def listings():
@@ -605,12 +605,12 @@ def requirements():
         f"<td>{esc(r['contact_no'])}</td><td>{esc(r['budget_text'])}</td><td>{esc(r['area_text'])}</td>"
         f"<td>{esc(r['source_group'])}</td><td>{esc(r['location'])}</td><td>{esc(r['property_type'])}</td>"
         f"<td>{esc(r['transaction'])}</td><td>{esc(r['client_broker'])}</td><td>{esc(r['ai_confidence'])}</td>"
-        f"<td>{esc(r['status'])}</td><td><a class=btn href='/property-database/requirements/{esc(r['req_id'])}/matches'>Find Matches</a></td></tr>"
+        f"<td>{esc(r['status'])}</td><td><a class=btn href='/whatsapp-capture/database/requirements/{esc(r['req_id'])}/matches'>Find Matches</a></td></tr>"
         for r in rows
     )
     body=f"""<div style='display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap'>
       <div><h2>Requirements</h2><p class=muted>Full requirement details are visible on the front page.</p></div>
-      <a class='btn btn3' href='/property-database/requirements/new'>+ ADD OFFLINE REQUIREMENT</a>
+      <a class='btn btn3' href='/whatsapp-capture/database/requirements/new'>+ ADD OFFLINE REQUIREMENT</a>
     </div>
     <div class=scroll><table>
     <tr><th>Raw Requirement Details</th><th>Contact No.</th><th>Budget / Rent</th><th>Area</th><th>Source Group</th>
@@ -685,7 +685,7 @@ def create_requirement(
         })
         if contact_no:
             upsert_contact(c,contact_no,name=client_broker,region=region,notes="Manual/offline requirement")
-    return RedirectResponse(f"/property-database/requirements/{rid}/matches",303)
+    return RedirectResponse(f"/whatsapp-capture/database/requirements/{rid}/matches",303)
 
 @router.get("/requirements/{req_id}/matches", response_class=HTMLResponse)
 def matches_for_requirement(req_id: str):
@@ -724,7 +724,7 @@ def matches_index():
     trs="".join(
         f"<tr><td style='min-width:360px'>{esc(r['raw_summary'])}</td><td>{esc(r['location'])}</td>"
         f"<td>{esc(r['status'])}</td><td>{r['match_count']}</td><td>{float(r['best_match'] or 0):.0f}%</td>"
-        f"<td><a class=btn href='/property-database/requirements/{esc(r['req_id'])}/matches'>Open</a></td></tr>"
+        f"<td><a class=btn href='/whatsapp-capture/database/requirements/{esc(r['req_id'])}/matches'>Open</a></td></tr>"
         for r in rows
     )
     return HTMLResponse(shell("AI Matches",f"<h2>AI Matches</h2><div class=scroll><table><tr><th>Requirement</th><th>Location</th><th>Status</th><th>Matches</th><th>Best Match</th><th></th></tr>{trs}</table></div>","AI Matches"))
