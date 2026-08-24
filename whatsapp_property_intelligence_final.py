@@ -461,6 +461,11 @@ def ingest_current_whatsapp_source():
             """),{"id":mid,"gid":gid,"p":r.get("sender_phone") or "","n":r.get("sender_name") or "",
                   "txt":r.get("raw_text") or "","sent":r.get("source_created_at"),"key":source_key})
 
+            already=c.execute(text("SELECT extraction_status FROM wai_raw_messages WHERE id=:id"),{"id":mid}).scalar()
+            if already in ("extracted","skipped"):
+                stats["skipped"]+=1
+                continue
+
             raw=r.get("raw_text") or ""
             pieces=split_multi_listing_message(raw)
             if not pieces:
@@ -633,7 +638,8 @@ def dashboard():
         run_html=f"<div class=card><b>Last pipeline run</b><br>Messages: {run['messages_ingested']} · Extracted: {run['messages_extracted']} · Listing rows: {run['listing_rows_created']} · Requirement rows: {run['requirement_rows_created']} · Failed: {run['failed']}</div>"
     body=f"""<div style='display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;align-items:center'>
       <div><h2>Dashboard</h2><p class=muted>Raw message → rule extraction → optional LLM repair → verification → matching.</p></div>
-      <div><a class='btn green' href='/whatsapp-capture/intelligence/run-pipeline'>RUN / REBUILD PIPELINE</a>
+      <div><a class='btn blue' href='/whatsapp-capture/intelligence/accounts'>WHATSAPP NUMBERS + AI STATUS</a>
+      <a class='btn green' href='/whatsapp-capture/intelligence/run-pipeline'>RUN / REBUILD PIPELINE</a>
       <a class='btn blue' href='/whatsapp-capture/intelligence/export.xlsx'>EXPORT EXCEL</a></div></div>
       <div class=grid>{cards}</div><br>{run_html}"""
     return HTMLResponse(shell("Dashboard",body,"Dashboard"))
@@ -833,3 +839,12 @@ try:
     _install_db_improvement_v2(router, engine, require_db, init_db, shell, esc)
 except Exception as _dbv2_error:
     print('WAI Database Improvement V2 warning:', _dbv2_error)
+# WhatsApp AI Source Control: accounts + mapping + automatic segregation
+try:
+    from whatsapp_ai_source_control import install as _install_ai_source_control
+    _install_ai_source_control(
+        router, engine, require_db, init_db, shell, esc,
+        ingest_current_whatsapp_source, rebuild_matches
+    )
+except Exception as _source_control_error:
+    print("WAI AI Source Control warning:", _source_control_error)
