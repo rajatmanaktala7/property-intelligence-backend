@@ -16899,3 +16899,8 @@ from whatsapp_capture_v8 import router as whatsapp_capture_v8_router
 app.include_router(whatsapp_capture_v8_router)
 # === END WHATSAPP CAPTURE V8 ADDITIVE MODULE ===
 
+# === ALLIANCE MASTER PROPERTY DATABASE ===
+from alliance_master_property_database import router as alliance_master_property_database_router
+app.include_router(alliance_master_property_database_router)
+# === END ALLIANCE MASTER PROPERTY DATABASE ===
+
