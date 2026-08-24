@@ -16893,3 +16893,9 @@ app.include_router(whatsapp_hot_lead_router)
 from whatsapp_live_bridge import router as whatsapp_live_router
 app.include_router(whatsapp_live_router)
 # === END WHATSAPP LIVE BRIDGE ===
+
+# === WHATSAPP CAPTURE V8 ADDITIVE MODULE ===
+from whatsapp_capture_v8 import router as whatsapp_capture_v8_router
+app.include_router(whatsapp_capture_v8_router)
+# === END WHATSAPP CAPTURE V8 ADDITIVE MODULE ===
+
