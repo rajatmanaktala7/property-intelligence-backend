@@ -16,7 +16,7 @@ PROPERTY_TYPES = [
     ("Commercial Showroom", ["showroom"]),("Commercial Shop", ["shop","retail outlet"]),
     ("Office", ["office","workspace"]),("Farmhouse", ["farmhouse","farm house","farm land"]),
     ("Banquet", ["banquet"]),("Hotel", ["hotel","resort"]),("Guest House", ["guest house","guesthouse"]),
-    ("Restaurant", ["restaurant","restro","resto bar","restobar"]),("Cafe", ["cafe","café"]),
+    ("Restaurant", ["restaurant","restro","resto bar","restobar"]),("Cafe", ["cafe","cafâ”œâŒ"]),
     ("Club", ["club","lounge"]),("Independent House / Villa", ["villa","kothi","independent house","bungalow","bunglow","row house"]),
     ("Apartment", ["apartment","flat","bhk","builder floor","floor with terrace"]),
     ("Plot / Land", ["plot","land","acre","sqyd","gaj"]),("Commercial Space", ["commercial space","commercial building","commercial","retail space"])
@@ -26,8 +26,8 @@ SUPPLY_SALE=["for sale","available for sale","on sale","sale option","mandate sa
 SUPPLY_RENT=["for rent","available on rent","available for rent","for lease","available on lease","lease option","rent -","rent:","rent @","rent@"]
 NOISE_WORDS=["high court","supreme court","breaking news","we're hiring","we are hiring","join our team","send us your cv","job opening","vacancy","follow our","facebook.com","instagram.com","group chat invite","view channel","subscribe","likes and follow"]
 PHONE_RE=re.compile(r"(?<!\d)(?:(?:\+?91)[\s-]?)?([6-9](?:[\s-]?\d){9})(?!\d)")
-AREA_RE=re.compile(r"(?P<a>\d[\d,]*(?:\.\d+)?)\s*(?:-|to|–)?\s*(?P<b>\d[\d,]*(?:\.\d+)?)?\s*(?P<u>sq\.?\s*ft|sqft|sft|sq\.?\s*yds?|sqyds?|sqyrd|sq\.?\s*m(?:tr|trs)?|sqm(?:tr|trs)?|gaj|yards?|yds?|acre?s?|bigha|mtr?s?)",re.I)
-BUDGET_RE=re.compile(r"(?:(?:budget|price|demand|asking|rent|reserve price|amount|range)\s*(?:is|@|:|-|=)?\s*)(?:₹|rs\.?|inr)?\s*(?P<a>\d[\d,]*(?:\.\d+)?)(?:\s*(?:-|to|–)\s*(?P<b>\d[\d,]*(?:\.\d+)?))?\s*(?P<u>cr|crore?s?|lac?s?|lakh?s?|l|k|thousand)?",re.I)
+AREA_RE=re.compile(r"(?P<a>\d[\d,]*(?:\.\d+)?)\s*(?:-|to|Î“Ã‡Ã´)?\s*(?P<b>\d[\d,]*(?:\.\d+)?)?\s*(?P<u>sq\.?\s*ft|sqft|sft|sq\.?\s*yds?|sqyds?|sqyrd|sq\.?\s*m(?:tr|trs)?|sqm(?:tr|trs)?|gaj|yards?|yds?|acre?s?|bigha|mtr?s?)",re.I)
+BUDGET_RE=re.compile(r"(?:(?:budget|price|demand|asking|rent|reserve price|amount|range)\s*(?:is|@|:|-|=)?\s*)(?:Î“Ã©â•£|rs\.?|inr)?\s*(?P<a>\d[\d,]*(?:\.\d+)?)(?:\s*(?:-|to|Î“Ã‡Ã´)\s*(?P<b>\d[\d,]*(?:\.\d+)?))?\s*(?P<u>cr|crore?s?|lac?s?|lakh?s?|l|k|thousand)?",re.I)
 
 KNOWN_LOCATIONS=["Siolim","Assagao","Anjuna","Vagator","Morjim","Mandrem","Parra","Arpora","Calangute","Candolim","Baga","Porvorim","Panjim","Panaji","Miramar","Caranzalem","Taleigao","Dona Paula","Bambolim","Saligao","Sangolda","Guirim","Old Goa","Campal","Mapusa","Margao","Colva","Nerul","Reis Magos","Pilerne","Moira","Ribandar","Kadamba Plateau","St. Inez","Fontainhas","Socorro","Merces","Chimbel","Betim","Corlim","Carambolim","Delhi","South Delhi","Defence Colony","Greater Kailash","GK-1","GK-2","Vasant Kunj","Vasant Vihar","Saket","Green Park","Hauz Khas","Janakpuri","Dwarka","Karol Bagh","Rohini","Rajouri Garden","Punjabi Bagh","Paschim Vihar","Pitampura","Vikaspuri","Tilak Nagar","Subhash Nagar","Moti Nagar","Friends Colony","Maharani Bagh","South Extension","Lajpat Nagar","Jor Bagh","Anand Lok","Niti Bagh","Panchsheel Park","Shanti Niketan","Sundar Nagar","Golf Links","Gulmohar Park","Connaught Place","East of Kailash","SDA","Safdarjung Enclave","Gurugram","Golf Course Road","Sohna Road","DLF Phase-1","DLF Phase-2","DLF Phase-4","Palam Vihar","Udyog Vihar","Noida","Faridabad","Ghaziabad","Vaishali","Indirapuram","Hapur"]
 
@@ -133,7 +133,7 @@ def detect_type(txt):
         return "Hotel"
     if re.search(r"\b(?:restaurant|restro|resto\s*bar|restobar)\b",low):
         return "Restaurant"
-    if re.search(r"\b(?:cafe|café)\b",low):
+    if re.search(r"\b(?:cafe|cafâ”œâŒ)\b",low):
         return "Cafe"
     # Club/lounges are classified only when they are the asset, not an amenity.
     if re.search(r"\b(?:club|lounge)\b",low) and not re.search(r"\bclub\s+(?:membership|house)\b",low):
@@ -206,8 +206,8 @@ def extract_budget(txt):
     textv=str(txt or "")
     # Only monetary labels. Do not treat "range 1437 sqft" as a budget.
     patterns=[
-        r"(?P<label>budget|price|demand|asking|rent|reserve\s+price|sale\s+price|amount)\s*(?:is|@|:|-|=)?\s*(?:₹|rs\.?|inr)?\s*(?P<a>\d[\d,]*(?:\.\d+)?)\s*(?:-|to|–)?\s*(?P<b>\d[\d,]*(?:\.\d+)?)?\s*(?P<u>cr|crore?s?|lac?s?|lakh?s?|l|k|thousand)?",
-        r"(?:₹|rs\.?|inr)\s*(?P<a>\d[\d,]*(?:\.\d+)?)\s*(?:-|to|–)?\s*(?P<b>\d[\d,]*(?:\.\d+)?)?\s*(?P<u>cr|crore?s?|lac?s?|lakh?s?|l|k|thousand)?"
+        r"(?P<label>budget|price|demand|asking|rent|reserve\s+price|sale\s+price|amount)\s*(?:is|@|:|-|=)?\s*(?:Î“Ã©â•£|rs\.?|inr)?\s*(?P<a>\d[\d,]*(?:\.\d+)?)\s*(?:-|to|Î“Ã‡Ã´)?\s*(?P<b>\d[\d,]*(?:\.\d+)?)?\s*(?P<u>cr|crore?s?|lac?s?|lakh?s?|l|k|thousand)?",
+        r"(?:Î“Ã©â•£|rs\.?|inr)\s*(?P<a>\d[\d,]*(?:\.\d+)?)\s*(?:-|to|Î“Ã‡Ã´)?\s*(?P<b>\d[\d,]*(?:\.\d+)?)?\s*(?P<u>cr|crore?s?|lac?s?|lakh?s?|l|k|thousand)?"
     ]
     m=None
     for pat in patterns:
@@ -227,7 +227,7 @@ PROPERTY_OBJECT_RE=re.compile(
     re.I
 )
 AREA_TOKEN_RE=re.compile(r"\b\d[\d,]*(?:\.\d+)?\s*(?:sq\.?\s*ft|sqft|sft|sq\.?\s*yds?|sqyds?|sqyrd|sq\.?\s*m(?:tr|trs)?|sqm(?:tr|trs)?|gaj|yards?|yds?|acre?s?|bigha)\b",re.I)
-PRICE_TOKEN_RE=re.compile(r"(?:₹|rs\.?|inr|\b(?:rent|price|asking|demand|reserve\s+price)\b).{0,18}\d",re.I)
+PRICE_TOKEN_RE=re.compile(r"(?:Î“Ã©â•£|rs\.?|inr|\b(?:rent|price|asking|demand|reserve\s+price)\b).{0,18}\d",re.I)
 
 def _looks_like_entity(piece):
     low=str(piece or "").lower()
@@ -281,9 +281,9 @@ def _building_split(textv):
 
 def _bullet_project_split(textv):
     # Handles compact project lists:
-    # "Heritage One • 1996 Sq.Ft • 3BHK • ₹4.26 Cr Adani Samsara • 1725 Sq.Ft ..."
+    # "Heritage One Î“Ã‡Ã³ 1996 Sq.Ft Î“Ã‡Ã³ 3BHK Î“Ã‡Ã³ Î“Ã©â•£4.26 Cr Adani Samsara Î“Ã‡Ã³ 1725 Sq.Ft ..."
     marked=re.sub(
-        r"(?i)(\b(?:cr|crore|crores|lac|lakh|lakhs)\b)\s+(?=[A-Z][A-Za-z0-9&'()./-]*(?:\s+[A-Z][A-Za-z0-9&'()./-]*){0,5}\s*•\s*\d[\d,]*(?:\.\d+)?\s*(?:sq\.?\s*ft|sqft|sq\.?\s*yds?|sqyds?|sqm|sq\.?\s*m))",
+        r"(?i)(\b(?:cr|crore|crores|lac|lakh|lakhs)\b)\s+(?=[A-Z][A-Za-z0-9&'()./-]*(?:\s+[A-Z][A-Za-z0-9&'()./-]*){0,5}\s*Î“Ã‡Ã³\s*\d[\d,]*(?:\.\d+)?\s*(?:sq\.?\s*ft|sqft|sq\.?\s*yds?|sqyds?|sqm|sq\.?\s*m))",
         r"\1\n",textv
     )
     parts=[norm(x) for x in marked.splitlines() if norm(x)]
@@ -310,7 +310,7 @@ def entity_complexity(piece):
     building=len(re.findall(r"(?i)\b(?:BUILDING|PROJECT|OPTION)\s*[-:#]",s))
     # Repeated distinct area+BHK/property anchors are a strong multi-entity signal.
     areas=len(AREA_TOKEN_RE.findall(s))
-    prices=len(re.findall(r"(?i)\b(?:rent|price|asking|demand|reserve\s+price)\s*[:=@-]?\s*(?:₹|rs\.?|inr)?\s*\d",s))
+    prices=len(re.findall(r"(?i)\b(?:rent|price|asking|demand|reserve\s+price)\s*[:=@-]?\s*(?:Î“Ã©â•£|rs\.?|inr)?\s*\d",s))
     return max(numbered,building, min(areas,prices) if areas and prices else 0)
 
 def atomic_segments(raw):
@@ -344,7 +344,7 @@ def extract_person(seg, fallback=""):
     s=str(seg or "")
     patterns=[
         r"(?i)\b(?:call|contact|whatsapp|connect\s+with|regards?)\s*[:\-]?\s*([A-Z][A-Za-z .&'-]{2,45}?)(?=\s*(?:\+?91[\s-]?)?[6-9]\d)",
-        r"(?i)\b([A-Z][A-Za-z .'-]{2,35})\s*[-–]\s*(?:\+?91[\s-]?)?[6-9]\d",
+        r"(?i)\b([A-Z][A-Za-z .'-]{2,35})\s*[-Î“Ã‡Ã´]\s*(?:\+?91[\s-]?)?[6-9]\d",
     ]
     for pat in patterns:
         m=re.search(pat,s)
@@ -450,7 +450,7 @@ def shell(title,body):
            ("Contacts","/whatsapp-capture/intelligence/clean/contacts"),("Needs Contact","/whatsapp-capture/intelligence/clean/needs-contact"),
            ("Data Quality","/whatsapp-capture/intelligence/clean/data-quality"),
            ("Rejected","/whatsapp-capture/intelligence/clean/rejected"),("Excel","/whatsapp-capture/intelligence/clean/export"),
-           ("← Sources","/whatsapp-capture/intelligence/accounts")]
+           ("Î“Ã¥Ã‰ Sources","/whatsapp-capture/intelligence/accounts")]
     nav=" ".join(f"<a href='{u}'>{html.escape(n)}</a>" for n,u in links)
     return f"""<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
     <style>body{{font-family:Arial;margin:0;background:#f5f7fb;color:#172437}}header{{background:#fff;padding:18px 22px;border-bottom:1px solid #ddd}}
@@ -460,7 +460,7 @@ def shell(title,body):
     td.raw{{min-width:420px}}.btn{{display:inline-block;padding:8px 11px;background:#155eef;color:#fff;text-decoration:none;border-radius:7px;font-weight:700;border:0;cursor:pointer}}
     .green{{background:#067647}}.edit{{background:#7a5af8}}.muted{{color:#667085}}.phone{{white-space:nowrap;font-weight:800}}.date{{white-space:nowrap}}.warn{{color:#b42318;font-weight:800}}
     input,select,textarea{{width:100%;box-sizing:border-box;padding:9px;border:1px solid #ccd6e2;border-radius:7px}}textarea{{min-height:150px}}label{{font-weight:700}}.formgrid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px}}
-    </style></head><body><header><h2>{html.escape(title)}</h2><div class=muted>Structured · one entity per row · contacts and dates preserved</div><nav>{nav}</nav></header><main>{body}</main></body></html>"""
+    </style></head><body><header><h2>{html.escape(title)}</h2><div class=muted>Structured â”¬â•– one entity per row â”¬â•– contacts and dates preserved</div><nav>{nav}</nav></header><main>{body}</main></body></html>"""
 
 @router.get("",response_class=HTMLResponse)
 def dashboard():
@@ -503,18 +503,106 @@ def get_rows(rtype, require_contact=True):
         return c.execute(text(f"SELECT * FROM wai_clean_records WHERE {where} ORDER BY source_created_at DESC NULLS LAST LIMIT 5000"),{"r":rtype}).mappings().all()
 
 def records_table(rows, label):
-    trs="".join(f"""<tr>
-      <td class=date>{esc(fmt_date(r['source_created_at']))}</td>
-      <td class=raw>{esc(r['raw_details'])}</td>
-      <td class=phone>{esc(phone_line(r))}</td>
-      <td>{esc(r['budget_text'])}</td><td>{esc(r['area_text'])}</td><td>{esc(r['source_group'])}</td>
-      <td>{esc(', '.join(r['all_locations'] or []))}</td><td>{esc(r['property_type'])}</td><td>{esc(r['transaction'])}</td>
-      <td>{esc(r['person_name'])}</td><td>{float(r['confidence'] or 0):.0f}%</td><td>{esc(r['status'])}</td>
-      <td><a class='btn edit' href='/whatsapp-capture/intelligence/clean/edit/{r["id"]}'>Edit</a></td></tr>""" for r in rows)
-    return f"""<h2>{html.escape(label)}</h2><div class=scroll><table><tr><th>Date</th><th>Raw Details</th><th>Contact No.</th><th>Price / Budget</th>
-    <th>Area</th><th>Source Group</th><th>Location</th><th>Property Type</th><th>Transaction</th><th>Person / Broker</th>
-    <th>Confidence</th><th>Status</th><th>Edit</th></tr>{trs}</table></div>"""
+    def short_date(v):
+        if not v:
+            return ""
+        try:
+            return v.astimezone().strftime("%d-%m-%y")
+        except Exception:
+            return str(v)[:10]
 
+    def furnishing(raw):
+        low = str(raw or "").lower()
+        if "semi furnished" in low or "semi-furnished" in low:
+            return "Semi"
+        if "unfurnished" in low:
+            return "Unfurnished"
+        if "fully furnished" in low or "furnished" in low:
+            return "Furnished"
+        return ""
+
+    def description(r):
+        raw = norm(r.get("raw_details") or "")
+        low = raw.lower()
+        bits = []
+
+        for pat in [
+            r"(?i)\bsecurity\s+deposit\b.{0,42}",
+            r"(?i)\bparking\b.{0,35}",
+            r"(?i)\b(?:non[- ]?negotiable|negotiable)\b",
+            r"(?i)\b(?:ready|possession)\b.{0,30}",
+        ]:
+            m = re.search(pat, raw)
+            if m:
+                v = norm(m.group(0)).strip(" ,.;:-")
+                if v and v not in bits:
+                    bits.append(v)
+
+        if "gst" in low and not any("gst" in x.lower() for x in bits):
+            bits.append("+ GST")
+
+        if bits:
+            return " Â· ".join(bits)[:150]
+
+        cleaned = PHONE_RE.sub("", raw)
+        cleaned = re.sub(r"\s+", " ", cleaned).strip(" |-*")
+        return (cleaned[:135] + "â€¦") if len(cleaned) > 135 else cleaned
+
+    trs = []
+
+    for i, r in enumerate(rows, 1):
+        location = ", ".join(r["all_locations"] or [])
+        p = norm(r.get("property_type") or "Property")
+        tx = norm(r.get("transaction") or "")
+        prop = f"{p} Â· {tx.title()}" if tx else p
+        edit_url = f'/whatsapp-capture/intelligence/clean/edit/{r["id"]}'
+
+        trs.append(f"""<tr>
+          <td style="width:66px;padding:6px 1px 6px 4px;white-space:nowrap">{esc(short_date(r['source_created_at']))}</td>
+          <td style="width:24px;padding:6px 1px;text-align:center">{i}</td>
+          <td style="width:130px;padding:6px 5px"><a href="{edit_url}" style="font-weight:800;color:#155eef;text-decoration:none">{esc(prop)}</a></td>
+          <td style="width:115px;padding:6px 5px">{esc(location)}</td>
+          <td style="width:82px;padding:6px 5px">{esc(r['area_text'])}</td>
+          <td style="width:100px;padding:6px 5px">{esc(r['budget_text'])}</td>
+          <td style="width:80px;padding:6px 5px">{esc(furnishing(r['raw_details']))}</td>
+          <td style="padding:6px 5px">{esc(description(r))}</td>
+          <td style="width:138px;padding:6px 5px;white-space:nowrap;font-weight:800">{esc(phone_line(r))}</td>
+        </tr>""")
+
+    table_id = "compactPropertyTable" if label == "Property Database" else "compactRequirementTable"
+
+    return f"""<h2>{html.escape(label)}</h2>
+    <div class=muted style="font-size:12px;margin-bottom:8px">One property / requirement per row. Click Property to view or edit.</div>
+
+    <input type="search"
+      placeholder="Search this grid..."
+      style="width:100%;padding:8px 10px;margin-bottom:8px"
+      oninput="filterCompactTable('{table_id}',this.value)">
+
+    <div class=scroll>
+    <table id="{table_id}" style="min-width:980px;table-layout:fixed">
+    <thead><tr>
+      <th style="width:66px;padding-right:1px">Date</th>
+      <th style="width:24px;padding-left:1px;padding-right:1px;text-align:center">#</th>
+      <th style="width:130px">Property</th>
+      <th style="width:115px">Location</th>
+      <th style="width:82px">Area</th>
+      <th style="width:100px">Rent / Price</th>
+      <th style="width:80px">Furnishing</th>
+      <th>Description</th>
+      <th style="width:138px">Contact</th>
+    </tr></thead>
+    <tbody>{''.join(trs)}</tbody>
+    </table></div>
+
+    <script>
+    function filterCompactTable(id,q){{
+      q=(q||'').toLowerCase();
+      document.querySelectorAll('#'+id+' tbody tr').forEach(function(row){{
+        row.style.display = row.innerText.toLowerCase().includes(q) ? '' : 'none';
+      }});
+    }}
+    </script>"""
 @router.get("/properties",response_class=HTMLResponse)
 def properties():
     init_clean_db();return HTMLResponse(shell("Property Database",records_table(get_rows("INVENTORY"),"Property Database")))
@@ -659,7 +747,7 @@ def data_quality():
       <td class=phone>{esc(phone_line(r))}</td><td>{esc(r['source_group'])}</td>
       <td class=warn>{esc(r['rejection_reason'])}</td>
       <td><a class='btn edit' href='/whatsapp-capture/intelligence/clean/edit/{r["id"]}'>Review / Edit</a></td></tr>""" for r in rows)
-    body=f"""<h2>Data Quality · Needs Split Review</h2>
+    body=f"""<h2>Data Quality â”¬â•– Needs Split Review</h2>
     <p>Safety queue. These rows are <b>not</b> used as inventory, requirements or AI matches until they are normalized.</p>
     <div class=scroll><table><tr><th>Date</th><th>Type</th><th>Combined Details</th><th>Contact</th>
     <th>Source Group</th><th>Reason</th><th>Action</th></tr>{trs}</table></div>"""
