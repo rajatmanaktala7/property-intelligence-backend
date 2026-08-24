@@ -16904,3 +16904,8 @@ from alliance_master_property_database import router as alliance_master_property
 app.include_router(alliance_master_property_database_router)
 # === END ALLIANCE MASTER PROPERTY DATABASE ===
 
+# === WHATSAPP PROPERTY INTELLIGENCE FINAL ===
+from whatsapp_property_intelligence_final import router as whatsapp_property_intelligence_final_router
+app.include_router(whatsapp_property_intelligence_final_router)
+# === END WHATSAPP PROPERTY INTELLIGENCE FINAL ===
+
