@@ -45,6 +45,25 @@ def install(router, engine, require_db, init_db, shell, esc,
             for stmt in statements:
                 c.execute(text(stmt))
 
+            known_accounts = [
+                ("Main office","9811895500"),
+                ("Priya","9811895527"),
+                ("Priya 1","8076209947"),
+                ("Zoya","9811891233"),
+            ]
+            for label, phone in known_accounts:
+                c.execute(text("""
+                  INSERT INTO wai_source_accounts(id,label,account_phone,is_active)
+                  VALUES(:id,:label,:phone,TRUE)
+                  ON CONFLICT(account_phone) DO UPDATE SET
+                    label=COALESCE(NULLIF(wai_source_accounts.label,''),EXCLUDED.label),
+                    updated_at=NOW()
+                """),{
+                    "id":uuid.uuid5(uuid.NAMESPACE_URL,"wai-account:"+phone),
+                    "label":label,
+                    "phone":phone
+                })
+
     def clean_phone(v):
         d=re.sub(r"\D","",str(v or ""))
         if len(d)==12 and d.startswith("91"): d=d[2:]
@@ -169,7 +188,10 @@ def install(router, engine, require_db, init_db, shell, esc,
         auto=f"""<div class=card style='margin-top:14px'>
           <b>Automatic AI Segregation: {'ON' if setting and setting['auto_process'] else 'OFF'}</b><br>
           <span class=muted>Interval: {setting['interval_seconds'] if setting else 120} sec · Last run: {esc(setting['last_auto_run'] if setting else '')}
-          · Status: {esc(setting['last_auto_status'] if setting else '')}</span><br><br>
+          · Status: {esc(setting['last_auto_status'] if setting else '')}</span><br>
+          <div style='margin-top:8px;padding:9px;background:#f9fafb;border:1px solid #e5e7eb;border-radius:7px;white-space:pre-wrap'>
+            <b>Last AI Run Detail:</b> {esc(setting['last_auto_result'] if setting else '')}
+          </div><br>
           <a class='btn green' href='/whatsapp-capture/intelligence/accounts/auto/on'>AUTO ON</a>
           <a class='btn red' href='/whatsapp-capture/intelligence/accounts/auto/off'>AUTO OFF</a>
           <a class='btn blue' href='/whatsapp-capture/intelligence/accounts/process-now'>PROCESS PENDING NOW</a>
