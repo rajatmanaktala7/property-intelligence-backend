@@ -424,7 +424,8 @@ def ingest_current_whatsapp_source():
     with engine.begin() as c:
         c.execute(text("INSERT INTO wai_pipeline_runs(id) VALUES(:id)"),{"id":run_id})
         rows=c.execute(text("""
-            SELECT m.message_id,m.source_id,m.raw_text,m.sender_name,m.sender_phone,m.received_at,
+            SELECT m.message_id,m.source_id,m.raw_text,m.sender_name,m.sender_phone,
+                   m.message_timestamp,m.created_at AS source_created_at,
                    s.group_name,s.source_name
             FROM wa_messages m
             LEFT JOIN wa_sources s ON s.source_id=m.source_id
@@ -448,7 +449,7 @@ def ingest_current_whatsapp_source():
                 VALUES(:id,:gid,:p,:n,:txt,:sent,:key)
                 ON CONFLICT(source_message_key) DO NOTHING
             """),{"id":mid,"gid":gid,"p":r.get("sender_phone") or "","n":r.get("sender_name") or "",
-                  "txt":r.get("raw_text") or "","sent":r.get("received_at"),"key":source_key})
+                  "txt":r.get("raw_text") or "","sent":r.get("source_created_at"),"key":source_key})
 
             raw=r.get("raw_text") or ""
             pieces=split_multi_listing_message(raw)
