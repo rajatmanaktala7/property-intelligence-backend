@@ -6,7 +6,7 @@ from sqlalchemy import create_engine, text
 from fastapi import Request
 from fastapi.responses import HTMLResponse
 
-MODULE_VERSION = "2.4.5-CRITICAL-FIELD-RECOVERY"
+MODULE_VERSION = "2.4.5A2-TOKEN-SAFE-POSTGRES-TYPING"
 BATCH_SIZE = 250
 
 LOCATION_ALIASES = {
@@ -407,40 +407,40 @@ def run_critical_field_recovery(primary_engine):
                   SET
                     recovered_role=CASE
                       WHEN (recovered_role IS NULL OR recovered_role='UNKNOWN')
-                           AND :role IS NOT NULL AND :role_conf >= 94
-                      THEN :role ELSE recovered_role END,
+                           AND CAST(:role AS TEXT) IS NOT NULL AND CAST(:role_conf AS NUMERIC) >= 94
+                      THEN CAST(:role AS TEXT) ELSE recovered_role END,
 
                     recovered_transaction=CASE
                       WHEN (recovered_transaction IS NULL OR recovered_transaction='UNKNOWN')
-                           AND :tx IS NOT NULL AND :tx_conf >= 92
-                      THEN :tx ELSE recovered_transaction END,
+                           AND CAST(:tx AS TEXT) IS NOT NULL AND CAST(:tx_conf AS NUMERIC) >= 92
+                      THEN CAST(:tx AS TEXT) ELSE recovered_transaction END,
 
                     transaction_confidence=CASE
-                      WHEN :tx IS NOT NULL AND :tx_conf > COALESCE(transaction_confidence,0)
-                      THEN :tx_conf ELSE transaction_confidence END,
+                      WHEN CAST(:tx AS TEXT) IS NOT NULL AND CAST(:tx_conf AS NUMERIC) > COALESCE(transaction_confidence,0)
+                      THEN CAST(:tx_conf AS NUMERIC) ELSE transaction_confidence END,
 
                     recovered_location=CASE
                       WHEN LOWER(COALESCE(recovered_location,'')) IN
                            ('','unknown','other','others','india','delhi ncr','ncr','na','n/a','none')
-                           AND :loc IS NOT NULL AND :loc_conf >= 90
-                      THEN :loc ELSE recovered_location END,
+                           AND CAST(:loc AS TEXT) IS NOT NULL AND CAST(:loc_conf AS NUMERIC) >= 90
+                      THEN CAST(:loc AS TEXT) ELSE recovered_location END,
 
                     recovered_property_type=CASE
                       WHEN (recovered_property_type IS NULL OR recovered_property_type='UNKNOWN')
-                           AND :ptype IS NOT NULL AND :ptype_conf >= 94
-                      THEN :ptype ELSE recovered_property_type END,
+                           AND CAST(:ptype AS TEXT) IS NOT NULL AND CAST(:ptype_conf AS NUMERIC) >= 94
+                      THEN CAST(:ptype AS TEXT) ELSE recovered_property_type END,
 
                     property_type_confidence=CASE
-                      WHEN :ptype IS NOT NULL AND :ptype_conf > COALESCE(property_type_confidence,0)
-                      THEN :ptype_conf ELSE property_type_confidence END,
+                      WHEN CAST(:ptype AS TEXT) IS NOT NULL AND CAST(:ptype_conf AS NUMERIC) > COALESCE(property_type_confidence,0)
+                      THEN CAST(:ptype_conf AS NUMERIC) ELSE property_type_confidence END,
 
                     purity_score=LEAST(
                       100,
                       COALESCE(purity_score,0)
-                      + CASE WHEN :role IS NOT NULL AND :role_conf >= 94 THEN 3 ELSE 0 END
-                      + CASE WHEN :tx IS NOT NULL AND :tx_conf >= 92 THEN 4 ELSE 0 END
-                      + CASE WHEN :loc IS NOT NULL AND :loc_conf >= 90 THEN 4 ELSE 0 END
-                      + CASE WHEN :ptype IS NOT NULL AND :ptype_conf >= 94 THEN 4 ELSE 0 END
+                      + CASE WHEN CAST(:role AS TEXT) IS NOT NULL AND CAST(:role_conf AS NUMERIC) >= 94 THEN 3 ELSE 0 END
+                      + CASE WHEN CAST(:tx AS TEXT) IS NOT NULL AND CAST(:tx_conf AS NUMERIC) >= 92 THEN 4 ELSE 0 END
+                      + CASE WHEN CAST(:loc AS TEXT) IS NOT NULL AND CAST(:loc_conf AS NUMERIC) >= 90 THEN 4 ELSE 0 END
+                      + CASE WHEN CAST(:ptype AS TEXT) IS NOT NULL AND CAST(:ptype_conf AS NUMERIC) >= 94 THEN 4 ELSE 0 END
                     ),
                     last_recovered_at=NOW()
                   WHERE listing_id=CAST(:id AS uuid)
