@@ -5,7 +5,7 @@ from sqlalchemy import text
 from fastapi import Request
 from fastapi.responses import HTMLResponse
 
-MODULE_VERSION = "2.5.1-SCHEMA-ADAPTIVE-PRODUCTION-MATCHER"
+MODULE_VERSION = "2.5.2-FAST-SHORTLIST-PRODUCTION-MATCHER"
 
 def _norm(v):
     return re.sub(r"\s+", " ", str(v or "").strip().lower())
@@ -324,17 +324,13 @@ def run_match(engine, requirement_code):
     req_cols = _table_columns(engine, "ai_requirement_index")
     prop_cols = _table_columns(engine, "ai_property_index")
 
-    required_req = {"requirement_code"}
-    missing_req = sorted(required_req - req_cols)
-    if missing_req:
+    if "requirement_code" not in req_cols:
         return {
             "detail": "Requirement index schema incompatible",
-            "missing_columns": missing_req,
+            "missing_columns": ["requirement_code"],
             "available_columns": sorted(req_cols),
         }
 
-    # Schema-adaptive requirement select. Live index currently uses `locations`;
-    # older/manual source tables may use `preferred_locations`.
     req_select = [
         _expr(req_cols, "requirement_code", "requirement_code"),
         _expr(req_cols, "company_name", "company_name", "client_name"),
@@ -360,13 +356,10 @@ def run_match(engine, requirement_code):
     if not req:
         return {"detail": "Requirement not indexed"}
 
-    # Property schema is also adaptive so an optional column cannot crash V2.5.
-    required_prop = {"source_record_id"}
-    missing_prop = sorted(required_prop - prop_cols)
-    if missing_prop:
+    if "source_record_id" not in prop_cols:
         return {
             "detail": "Property index schema incompatible",
-            "missing_columns": missing_prop,
+            "missing_columns": ["source_record_id"],
             "available_columns": sorted(prop_cols),
         }
 
@@ -389,16 +382,6 @@ def run_match(engine, requirement_code):
         _expr(prop_cols, "data_confidence_score", "data_confidence_score", "data_confidence"),
     ]
 
-    match_eligible_clause = "TRUE"
-    if "match_eligible" in prop_cols:
-        match_eligible_clause = "COALESCE(p.match_eligible,FALSE)=TRUE"
-
-    with engine.connect() as c:
-        props = c.execute(text(f"""
-          SELECT {", ".join("p."+x if " AS " not in x and x != "NULL" else x for x in [])}
-        """)) if False else None
-
-    # Prefix selected real columns with p. while preserving aliases/NULL expressions.
     def pexpr(expr):
         if expr.startswith("NULL AS "):
             return expr
@@ -409,6 +392,57 @@ def run_match(engine, requirement_code):
 
     property_sql = ", ".join(pexpr(x) for x in prop_select)
 
+    clauses = ["COALESCE(e.suppress_from_matcher,FALSE)=FALSE"]
+    params = {}
+
+    if "match_eligible" in prop_cols:
+        clauses.append("COALESCE(p.match_eligible,FALSE)=TRUE")
+
+    # Stage 1 hard prefilter: transaction.
+    req_tx = _norm(req.get("transaction_type"))
+    tx_col = _pick(prop_cols, "transaction_type")
+    if req_tx and tx_col:
+        clauses.append(f"(LOWER(COALESCE(p.{tx_col},'')) = :req_tx OR LOWER(COALESCE(p.{tx_col},'')) = 'lease_or_sale')")
+        params["req_tx"] = req_tx
+
+    # Stage 1 location prefilter:
+    # Require at least one meaningful token from the requirement location.
+    loc_col = _pick(prop_cols, "location_raw", "location", "locations")
+    loc_tokens = [t for t in _tokens(req.get("locations")) if t not in {"place","road","sector","block","delhi","ncr"}]
+    if loc_col and loc_tokens:
+        loc_parts = []
+        for i, token in enumerate(sorted(loc_tokens, key=len, reverse=True)[:4]):
+            k = f"loc{i}"
+            loc_parts.append(f"LOWER(COALESCE(p.{loc_col},'')) LIKE :{k}")
+            params[k] = f"%{token}%"
+        clauses.append("(" + " OR ".join(loc_parts) + ")")
+
+    # Stage 1 area coarse prefilter with 20% tolerance when columns exist.
+    amin_col = _pick(prop_cols, "area_min_sqft", "minimum_area_sqft")
+    amax_col = _pick(prop_cols, "area_max_sqft", "maximum_area_sqft")
+    try:
+        rmin = float(req.get("minimum_area_sqft")) if req.get("minimum_area_sqft") is not None else None
+        rmax = float(req.get("maximum_area_sqft")) if req.get("maximum_area_sqft") is not None else None
+    except Exception:
+        rmin = rmax = None
+
+    if amin_col and amax_col and (rmin is not None or rmax is not None):
+        if rmin is None:
+            rmin = rmax
+        if rmax is None:
+            rmax = rmin
+        params["area_low"] = rmin * 0.80
+        params["area_high"] = rmax * 1.20
+        clauses.append(
+            f"(p.{amax_col} IS NULL OR p.{amin_col} IS NULL OR "
+            f"(p.{amax_col} >= :area_low AND p.{amin_col} <= :area_high))"
+        )
+
+    where_sql = " AND ".join(clauses)
+
+    # Bound the candidate pool to keep Railway requests fast.
+    candidate_limit = 1200
+
     with engine.connect() as c:
         props = c.execute(text(f"""
           SELECT {property_sql},
@@ -418,31 +452,44 @@ def run_match(engine, requirement_code):
           LEFT JOIN ai_whatsapp_entity_resolution e
             ON e.listing_id::text=p.source_record_id
            AND e.model_version='2.4.7A-DUPLICATE-SAFETY-CALIBRATION'
-          WHERE COALESCE(e.suppress_from_matcher,FALSE)=FALSE
-            AND {match_eligible_clause}
-        """)).mappings().all()
+          WHERE {where_sql}
+          ORDER BY COALESCE(p.data_confidence_score,0) DESC NULLS LAST
+          LIMIT {candidate_limit}
+        """), params).mappings().all()
 
     ranked = []
-    rows_for_db = []
     for p in props:
         result = score_match(req, p)
-        item = {**result, **dict(p)}
-        ranked.append(item)
+        ranked.append({**result, **dict(p)})
+
+    ranked.sort(key=lambda x: (x["hard_rule_pass"], x["match_score"]), reverse=True)
+    actionable = [x for x in ranked if x["hard_rule_pass"] and x["match_score"] >= 70]
+    top_rejected = [x for x in ranked if not x["hard_rule_pass"]][:10]
+
+    # Persist only useful results, not the entire candidate universe.
+    persist = actionable[:100] + top_rejected
+    rows_for_db = []
+    seen = set()
+    for p in persist:
+        rid = p["source_record_id"]
+        if rid in seen:
+            continue
+        seen.add(rid)
         rows_for_db.append({
             "code": requirement_code,
-            "id": p["source_record_id"],
-            "score": result["match_score"],
-            "status": result["status"],
-            "action": result["action"],
-            "hard": result["hard_rule_pass"],
-            "rej": json.dumps(result["rejection_reasons"]),
-            "pos": json.dumps(result["positive_reasons"]),
-            "ls": result["location_score"],
-            "ascore": result["area_score"],
-            "ts": result["type_score"],
-            "fs": result["floor_score"],
-            "frs": result["frontage_score"],
-            "rs": result["rent_score"],
+            "id": rid,
+            "score": p["match_score"],
+            "status": p["status"],
+            "action": p["action"],
+            "hard": p["hard_rule_pass"],
+            "rej": json.dumps(p["rejection_reasons"]),
+            "pos": json.dumps(p["positive_reasons"]),
+            "ls": p["location_score"],
+            "ascore": p["area_score"],
+            "ts": p["type_score"],
+            "fs": p["floor_score"],
+            "frs": p["frontage_score"],
+            "rs": p["rent_score"],
             "version": MODULE_VERSION,
         })
 
@@ -467,10 +514,6 @@ def run_match(engine, requirement_code):
                 rent_score=EXCLUDED.rent_score,model_version=EXCLUDED.model_version,evaluated_at=NOW()
             """), rows_for_db)
 
-    ranked.sort(key=lambda x: (x["hard_rule_pass"], x["match_score"]), reverse=True)
-    actionable = [x for x in ranked if x["hard_rule_pass"] and x["match_score"] >= 70]
-    top_rejected = [x for x in ranked if not x["hard_rule_pass"]][:10]
-
     inventory_gap = None
     if not actionable:
         inventory_gap = {
@@ -484,7 +527,7 @@ def run_match(engine, requirement_code):
             "minimum_frontage_ft": req.get("minimum_frontage_ft"),
             "required_floor": req.get("required_floor"),
             "suitable_for": req.get("suitable_for"),
-            "reason": "No actionable property passed V2.5 production hard rules and minimum score."
+            "reason": "No actionable property passed V2.5.2 shortlist + hard rules."
         }
 
     return {
@@ -494,11 +537,14 @@ def run_match(engine, requirement_code):
         "inventory_gap": inventory_gap,
         "top_rejected": top_rejected,
         "evaluated_properties": len(ranked),
+        "candidate_limit": candidate_limit,
+        "persisted_results": len(rows_for_db),
         "suppression_policy": "EXACT_DUPLICATE and HIGH_CONF_DUPLICATE only",
         "schema_mapping": {
             "requirement_location_column": _pick(req_cols, "locations", "preferred_locations", "location"),
             "property_location_column": _pick(prop_cols, "location_raw", "location", "locations"),
         },
+        "execution_mode": "FAST_SHORTLIST",
     }
 def register_v25_match_routes(core):
     app, engine = core.app, core.engine
