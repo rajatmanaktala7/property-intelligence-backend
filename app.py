@@ -16938,3 +16938,14 @@ try:
     print("Alliance V3.7.5 final dashboard route takeover registered")
 except Exception as _v375_error:
     print("Alliance V3.7.5 route takeover skipped:", repr(_v375_error))
+
+
+# ALLIANCE V3.7.6 FRESHNESS + NAVIGATION FIX
+try:
+    import team_dashboard_v376_ops as _v376_ops
+    _v376_ops.register(app, engine, need_login)
+    import team_dashboard_v376_takeover as _v376_takeover
+    _v376_takeover.register(app, engine, need_login)
+    print("Alliance V3.7.6 registered successfully")
+except Exception as _v376_error:
+    print("Alliance V3.7.6 registration skipped:", repr(_v376_error))

@@ -332,7 +332,7 @@ def _page(title,body):
     table{{width:100%;border-collapse:collapse;background:#fff}}th,td{{padding:9px;border-bottom:1px solid #eaecf0;text-align:left;vertical-align:top}}input,select{{padding:9px;border:1px solid #d0d5dd;border-radius:7px;width:100%}}
     button,.btn{{border:0;background:#101828;color:#fff;padding:9px 12px;border-radius:7px;text-decoration:none;cursor:pointer}}.green{{background:#039855}}.muted{{color:#667085}}pre{{white-space:pre-wrap;margin:0}}
     </style></head><body><header><h2 style='margin:0'>WhatsApp Live Property Intelligence</h2><small>Approved numbers + approved groups → automatic intake → property/requirement → match → hot lead → team review</small></header>
-    <nav><a href='/whatsapp-live'>Live Dashboard</a><a href='/whatsapp-live/sources'>WhatsApp Sources</a><a href='/whatsapp-live/feed'>Live Feed</a><a href='/whatsapp-live/requirements'>Date-wise Requirements</a><a href='/whatsapp-intelligence'>Main WhatsApp Intelligence</a><a href='/whatsapp-automation'>Hot Leads</a></nav>
+    <nav><a href='/team-dashboard-v376'><b>← Dashboard</b></a><a href='/workspace'><b>Working Space</b></a><a href='/whatsapp-live'>Live Dashboard</a><a href='/whatsapp-live/sources'>WhatsApp Sources</a><a href='/whatsapp-live/feed'>Live Feed</a><a href='/whatsapp-live/requirements'>Date-wise Requirements</a><a href='/whatsapp-intelligence'>Main WhatsApp Intelligence</a><a href='/whatsapp-automation'>Hot Leads</a></nav>
     <main>{body}</main></body></html>"""
 
 @router.get("",response_class=HTMLResponse)
