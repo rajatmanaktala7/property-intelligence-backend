@@ -19,6 +19,7 @@ from alliance_v26_team_action import register_v26_routes
 from alliance_v27_inventory_acquisition import register_v27_routes
 from alliance_v28_external_discovery import register_v28_routes
 from alliance_v29_external_verification import register_v29_routes
+from alliance_v29a_listing_splitter import register_v29a_routes
 
 LOCATION_ALIASES={
     "cp":["connaught place","connaught circus","rajiv chowk","inner circle","outer circle"],
@@ -245,6 +246,7 @@ def register(core):
     register_v27_routes(core)
     register_v28_routes(core)
     register_v29_routes(core)
+    register_v29a_routes(core)
 
 
     @app.middleware("http")
