@@ -517,7 +517,7 @@ def register_v30_routes(core):
             "config":_get_config(engine),
         }
 
-    @app.get("/v3/control-centre",response_class=HTMLResponse)
+    @app.get("/v3/property-orchestrator-legacy",response_class=HTMLResponse)
     def dashboard(req:Request):
         if hasattr(core,"need_login"):
             core.need_login(req)
