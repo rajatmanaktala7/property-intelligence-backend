@@ -9,6 +9,7 @@ from alliance_v2_whatsapp_review_queue import register_review_queue
 from alliance_v2_review_prioritizer import register_priority_routes
 from alliance_v2_area_intelligence import register_area_intelligence_routes
 from alliance_v2_critical_field_recovery import register_critical_field_routes
+from alliance_v2_requirement_supply_intelligence import register_requirement_supply_routes
 
 LOCATION_ALIASES={
     "cp":["connaught place","connaught circus","rajiv chowk","inner circle","outer circle"],
@@ -225,6 +226,7 @@ def register(core):
     register_priority_routes(core)
     register_area_intelligence_routes(core)
     register_critical_field_routes(core)
+    register_requirement_supply_routes(core)
 
 
     @app.middleware("http")
