@@ -2,7 +2,7 @@ from __future__ import annotations
 import re, hashlib
 from datetime import datetime, timezone, timedelta
 
-MODULE_VERSION="3.2B-RETAIL-EXPANSION-PURITY-ENGINE"
+MODULE_VERSION="3.2B2-REGISTRATION-SIGNATURE-FIX"
 
 TARGET_ROLES=[
 "head of expansion","expansion head","expansion manager","head of real estate",
@@ -81,9 +81,10 @@ def build_profile_queries(company,category="",location="India"):
 def canonical_key(company,url):
     return hashlib.sha256((_norm(company).lower()+"|"+_norm(url).lower()).encode()).hexdigest()[:32]
 
-def register(app,core):
+def register(core):
     from fastapi import Request
     from sqlalchemy import text
+    app=core.app
     engine=core.engine
 
     @app.get("/api/v3/retail/v32b/status")
