@@ -130,160 +130,50 @@ def close_gap(c,rid):
     c.execute(text("UPDATE ai_inventory_gap SET status='RESOLVED',updated_at=NOW() WHERE requirement_index_id=:i"),{"i":rid})
 
 def run_match(engine,code):
-    MATCHER_VERSION="2.5.7-STABLE-ROUTE-INTEGRATION"
-
     with engine.begin() as c:
         r=c.execute(text("""SELECT * FROM ai_requirement_index
         WHERE requirement_code=:x OR source_record_id=:x
         ORDER BY requirement_index_id DESC LIMIT 1"""),{"x":code}).mappings().first()
-        if not r:
-            raise ValueError("Requirement not indexed")
-
+        if not r:raise ValueError("Requirement not indexed")
         ls=[x[0] for x in c.execute(text("""SELECT location_normalized FROM ai_requirement_location
         WHERE requirement_index_id=:i"""),{"i":r["requirement_index_id"]}).fetchall()]
-
-        # V2.4.7A duplicate safety:
-        # only EXACT_DUPLICATE / HIGH_CONF_DUPLICATE rows with suppress_from_matcher=TRUE
-        # are excluded. POSSIBLE_DUPLICATE stays visible with a small score penalty.
-        duplicate_map={}
-        try:
-            for d in c.execute(text("""
-              SELECT listing_id,duplicate_type,suppress_from_matcher
-              FROM ai_whatsapp_entity_resolution
-              WHERE model_version='2.4.7A-DUPLICATE-SAFETY-CALIBRATION'
-            """)).mappings().all():
-                duplicate_map[str(d["listing_id"])] = {
-                    "duplicate_type": d["duplicate_type"],
-                    "suppress": bool(d["suppress_from_matcher"]),
-                }
-        except Exception:
-            # Non-destructive fallback: matcher continues exactly as before
-            # if duplicate intelligence is temporarily unavailable.
-            duplicate_map={}
-
-        out=[]
-        all_rows=[]
-        suppressed_duplicates=0
-        possible_duplicates_seen=0
-        evaluated=0
-
-        for p in c.execute(text(
-            "SELECT * FROM ai_property_match_index WHERE match_eligible=TRUE"
-        )).mappings().all():
-
-            dup=duplicate_map.get(
-                str(p["source_record_id"]),
-                {"duplicate_type":"UNIQUE","suppress":False}
-            )
-            duplicate_type=dup["duplicate_type"] or "UNIQUE"
-
-            if dup["suppress"] and duplicate_type in {"EXACT_DUPLICATE","HIGH_CONF_DUPLICATE"}:
-                suppressed_duplicates += 1
-                continue
-
-            evaluated += 1
-            hard=[]
-            verify=[]
-            positive=[]
-
-            rtx=r["transaction_type"]
-            ptx=p["transaction_type"]
-
-            if (
-                rtx!="UNKNOWN"
-                and ptx!="UNKNOWN"
-                and rtx!=ptx
-                and ptx!="LEASE_OR_SALE"
-                and rtx!="LEASE_OR_SALE"
-            ):
+        out=[];all_rows=[]
+        for p in c.execute(text("SELECT * FROM ai_property_match_index WHERE match_eligible=TRUE")).mappings().all():
+            hard=[];verify=[];positive=[]
+            rtx=r["transaction_type"];ptx=p["transaction_type"]
+            if rtx!="UNKNOWN" and ptx!="UNKNOWN" and rtx!=ptx and ptx!="LEASE_OR_SALE" and rtx!="LEASE_OR_SALE":
                 hard.append("Transaction type mismatch")
-
             l=loc_score(p["location_normalized"],ls)
-            if ls and l<10:
-                hard.append("Location mismatch")
-            elif l>=27:
-                positive.append("Location aligned")
-
-            a,aband=area_score(
-                p["area_min_sqft"],
-                p["area_max_sqft"],
-                r["minimum_area_sqft"],
-                r["maximum_area_sqft"]
-            )
-            if aband=="OUT":
-                hard.append("Area materially outside requirement")
-            elif aband=="NEAR_20":
-                verify.append("Area outside preferred range")
-            elif aband in {"OVERLAP","NEAR_10"}:
-                positive.append("Area aligned or near-fit")
-
+            if ls and l<10:hard.append("Location mismatch")
+            elif l>=27:positive.append("Location aligned")
+            a,aband=area_score(p["area_min_sqft"],p["area_max_sqft"],r["minimum_area_sqft"],r["maximum_area_sqft"])
+            if aband=="OUT":hard.append("Area materially outside requirement")
+            elif aband=="NEAR_20":verify.append("Area outside preferred range")
+            elif aband in {"OVERLAP","NEAR_10"}:positive.append("Area aligned or near-fit")
             rs=15
             if r["maximum_monthly_rent"] and p["monthly_rent"]:
                 ratio=float(p["monthly_rent"])/float(r["maximum_monthly_rent"])
-                if ratio>1.30:
-                    hard.append("Rent materially above budget")
-                    rs=0
-                elif ratio>1.10:
-                    verify.append("Rent above preferred budget")
-                    rs=8
-                elif ratio>1:
-                    rs=12
-                else:
-                    positive.append("Rent within budget")
+                if ratio>1.30:hard.append("Rent materially above budget");rs=0
+                elif ratio>1.10:verify.append("Rent above preferred budget");rs=8
+                elif ratio>1:rs=12
+                else:positive.append("Rent within budget")
             elif r["maximum_monthly_rent"] and not p["monthly_rent"]:
-                verify.append("Rent needs verification")
-                rs=8
-
+                verify.append("Rent needs verification");rs=8
             ts=type_score(p["canonical_property_type"],r["requirement_types"])
-
             fs,fmsg=floor_score(p["floor_normalized"],r["required_floor"])
             if fmsg:
-                if fs==0:
-                    hard.append(fmsg)
-                else:
-                    verify.append(fmsg)
-
+                if fs==0:hard.append(fmsg)
+                else:verify.append(fmsg)
             frs,frmsg=frontage_score(p["frontage_ft"],r["minimum_frontage_ft"])
             if frmsg:
-                if frs==0:
-                    hard.append(frmsg)
-                else:
-                    verify.append(frmsg)
-
+                if frs==0:hard.append(frmsg)
+                else:verify.append(frmsg)
             ss,smsg=suitability_score(p["suitable_for"],r["suitable_for"])
-            if smsg:
-                verify.append(smsg)
-
+            if smsg:verify.append(smsg)
             base=l+a+rs+ts+fs+frs+ss+10
-
-            if duplicate_type=="POSSIBLE_DUPLICATE":
-                possible_duplicates_seen += 1
-                base -= 2
-                verify.append("Possible duplicate flagged")
-
-            score=round(max(0,min(100,base)),2)
+            score=round(min(100,base),2)
             status,action=classify(score,hard,verify)
-
-            if hard:
-                score=min(score,59)
-
-            # V2.5 decision layer, added without breaking legacy status/action fields.
-            if hard:
-                v25_decision="REJECT"
-                v25_action="DO_NOT_SEND"
-            elif score>=90:
-                v25_decision="STRONG_MATCH"
-                v25_action="VERIFY_CONTACT"
-            elif score>=80:
-                v25_decision="GOOD_MATCH"
-                v25_action="REVIEW"
-            elif score>=70:
-                v25_decision="POSSIBLE_MATCH"
-                v25_action="REVIEW"
-            else:
-                v25_decision="WEAK"
-                v25_action="DO_NOT_SEND"
-
+            if hard:score=min(score,59)
             c.execute(text("""INSERT INTO ai_match_v2(
               requirement_index_id,match_index_id,match_score,location_score,area_score,rent_score,
               type_score,floor_score,frontage_score,suitability_score,hard_rule_pass,
@@ -300,98 +190,39 @@ def run_match(engine,code):
               updated_at=NOW()"""),
               {"r":r["requirement_index_id"],"p":p["match_index_id"],"s":score,"l":l,"a":a,"rs":rs,
                "ts":ts,"fs":fs,"frs":frs,"ss":ss,"h":not hard,"rej":json.dumps(hard+verify),
-               "pos":json.dumps(positive),"st":status,"act":action,"v":MATCHER_VERSION})
-
+               "pos":json.dumps(positive),"st":status,"act":action,"v":VERSION})
             item={
-              "score":score,
-              "status":status,
-              "action":action,
-              "v25_decision":v25_decision,
-              "v25_action":v25_action,
-              "source":p["source_name"],
-              "source_type":p["source_type"],
-              "property_name":p["property_name"],
-              "location":p["location_raw"],
-              "area_min_sqft":p["area_min_sqft"],
-              "area_max_sqft":p["area_max_sqft"],
-              "rent_psf_month":p["rent_psf_month"],
-              "monthly_rent":p["monthly_rent"],
-              "transaction_type":p["transaction_type"],
-              "canonical_property_type":p["canonical_property_type"],
-              "floor":p["floor_raw"],
-              "frontage_ft":p["frontage_ft"],
-              "verification_status":p["verification_status"],
-              "data_confidence":p["data_confidence_score"],
-              "duplicate_type":duplicate_type,
-              "reasons":hard+verify,
-              "positive_reasons":positive,
-              "source_record_id":p["source_record_id"]
+              "score":score,"status":status,"action":action,"source":p["source_name"],
+              "source_type":p["source_type"],"property_name":p["property_name"],
+              "location":p["location_raw"],"area_min_sqft":p["area_min_sqft"],
+              "area_max_sqft":p["area_max_sqft"],"rent_psf_month":p["rent_psf_month"],
+              "monthly_rent":p["monthly_rent"],"transaction_type":p["transaction_type"],
+              "canonical_property_type":p["canonical_property_type"],"floor":p["floor_raw"],
+              "frontage_ft":p["frontage_ft"],"verification_status":p["verification_status"],
+              "data_confidence":p["data_confidence_score"],"reasons":hard+verify,
+              "positive_reasons":positive,"source_record_id":p["source_record_id"]
             }
-
             all_rows.append(item)
-
             if status in {"EXACT","STRONG","NEAR","VERIFY"} and score>=65:
                 out.append(item)
-
-        out=sorted(
-            out,
-            key=lambda x:(
-                x["v25_decision"]=="STRONG_MATCH",
-                x["v25_decision"]=="GOOD_MATCH",
-                x["score"]
-            ),
-            reverse=True
-        )
-
-        actionable=[
-            x for x in out
-            if x["v25_decision"] in {"STRONG_MATCH","GOOD_MATCH","POSSIBLE_MATCH"}
-            and x["score"]>=70
-        ]
-
+        out=sorted(out,key=lambda x:(x["status"]=="EXACT",x["status"]=="STRONG",x["score"]),reverse=True)
+        actionable=[x for x in out if x["status"] in {"EXACT","STRONG","VERIFY"} and x["score"]>=70]
         if actionable:
             close_gap(c,r["requirement_index_id"])
             gap=None
         else:
-            reason=(
-                f"No actionable {r['transaction_type']} property found for "
-                f"{r['preferred_locations_raw']} in "
-                f"{r['minimum_area_sqft']}-{r['maximum_area_sqft']} sqft."
-            )
+            reason=f"No actionable {r['transaction_type']} property found for {r['preferred_locations_raw']} in {r['minimum_area_sqft']}-{r['maximum_area_sqft']} sqft."
             save_gap(c,r,reason)
             gap={
-              "status":"OPEN",
-              "requirement_code":r["requirement_code"],
-              "company_name":r["company_name"],
-              "locations":r["preferred_locations_raw"],
-              "transaction_type":r["transaction_type"],
-              "minimum_area_sqft":r["minimum_area_sqft"],
-              "maximum_area_sqft":r["maximum_area_sqft"],
-              "minimum_frontage_ft":r["minimum_frontage_ft"],
-              "required_floor":r["required_floor"],
-              "suitable_for":r["suitable_for"],
-              "reason":reason
+              "status":"OPEN","requirement_code":r["requirement_code"],"company_name":r["company_name"],
+              "locations":r["preferred_locations_raw"],"transaction_type":r["transaction_type"],
+              "minimum_area_sqft":r["minimum_area_sqft"],"maximum_area_sqft":r["maximum_area_sqft"],
+              "minimum_frontage_ft":r["minimum_frontage_ft"],"required_floor":r["required_floor"],
+              "suitable_for":r["suitable_for"],"reason":reason
             }
+        near_rejected=sorted([x for x in all_rows if x["status"]=="REJECTED"],key=lambda x:x["score"],reverse=True)[:10]
+        return {"matches":out[:50],"inventory_gap":gap,"top_rejected":near_rejected}
 
-        near_rejected=sorted(
-            [x for x in all_rows if x["status"]=="REJECTED"],
-            key=lambda x:x["score"],
-            reverse=True
-        )[:10]
-
-        return {
-            "matcher_version":MATCHER_VERSION,
-            "matches":out[:50],
-            "inventory_gap":gap,
-            "top_rejected":near_rejected,
-            "matcher_stats":{
-                "evaluated_properties":evaluated,
-                "suppressed_duplicates":suppressed_duplicates,
-                "possible_duplicates_seen":possible_duplicates_seen,
-                "duplicate_policy":"2.4.7A_SAFE",
-                "execution_path":"STABLE_V2_ROUTE"
-            }
-        }
 def register(core):
     app,engine=core.app,core.engine
     register_review_queue(core)
