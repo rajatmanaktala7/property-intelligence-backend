@@ -5,7 +5,7 @@ from sqlalchemy import text
 from fastapi import Request, Body
 from fastapi.responses import HTMLResponse
 
-MODULE_VERSION = "2.9.5A-INDIVIDUAL-ENTITY-VERIFICATION"
+MODULE_VERSION = "2.9.5B-STARTUP-SAFE-ENTITY-VERIFICATION"
 
 PROPERTY_TERMS = {
     "RESTAURANT": "restaurant",
@@ -21,8 +21,46 @@ PROPERTY_TERMS = {
 def _norm(v):
     return re.sub(r"\s+", " ", str(v or "").strip())
 
-def _ensure_schema(engine):
+def anchored_property_type(raw_text):
+    t = _norm(raw_text).lower()
+    head = t[:140]
+    found = []
+    for ptype, term in PROPERTY_TERMS.items():
+        m = re.search(rf"\b{re.escape(term)}\b", head)
+        if m:
+            found.append((m.start(), ptype))
+    if not found:
+        return "COMMERCIAL_PROPERTY"
+    found.sort(key=lambda x: x[0])
+    return found[0][1]
+
+def suitability_for_fine_dine(property_type):
+    p = str(property_type or "").upper()
+    if p in {"RESTAURANT","CAFE","BAR"}:
+        return "SUITABLE", 25, ["Property type directly supports F&B"]
+    if p in {"SHOP","SHOWROOM","RETAIL_SPACE","COMMERCIAL_PROPERTY"}:
+        return "VERIFY_USE", 15, ["Retail/commercial use may support F&B; verify permissions/services"]
+    if p == "OFFICE_SPACE":
+        return "VERIFY_CONVERSION", 5, ["Office space requires conversion/use verification for fine dine"]
+    return "UNSUITABLE", 0, ["Property type not suitable for fine dine"]
+
+def _schema_exists(engine):
+    try:
+        with engine.connect() as c:
+            return bool(c.execute(text(
+                "SELECT to_regclass('public.ai_v295_entity_verification') IS NOT NULL"
+            )).scalar())
+    except Exception:
+        return False
+
+def ensure_schema_safe(engine):
+    if _schema_exists(engine):
+        return {"status":"READY","created":False}
+
     with engine.begin() as c:
+        # Never wait indefinitely for a DDL lock.
+        c.execute(text("SET LOCAL lock_timeout = '2s'"))
+        c.execute(text("SET LOCAL statement_timeout = '4s'"))
         c.execute(text("""
         CREATE TABLE IF NOT EXISTS ai_v295_entity_verification(
           verification_id BIGSERIAL PRIMARY KEY,
@@ -46,47 +84,12 @@ def _ensure_schema(engine):
           updated_at TIMESTAMPTZ DEFAULT NOW()
         )
         """))
-        c.execute(text("""
-        CREATE INDEX IF NOT EXISTS ix_ai_v295_req_status
-        ON ai_v295_entity_verification(requirement_code,verification_status,updated_at DESC)
-        """))
-
-def anchored_property_type(raw_text):
-    """
-    Pick the earliest property-type marker in the listing heading.
-    Nearby landmarks/brands later in the text cannot override it.
-    """
-    t = _norm(raw_text).lower()
-    head = t[:140]
-
-    found = []
-    for ptype, term in PROPERTY_TERMS.items():
-        m = re.search(rf"\b{re.escape(term)}\b", head)
-        if m:
-            found.append((m.start(), ptype))
-
-    if not found:
-        return "COMMERCIAL_PROPERTY"
-
-    found.sort(key=lambda x: x[0])
-    return found[0][1]
-
-def suitability_for_fine_dine(property_type):
-    p = str(property_type or "").upper()
-
-    if p in {"RESTAURANT","CAFE","BAR"}:
-        return "SUITABLE", 25, ["Property type directly supports F&B"]
-
-    if p in {"SHOP","SHOWROOM","RETAIL_SPACE","COMMERCIAL_PROPERTY"}:
-        return "VERIFY_USE", 15, ["Retail/commercial use may support F&B; verify permissions/services"]
-
-    if p == "OFFICE_SPACE":
-        return "VERIFY_CONVERSION", 5, ["Office space requires conversion/use verification for fine dine"]
-
-    return "UNSUITABLE", 0, ["Property type not suitable for fine dine"]
+    return {"status":"READY","created":True}
 
 def verify_entity(engine, split_entity_id, payload):
-    _ensure_schema(engine)
+    schema = ensure_schema_safe(engine)
+    if schema.get("status") != "READY":
+        return {"version":MODULE_VERSION,"status":"SCHEMA_NOT_READY"}
 
     with engine.connect() as c:
         ent = c.execute(text("""
@@ -225,33 +228,6 @@ def verify_entity(engine, split_entity_id, payload):
             "notes":payload.get("notes"),
         }).mappings().one()
 
-    v26_action = None
-    if final_status == "VERIFIED_CANDIDATE":
-        from alliance_v26_team_action import create_or_update_action
-        v26_action = create_or_update_action(engine, {
-            "requirement_code": ent["requirement_code"],
-            "source_record_id": ent["external_entity_code"],
-            "decision": "GOOD_MATCH",
-            "priority_score": score,
-            "workflow_status": "VERIFYING",
-            "internal_contact_name": payload.get("contact_name"),
-            "internal_contact_phone": contact_phone,
-            "internal_contact_role": "EXTERNAL_BROKER_OR_OWNER",
-            "notes": "V2.9.5 entity-level verified candidate. Final availability/physical verification required before sharing.",
-            "property": {
-                "property_name": ent["property_name"],
-                "location": ent["location"],
-                "area_min_sqft": ent["area_min_sqft"],
-                "area_max_sqft": ent["area_max_sqft"],
-                "monthly_rent": ent["monthly_rent"],
-                "transaction_type": ent["transaction_type"],
-                "canonical_property_type": verified_type,
-                "frontage_ft": frontage,
-                "source_record_id": ent["external_entity_code"],
-                "verification_status": "EXTERNAL_VERIFIED_CANDIDATE",
-            }
-        })
-
     return {
         "version":MODULE_VERSION,
         "split_entity_id":int(split_entity_id),
@@ -263,13 +239,68 @@ def verify_entity(engine, split_entity_id, payload):
         "verification_score":score,
         "verification_status":final_status,
         "reasons":reasons,
-        "v26_action_created":v26_action,
         "promoted_to_core_match_index":False,
     }
 
 def register_v295_routes(core):
     app,engine=core.app,core.engine
-    _ensure_schema(engine)
+
+    # IMPORTANT: no database DDL here.
+    # Route registration must remain instant and startup-safe.
+
+    @app.get("/api/v2/intelligence/v295/status")
+    def status(req:Request):
+        if hasattr(core,"need_login"):
+            core.need_login(req)
+        return {
+            "version":MODULE_VERSION,
+            "status":"OK",
+            "startup_schema_ddl":False,
+            "verification_table_ready":_schema_exists(engine),
+        }
+
+    @app.post("/api/v2/intelligence/v295/setup")
+    def setup(req:Request):
+        if hasattr(core,"need_login"):
+            core.need_login(req)
+        try:
+            return {"version":MODULE_VERSION,**ensure_schema_safe(engine)}
+        except Exception as exc:
+            return {"version":MODULE_VERSION,"status":"SCHEMA_BUSY","message":str(exc)}
+
+    @app.get("/api/v2/intelligence/v295/queue")
+    def queue(req:Request,requirement_code:str="",limit:int=50):
+        if hasattr(core,"need_login"):
+            core.need_login(req)
+
+        limit=max(1,min(int(limit or 50),100))
+        clauses=["splitter_status IN ('VERIFY_FIRST','REVIEW')"]
+        params={"lim":limit}
+        if requirement_code:
+            clauses.append("requirement_code=:code")
+            params["code"]=requirement_code
+
+        try:
+            with engine.connect() as c:
+                # Read-only, tiny query. No schema creation.
+                rows=c.execute(text(f"""
+                  SELECT split_entity_id,external_entity_code,requirement_code,
+                         property_name,location,property_type,transaction_type,
+                         area_min_sqft,area_max_sqft,monthly_rent,
+                         splitter_score,splitter_status,source_url
+                  FROM ai_v29a_split_external_entity
+                  WHERE {" AND ".join(clauses)}
+                  ORDER BY splitter_score DESC,split_entity_id
+                  LIMIT :lim
+                """),params).mappings().all()
+
+            return {
+                "version":MODULE_VERSION,
+                "count":len(rows),
+                "queue":[dict(x) for x in rows],
+            }
+        except Exception as exc:
+            return {"version":MODULE_VERSION,"status":"ERROR","message":str(exc)}
 
     @app.post("/api/v2/intelligence/v295/verify/{split_entity_id}")
     def verify(split_entity_id:int,req:Request,payload:dict=Body(default={})):
@@ -280,40 +311,16 @@ def register_v295_routes(core):
         except Exception as exc:
             return {"version":MODULE_VERSION,"status":"ERROR","message":str(exc)}
 
-    @app.get("/api/v2/intelligence/v295/queue")
-    def queue(req:Request,requirement_code:str="",limit:int=100):
-        if hasattr(core,"need_login"):
-            core.need_login(req)
-        limit=max(1,min(int(limit or 100),200))
-        clauses=["splitter_status IN ('VERIFY_FIRST','REVIEW')"]
-        params={"lim":limit}
-        if requirement_code:
-            clauses.append("requirement_code=:code")
-            params["code"]=requirement_code
-
-        with engine.connect() as c:
-            rows=c.execute(text(f"""
-              SELECT split_entity_id,external_entity_code,requirement_code,property_name,
-                     location,property_type,transaction_type,area_min_sqft,area_max_sqft,
-                     monthly_rent,splitter_score,splitter_status,source_url
-              FROM ai_v29a_split_external_entity
-              WHERE {" AND ".join(clauses)}
-              ORDER BY splitter_score DESC,split_entity_id
-              LIMIT :lim
-            """),params).mappings().all()
-
-        return {"version":MODULE_VERSION,"count":len(rows),"queue":[dict(x) for x in rows]}
-
     @app.get("/v2/entity-verification",response_class=HTMLResponse)
     def dashboard(req:Request):
         if hasattr(core,"need_login"):
             core.need_login(req)
         return HTMLResponse("""<!doctype html>
-<html><head><meta charset="utf-8"><title>V2.9.5 Entity Verification</title></head>
+<html><head><meta charset="utf-8"><title>V2.9.5B Entity Verification</title></head>
 <body style="font-family:Arial;background:#f5f7fa">
 <div style="max-width:1050px;margin:30px auto;background:white;padding:28px;border-radius:14px">
-<h1>V2.9.5A Individual Entity Verification</h1>
-<p>Verifies one split property at a time.</p>
-<p>Property type is anchored to the earliest listing type, not nearby restaurant/brand names.</p>
+<h1>V2.9.5B Startup-Safe Entity Verification</h1>
+<p>No schema DDL during application startup.</p>
+<p>Queue endpoint is read-only and lightweight.</p>
 </div></body></html>""")
     return app
