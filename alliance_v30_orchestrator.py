@@ -1,11 +1,28 @@
 
 import json
-from datetime import datetime, timezone
+from decimal import Decimal
+from datetime import datetime, date, time, timezone
 from sqlalchemy import text
 from fastapi import Request, Body
 from fastapi.responses import HTMLResponse
 
-MODULE_VERSION = "3.0.0-AUTONOMOUS-ORCHESTRATOR-CONTROL-CENTRE"
+MODULE_VERSION = "3.0.1-JSON-SAFE-ORCHESTRATOR"
+
+def _json_safe(value):
+    if value is None:
+        return None
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, (datetime, date, time)):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe(v) for v in value]
+    if isinstance(value, bytes):
+        return value.decode("utf-8", "replace")
+    return value
+
 
 PIPELINE_STEPS = [
     "V2.6_TEAM_ACTION",
@@ -105,7 +122,7 @@ def _update_run(engine, run_id, **kwargs):
             continue
         if k == "summary":
             fields.append("summary=CAST(:summary AS jsonb)")
-            params["summary"] = json.dumps(v or {})
+            params["summary"] = json.dumps(_json_safe(v or {}), ensure_ascii=False)
         elif k == "completed_at":
             fields.append("completed_at=NOW()" if v else "completed_at=NULL")
         else:
@@ -249,7 +266,7 @@ def orchestrate_requirement(engine, requirement_code, trigger_source="MANUAL"):
                 "status":"WAITING_HUMAN",
                 "action_id":action_id,
                 "next_step":"VERIFY_EXISTING_CANDIDATES",
-                "summary":summary,
+                "summary":_json_safe(summary),
             }
 
         if not config.get("auto_external_discovery", True):
@@ -290,7 +307,7 @@ def orchestrate_requirement(engine, requirement_code, trigger_source="MANUAL"):
                 "run_id":run_id,
                 "status":"STOPPED",
                 "next_step":"RETRY_EXTERNAL_DISCOVERY",
-                "provider_result":r28,
+                "provider_result":_json_safe(r28),
             }
 
         if r28.get("unique_discoveries", 0) == 0:
@@ -378,7 +395,7 @@ def orchestrate_requirement(engine, requirement_code, trigger_source="MANUAL"):
             "action_id":action_id,
             "next_step":"VERIFY_INDIVIDUAL_ENTITIES",
             "verification_queue_count":len(queue),
-            "verification_queue":queue[:20],
+            "verification_queue":_json_safe(queue[:20]),
             "safety":{
                 "auto_verify":False,
                 "auto_share":False,
