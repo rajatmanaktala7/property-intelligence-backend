@@ -1,0 +1,117 @@
+<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Alliance Live Team Operations</title>
+<style>
+:root{--nav:#101828;--bg:#f4f6f8;--card:#fff;--line:#e4e7ec;--muted:#667085;--green:#067647;--red:#b42318;--amber:#b54708}
+*{box-sizing:border-box}body{margin:0;font-family:Arial,sans-serif;background:var(--bg);color:#172033}
+header{background:var(--nav);color:#fff;padding:16px 22px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:4}
+header h1{font-size:20px;margin:0}button,.btn,input,select,textarea{font:inherit}button,.btn{border:0;border-radius:8px;padding:9px 12px;background:#101828;color:white;font-weight:700;cursor:pointer}.btn2{background:white;color:#172033;border:1px solid var(--line)}
+.wrap{max-width:1500px;margin:auto;padding:18px}.nav{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px}.nav button.active{background:#344054}
+.card{background:white;border:1px solid var(--line);border-radius:14px;padding:16px;margin-bottom:14px}.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}.stat{font-size:26px;font-weight:800;margin-top:6px}
+.muted{color:var(--muted);font-size:13px}.toolbar{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0}.hidden{display:none!important}
+table{width:100%;border-collapse:collapse;background:white;min-width:1050px}th,td{border-bottom:1px solid var(--line);padding:8px;font-size:12px;text-align:left;vertical-align:top}th{background:#f9fafb;position:sticky;top:0}.tablewrap{overflow:auto;max-height:580px;border:1px solid var(--line);border-radius:10px}
+input,select,textarea{width:100%;padding:9px;border:1px solid #d0d5dd;border-radius:8px}textarea{min-height:75px}.formgrid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+.actions button{padding:6px 8px;font-size:11px;margin-right:4px}.del{background:var(--red)}.edit{background:#475467}.run{background:var(--green)}
+.pipeline{display:flex;gap:8px;flex-wrap:wrap}.step{background:#f9fafb;border:1px solid var(--line);padding:10px 12px;border-radius:10px}.step b{display:block}
+.botgrid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.notice{background:#fffaeb;border:1px solid #fedf89;border-radius:10px;padding:10px}
+@media(max-width:900px){.grid,.formgrid,.botgrid{grid-template-columns:1fr 1fr}}@media(max-width:600px){.grid,.formgrid,.botgrid{grid-template-columns:1fr}}
+</style></head><body>
+<header><div><h1>Alliance V3.6 Live Team Operations</h1><div class="muted" style="color:#d0d5dd">app.allianceinfrastructure.co.in · Same application</div></div>
+<div><button class="btn2" onclick="goHome()">Home</button> <button class="btn2" onclick="history.back()">Back</button></div></header>
+<div class="wrap">
+<div class="nav" id="nav">
+<button onclick="show('home')" class="active">Dashboard</button>
+<button onclick="openDataset('whatsapp')">WhatsApp Live</button>
+<button onclick="openDataset('newspaper')">Newspaper Live</button>
+<button onclick="openManual('MAGAZINE')">Magazine Live</button>
+<button onclick="openDataset('hospitality')">Hospitality Database</button>
+<button onclick="openDataset('retail_signal')">Retail Signals</button>
+<button onclick="openDataset('retail_contact')">Retail Contacts</button>
+<button onclick="openManual('MANUAL')">Manual Database</button>
+<button onclick="show('upload')">Upload Picture/File</button>
+<button onclick="show('pipeline');loadPipeline()">Live Property Pipeline</button>
+</div>
+
+<section id="home">
+<div class="grid">
+<div class="card"><b>WhatsApp Records</b><div class="stat" id="swa">—</div></div>
+<div class="card"><b>Newspaper Records</b><div class="stat" id="snews">—</div></div>
+<div class="card"><b>Hospitality</b><div class="stat" id="shosp">—</div></div>
+<div class="card"><b>Retail Signals</b><div class="stat" id="sret">—</div></div>
+</div>
+<div class="botgrid">
+<div class="card"><h3>Hospitality Bot - LIVE</h3><div class="formgrid">
+<div><label>Category</label><select id="hcat"><option>RESTAURANT</option><option>CAFE</option><option>LOUNGE</option><option>CLUB</option><option>BANQUET</option><option>GUEST_HOUSE</option><option>HOTEL</option></select></div>
+<div><label>Location</label><input id="hloc" value="Delhi NCR"></div>
+<div style="align-self:end"><button class="run" onclick="runHospitality()">Run Hospitality Bot</button></div></div>
+<pre id="hout" class="muted">Ready.</pre></div>
+<div class="card"><h3>Retail Expansion Bot - LIVE</h3><div class="formgrid">
+<div><label>Category</label><select id="rcat"><option>ALL</option><option>JEWELLERY</option><option>RESTAURANT</option><option>CAFE</option><option>QSR</option><option>FASHION</option><option>FOOTWEAR</option></select></div>
+<div style="align-self:end"><button class="run" onclick="runRetailNews()">Run Retail News Bot</button></div>
+<div style="align-self:end"><button onclick="runRetailPeople()">Find Decision Makers</button></div></div>
+<pre id="rout" class="muted">Ready.</pre></div>
+</div>
+<div class="card"><h3>Property AI Pipeline</h3><div class="pipeline">
+<div class="step"><b>V2.6</b>Team Action</div><div class="step"><b>V2.7</b>Existing Inventory</div>
+<div class="step"><b>V2.8</b>External Discovery</div><div class="step"><b>V2.9A</b>Entity Splitter</div>
+<div class="step"><b>V2.9.5</b>Human Verification</div></div>
+<div class="toolbar"><input id="req" placeholder="Requirement code REQ-..." style="max-width:360px"><button class="run" onclick="runProperty()">Run Property Pipeline</button><button onclick="show('pipeline');loadPipeline()">View Live Workflow</button></div>
+<pre id="pout" class="muted">No auto-share. Human verification remains mandatory.</pre></div>
+</section>
+
+<section id="dataset" class="hidden">
+<div class="card"><div class="toolbar"><button class="btn2" onclick="goHome()">← Back</button><h2 id="datasetTitle" style="margin:5px 10px">Database</h2><button onclick="reloadDataset()">Refresh</button><button onclick="show('manualForm')">+ Add Manual Record</button></div>
+<div class="tablewrap"><table><thead id="thead"></thead><tbody id="tbody"></tbody></table></div></div>
+</section>
+
+<section id="manualForm" class="hidden"><div class="card"><div class="toolbar"><button class="btn2" onclick="goHome()">← Back</button><h2>Add Manual Database Entry</h2></div>
+<div class="formgrid">
+<div><label>Source</label><select id="msource"><option>MANUAL</option><option>WHATSAPP_GROUP</option><option>NEWSPAPER</option><option>MAGAZINE</option><option>PHONE_IMPORT</option></select></div>
+<div><label>Record Type</label><input id="mtype" placeholder="Property / Contact / Requirement"></div>
+<div><label>Business/Property</label><input id="mbusiness"></div>
+<div><label>Contact Name</label><input id="mcontact"></div><div><label>Phone</label><input id="mphone"></div><div><label>Email</label><input id="memail"></div>
+<div><label>Location</label><input id="mloc"></div><div><label>Status</label><select id="mstatus"><option>UNVERIFIED</option><option>VERIFIED</option><option>REVIEW</option></select></div>
+<div><label>Assigned To</label><input id="massigned"></div></div><label>Details</label><textarea id="mdetails"></textarea>
+<div class="toolbar"><button class="run" onclick="saveManual()">Save Record</button></div></div></section>
+
+<section id="upload" class="hidden"><div class="card"><div class="toolbar"><button class="btn2" onclick="goHome()">← Back</button><h2>Upload Newspaper / Magazine / WhatsApp Picture</h2></div>
+<div class="notice">This saves the original file permanently in PostgreSQL with a live database record. Newspaper AI extraction can continue through your existing Newspaper Intelligence module.</div>
+<form id="upform" class="formgrid" style="margin-top:12px">
+<div><label>Source</label><select name="source_channel"><option>NEWSPAPER</option><option>MAGAZINE</option><option>WHATSAPP_GROUP</option><option>MANUAL</option></select></div>
+<div><label>File</label><input type="file" name="file" required></div><div><label>Record Type</label><input name="record_type" value="IMAGE_UPLOAD"></div>
+<div><label>Business/Property</label><input name="business_name"></div><div><label>Contact</label><input name="contact_name"></div><div><label>Phone</label><input name="phone"></div>
+<div><label>Location</label><input name="location"></div><div><label>Assigned To</label><input name="assigned_to"></div><div><label>Details</label><input name="details"></div>
+<div><button class="run" type="submit">Upload & Save</button></div></form><pre id="upout"></pre></div></section>
+
+<section id="pipeline" class="hidden"><div class="card"><div class="toolbar"><button class="btn2" onclick="goHome()">← Back</button><h2>Live Property Workflow</h2><button onclick="loadPipeline()">Refresh</button></div>
+<div class="pipeline"><div class="step"><b>V2.6</b>Team Action</div><div class="step"><b>V2.7</b>Existing Inventory</div><div class="step"><b>V2.8</b>External Discovery</div><div class="step"><b>V2.9A</b>Entity Splitter</div><div class="step"><b>V2.9.5</b>Verification</div></div>
+<div class="tablewrap" style="margin-top:12px"><table><thead><tr><th>Run</th><th>Requirement</th><th>Status</th><th>Current Step</th><th>Next Step</th><th>Human Review</th><th>Started</th></tr></thead><tbody id="pruns"></tbody></table></div></div></section>
+</div>
+<script>
+let currentDataset='';let currentSource='';
+const sections=['home','dataset','manualForm','upload','pipeline'];
+function show(id){sections.forEach(x=>document.getElementById(x).classList.toggle('hidden',x!==id))}
+function goHome(){show('home');loadStats()}
+async function api(url,opt={}){try{let r=await fetch(url,{credentials:'include',...opt});let t=await r.text();let d;try{d=JSON.parse(t)}catch(e){d={raw:t}};return {ok:r.ok,status:r.status,data:d}}catch(e){return {ok:false,data:{error:String(e)}}}}
+function esc(v){return String(v??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]))}
+async function setup(){await api('/api/v3/live/setup',{method:'POST'})}
+async function loadStats(){for(let [d,id,src] of [['whatsapp','swa',''],['newspaper','snews',''],['hospitality','shosp',''],['retail_signal','sret','']]){let x=await api('/api/v3/live/data/'+d+'?limit=500');document.getElementById(id).textContent=x.data.count??0}}
+function openManual(src){currentSource=src;openDataset('manual',src)}
+async function openDataset(d,src=''){currentDataset=d;currentSource=src;show('dataset');document.getElementById('datasetTitle').textContent=(src?src+' ':'')+d.replace('_',' ').toUpperCase()+' DATABASE';await reloadDataset()}
+async function reloadDataset(){let u='/api/v3/live/data/'+currentDataset+'?limit=200'+(currentSource?'&source_channel='+encodeURIComponent(currentSource):'');let x=await api(u);renderRows(x.data.rows||[])}
+function renderRows(rows){let th=document.getElementById('thead'),tb=document.getElementById('tbody');th.innerHTML='';tb.innerHTML='';if(!rows.length){tb.innerHTML='<tr><td>No records yet</td></tr>';return}
+let keys=Object.keys(rows[0]).filter(k=>!['raw_payload','all_contacts','all_locations'].includes(k)).slice(0,14);
+th.innerHTML='<tr>'+keys.map(k=>'<th>'+esc(k)+'</th>').join('')+'<th>Actions</th></tr>';
+let idkey={manual:'record_id',whatsapp:'id',newspaper:'id',hospitality:'hospitality_id',retail_signal:'signal_id',retail_contact:'retail_contact_id'}[currentDataset];
+rows.forEach(r=>{let tr=document.createElement('tr');tr.innerHTML=keys.map(k=>'<td>'+esc(typeof r[k]==='object'?JSON.stringify(r[k]):r[k])+'</td>').join('')+
+'<td class="actions"><button class="edit" onclick="editRow('+JSON.stringify(String(r[idkey]))+')">Edit</button><button class="del" onclick="deleteRow('+JSON.stringify(String(r[idkey]))+')">Delete</button></td>';tb.appendChild(tr)})}
+async function editRow(id){let raw=prompt('Enter changes as JSON. Example: {"status":"VERIFIED"}');if(!raw)return;let p;try{p=JSON.parse(raw)}catch(e){alert('Invalid JSON');return}let x=await api('/api/v3/live/update/'+currentDataset+'/'+encodeURIComponent(id),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)});alert(x.data.status||JSON.stringify(x.data));reloadDataset()}
+async function deleteRow(id){if(!confirm('Delete this record? This cannot be undone.'))return;let x=await api('/api/v3/live/delete/'+currentDataset+'/'+encodeURIComponent(id),{method:'DELETE'});alert(x.data.status||JSON.stringify(x.data));reloadDataset()}
+async function saveManual(){let p={source_channel:msource.value,record_type:mtype.value,business_name:mbusiness.value,contact_name:mcontact.value,phone:mphone.value,email:memail.value,location:mloc.value,status:mstatus.value,assigned_to:massigned.value,details:mdetails.value};let x=await api('/api/v3/live/manual',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)});alert(x.data.status||JSON.stringify(x.data));goHome()}
+upform.onsubmit=async e=>{e.preventDefault();let x=await api('/api/v3/live/upload',{method:'POST',body:new FormData(upform)});upout.textContent=JSON.stringify(x.data,null,2);loadStats()}
+async function runHospitality(){hout.textContent='Running...';let x=await api('/api/v3/hospitality/discover/'+encodeURIComponent(hcat.value)+'?location='+encodeURIComponent(hloc.value)+'&count=8',{method:'POST'});hout.textContent=JSON.stringify(x.data,null,2);loadStats()}
+async function runRetailNews(){rout.textContent='Running retail news...';let x=await api('/api/v3/retail/discover/news?category='+encodeURIComponent(rcat.value)+'&count=8',{method:'POST'});rout.textContent=JSON.stringify(x.data,null,2);loadStats()}
+async function runRetailPeople(){rout.textContent='Finding decision makers...';let cat=rcat.value==='ALL'?'OTHER':rcat.value;let x=await api('/api/v3/retail/discover/linkedin?category='+encodeURIComponent(cat)+'&location=India&count=8',{method:'POST'});rout.textContent=JSON.stringify(x.data,null,2);loadStats()}
+async function runProperty(){if(!req.value.trim()){alert('Enter requirement code');return}pout.textContent='Running...';let x=await api('/api/v2/intelligence/v30/run/'+encodeURIComponent(req.value.trim()),{method:'POST'});pout.textContent=JSON.stringify(x.data,null,2)}
+async function loadPipeline(){let x=await api('/api/v3/live/pipeline');let tb=document.getElementById('pruns');tb.innerHTML='';(x.data.runs||[]).forEach(r=>{tb.innerHTML+='<tr><td>'+esc(r.run_id)+'</td><td>'+esc(r.requirement_code)+'</td><td>'+esc(r.run_status)+'</td><td>'+esc(r.current_step)+'</td><td>'+esc(r.next_step)+'</td><td>'+esc(r.requires_human_review)+'</td><td>'+esc(r.started_at)+'</td></tr>'})}
+setup().then(loadStats)
+</script></body></html>
