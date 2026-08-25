@@ -6,6 +6,7 @@ from alliance_v2_index import rebuild
 from alliance_v2_normalize import norm
 from alliance_v2_whatsapp_purity import purity_rows
 from alliance_v2_whatsapp_review_queue import register_review_queue
+from alliance_v2_review_prioritizer import register_priority_routes
 
 LOCATION_ALIASES={
     "cp":["connaught place","connaught circus","rajiv chowk","inner circle","outer circle"],
@@ -219,6 +220,7 @@ def run_match(engine,code):
 def register(core):
     app,engine=core.app,core.engine
     register_review_queue(core)
+    register_priority_routes(core)
 
 
     @app.middleware("http")
