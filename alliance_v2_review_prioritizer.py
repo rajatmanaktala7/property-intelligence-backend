@@ -5,31 +5,35 @@ from sqlalchemy import text
 from fastapi import Request, Query, Form, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse
 from alliance_v2_whatsapp_review_queue import (
-    ensure_review_schema, save_decision, queue_summary
+    ensure_review_schema, save_decision
 )
 
-MODULE_VERSION = "2.4.1-BULK-REVIEW-PRIORITIZATION"
+MODULE_VERSION = "2.4.3-CALIBRATION-ENGINE"
 
 BUCKETS = {
     "AUTO_APPROVE_CANDIDATE",
     "QUICK_REVIEW",
     "DEEP_REVIEW",
+    "MISSING_CRITICAL_DATA",
     "REJECT_NOISE",
 }
 
 NOISE_PHRASES = [
-    "good morning", "good evening", "happy birthday", "congratulations",
-    "festival wishes", "breaking news", "market news", "real estate news",
-    "subscribe", "youtube", "webinar", "seminar", "training session",
-    "job opening", "hiring", "vacancy", "loan available", "home loan",
-    "insurance", "political", "election", "stock market", "crypto",
+    "good morning", "good evening", "good night", "happy birthday",
+    "congratulations", "festival wishes", "breaking news", "market news",
+    "real estate news", "subscribe", "youtube", "webinar", "seminar",
+    "training session", "job opening", "hiring", "vacancy", "loan available",
+    "home loan", "insurance", "political", "election", "stock market", "crypto",
+    "motivational", "quote of the day", "thank you", "thanks everyone",
+    "welcome", "meeting reminder", "event invite", "join us", "download app",
 ]
 
-PROPERTY_SIGNAL_WORDS = [
+PROPERTY_SIGNALS = [
     "sale", "rent", "lease", "property", "shop", "office", "floor", "plot",
     "apartment", "flat", "villa", "showroom", "warehouse", "restaurant",
     "commercial", "residential", "sqft", "sq ft", "sqyd", "acre", "bhk",
     "require", "required", "looking for", "need", "tenant", "buyer",
+    "available", "owner", "broker", "frontage", "ground floor", "first floor",
 ]
 
 GENERIC_LOCATIONS = {
@@ -51,10 +55,7 @@ def _f(v, default=0.0):
     except Exception:
         return default
 
-def _has_value(v):
-    return v not in (None, "", "UNKNOWN", "unknown")
-
-def ensure_priority_schema(engine):
+def ensure_calibration_schema(engine):
     ensure_review_schema(engine)
     with engine.begin() as c:
         c.execute(text("""
@@ -75,149 +76,12 @@ def ensure_priority_schema(engine):
           ON ai_whatsapp_review_priority(bucket,priority_score DESC)
         """))
 
-def _noise_score(raw):
-    t = _s(raw).lower()
-    if not t:
-        return 100, ["Empty raw message"]
-    hits = [x for x in NOISE_PHRASES if x in t]
-    signals = [x for x in PROPERTY_SIGNAL_WORDS if x in t]
-    score = 0
-    reasons = []
-    if hits:
-        score += min(70, len(hits) * 25)
-        reasons.append("Non-property/noise language detected: " + ", ".join(hits[:3]))
-    if not signals:
-        score += 35
-        reasons.append("No strong property or requirement signal")
-    if len(t) < 20:
-        score += 25
-        reasons.append("Message too short for reliable property extraction")
-    return min(100, score), reasons
-
-def _evaluate_row(r, dup_size):
-    reasons = []
-    risks = []
-    score = 0.0
-
-    purity = _f(r.get("purity_score"))
-    tx_conf = _f(r.get("transaction_confidence"))
-    type_conf = _f(r.get("property_type_confidence"))
-    loc = _s(r.get("recovered_location"))
-    ptype = _s(r.get("recovered_property_type")).upper()
-    role = _s(r.get("recovered_role")).upper()
-    tx = _s(r.get("recovered_transaction")).upper()
-    amin = _f(r.get("recovered_area_min_sqft"), 0)
-    amax = _f(r.get("recovered_area_max_sqft"), 0)
-    raw = _s(r.get("raw_text"))
-
-    noise, noise_reasons = _noise_score(raw)
-    if noise >= 60:
-        risks.extend(noise_reasons)
-
-    if role in {"SUPPLY", "REQUIREMENT"}:
-        score += 15
-        reasons.append("Role classified")
-    else:
-        risks.append("Role unresolved")
-
-    if tx in {"SALE", "LEASE", "LEASE_OR_SALE"}:
-        score += 15
-        reasons.append("Transaction classified")
-    else:
-        risks.append("Transaction unresolved")
-
-    if tx_conf >= 95:
-        score += 12
-        reasons.append("High transaction confidence")
-    elif tx_conf >= 75:
-        score += 7
-    else:
-        risks.append("Low transaction confidence")
-
-    if ptype and ptype != "UNKNOWN":
-        score += 12
-        reasons.append("Property type available")
-    else:
-        risks.append("Property type unresolved")
-
-    if type_conf >= 95:
-        score += 10
-        reasons.append("High property type confidence")
-    elif type_conf >= 75:
-        score += 5
-    else:
-        risks.append("Low property type confidence")
-
-    if loc and loc.lower() not in GENERIC_LOCATIONS:
-        score += 15
-        reasons.append("Specific location available")
-    else:
-        risks.append("Location missing or too generic")
-
-    if amin > 0 and amax > 0 and amin <= amax and amax <= 100_000_000:
-        score += 14
-        reasons.append("Plausible area range")
-    else:
-        risks.append("Area missing or implausible")
-
-    if purity >= 70:
-        score += 7
-    elif purity >= 55:
-        score += 3
-
-    if dup_size <= 1:
-        score += 5
-        reasons.append("No duplicate cluster conflict")
-    else:
-        risks.append(f"Duplicate cluster contains {dup_size} rows")
-
-    if noise >= 60:
-        score -= 40
-    elif noise >= 30:
-        score -= 15
-
-    score = round(max(0, min(100, score)), 2)
-
-    # Conservative auto-approval eligibility.
-    auto_safe = bool(
-        r.get("review_status") == "NEEDS_REVIEW"
-        and score >= 90
-        and purity >= 70
-        and tx_conf >= 95
-        and type_conf >= 95
-        and role in {"SUPPLY", "REQUIREMENT"}
-        and tx in {"SALE", "LEASE", "LEASE_OR_SALE"}
-        and loc and loc.lower() not in GENERIC_LOCATIONS
-        and ptype and ptype != "UNKNOWN"
-        and amin > 0 and amax > 0
-        and dup_size <= 1
-        and noise < 30
-    )
-
-    if noise >= 70:
-        bucket = "REJECT_NOISE"
-    elif auto_safe:
-        bucket = "AUTO_APPROVE_CANDIDATE"
-    elif score >= 70 and len(risks) <= 2:
-        bucket = "QUICK_REVIEW"
-    else:
-        bucket = "DEEP_REVIEW"
-
-    return {
-        "priority_score": score,
-        "bucket": bucket,
-        "auto_approve_safe": auto_safe,
-        "reasons": reasons,
-        "risk_flags": risks,
-    }
-
 def run_prioritization(engine):
     """
-    V2.4.1 bulk implementation.
-    Uses one PostgreSQL INSERT..SELECT..ON CONFLICT instead of thousands
-    of Python row-by-row UPSERTs.
+    Bulk SQL calibration.
+    This remains decoupled from rebuild-index.
     """
-    ensure_priority_schema(engine)
+    ensure_calibration_schema(engine)
 
     with engine.begin() as c:
         result = c.execute(text("""
@@ -254,31 +118,45 @@ def run_prioritization(engine):
             (
               CASE WHEN role IN ('SUPPLY','REQUIREMENT') THEN 15 ELSE 0 END +
               CASE WHEN tx IN ('SALE','LEASE','LEASE_OR_SALE') THEN 15 ELSE 0 END +
-              CASE WHEN tx_conf >= 95 THEN 12 WHEN tx_conf >= 75 THEN 7 ELSE 0 END +
+              CASE WHEN tx_conf >= 95 THEN 12 WHEN tx_conf >= 90 THEN 10 WHEN tx_conf >= 75 THEN 7 ELSE 0 END +
               CASE WHEN ptype <> '' AND ptype <> 'UNKNOWN' THEN 12 ELSE 0 END +
-              CASE WHEN type_conf >= 95 THEN 10 WHEN type_conf >= 75 THEN 5 ELSE 0 END +
+              CASE WHEN type_conf >= 95 THEN 10 WHEN type_conf >= 90 THEN 8 WHEN type_conf >= 75 THEN 5 ELSE 0 END +
               CASE WHEN LOWER(loc) NOT IN ('','other','others','unknown','na','n/a','none','delhi ncr','india') THEN 15 ELSE 0 END +
               CASE WHEN amin > 0 AND amax > 0 AND amin <= amax AND amax <= 100000000 THEN 14 ELSE 0 END +
-              CASE WHEN purity_score >= 70 THEN 7 WHEN purity_score >= 55 THEN 3 ELSE 0 END +
+              CASE WHEN purity_score >= 75 THEN 8 WHEN purity_score >= 65 THEN 5 WHEN purity_score >= 55 THEN 3 ELSE 0 END +
               CASE WHEN dup_size <= 1 THEN 5 ELSE 0 END
             )::numeric AS positive_score,
+
+            (
+              CASE WHEN role NOT IN ('SUPPLY','REQUIREMENT') THEN 1 ELSE 0 END +
+              CASE WHEN tx NOT IN ('SALE','LEASE','LEASE_OR_SALE') THEN 1 ELSE 0 END +
+              CASE WHEN LOWER(loc) IN ('','other','others','unknown','na','n/a','none','delhi ncr','india') THEN 1 ELSE 0 END +
+              CASE WHEN ptype='' OR ptype='UNKNOWN' THEN 1 ELSE 0 END +
+              CASE WHEN NOT (amin > 0 AND amax > 0 AND amin <= amax AND amax <= 100000000) THEN 1 ELSE 0 END
+            )::int AS critical_missing,
+
             (
               CASE
                 WHEN raw = '' THEN 100
                 ELSE LEAST(100,
                   CASE WHEN raw LIKE '%good morning%' OR raw LIKE '%good evening%'
-                            OR raw LIKE '%happy birthday%' OR raw LIKE '%congratulations%'
-                            OR raw LIKE '%festival wishes%' OR raw LIKE '%breaking news%'
-                            OR raw LIKE '%market news%' OR raw LIKE '%real estate news%'
-                            OR raw LIKE '%subscribe%' OR raw LIKE '%youtube%'
-                            OR raw LIKE '%webinar%' OR raw LIKE '%seminar%'
-                            OR raw LIKE '%training session%' OR raw LIKE '%job opening%'
-                            OR raw LIKE '%hiring%' OR raw LIKE '%vacancy%'
-                            OR raw LIKE '%loan available%' OR raw LIKE '%home loan%'
-                            OR raw LIKE '%insurance%' OR raw LIKE '%political%'
-                            OR raw LIKE '%election%' OR raw LIKE '%stock market%'
-                            OR raw LIKE '%crypto%'
-                       THEN 25 ELSE 0 END
+                            OR raw LIKE '%good night%' OR raw LIKE '%happy birthday%'
+                            OR raw LIKE '%congratulations%' OR raw LIKE '%festival wishes%'
+                            OR raw LIKE '%breaking news%' OR raw LIKE '%market news%'
+                            OR raw LIKE '%real estate news%' OR raw LIKE '%subscribe%'
+                            OR raw LIKE '%youtube%' OR raw LIKE '%webinar%'
+                            OR raw LIKE '%seminar%' OR raw LIKE '%training session%'
+                            OR raw LIKE '%job opening%' OR raw LIKE '%hiring%'
+                            OR raw LIKE '%vacancy%' OR raw LIKE '%loan available%'
+                            OR raw LIKE '%home loan%' OR raw LIKE '%insurance%'
+                            OR raw LIKE '%political%' OR raw LIKE '%election%'
+                            OR raw LIKE '%stock market%' OR raw LIKE '%crypto%'
+                            OR raw LIKE '%motivational%' OR raw LIKE '%quote of the day%'
+                            OR raw LIKE '%thank you%' OR raw LIKE '%thanks everyone%'
+                            OR raw LIKE '%welcome%' OR raw LIKE '%meeting reminder%'
+                            OR raw LIKE '%event invite%' OR raw LIKE '%join us%'
+                            OR raw LIKE '%download app%'
+                       THEN 40 ELSE 0 END
                   +
                   CASE WHEN NOT (
                             raw LIKE '%sale%' OR raw LIKE '%rent%' OR raw LIKE '%lease%'
@@ -291,10 +169,15 @@ def run_prioritization(engine):
                             OR raw LIKE '%acre%' OR raw LIKE '%bhk%' OR raw LIKE '%require%'
                             OR raw LIKE '%required%' OR raw LIKE '%looking for%'
                             OR raw LIKE '%need%' OR raw LIKE '%tenant%' OR raw LIKE '%buyer%'
+                            OR raw LIKE '%available%' OR raw LIKE '%owner%'
+                            OR raw LIKE '%broker%' OR raw LIKE '%frontage%'
+                            OR raw LIKE '%ground floor%' OR raw LIKE '%first floor%'
                        )
-                       THEN 35 ELSE 0 END
+                       THEN 45 ELSE 0 END
                   +
-                  CASE WHEN LENGTH(raw) < 20 THEN 25 ELSE 0 END
+                  CASE WHEN LENGTH(raw) < 18 THEN 30 ELSE 0 END
+                  +
+                  CASE WHEN raw ~ '^[0-9 +()-]{7,}$' THEN 35 ELSE 0 END
                 )
               END
             )::numeric AS noise_score
@@ -304,42 +187,36 @@ def run_prioritization(engine):
           SELECT *,
             GREATEST(0,LEAST(100,
               positive_score
-              - CASE WHEN noise_score >= 60 THEN 40
-                     WHEN noise_score >= 30 THEN 15 ELSE 0 END
+              - CASE WHEN noise_score >= 70 THEN 45
+                     WHEN noise_score >= 40 THEN 25
+                     WHEN noise_score >= 25 THEN 10
+                     ELSE 0 END
             ))::numeric(6,2) AS priority_score,
+
             (
               review_status='NEEDS_REVIEW'
-              AND purity_score >= 70
-              AND tx_conf >= 95
-              AND type_conf >= 95
+              AND purity_score >= 75
+              AND tx_conf >= 90
+              AND type_conf >= 90
               AND role IN ('SUPPLY','REQUIREMENT')
               AND tx IN ('SALE','LEASE','LEASE_OR_SALE')
               AND LOWER(loc) NOT IN ('','other','others','unknown','na','n/a','none','delhi ncr','india')
               AND ptype <> '' AND ptype <> 'UNKNOWN'
               AND amin > 0 AND amax > 0 AND amin <= amax AND amax <= 100000000
               AND dup_size <= 1
-              AND noise_score < 30
-              AND positive_score >= 90
+              AND noise_score < 25
+              AND positive_score >= 88
+              AND critical_missing = 0
             ) AS auto_safe
           FROM feat
         ),
         final AS (
           SELECT *,
             CASE
-              WHEN noise_score >= 70 THEN 'REJECT_NOISE'
+              WHEN noise_score >= 75 THEN 'REJECT_NOISE'
+              WHEN critical_missing >= 2 THEN 'MISSING_CRITICAL_DATA'
               WHEN auto_safe THEN 'AUTO_APPROVE_CANDIDATE'
-              WHEN priority_score >= 70
-                   AND (
-                     (CASE WHEN role NOT IN ('SUPPLY','REQUIREMENT') THEN 1 ELSE 0 END) +
-                     (CASE WHEN tx NOT IN ('SALE','LEASE','LEASE_OR_SALE') THEN 1 ELSE 0 END) +
-                     (CASE WHEN tx_conf < 75 THEN 1 ELSE 0 END) +
-                     (CASE WHEN ptype='' OR ptype='UNKNOWN' THEN 1 ELSE 0 END) +
-                     (CASE WHEN type_conf < 75 THEN 1 ELSE 0 END) +
-                     (CASE WHEN LOWER(loc) IN ('','other','others','unknown','na','n/a','none','delhi ncr','india') THEN 1 ELSE 0 END) +
-                     (CASE WHEN NOT (amin > 0 AND amax > 0 AND amin <= amax AND amax <= 100000000) THEN 1 ELSE 0 END) +
-                     (CASE WHEN dup_size > 1 THEN 1 ELSE 0 END)
-                   ) <= 2
-                THEN 'QUICK_REVIEW'
+              WHEN priority_score >= 70 AND critical_missing <= 1 THEN 'QUICK_REVIEW'
               ELSE 'DEEP_REVIEW'
             END AS bucket
           FROM scored
@@ -357,9 +234,9 @@ def run_prioritization(engine):
             to_jsonb(array_remove(ARRAY[
               CASE WHEN role IN ('SUPPLY','REQUIREMENT') THEN 'Role classified' END,
               CASE WHEN tx IN ('SALE','LEASE','LEASE_OR_SALE') THEN 'Transaction classified' END,
-              CASE WHEN tx_conf >= 95 THEN 'High transaction confidence' END,
+              CASE WHEN tx_conf >= 90 THEN 'Strong transaction confidence' END,
               CASE WHEN ptype <> '' AND ptype <> 'UNKNOWN' THEN 'Property type available' END,
-              CASE WHEN type_conf >= 95 THEN 'High property type confidence' END,
+              CASE WHEN type_conf >= 90 THEN 'Strong property type confidence' END,
               CASE WHEN LOWER(loc) NOT IN ('','other','others','unknown','na','n/a','none','delhi ncr','india') THEN 'Specific location available' END,
               CASE WHEN amin > 0 AND amax > 0 AND amin <= amax AND amax <= 100000000 THEN 'Plausible area range' END,
               CASE WHEN dup_size <= 1 THEN 'No duplicate cluster conflict' END
@@ -373,7 +250,8 @@ def run_prioritization(engine):
               CASE WHEN LOWER(loc) IN ('','other','others','unknown','na','n/a','none','delhi ncr','india') THEN 'Location missing or too generic' END,
               CASE WHEN NOT (amin > 0 AND amax > 0 AND amin <= amax AND amax <= 100000000) THEN 'Area missing or implausible' END,
               CASE WHEN dup_size > 1 THEN 'Duplicate cluster conflict' END,
-              CASE WHEN noise_score >= 60 THEN 'Noise/non-property language detected' END
+              CASE WHEN noise_score >= 75 THEN 'Likely non-property/noise message' END,
+              CASE WHEN critical_missing >= 2 THEN 'Multiple critical fields missing' END
             ]::text[],NULL)),
             dup_size,
             :version,
@@ -396,6 +274,7 @@ def run_prioritization(engine):
           COUNT(*) FILTER (WHERE bucket='AUTO_APPROVE_CANDIDATE')::int AS auto_bucket,
           COUNT(*) FILTER (WHERE bucket='QUICK_REVIEW')::int AS quick_bucket,
           COUNT(*) FILTER (WHERE bucket='DEEP_REVIEW')::int AS deep_bucket,
+          COUNT(*) FILTER (WHERE bucket='MISSING_CRITICAL_DATA')::int AS missing_bucket,
           COUNT(*) FILTER (WHERE bucket='REJECT_NOISE')::int AS noise_bucket
         FROM upserted
         """), {"version": MODULE_VERSION}).mappings().one()
@@ -420,13 +299,15 @@ def run_prioritization(engine):
             "AUTO_APPROVE_CANDIDATE": int(result["auto_bucket"] or 0),
             "QUICK_REVIEW": int(result["quick_bucket"] or 0),
             "DEEP_REVIEW": int(result["deep_bucket"] or 0),
+            "MISSING_CRITICAL_DATA": int(result["missing_bucket"] or 0),
             "REJECT_NOISE": int(result["noise_bucket"] or 0),
         },
         "auto_approval_default": "DISABLED",
         "execution_mode": "BULK_SQL",
     }
+
 def priority_summary(engine):
-    ensure_priority_schema(engine)
+    ensure_calibration_schema(engine)
     with engine.connect() as c:
         rows = c.execute(text("""
           SELECT bucket,COUNT(*)::int n,
@@ -437,10 +318,10 @@ def priority_summary(engine):
         counts = {b: 0 for b in BUCKETS}
         safe = 0
         evaluated = 0
-        for row in rows:
-            counts[row["bucket"]] = int(row["n"] or 0)
-            safe += int(row["safe"] or 0)
-            evaluated += int(row["n"] or 0)
+        for r in rows:
+            counts[r["bucket"]] = int(r["n"] or 0)
+            safe += int(r["safe"] or 0)
+            evaluated += int(r["n"] or 0)
     return {
         "version": MODULE_VERSION,
         "evaluated": evaluated,
@@ -452,7 +333,7 @@ def priority_summary(engine):
     }
 
 def priority_rows(engine, bucket="ALL", limit=100, offset=0, search=""):
-    ensure_priority_schema(engine)
+    ensure_calibration_schema(engine)
     bucket = _s(bucket).upper() or "ALL"
     search = _s(search)
     where = ["COALESCE(d.decision,'PENDING')='PENDING'"]
@@ -483,21 +364,18 @@ def priority_rows(engine, bucket="ALL", limit=100, offset=0, search=""):
             CASE q.bucket
               WHEN 'AUTO_APPROVE_CANDIDATE' THEN 1
               WHEN 'QUICK_REVIEW' THEN 2
-              WHEN 'DEEP_REVIEW' THEN 3
-              ELSE 4
+              WHEN 'MISSING_CRITICAL_DATA' THEN 3
+              WHEN 'DEEP_REVIEW' THEN 4
+              ELSE 5
             END,
             q.priority_score DESC
           LIMIT :lim OFFSET :off
         """), params).mappings().all()
     return [dict(r) for r in rows]
 
-def apply_safe_auto_approvals(engine, reviewer_name="V2.4 Safe Auto Approval", max_records=25):
-    """
-    Explicit opt-in only. Never called automatically by a rebuild.
-    Uses V2.3 save_decision so approvals remain persistent and auditable.
-    """
-    ensure_priority_schema(engine)
-    max_records = max(1, min(int(max_records), 100))
+def apply_safe_auto_approvals(engine, reviewer_name="V2.4.3 Safe Auto Approval", max_records=10):
+    ensure_calibration_schema(engine)
+    max_records = max(1, min(int(max_records), 25))
     with engine.connect() as c:
         rows = c.execute(text("""
           SELECT q.listing_id,p.*
@@ -528,17 +406,15 @@ def apply_safe_auto_approvals(engine, reviewer_name="V2.4 Safe Auto Approval", m
             r.get("recovered_required_floor"),
             r.get("recovered_suitable_for"),
             reviewer_name,
-            "V2.4 strict safe-auto criteria passed"
+            "V2.4.3 calibrated safe-auto criteria passed"
         )
         approved.append(str(r["listing_id"]))
 
-    # Recalculate priority after decisions.
-    result = run_prioritization(engine)
     return {
         "version": MODULE_VERSION,
         "approved_count": len(approved),
         "approved_listing_ids": approved,
-        "post_run": result,
+        "post_run": run_prioritization(engine),
     }
 
 def _e(v):
@@ -547,8 +423,9 @@ def _e(v):
 def render_priority_page(engine, bucket="ALL", limit=50, offset=0, search=""):
     summary = priority_summary(engine)
     rows = priority_rows(engine, bucket, limit, offset, search)
-    cards = []
+    counts = summary["buckets"]
 
+    cards = []
     for r in rows:
         reasons = r.get("reasons") or []
         risks = r.get("risk_flags") or []
@@ -556,7 +433,7 @@ def render_priority_page(engine, bucket="ALL", limit=50, offset=0, search=""):
         <section class="card">
           <div class="head">
             <div>
-              <span class="bucket {_e(r.get('bucket')).lower()}">{_e(r.get('bucket'))}</span>
+              <span class="bucket">{_e(r.get('bucket'))}</span>
               <h3>{_e(r.get('recovered_location') or 'Location missing')} · {_e(r.get('recovered_property_type') or 'Type missing')}</h3>
               <div class="meta">{_e(r.get('source_group_name'))} · Purity {_e(r.get('purity_score'))} · Duplicate cluster {_e(r.get('duplicate_cluster_size'))}</div>
             </div>
@@ -573,26 +450,21 @@ def render_priority_page(engine, bucket="ALL", limit=50, offset=0, search=""):
             <div><b>Why prioritized</b><br>{'<br>'.join('✓ '+_e(x) for x in reasons)}</div>
             <div><b>Risks</b><br>{'<br>'.join('⚠ '+_e(x) for x in risks) if risks else 'No material risk flag'}</div>
           </div>
-          <div class="actions">
-            <a class="review" href="/v2/whatsapp-review?search={_e(r.get('listing_id'))}">Open in Human Review</a>
-            {'<span class="safe">Safe auto-approval candidate</span>' if r.get('auto_approve_safe') else ''}
-          </div>
         </section>
         """)
 
-    counts = summary["buckets"]
     prev_off = max(0, offset-limit)
     next_off = offset+limit
 
     return f"""<!doctype html>
-<html><head><meta charset="utf-8"><title>V2.4 Review Prioritization</title>
+<html><head><meta charset="utf-8"><title>V2.4.3 Calibration Engine</title>
 <style>
 body{{font-family:Arial,sans-serif;background:#f5f7fa;margin:0;color:#172033}}
 header{{background:#111827;color:white;padding:22px 28px}}
 .wrap{{max-width:1450px;margin:22px auto;padding:0 18px}}
-.stats{{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:15px}}
+.stats{{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-bottom:15px}}
 .stat,.filters,.card{{background:white;border:1px solid #e5e7eb;border-radius:12px;padding:14px}}
-.stat b{{display:block;font-size:24px}}
+.stat b{{display:block;font-size:22px}}
 .filters form{{display:flex;gap:10px;flex-wrap:wrap}}
 input,select{{padding:9px;border:1px solid #cbd5e1;border-radius:7px}}
 .card{{margin-top:14px}} .head{{display:flex;justify-content:space-between;gap:20px}}
@@ -600,37 +472,36 @@ input,select{{padding:9px;border:1px solid #cbd5e1;border-radius:7px}}
 .score{{font-size:30px;font-weight:bold}} .meta{{font-size:12px;color:#64748b}}
 .raw{{background:#f8fafc;padding:12px;border-radius:8px;margin:12px 0;white-space:pre-wrap}}
 .cols{{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;line-height:1.5}}
-.actions{{margin-top:14px;display:flex;gap:10px;align-items:center}}
-.review,button{{background:#1d4ed8;color:white;padding:10px 13px;border:0;border-radius:8px;text-decoration:none;font-weight:bold}}
-.safe{{background:#dcfce7;color:#166534;padding:8px;border-radius:8px;font-weight:bold}}
+button{{background:#1d4ed8;color:white;padding:10px 13px;border:0;border-radius:8px;font-weight:bold}}
 .auto{{background:#15803d}}
 .pagination{{display:flex;justify-content:space-between;margin:20px 0}}
 @media(max-width:900px){{.stats,.cols{{grid-template-columns:1fr 1fr}}}}
 </style></head>
 <body>
-<header><h1>V2.4 AI Review Prioritization</h1><div>Explainable prioritization. Safe auto-approval is disabled by default and requires an explicit action.</div></header>
+<header><h1>V2.4.3 Calibration Engine</h1><div>Five-way prioritization with conservative manual-opt-in auto approval.</div></header>
 <div class="wrap">
 <div class="stats">
-<div class="stat">Auto-Approve Candidates<b>{counts.get('AUTO_APPROVE_CANDIDATE',0)}</b></div>
+<div class="stat">Auto Candidates<b>{counts.get('AUTO_APPROVE_CANDIDATE',0)}</b></div>
 <div class="stat">Quick Review<b>{counts.get('QUICK_REVIEW',0)}</b></div>
+<div class="stat">Missing Critical Data<b>{counts.get('MISSING_CRITICAL_DATA',0)}</b></div>
 <div class="stat">Deep Review<b>{counts.get('DEEP_REVIEW',0)}</b></div>
 <div class="stat">Reject / Noise<b>{counts.get('REJECT_NOISE',0)}</b></div>
 </div>
 <div class="filters">
 <form method="get" action="/v2/whatsapp-priority">
-<select name="bucket"><option>{_e(bucket)}</option><option>ALL</option><option>AUTO_APPROVE_CANDIDATE</option><option>QUICK_REVIEW</option><option>DEEP_REVIEW</option><option>REJECT_NOISE</option></select>
+<select name="bucket"><option>{_e(bucket)}</option><option>ALL</option><option>AUTO_APPROVE_CANDIDATE</option><option>QUICK_REVIEW</option><option>MISSING_CRITICAL_DATA</option><option>DEEP_REVIEW</option><option>REJECT_NOISE</option></select>
 <input name="search" value="{_e(search)}" placeholder="Search location, group, text">
 <input type="hidden" name="limit" value="{int(limit)}">
 <button>Filter</button>
 </form>
 <form method="post" action="/api/v2/intelligence/whatsapp-priority/apply-auto-approve" style="margin-top:10px">
 <input type="hidden" name="confirm" value="YES">
-<input type="number" name="max_records" value="10" min="1" max="100">
+<input type="number" name="max_records" value="10" min="1" max="25">
 <button class="auto">Apply Safe Auto Approvals</button>
-<span>Explicit action only. Start with 10.</span>
+<span>Manual opt-in only. Start with 10.</span>
 </form>
 </div>
-{''.join(cards) if cards else '<div class="card"><b>No rows in this priority bucket.</b></div>'}
+{''.join(cards) if cards else '<div class="card"><b>No rows in this bucket.</b></div>'}
 <div class="pagination">
 <a href="/v2/whatsapp-priority?bucket={_e(bucket)}&search={_e(search)}&limit={int(limit)}&offset={prev_off}">← Previous</a>
 <a href="/v2/whatsapp-priority?bucket={_e(bucket)}&search={_e(search)}&limit={int(limit)}&offset={next_off}">Next →</a>
@@ -639,7 +510,7 @@ input,select{{padding:9px;border:1px solid #cbd5e1;border-radius:7px}}
 
 def register_priority_routes(core):
     app, engine = core.app, core.engine
-    ensure_priority_schema(engine)
+    ensure_calibration_schema(engine)
 
     @app.post("/api/v2/intelligence/whatsapp-priority/run")
     def priority_run(req: Request):
@@ -654,12 +525,12 @@ def register_priority_routes(core):
                      search: str = Query("")):
         if hasattr(core, "need_login"):
             core.need_login(req)
-        summary = priority_summary(engine)
+        rows = priority_rows(engine,bucket,limit,offset,search)
         return {
             "version": MODULE_VERSION,
-            "summary": summary,
-            "count": len(priority_rows(engine,bucket,limit,offset,search)),
-            "rows": priority_rows(engine,bucket,limit,offset,search),
+            "summary": priority_summary(engine),
+            "count": len(rows),
+            "rows": rows,
         }
 
     @app.post("/api/v2/intelligence/whatsapp-priority/apply-auto-approve")
@@ -670,7 +541,7 @@ def register_priority_routes(core):
             core.need_login(req)
         if _s(confirm).upper() != "YES":
             raise HTTPException(400, "Explicit confirm=YES required")
-        apply_safe_auto_approvals(engine, "V2.4 Safe Auto Approval", max_records)
+        apply_safe_auto_approvals(engine, "V2.4.3 Safe Auto Approval", max_records)
         return RedirectResponse("/v2/whatsapp-priority?bucket=AUTO_APPROVE_CANDIDATE", status_code=303)
 
     @app.get("/v2/whatsapp-priority", response_class=HTMLResponse)
