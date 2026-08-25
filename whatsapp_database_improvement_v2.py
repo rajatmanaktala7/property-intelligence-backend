@@ -113,5 +113,3 @@ def install(router, engine, require_db, init_db, shell, esc):
         <th>Last Ingested</th><th>Health</th></tr>{trs}</table></div>"""
         return HTMLResponse(shell("Group Health",body,"System Health"))
 
-    try: ensure_upgrade()
-    except Exception as e: print("WAI database improvement init warning:",e)
