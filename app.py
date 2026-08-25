@@ -16918,3 +16918,14 @@ try:
     print("Alliance V3.7.2 beautiful dashboard registered successfully")
 except Exception as _v372_error:
     print("Alliance V3.7.2 dashboard registration skipped:", repr(_v372_error))
+
+
+# ALLIANCE V3.7.4 ORGANIZED UNIFORM DASHBOARD
+try:
+    import team_dashboard_v374_ops as _v374_ops
+    _v374_ops.register(app, engine, need_login)
+    import team_dashboard_v374 as _v374_dash
+    _v374_dash.register(app, engine, need_login)
+    print("Alliance V3.7.4 registered successfully")
+except Exception as _v374_error:
+    print("Alliance V3.7.4 registration skipped:", repr(_v374_error))
