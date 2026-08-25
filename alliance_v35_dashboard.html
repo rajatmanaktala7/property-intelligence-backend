@@ -1,0 +1,118 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Alliance AI Operational Control Centre</title>
+<style>
+:root{--bg:#f3f5f7;--card:#fff;--ink:#172033;--muted:#667085;--line:#e4e7ec;--nav:#101828;--good:#067647;--warn:#b54708}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);font-family:Arial,sans-serif;color:var(--ink)}
+.top{background:var(--nav);color:#fff;padding:18px 24px;position:sticky;top:0;z-index:3}.top h1{margin:0;font-size:22px}.top small{color:#d0d5dd}
+.wrap{max-width:1360px;margin:22px auto;padding:0 18px 40px}.hero{background:#fff;border:1px solid var(--line);border-radius:16px;padding:22px}
+.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-top:14px}.card{background:#fff;border:1px solid var(--line);border-radius:14px;padding:16px}
+.big{font-size:27px;font-weight:800;margin-top:7px}.muted{color:var(--muted);font-size:13px}
+.section{margin-top:22px}.section h2{font-size:20px;margin-bottom:10px}
+.actions{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}.tile{display:block;text-decoration:none;color:inherit;background:#fff;border:1px solid var(--line);border-radius:14px;padding:16px}
+.tile:hover{box-shadow:0 3px 12px #10182812}.tile b{display:block;margin-bottom:5px}.tile span{font-size:13px;color:var(--muted)}
+button,select,input{border:1px solid #cfd4dc;border-radius:9px;padding:10px 12px;font-size:14px}button{background:#101828;color:#fff;font-weight:700;cursor:pointer}
+button.secondary{background:#fff;color:#172033}.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+.panel{background:#fff;border:1px solid var(--line);border-radius:14px;padding:16px}.req{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+pre{white-space:pre-wrap;background:#101828;color:#d1fadf;padding:12px;border-radius:10px;max-height:320px;overflow:auto;font-size:12px}
+table{width:100%;border-collapse:collapse;background:#fff}th,td{padding:10px;border-bottom:1px solid var(--line);text-align:left;font-size:13px}th{background:#f9fafb}
+.status{font-weight:700}.good{color:var(--good)}.warn{color:var(--warn)}
+@media(max-width:900px){.grid{grid-template-columns:repeat(2,1fr)}.actions{grid-template-columns:repeat(2,1fr)}.req{grid-template-columns:1fr}}
+@media(max-width:600px){.grid,.actions{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div class="top"><h1>Alliance AI Operational Control Centre</h1><small>Property · Hospitality · Retail Expansion · Contact Intelligence</small></div>
+<div class="wrap">
+<div class="hero"><h2 style="margin:0 0 6px">Single Team Dashboard</h2><div class="muted">Runs entirely inside app.allianceinfrastructure.co.in and uses the existing V2.6 → V3.0 backend pipeline.</div></div>
+
+<div class="grid">
+<div class="card"><b>Property Orchestrator</b><div class="big" id="pstate">—</div><div class="muted">V3.0 pipeline</div></div>
+<div class="card"><b>Hospitality</b><div class="big" id="hcount">—</div><div class="muted">Persistent entities</div></div>
+<div class="card"><b>Retail Expansion</b><div class="big" id="rcount">—</div><div class="muted">Expansion signals</div></div>
+<div class="card"><b>Contact Vault</b><div class="big" id="ccount">—</div><div class="muted">Segregated contacts</div></div>
+</div>
+
+<div class="section"><h2>1. Property Intelligence</h2>
+<div class="panel">
+<div class="req">
+<div><label><b>Select Requirement</b></label><br><select id="reqSelect" style="width:100%;margin-top:7px"></select></div>
+<div><label><b>Or enter Requirement Code</b></label><br><input id="reqCode" style="width:100%;margin-top:7px" placeholder="REQ-..."></div>
+</div>
+<div class="row" style="margin-top:14px">
+<button onclick="runProperty()">Run AI Property Search</button>
+<button class="secondary" onclick="showMatches()">View Stored Matches</button>
+<button class="secondary" onclick="showQueue()">Verification Queue</button>
+<button class="secondary" onclick="showRuns()">Run History</button>
+<button class="secondary" onclick="showGaps()">Inventory Gaps</button>
+</div>
+<div style="margin-top:12px"><span class="status">Current result: </span><span id="runState">Ready</span></div>
+<pre id="propertyOutput">Choose a requirement and click "Run AI Property Search".</pre>
+</div></div>
+
+<div class="section"><h2>2. Business Workspaces</h2><div class="actions">
+<a class="tile" href="/v3/hospitality-intelligence"><b>Hospitality Intelligence</b><span>Restaurants, cafes, lounges, clubs, banquets, hotels and guest houses.</span></a>
+<a class="tile" href="/v3/retail-expansion-intelligence"><b>Retail Expansion</b><span>Expansion signals, decision makers and retail requirements.</span></a>
+<a class="tile" href="/v3/contact-import"><b>Import Contacts from Phone</b><span>VCF/vCard, CSV and XLSX.</span></a>
+<a class="tile" href="/api/v3/contacts?category=CAFE&limit=200"><b>Cafe Contacts</b><span>Separate Cafe database.</span></a>
+<a class="tile" href="/api/v3/contacts?category=LOUNGE&limit=200"><b>Lounge Contacts</b><span>Separate Lounge database.</span></a>
+<a class="tile" href="/api/v3/contacts?category=RESTAURANT&limit=200"><b>Restaurant Contacts</b><span>Restaurant database.</span></a>
+<a class="tile" href="/api/v3/contacts?category=BANQUET&limit=200"><b>Banquet Contacts</b><span>Banquet database.</span></a>
+<a class="tile" href="/api/v3/contacts?bucket=WHATSAPP_GROUP&limit=200"><b>WhatsApp Group Contacts</b><span>WhatsApp-source contacts only.</span></a>
+<a class="tile" href="/api/v3/contacts?bucket=MAGAZINE&limit=200"><b>Magazine Contacts</b><span>Magazine-source contacts only.</span></a>
+<a class="tile" href="/api/v3/contacts?bucket=NEWSPAPER&limit=200"><b>Newspaper Contacts</b><span>Newspaper-source contacts only.</span></a>
+<a class="tile" href="/api/v3/contacts?bucket=PHONE_IMPORT&limit=200"><b>Phone Imports</b><span>Contacts imported from team phones.</span></a>
+<a class="tile" href="/api/v3/contacts/whatsapp-ready?limit=500"><b>WhatsApp-Ready</b><span>Verified + approved/opted-in + not DND.</span></a>
+</div></div>
+
+<div class="section"><h2>3. Retail Expansion Intelligence</h2><div class="actions">
+<a class="tile" href="/api/v3/retail/signals?limit=100"><b>Expansion Signals</b><span>Retail expansion evidence.</span></a>
+<a class="tile" href="/api/v3/retail/contacts?limit=100"><b>Decision Makers</b><span>Expansion / Real Estate / Leasing / BD contacts.</span></a>
+<a class="tile" href="/api/v3/retail/runs?limit=50"><b>Bot Run History</b><span>Retail discovery runs.</span></a>
+<a class="tile" href="/api/v3/retail/v32b/purity-preview?limit=50"><b>Purity Review</b><span>Reject stale and generic signals.</span></a>
+<a class="tile" href="/api/v3/retail/v32c1/status"><b>Expansion Stage Engine</b><span>Future expansion / active rollout / store opened.</span></a>
+</div></div>
+</div>
+
+<script>
+async function api(url,opts={}){
+ try{let r=await fetch(url,{credentials:'include',...opts});let t=await r.text();let d;try{d=JSON.parse(t)}catch(e){d={raw:t}};return {ok:r.ok,status:r.status,data:d}}
+ catch(e){return {ok:false,status:0,data:{error:String(e)}}}
+}
+function code(){
+ let x=document.getElementById('reqCode').value.trim();
+ if(x)return x;
+ return document.getElementById('reqSelect').value;
+}
+function out(d){document.getElementById('propertyOutput').textContent=JSON.stringify(d,null,2)}
+async function loadReqs(){
+ let x=await api('/api/v3/control/requirements?limit=100');
+ let s=document.getElementById('reqSelect');s.innerHTML='';
+ (x.data.requirements||[]).forEach(r=>{
+   let o=document.createElement('option');o.value=r.requirement_code;
+   o.textContent=(r.company_name||'Requirement')+' | '+(r.locations||'')+' | '+r.requirement_code;
+   s.appendChild(o);
+ });
+}
+async function runProperty(){
+ let c=code();if(!c){alert('Select or enter a requirement code');return}
+ document.getElementById('runState').textContent='Running...';
+ let x=await api('/api/v2/intelligence/v30/run/'+encodeURIComponent(c),{method:'POST'});
+ document.getElementById('runState').textContent=x.data.status||('HTTP '+x.status);out(x.data);
+}
+async function showMatches(){let c=code();if(!c)return;out((await api('/api/v2/intelligence/matches/'+encodeURIComponent(c))).data)}
+async function showQueue(){let c=code();if(!c)return;out((await api('/api/v2/intelligence/v295/queue?requirement_code='+encodeURIComponent(c))).data)}
+async function showRuns(){out((await api('/api/v2/intelligence/v30/runs')).data)}
+async function showGaps(){out((await api('/api/v2/intelligence/inventory-gaps?status=OPEN')).data)}
+async function health(){
+ let p=await api('/api/v2/intelligence/v30/status');document.getElementById('pstate').textContent=p.ok?'READY':'OFFLINE';
+ let h=await api('/api/v3/hospitality/status');document.getElementById('hcount').textContent=h.data.entities??'—';
+ let r=await api('/api/v3/retail/db-status');document.getElementById('rcount').textContent=r.data.expansion_signals??'—';
+ let c=await api('/api/v3/contacts?limit=2000');document.getElementById('ccount').textContent=c.data.count??'—';
+}
+loadReqs();health();
+</script>
+</body></html>
