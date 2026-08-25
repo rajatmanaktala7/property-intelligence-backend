@@ -67,3 +67,16 @@ style="position:fixed;right:22px;bottom:22px;z-index:9999;background:#b42318;col
         return html
 
     core._v4_page = _v4_page_with_newspaper
+
+# ============================================================
+# ALLIANCE DATA INTELLIGENCE V2 - SAFE REGISTRATION
+# V2 failure must never prevent the main application starting.
+# ============================================================
+try:
+    from alliance_v2_routes import register
+    register(core)
+    print("Alliance V2: routes registered successfully")
+except Exception as e:
+    print(f"Alliance V2 registration warning: {e}")
+# ============================================================
+
