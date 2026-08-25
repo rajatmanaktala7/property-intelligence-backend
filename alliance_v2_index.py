@@ -2,6 +2,7 @@ import re,json
 from sqlalchemy import text
 from alliance_v2_schema import VERSION,exists
 from alliance_v2_normalize import *
+from alliance_v2_whatsapp_adapter import rebuild_whatsapp
 
 PS=[
 ("pi_operational_properties","MANUAL_SURVEY","Alliance Manual / Surveyor",{
@@ -170,4 +171,10 @@ def rebuild(engine):
             if not exists(c,t):continue
             n=sum(index_req(c,dict(x._mapping),t,st,sn,m) for x in c.execute(text(f'SELECT * FROM "{t}"')).fetchall())
             out["requirements"]+=n;out["sources"].append({"table":t,"indexed":n})
+
+    wa = rebuild_whatsapp(engine)
+    if wa.get("status") == "ok":
+        out["properties"] += int(wa.get("indexed_properties", 0))
+        out["requirements"] += int(wa.get("indexed_requirements", 0))
+    out["sources"].append(wa)
     return out
