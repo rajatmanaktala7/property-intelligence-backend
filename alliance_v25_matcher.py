@@ -5,7 +5,7 @@ from sqlalchemy import text
 from fastapi import Request
 from fastapi.responses import HTMLResponse
 
-MODULE_VERSION = "2.5.4-NO-JOIN-FAST-PATH"
+MODULE_VERSION = "2.5.5-NATIVE-INDEX-SCHEMA"
 
 def _norm(v):
     return re.sub(r"\s+", " ", str(v or "").strip().lower())
@@ -324,34 +324,24 @@ def ensure_schema(engine):
 def run_match(engine, requirement_code):
     ensure_schema(engine)
 
-    req_cols = _table_columns(engine, "ai_requirement_index")
-    prop_cols = _table_columns(engine, "ai_property_index")
-
-    if "requirement_code" not in req_cols:
-        return {
-            "detail": "Requirement index schema incompatible",
-            "missing_columns": ["requirement_code"],
-            "available_columns": sorted(req_cols),
-            "introspection_mode": "SELECT_LIMIT_0",
-        }
-
-    req_select = [
-        _expr(req_cols, "requirement_code", "requirement_code"),
-        _expr(req_cols, "company_name", "company_name", "client_name"),
-        _expr(req_cols, "locations", "locations", "preferred_locations", "location"),
-        _expr(req_cols, "minimum_area_sqft", "minimum_area_sqft", "area_min_sqft"),
-        _expr(req_cols, "maximum_area_sqft", "maximum_area_sqft", "area_max_sqft"),
-        _expr(req_cols, "maximum_rent", "maximum_rent", "max_rent", "monthly_rent"),
-        _expr(req_cols, "transaction_type", "transaction_type"),
-        _expr(req_cols, "additional_points", "additional_points", "notes"),
-        _expr(req_cols, "minimum_frontage_ft", "minimum_frontage_ft", "frontage_ft"),
-        _expr(req_cols, "required_floor", "required_floor", "floor"),
-        _expr(req_cols, "suitable_for", "suitable_for", "requirement_type", "property_type"),
-    ]
+    # Native schema from alliance_v2_index.py:
+    # requirements -> ai_requirement_index
+    # properties   -> ai_property_match_index
 
     with engine.connect() as c:
-        req = c.execute(text(f"""
-          SELECT {", ".join(req_select)}
+        req = c.execute(text("""
+          SELECT
+            requirement_code,
+            company_name,
+            preferred_locations_raw AS locations,
+            minimum_area_sqft,
+            maximum_area_sqft,
+            maximum_monthly_rent AS maximum_rent,
+            transaction_type,
+            additional_points,
+            minimum_frontage_ft,
+            required_floor,
+            suitable_for
           FROM ai_requirement_index
           WHERE requirement_code=:code
           LIMIT 1
@@ -360,80 +350,40 @@ def run_match(engine, requirement_code):
     if not req:
         return {"detail": "Requirement not indexed"}
 
-    if "source_record_id" not in prop_cols:
-        return {
-            "detail": "Property index schema incompatible",
-            "missing_columns": ["source_record_id"],
-            "available_columns": sorted(prop_cols),
-            "introspection_mode": "SELECT_LIMIT_0",
-        }
-
-    prop_select = [
-        _expr(prop_cols, "source_record_id", "source_record_id"),
-        _expr(prop_cols, "property_name", "property_name", "name"),
-        _expr(prop_cols, "location_raw", "location_raw", "location", "locations"),
-        _expr(prop_cols, "area_min_sqft", "area_min_sqft", "minimum_area_sqft"),
-        _expr(prop_cols, "area_max_sqft", "area_max_sqft", "maximum_area_sqft"),
-        _expr(prop_cols, "rent_psf_month", "rent_psf_month", "rent_psf"),
-        _expr(prop_cols, "monthly_rent", "monthly_rent", "rent_monthly"),
-        _expr(prop_cols, "transaction_type", "transaction_type"),
-        _expr(prop_cols, "canonical_property_type", "canonical_property_type", "property_type"),
-        _expr(prop_cols, "floor", "floor", "required_floor"),
-        _expr(prop_cols, "frontage_ft", "frontage_ft", "minimum_frontage_ft"),
-        _expr(prop_cols, "suitable_for", "suitable_for"),
-        _expr(prop_cols, "source_type", "source_type"),
-        _expr(prop_cols, "source_name", "source_name"),
-        _expr(prop_cols, "verification_status", "verification_status"),
-        _expr(prop_cols, "data_confidence_score", "data_confidence_score", "data_confidence"),
-    ]
-
-    def pexpr(expr):
-        if expr.startswith("NULL AS "):
-            return expr
-        if " AS " in expr:
-            left, right = expr.split(" AS ", 1)
-            return f"p.{left} AS {right}"
-        return f"p.{expr}"
-
-    property_sql = ", ".join(pexpr(x) for x in prop_select)
-
-    clauses = []
+    clauses = ["COALESCE(p.match_eligible,FALSE)=TRUE"]
     params = {}
 
-    if "match_eligible" in prop_cols:
-        clauses.append("COALESCE(p.match_eligible,FALSE)=TRUE")
-
     req_tx = _norm(req.get("transaction_type"))
-    tx_col = _pick(prop_cols, "transaction_type")
-    if req_tx and tx_col:
+    if req_tx:
         clauses.append(
-            f"(LOWER(COALESCE(p.{tx_col},'')) = :req_tx "
-            f"OR LOWER(COALESCE(p.{tx_col},'')) = 'lease_or_sale')"
+            "(LOWER(COALESCE(p.transaction_type,'')) = :req_tx "
+            "OR LOWER(COALESCE(p.transaction_type,'')) = 'lease_or_sale')"
         )
         params["req_tx"] = req_tx
 
-    loc_col = _pick(prop_cols, "location_raw", "location", "locations")
+    # Native index already has normalized and raw locations.
     loc_tokens = [
         t for t in _tokens(req.get("locations"))
         if t not in {"place","road","sector","block","delhi","ncr"}
     ]
-    if loc_col and loc_tokens:
+    if loc_tokens:
         loc_parts = []
         for i, token in enumerate(sorted(loc_tokens, key=len, reverse=True)[:3]):
             k = f"loc{i}"
-            loc_parts.append(f"LOWER(COALESCE(p.{loc_col},'')) LIKE :{k}")
+            loc_parts.append(
+                "(LOWER(COALESCE(p.location_raw,'')) LIKE :{k} "
+                "OR LOWER(COALESCE(p.location_normalized,'')) LIKE :{k})".format(k=k)
+            )
             params[k] = f"%{token}%"
         clauses.append("(" + " OR ".join(loc_parts) + ")")
 
-    amin_col = _pick(prop_cols, "area_min_sqft", "minimum_area_sqft")
-    amax_col = _pick(prop_cols, "area_max_sqft", "maximum_area_sqft")
     try:
         rmin = float(req.get("minimum_area_sqft")) if req.get("minimum_area_sqft") is not None else None
         rmax = float(req.get("maximum_area_sqft")) if req.get("maximum_area_sqft") is not None else None
     except Exception:
         rmin = rmax = None
 
-    if amin_col and amax_col and (rmin is not None or rmax is not None):
+    if rmin is not None or rmax is not None:
         if rmin is None:
             rmin = rmax
         if rmax is None:
@@ -441,33 +391,48 @@ def run_match(engine, requirement_code):
         params["area_low"] = rmin * 0.80
         params["area_high"] = rmax * 1.20
         clauses.append(
-            f"(p.{amax_col} IS NULL OR p.{amin_col} IS NULL OR "
-            f"(p.{amax_col} >= :area_low AND p.{amin_col} <= :area_high))"
+            "(p.area_max_sqft IS NULL OR p.area_min_sqft IS NULL OR "
+            "(p.area_max_sqft >= :area_low AND p.area_min_sqft <= :area_high))"
         )
 
-    where_sql = " AND ".join(clauses) if clauses else "TRUE"
-
-    # Critical performance change:
-    # no duplicate-resolution JOIN here; just hit property index directly.
+    where_sql = " AND ".join(clauses)
     candidate_limit = 350
 
+    # Fast path: native property index only, no duplicate join here.
     with engine.connect() as c:
         props = c.execute(text(f"""
-          SELECT {property_sql}
-          FROM ai_property_index p
+          SELECT
+            p.source_record_id,
+            p.property_name,
+            p.location_raw,
+            p.area_min_sqft,
+            p.area_max_sqft,
+            p.rent_psf_month,
+            p.monthly_rent,
+            p.transaction_type,
+            p.canonical_property_type,
+            p.floor_raw AS floor,
+            p.frontage_ft,
+            p.suitable_for,
+            p.source_type,
+            p.source_name,
+            p.verification_status,
+            p.data_confidence_score
+          FROM ai_property_match_index p
           WHERE {where_sql}
+          ORDER BY
+            COALESCE(p.data_confidence_score,0) DESC,
+            COALESCE(p.updated_at,NOW()) DESC
           LIMIT {candidate_limit}
         """), params).mappings().all()
 
-    # Fetch duplicate flags only for shortlist IDs.
+    # Duplicate lookup only for shortlisted WhatsApp UUIDs.
     duplicate_map = {}
     candidate_ids = [
         str(p["source_record_id"])
         for p in props
         if p.get("source_record_id")
     ]
-
-    # Only UUID-like WhatsApp listing IDs can exist in entity resolution.
     uuid_ids = [
         x for x in candidate_ids
         if re.fullmatch(
@@ -481,6 +446,7 @@ def run_match(engine, requirement_code):
             chunk = uuid_ids[chunk_start:chunk_start+100]
             bind = []
             dparams = {"version": "2.4.7A-DUPLICATE-SAFETY-CALIBRATION"}
+
             for i, rid in enumerate(chunk):
                 k = f"id{i}"
                 bind.append(f"CAST(:{k} AS uuid)")
@@ -509,6 +475,7 @@ def run_match(engine, requirement_code):
             str(p.get("source_record_id")),
             {"duplicate_type": "UNIQUE", "suppress_from_matcher": False}
         )
+
         p["duplicate_type"] = dup["duplicate_type"]
         p["suppress_from_matcher"] = dup["suppress_from_matcher"]
 
@@ -533,7 +500,6 @@ def run_match(engine, requirement_code):
         if not x["hard_rule_pass"]
     ][:10]
 
-    # Performance safety: persist only the top 40 actionable + 10 rejected.
     persist = actionable[:40] + top_rejected
     rows_for_db = []
     seen = set()
@@ -543,6 +509,7 @@ def run_match(engine, requirement_code):
         if rid in seen:
             continue
         seen.add(rid)
+
         rows_for_db.append({
             "code": requirement_code,
             "id": rid,
@@ -605,7 +572,7 @@ def run_match(engine, requirement_code):
             "minimum_frontage_ft": req.get("minimum_frontage_ft"),
             "required_floor": req.get("required_floor"),
             "suitable_for": req.get("suitable_for"),
-            "reason": "No actionable property passed V2.5.4 no-join fast path."
+            "reason": "No actionable property passed V2.5.5 native-index matcher."
         }
 
     return {
@@ -619,17 +586,11 @@ def run_match(engine, requirement_code):
         "evaluated_properties": len(ranked),
         "candidate_limit": candidate_limit,
         "persisted_results": len(rows_for_db),
-        "execution_mode": "NO_JOIN_FAST_PATH",
-        "introspection_mode": "SELECT_LIMIT_0",
+        "execution_mode": "NATIVE_INDEX_FAST_PATH",
+        "property_index_table": "ai_property_match_index",
+        "requirement_index_table": "ai_requirement_index",
+        "requirement_location_column": "preferred_locations_raw",
         "suppression_policy": "V2.4.7A lookup after shortlist only",
-        "schema_mapping": {
-            "requirement_location_column": _pick(
-                req_cols, "locations", "preferred_locations", "location"
-            ),
-            "property_location_column": _pick(
-                prop_cols, "location_raw", "location", "locations"
-            ),
-        },
     }
 def register_v25_match_routes(core):
     app, engine = core.app, core.engine
