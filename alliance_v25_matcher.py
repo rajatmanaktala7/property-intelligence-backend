@@ -5,7 +5,7 @@ from sqlalchemy import text
 from fastapi import Request
 from fastapi.responses import HTMLResponse
 
-MODULE_VERSION = "2.5.5-NATIVE-INDEX-SCHEMA"
+MODULE_VERSION = "2.5.6-TIMEOUT-SAFE-STAGED-MATCHER"
 
 def _norm(v):
     return re.sub(r"\s+", " ", str(v or "").strip().lower())
@@ -322,128 +322,147 @@ def ensure_schema(engine):
         """))
 
 def run_match(engine, requirement_code):
-    ensure_schema(engine)
+    # IMPORTANT: schema creation is done once during route registration.
+    # Do not run CREATE TABLE in each matcher request.
 
-    # Native schema from alliance_v2_index.py:
-    # requirements -> ai_requirement_index
-    # properties   -> ai_property_match_index
-
-    with engine.connect() as c:
-        req = c.execute(text("""
-          SELECT
-            requirement_code,
-            company_name,
-            preferred_locations_raw AS locations,
-            minimum_area_sqft,
-            maximum_area_sqft,
-            maximum_monthly_rent AS maximum_rent,
-            transaction_type,
-            additional_points,
-            minimum_frontage_ft,
-            required_floor,
-            suitable_for
-          FROM ai_requirement_index
-          WHERE requirement_code=:code
-          LIMIT 1
-        """), {"code": requirement_code}).mappings().one_or_none()
-
-    if not req:
-        return {"detail": "Requirement not indexed"}
-
-    clauses = ["COALESCE(p.match_eligible,FALSE)=TRUE"]
-    params = {}
-
-    req_tx = _norm(req.get("transaction_type"))
-    if req_tx:
-        clauses.append(
-            "(LOWER(COALESCE(p.transaction_type,'')) = :req_tx "
-            "OR LOWER(COALESCE(p.transaction_type,'')) = 'lease_or_sale')"
-        )
-        params["req_tx"] = req_tx
-
-    # Native index already has normalized and raw locations.
-    loc_tokens = [
-        t for t in _tokens(req.get("locations"))
-        if t not in {"place","road","sector","block","delhi","ncr"}
-    ]
-    if loc_tokens:
-        loc_parts = []
-        for i, token in enumerate(sorted(loc_tokens, key=len, reverse=True)[:3]):
-            k = f"loc{i}"
-            loc_parts.append(
-                "(LOWER(COALESCE(p.location_raw,'')) LIKE :{k} "
-                "OR LOWER(COALESCE(p.location_normalized,'')) LIKE :{k})".format(k=k)
-            )
-            params[k] = f"%{token}%"
-        clauses.append("(" + " OR ".join(loc_parts) + ")")
+    diagnostics = {
+        "stage": "START",
+        "requirement_loaded": False,
+        "shortlist_loaded": False,
+        "duplicate_lookup_done": False,
+        "scoring_done": False,
+        "persistence_done": False,
+    }
 
     try:
-        rmin = float(req.get("minimum_area_sqft")) if req.get("minimum_area_sqft") is not None else None
-        rmax = float(req.get("maximum_area_sqft")) if req.get("maximum_area_sqft") is not None else None
-    except Exception:
-        rmin = rmax = None
+        with engine.connect() as c:
+            # Keep any accidental long-running SQL from holding the request open.
+            c.execute(text("SET LOCAL statement_timeout = '8000ms'"))
+            req = c.execute(text("""
+              SELECT
+                requirement_code,
+                company_name,
+                preferred_locations_raw AS locations,
+                minimum_area_sqft,
+                maximum_area_sqft,
+                maximum_monthly_rent AS maximum_rent,
+                transaction_type,
+                additional_points,
+                minimum_frontage_ft,
+                required_floor,
+                suitable_for
+              FROM ai_requirement_index
+              WHERE requirement_code=:code
+              LIMIT 1
+            """), {"code": requirement_code}).mappings().one_or_none()
 
-    if rmin is not None or rmax is not None:
-        if rmin is None:
-            rmin = rmax
-        if rmax is None:
-            rmax = rmin
-        params["area_low"] = rmin * 0.80
-        params["area_high"] = rmax * 1.20
-        clauses.append(
-            "(p.area_max_sqft IS NULL OR p.area_min_sqft IS NULL OR "
-            "(p.area_max_sqft >= :area_low AND p.area_min_sqft <= :area_high))"
-        )
+        if not req:
+            return {
+                "version": MODULE_VERSION,
+                "detail": "Requirement not indexed",
+                "diagnostics": diagnostics,
+            }
 
-    where_sql = " AND ".join(clauses)
-    candidate_limit = 350
+        diagnostics["stage"] = "REQUIREMENT_LOADED"
+        diagnostics["requirement_loaded"] = True
 
-    # Fast path: native property index only, no duplicate join here.
-    with engine.connect() as c:
-        props = c.execute(text(f"""
-          SELECT
-            p.source_record_id,
-            p.property_name,
-            p.location_raw,
-            p.area_min_sqft,
-            p.area_max_sqft,
-            p.rent_psf_month,
-            p.monthly_rent,
-            p.transaction_type,
-            p.canonical_property_type,
-            p.floor_raw AS floor,
-            p.frontage_ft,
-            p.suitable_for,
-            p.source_type,
-            p.source_name,
-            p.verification_status,
-            p.data_confidence_score
-          FROM ai_property_match_index p
-          WHERE {where_sql}
-          ORDER BY
-            COALESCE(p.data_confidence_score,0) DESC,
-            COALESCE(p.updated_at,NOW()) DESC
-          LIMIT {candidate_limit}
-        """), params).mappings().all()
+        clauses = ["COALESCE(p.match_eligible,FALSE)=TRUE"]
+        params = {}
 
-    # Duplicate lookup only for shortlisted WhatsApp UUIDs.
-    duplicate_map = {}
-    candidate_ids = [
-        str(p["source_record_id"])
-        for p in props
-        if p.get("source_record_id")
-    ]
-    uuid_ids = [
-        x for x in candidate_ids
-        if re.fullmatch(
-            r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",
-            x
-        )
-    ]
+        req_tx = _norm(req.get("transaction_type"))
+        if req_tx:
+            clauses.append(
+                "(LOWER(COALESCE(p.transaction_type,'')) = :req_tx "
+                "OR LOWER(COALESCE(p.transaction_type,'')) = 'lease_or_sale')"
+            )
+            params["req_tx"] = req_tx
 
-    if uuid_ids:
-        for chunk_start in range(0, len(uuid_ids), 100):
-            chunk = uuid_ids[chunk_start:chunk_start+100]
+        loc_tokens = [
+            t for t in _tokens(req.get("locations"))
+            if t not in {"place","road","sector","block","delhi","ncr"}
+        ]
+        if loc_tokens:
+            loc_parts = []
+            for i, token in enumerate(sorted(loc_tokens, key=len, reverse=True)[:2]):
+                k = f"loc{i}"
+                loc_parts.append(
+                    "(LOWER(COALESCE(p.location_raw,'')) LIKE :{k} "
+                    "OR LOWER(COALESCE(p.location_normalized,'')) LIKE :{k})".format(k=k)
+                )
+                params[k] = f"%{token}%"
+            clauses.append("(" + " OR ".join(loc_parts) + ")")
+
+        try:
+            rmin = float(req.get("minimum_area_sqft")) if req.get("minimum_area_sqft") is not None else None
+            rmax = float(req.get("maximum_area_sqft")) if req.get("maximum_area_sqft") is not None else None
+        except Exception:
+            rmin = rmax = None
+
+        if rmin is not None or rmax is not None:
+            if rmin is None:
+                rmin = rmax
+            if rmax is None:
+                rmax = rmin
+            params["area_low"] = rmin * 0.80
+            params["area_high"] = rmax * 1.20
+            clauses.append(
+                "(p.area_max_sqft IS NULL OR p.area_min_sqft IS NULL OR "
+                "(p.area_max_sqft >= :area_low AND p.area_min_sqft <= :area_high))"
+            )
+
+        where_sql = " AND ".join(clauses)
+        candidate_limit = 120
+
+        diagnostics["stage"] = "SHORTLIST_QUERY"
+
+        with engine.connect() as c:
+            c.execute(text("SET LOCAL statement_timeout = '8000ms'"))
+            props = c.execute(text(f"""
+              SELECT
+                p.source_record_id,
+                p.property_name,
+                p.location_raw,
+                p.area_min_sqft,
+                p.area_max_sqft,
+                p.rent_psf_month,
+                p.monthly_rent,
+                p.transaction_type,
+                p.canonical_property_type,
+                p.floor_raw AS floor,
+                p.frontage_ft,
+                p.suitable_for,
+                p.source_type,
+                p.source_name,
+                p.verification_status,
+                p.data_confidence_score
+              FROM ai_property_match_index p
+              WHERE {where_sql}
+              LIMIT {candidate_limit}
+            """), params).mappings().all()
+
+        diagnostics["stage"] = "SHORTLIST_LOADED"
+        diagnostics["shortlist_loaded"] = True
+        diagnostics["shortlist_count"] = len(props)
+
+        duplicate_map = {}
+        candidate_ids = [
+            str(p["source_record_id"])
+            for p in props
+            if p.get("source_record_id")
+        ]
+        uuid_ids = [
+            x for x in candidate_ids
+            if re.fullmatch(
+                r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",
+                x
+            )
+        ]
+
+        diagnostics["stage"] = "DUPLICATE_LOOKUP"
+
+        # One bounded lookup only.
+        if uuid_ids:
+            chunk = uuid_ids[:120]
             bind = []
             dparams = {"version": "2.4.7A-DUPLICATE-SAFETY-CALIBRATION"}
 
@@ -453,6 +472,7 @@ def run_match(engine, requirement_code):
                 dparams[k] = rid
 
             with engine.connect() as c:
+                c.execute(text("SET LOCAL statement_timeout = '5000ms'"))
                 rows = c.execute(text(f"""
                   SELECT listing_id,duplicate_type,suppress_from_matcher
                   FROM ai_whatsapp_entity_resolution
@@ -466,132 +486,149 @@ def run_match(engine, requirement_code):
                     "suppress_from_matcher": bool(row["suppress_from_matcher"]),
                 }
 
-    ranked = []
-    suppressed_shortlist = 0
+        diagnostics["duplicate_lookup_done"] = True
+        diagnostics["stage"] = "SCORING"
 
-    for p0 in props:
-        p = dict(p0)
-        dup = duplicate_map.get(
-            str(p.get("source_record_id")),
-            {"duplicate_type": "UNIQUE", "suppress_from_matcher": False}
+        ranked = []
+        suppressed_shortlist = 0
+
+        for p0 in props:
+            p = dict(p0)
+            dup = duplicate_map.get(
+                str(p.get("source_record_id")),
+                {"duplicate_type": "UNIQUE", "suppress_from_matcher": False}
+            )
+            p["duplicate_type"] = dup["duplicate_type"]
+            p["suppress_from_matcher"] = dup["suppress_from_matcher"]
+
+            if p["suppress_from_matcher"]:
+                suppressed_shortlist += 1
+                continue
+
+            result = score_match(req, p)
+            ranked.append({**result, **p})
+
+        ranked.sort(
+            key=lambda x: (x["hard_rule_pass"], x["match_score"]),
+            reverse=True
         )
 
-        p["duplicate_type"] = dup["duplicate_type"]
-        p["suppress_from_matcher"] = dup["suppress_from_matcher"]
+        actionable = [
+            x for x in ranked
+            if x["hard_rule_pass"] and x["match_score"] >= 70
+        ]
+        top_rejected = [
+            x for x in ranked
+            if not x["hard_rule_pass"]
+        ][:10]
 
-        if p["suppress_from_matcher"]:
-            suppressed_shortlist += 1
-            continue
+        diagnostics["scoring_done"] = True
+        diagnostics["stage"] = "PERSISTENCE"
 
-        result = score_match(req, p)
-        ranked.append({**result, **p})
+        # Persist only 20 actionable + 5 rejected.
+        persist = actionable[:20] + top_rejected[:5]
+        rows_for_db = []
+        seen = set()
 
-    ranked.sort(
-        key=lambda x: (x["hard_rule_pass"], x["match_score"]),
-        reverse=True
-    )
+        for p in persist:
+            rid = p["source_record_id"]
+            if rid in seen:
+                continue
+            seen.add(rid)
+            rows_for_db.append({
+                "code": requirement_code,
+                "id": rid,
+                "score": p["match_score"],
+                "status": p["status"],
+                "action": p["action"],
+                "hard": p["hard_rule_pass"],
+                "rej": json.dumps(p["rejection_reasons"]),
+                "pos": json.dumps(p["positive_reasons"]),
+                "ls": p["location_score"],
+                "ascore": p["area_score"],
+                "ts": p["type_score"],
+                "fs": p["floor_score"],
+                "frs": p["frontage_score"],
+                "rs": p["rent_score"],
+                "version": MODULE_VERSION,
+            })
 
-    actionable = [
-        x for x in ranked
-        if x["hard_rule_pass"] and x["match_score"] >= 70
-    ]
-    top_rejected = [
-        x for x in ranked
-        if not x["hard_rule_pass"]
-    ][:10]
+        if rows_for_db:
+            with engine.begin() as c:
+                c.execute(text("SET LOCAL statement_timeout = '5000ms'"))
+                c.execute(text("""
+                  INSERT INTO ai_v25_match_results(
+                    requirement_code,source_record_id,match_score,status,action,
+                    hard_rule_pass,rejection_reasons,positive_reasons,
+                    location_score,area_score,type_score,floor_score,
+                    frontage_score,rent_score,model_version,evaluated_at
+                  )
+                  VALUES(
+                    :code,:id,:score,:status,:action,:hard,
+                    CAST(:rej AS jsonb),CAST(:pos AS jsonb),
+                    :ls,:ascore,:ts,:fs,:frs,:rs,:version,NOW()
+                  )
+                  ON CONFLICT(requirement_code,source_record_id) DO UPDATE SET
+                    match_score=EXCLUDED.match_score,
+                    status=EXCLUDED.status,
+                    action=EXCLUDED.action,
+                    hard_rule_pass=EXCLUDED.hard_rule_pass,
+                    rejection_reasons=EXCLUDED.rejection_reasons,
+                    positive_reasons=EXCLUDED.positive_reasons,
+                    location_score=EXCLUDED.location_score,
+                    area_score=EXCLUDED.area_score,
+                    type_score=EXCLUDED.type_score,
+                    floor_score=EXCLUDED.floor_score,
+                    frontage_score=EXCLUDED.frontage_score,
+                    rent_score=EXCLUDED.rent_score,
+                    model_version=EXCLUDED.model_version,
+                    evaluated_at=NOW()
+                """), rows_for_db)
 
-    persist = actionable[:40] + top_rejected
-    rows_for_db = []
-    seen = set()
+        diagnostics["persistence_done"] = True
+        diagnostics["stage"] = "COMPLETE"
 
-    for p in persist:
-        rid = p["source_record_id"]
-        if rid in seen:
-            continue
-        seen.add(rid)
+        inventory_gap = None
+        if not actionable:
+            inventory_gap = {
+                "status": "OPEN",
+                "requirement_code": requirement_code,
+                "company_name": req.get("company_name"),
+                "locations": req.get("locations"),
+                "transaction_type": req.get("transaction_type"),
+                "minimum_area_sqft": req.get("minimum_area_sqft"),
+                "maximum_area_sqft": req.get("maximum_area_sqft"),
+                "minimum_frontage_ft": req.get("minimum_frontage_ft"),
+                "required_floor": req.get("required_floor"),
+                "suitable_for": req.get("suitable_for"),
+                "reason": "No actionable property passed V2.5.6 timeout-safe matcher."
+            }
 
-        rows_for_db.append({
-            "code": requirement_code,
-            "id": rid,
-            "score": p["match_score"],
-            "status": p["status"],
-            "action": p["action"],
-            "hard": p["hard_rule_pass"],
-            "rej": json.dumps(p["rejection_reasons"]),
-            "pos": json.dumps(p["positive_reasons"]),
-            "ls": p["location_score"],
-            "ascore": p["area_score"],
-            "ts": p["type_score"],
-            "fs": p["floor_score"],
-            "frs": p["frontage_score"],
-            "rs": p["rent_score"],
+        return {
             "version": MODULE_VERSION,
-        })
-
-    if rows_for_db:
-        with engine.begin() as c:
-            c.execute(text("""
-              INSERT INTO ai_v25_match_results(
-                requirement_code,source_record_id,match_score,status,action,
-                hard_rule_pass,rejection_reasons,positive_reasons,
-                location_score,area_score,type_score,floor_score,
-                frontage_score,rent_score,model_version,evaluated_at
-              )
-              VALUES(
-                :code,:id,:score,:status,:action,:hard,
-                CAST(:rej AS jsonb),CAST(:pos AS jsonb),
-                :ls,:ascore,:ts,:fs,:frs,:rs,:version,NOW()
-              )
-              ON CONFLICT(requirement_code,source_record_id) DO UPDATE SET
-                match_score=EXCLUDED.match_score,
-                status=EXCLUDED.status,
-                action=EXCLUDED.action,
-                hard_rule_pass=EXCLUDED.hard_rule_pass,
-                rejection_reasons=EXCLUDED.rejection_reasons,
-                positive_reasons=EXCLUDED.positive_reasons,
-                location_score=EXCLUDED.location_score,
-                area_score=EXCLUDED.area_score,
-                type_score=EXCLUDED.type_score,
-                floor_score=EXCLUDED.floor_score,
-                frontage_score=EXCLUDED.frontage_score,
-                rent_score=EXCLUDED.rent_score,
-                model_version=EXCLUDED.model_version,
-                evaluated_at=NOW()
-            """), rows_for_db)
-
-    inventory_gap = None
-    if not actionable:
-        inventory_gap = {
-            "status": "OPEN",
             "requirement_code": requirement_code,
-            "company_name": req.get("company_name"),
-            "locations": req.get("locations"),
-            "transaction_type": req.get("transaction_type"),
-            "minimum_area_sqft": req.get("minimum_area_sqft"),
-            "maximum_area_sqft": req.get("maximum_area_sqft"),
-            "minimum_frontage_ft": req.get("minimum_frontage_ft"),
-            "required_floor": req.get("required_floor"),
-            "suitable_for": req.get("suitable_for"),
-            "reason": "No actionable property passed V2.5.5 native-index matcher."
+            "matches": actionable[:20],
+            "inventory_gap": inventory_gap,
+            "top_rejected": top_rejected,
+            "shortlist_fetched": len(props),
+            "shortlist_suppressed": suppressed_shortlist,
+            "evaluated_properties": len(ranked),
+            "candidate_limit": candidate_limit,
+            "persisted_results": len(rows_for_db),
+            "execution_mode": "TIMEOUT_SAFE_STAGED",
+            "property_index_table": "ai_property_match_index",
+            "requirement_index_table": "ai_requirement_index",
+            "diagnostics": diagnostics,
         }
 
-    return {
-        "version": MODULE_VERSION,
-        "requirement_code": requirement_code,
-        "matches": actionable[:30],
-        "inventory_gap": inventory_gap,
-        "top_rejected": top_rejected,
-        "shortlist_fetched": len(props),
-        "shortlist_suppressed": suppressed_shortlist,
-        "evaluated_properties": len(ranked),
-        "candidate_limit": candidate_limit,
-        "persisted_results": len(rows_for_db),
-        "execution_mode": "NATIVE_INDEX_FAST_PATH",
-        "property_index_table": "ai_property_match_index",
-        "requirement_index_table": "ai_requirement_index",
-        "requirement_location_column": "preferred_locations_raw",
-        "suppression_policy": "V2.4.7A lookup after shortlist only",
-    }
+    except Exception as exc:
+        return {
+            "version": MODULE_VERSION,
+            "status": "MATCHER_ERROR",
+            "requirement_code": requirement_code,
+            "error": str(exc),
+            "diagnostics": diagnostics,
+        }
 def register_v25_match_routes(core):
     app, engine = core.app, core.engine
     ensure_schema(engine)
