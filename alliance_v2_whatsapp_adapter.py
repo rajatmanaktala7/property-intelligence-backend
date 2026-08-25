@@ -4,6 +4,7 @@ import json
 from sqlalchemy import create_engine, text
 from alliance_v2_schema import VERSION
 from alliance_v2_whatsapp_purity import build_purity
+from alliance_v2_purity_matcher_integration import promote_purity_to_matcher
 from alliance_v2_normalize import (
     norm, ptype, area, num, money, phone, cid, pid,
     floor_norm, infer_frontage, infer_required_floor, infer_suitable
@@ -362,6 +363,10 @@ def rebuild_whatsapp(primary_engine):
                     result["match_eligible_properties"] += eligible
                 else:
                     result["skipped_unknown_transaction"] += 1
+        promotion = promote_purity_to_matcher(primary_engine, source_engine)
+        result["purity_matcher"] = promotion
+        result["match_eligible_properties"] = promotion.get("match_eligible_properties", result["match_eligible_properties"])
+        result["match_eligible_requirements"] = promotion.get("match_eligible_requirements", result["match_eligible_requirements"])
         result["status"] = "ok"
         return result
     finally:
