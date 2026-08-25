@@ -8,7 +8,7 @@ from alliance_v2_whatsapp_review_queue import (
     ensure_review_schema, save_decision, queue_summary
 )
 
-MODULE_VERSION = "2.4-AI-REVIEW-PRIORITIZATION"
+MODULE_VERSION = "2.4.1-BULK-REVIEW-PRIORITIZATION"
 
 BUCKETS = {
     "AUTO_APPROVE_CANDIDATE",
@@ -212,63 +212,194 @@ def _evaluate_row(r, dup_size):
     }
 
 def run_prioritization(engine):
+    """
+    V2.4.1 bulk implementation.
+    Uses one PostgreSQL INSERT..SELECT..ON CONFLICT instead of thousands
+    of Python row-by-row UPSERTs.
+    """
     ensure_priority_schema(engine)
+
     with engine.begin() as c:
-        rows = c.execute(text("""
-          SELECT p.*,COALESCE(d.decision,'PENDING') human_decision
+        result = c.execute(text("""
+        WITH dup AS (
+          SELECT duplicate_cluster_key,COUNT(*)::int AS duplicate_cluster_size
+          FROM ai_whatsapp_purity
+          WHERE duplicate_cluster_key IS NOT NULL
+            AND duplicate_cluster_key <> ''
+          GROUP BY duplicate_cluster_key
+        ),
+        base AS (
+          SELECT
+            p.listing_id,
+            p.review_status,
+            COALESCE(p.purity_score,0)::numeric AS purity_score,
+            COALESCE(p.transaction_confidence,0)::numeric AS tx_conf,
+            COALESCE(p.property_type_confidence,0)::numeric AS type_conf,
+            UPPER(COALESCE(p.recovered_role,'')) AS role,
+            UPPER(COALESCE(p.recovered_transaction,'')) AS tx,
+            COALESCE(p.recovered_location,'') AS loc,
+            UPPER(COALESCE(p.recovered_property_type,'')) AS ptype,
+            COALESCE(p.recovered_area_min_sqft,0)::numeric AS amin,
+            COALESCE(p.recovered_area_max_sqft,0)::numeric AS amax,
+            LOWER(COALESCE(p.raw_text,'')) AS raw,
+            COALESCE(dq.duplicate_cluster_size,1)::int AS dup_size
           FROM ai_whatsapp_purity p
           LEFT JOIN ai_whatsapp_review_decision d ON d.listing_id=p.listing_id
+          LEFT JOIN dup dq ON dq.duplicate_cluster_key=p.duplicate_cluster_key
           WHERE COALESCE(d.decision,'PENDING')='PENDING'
             AND p.review_status IN ('NEEDS_REVIEW','LOW_CONFIDENCE','UNKNOWN')
-          ORDER BY p.purity_score DESC
-        """)).mappings().all()
+        ),
+        feat AS (
+          SELECT *,
+            (
+              CASE WHEN role IN ('SUPPLY','REQUIREMENT') THEN 15 ELSE 0 END +
+              CASE WHEN tx IN ('SALE','LEASE','LEASE_OR_SALE') THEN 15 ELSE 0 END +
+              CASE WHEN tx_conf >= 95 THEN 12 WHEN tx_conf >= 75 THEN 7 ELSE 0 END +
+              CASE WHEN ptype <> '' AND ptype <> 'UNKNOWN' THEN 12 ELSE 0 END +
+              CASE WHEN type_conf >= 95 THEN 10 WHEN type_conf >= 75 THEN 5 ELSE 0 END +
+              CASE WHEN LOWER(loc) NOT IN ('','other','others','unknown','na','n/a','none','delhi ncr','india') THEN 15 ELSE 0 END +
+              CASE WHEN amin > 0 AND amax > 0 AND amin <= amax AND amax <= 100000000 THEN 14 ELSE 0 END +
+              CASE WHEN purity_score >= 70 THEN 7 WHEN purity_score >= 55 THEN 3 ELSE 0 END +
+              CASE WHEN dup_size <= 1 THEN 5 ELSE 0 END
+            )::numeric AS positive_score,
+            (
+              CASE
+                WHEN raw = '' THEN 100
+                ELSE LEAST(100,
+                  CASE WHEN raw LIKE '%good morning%' OR raw LIKE '%good evening%'
+                            OR raw LIKE '%happy birthday%' OR raw LIKE '%congratulations%'
+                            OR raw LIKE '%festival wishes%' OR raw LIKE '%breaking news%'
+                            OR raw LIKE '%market news%' OR raw LIKE '%real estate news%'
+                            OR raw LIKE '%subscribe%' OR raw LIKE '%youtube%'
+                            OR raw LIKE '%webinar%' OR raw LIKE '%seminar%'
+                            OR raw LIKE '%training session%' OR raw LIKE '%job opening%'
+                            OR raw LIKE '%hiring%' OR raw LIKE '%vacancy%'
+                            OR raw LIKE '%loan available%' OR raw LIKE '%home loan%'
+                            OR raw LIKE '%insurance%' OR raw LIKE '%political%'
+                            OR raw LIKE '%election%' OR raw LIKE '%stock market%'
+                            OR raw LIKE '%crypto%'
+                       THEN 25 ELSE 0 END
+                  +
+                  CASE WHEN NOT (
+                            raw LIKE '%sale%' OR raw LIKE '%rent%' OR raw LIKE '%lease%'
+                            OR raw LIKE '%property%' OR raw LIKE '%shop%' OR raw LIKE '%office%'
+                            OR raw LIKE '%floor%' OR raw LIKE '%plot%' OR raw LIKE '%apartment%'
+                            OR raw LIKE '%flat%' OR raw LIKE '%villa%' OR raw LIKE '%showroom%'
+                            OR raw LIKE '%warehouse%' OR raw LIKE '%restaurant%'
+                            OR raw LIKE '%commercial%' OR raw LIKE '%residential%'
+                            OR raw LIKE '%sqft%' OR raw LIKE '%sq ft%' OR raw LIKE '%sqyd%'
+                            OR raw LIKE '%acre%' OR raw LIKE '%bhk%' OR raw LIKE '%require%'
+                            OR raw LIKE '%required%' OR raw LIKE '%looking for%'
+                            OR raw LIKE '%need%' OR raw LIKE '%tenant%' OR raw LIKE '%buyer%'
+                       )
+                       THEN 35 ELSE 0 END
+                  +
+                  CASE WHEN LENGTH(raw) < 20 THEN 25 ELSE 0 END
+                )
+              END
+            )::numeric AS noise_score
+          FROM base
+        ),
+        scored AS (
+          SELECT *,
+            GREATEST(0,LEAST(100,
+              positive_score
+              - CASE WHEN noise_score >= 60 THEN 40
+                     WHEN noise_score >= 30 THEN 15 ELSE 0 END
+            ))::numeric(6,2) AS priority_score,
+            (
+              review_status='NEEDS_REVIEW'
+              AND purity_score >= 70
+              AND tx_conf >= 95
+              AND type_conf >= 95
+              AND role IN ('SUPPLY','REQUIREMENT')
+              AND tx IN ('SALE','LEASE','LEASE_OR_SALE')
+              AND LOWER(loc) NOT IN ('','other','others','unknown','na','n/a','none','delhi ncr','india')
+              AND ptype <> '' AND ptype <> 'UNKNOWN'
+              AND amin > 0 AND amax > 0 AND amin <= amax AND amax <= 100000000
+              AND dup_size <= 1
+              AND noise_score < 30
+              AND positive_score >= 90
+            ) AS auto_safe
+          FROM feat
+        ),
+        final AS (
+          SELECT *,
+            CASE
+              WHEN noise_score >= 70 THEN 'REJECT_NOISE'
+              WHEN auto_safe THEN 'AUTO_APPROVE_CANDIDATE'
+              WHEN priority_score >= 70
+                   AND (
+                     (CASE WHEN role NOT IN ('SUPPLY','REQUIREMENT') THEN 1 ELSE 0 END) +
+                     (CASE WHEN tx NOT IN ('SALE','LEASE','LEASE_OR_SALE') THEN 1 ELSE 0 END) +
+                     (CASE WHEN tx_conf < 75 THEN 1 ELSE 0 END) +
+                     (CASE WHEN ptype='' OR ptype='UNKNOWN' THEN 1 ELSE 0 END) +
+                     (CASE WHEN type_conf < 75 THEN 1 ELSE 0 END) +
+                     (CASE WHEN LOWER(loc) IN ('','other','others','unknown','na','n/a','none','delhi ncr','india') THEN 1 ELSE 0 END) +
+                     (CASE WHEN NOT (amin > 0 AND amax > 0 AND amin <= amax AND amax <= 100000000) THEN 1 ELSE 0 END) +
+                     (CASE WHEN dup_size > 1 THEN 1 ELSE 0 END)
+                   ) <= 2
+                THEN 'QUICK_REVIEW'
+              ELSE 'DEEP_REVIEW'
+            END AS bucket
+          FROM scored
+        ),
+        upserted AS (
+          INSERT INTO ai_whatsapp_review_priority(
+            listing_id,priority_score,bucket,auto_approve_safe,reasons,risk_flags,
+            duplicate_cluster_size,model_version,evaluated_at
+          )
+          SELECT
+            listing_id,
+            priority_score,
+            bucket,
+            auto_safe,
+            to_jsonb(array_remove(ARRAY[
+              CASE WHEN role IN ('SUPPLY','REQUIREMENT') THEN 'Role classified' END,
+              CASE WHEN tx IN ('SALE','LEASE','LEASE_OR_SALE') THEN 'Transaction classified' END,
+              CASE WHEN tx_conf >= 95 THEN 'High transaction confidence' END,
+              CASE WHEN ptype <> '' AND ptype <> 'UNKNOWN' THEN 'Property type available' END,
+              CASE WHEN type_conf >= 95 THEN 'High property type confidence' END,
+              CASE WHEN LOWER(loc) NOT IN ('','other','others','unknown','na','n/a','none','delhi ncr','india') THEN 'Specific location available' END,
+              CASE WHEN amin > 0 AND amax > 0 AND amin <= amax AND amax <= 100000000 THEN 'Plausible area range' END,
+              CASE WHEN dup_size <= 1 THEN 'No duplicate cluster conflict' END
+            ]::text[],NULL)),
+            to_jsonb(array_remove(ARRAY[
+              CASE WHEN role NOT IN ('SUPPLY','REQUIREMENT') THEN 'Role unresolved' END,
+              CASE WHEN tx NOT IN ('SALE','LEASE','LEASE_OR_SALE') THEN 'Transaction unresolved' END,
+              CASE WHEN tx_conf < 75 THEN 'Low transaction confidence' END,
+              CASE WHEN ptype='' OR ptype='UNKNOWN' THEN 'Property type unresolved' END,
+              CASE WHEN type_conf < 75 THEN 'Low property type confidence' END,
+              CASE WHEN LOWER(loc) IN ('','other','others','unknown','na','n/a','none','delhi ncr','india') THEN 'Location missing or too generic' END,
+              CASE WHEN NOT (amin > 0 AND amax > 0 AND amin <= amax AND amax <= 100000000) THEN 'Area missing or implausible' END,
+              CASE WHEN dup_size > 1 THEN 'Duplicate cluster conflict' END,
+              CASE WHEN noise_score >= 60 THEN 'Noise/non-property language detected' END
+            ]::text[],NULL)),
+            dup_size,
+            :version,
+            NOW()
+          FROM final
+          ON CONFLICT(listing_id) DO UPDATE SET
+            priority_score=EXCLUDED.priority_score,
+            bucket=EXCLUDED.bucket,
+            auto_approve_safe=EXCLUDED.auto_approve_safe,
+            reasons=EXCLUDED.reasons,
+            risk_flags=EXCLUDED.risk_flags,
+            duplicate_cluster_size=EXCLUDED.duplicate_cluster_size,
+            model_version=EXCLUDED.model_version,
+            evaluated_at=NOW()
+          RETURNING bucket,auto_approve_safe
+        )
+        SELECT
+          COUNT(*)::int AS evaluated,
+          COUNT(*) FILTER (WHERE auto_approve_safe)::int AS auto_candidates,
+          COUNT(*) FILTER (WHERE bucket='AUTO_APPROVE_CANDIDATE')::int AS auto_bucket,
+          COUNT(*) FILTER (WHERE bucket='QUICK_REVIEW')::int AS quick_bucket,
+          COUNT(*) FILTER (WHERE bucket='DEEP_REVIEW')::int AS deep_bucket,
+          COUNT(*) FILTER (WHERE bucket='REJECT_NOISE')::int AS noise_bucket
+        FROM upserted
+        """), {"version": MODULE_VERSION}).mappings().one()
 
-        dup_counts = {
-            r["duplicate_cluster_key"]: r["n"]
-            for r in c.execute(text("""
-              SELECT duplicate_cluster_key,COUNT(*) n
-              FROM ai_whatsapp_purity
-              WHERE duplicate_cluster_key IS NOT NULL AND duplicate_cluster_key <> ''
-              GROUP BY duplicate_cluster_key
-            """)).mappings().all()
-        }
-
-        counts = {b: 0 for b in BUCKETS}
-        safe = 0
-
-        for r in rows:
-            cluster = _s(r.get("duplicate_cluster_key"))
-            dup_size = int(dup_counts.get(cluster, 1)) if cluster else 1
-            ev = _evaluate_row(r, dup_size)
-            counts[ev["bucket"]] += 1
-            safe += 1 if ev["auto_approve_safe"] else 0
-
-            c.execute(text("""
-              INSERT INTO ai_whatsapp_review_priority(
-                listing_id,priority_score,bucket,auto_approve_safe,reasons,risk_flags,
-                duplicate_cluster_size,model_version,evaluated_at
-              )
-              VALUES(
-                :id,:score,:bucket,:safe,CAST(:reasons AS jsonb),CAST(:risks AS jsonb),
-                :dup,:version,NOW()
-              )
-              ON CONFLICT(listing_id) DO UPDATE SET
-                priority_score=EXCLUDED.priority_score,
-                bucket=EXCLUDED.bucket,
-                auto_approve_safe=EXCLUDED.auto_approve_safe,
-                reasons=EXCLUDED.reasons,
-                risk_flags=EXCLUDED.risk_flags,
-                duplicate_cluster_size=EXCLUDED.duplicate_cluster_size,
-                model_version=EXCLUDED.model_version,
-                evaluated_at=NOW()
-            """), {
-                "id": r["listing_id"], "score": ev["priority_score"], "bucket": ev["bucket"],
-                "safe": ev["auto_approve_safe"], "reasons": __import__("json").dumps(ev["reasons"]),
-                "risks": __import__("json").dumps(ev["risk_flags"]), "dup": dup_size,
-                "version": MODULE_VERSION,
-            })
-
-        # Remove stale priority rows for records no longer awaiting review.
         c.execute(text("""
           DELETE FROM ai_whatsapp_review_priority q
           WHERE NOT EXISTS (
@@ -283,12 +414,17 @@ def run_prioritization(engine):
 
     return {
         "version": MODULE_VERSION,
-        "evaluated": len(rows),
-        "auto_approve_candidates": safe,
-        "buckets": counts,
+        "evaluated": int(result["evaluated"] or 0),
+        "auto_approve_candidates": int(result["auto_candidates"] or 0),
+        "buckets": {
+            "AUTO_APPROVE_CANDIDATE": int(result["auto_bucket"] or 0),
+            "QUICK_REVIEW": int(result["quick_bucket"] or 0),
+            "DEEP_REVIEW": int(result["deep_bucket"] or 0),
+            "REJECT_NOISE": int(result["noise_bucket"] or 0),
+        },
         "auto_approval_default": "DISABLED",
+        "execution_mode": "BULK_SQL",
     }
-
 def priority_rows(engine, bucket="ALL", limit=100, offset=0, search=""):
     ensure_priority_schema(engine)
     bucket = _s(bucket).upper() or "ALL"
