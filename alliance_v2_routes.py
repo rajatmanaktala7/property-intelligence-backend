@@ -4,6 +4,7 @@ from sqlalchemy import text
 from alliance_v2_schema import VERSION,setup
 from alliance_v2_index import rebuild
 from alliance_v2_normalize import norm
+from alliance_v2_whatsapp_purity import purity_rows
 
 LOCATION_ALIASES={
     "cp":["connaught place","connaught circus","rajiv chowk","inner circle","outer circle"],
@@ -279,6 +280,17 @@ def register(core):
             rows=[dict(x._mapping) for x in c.execute(text("""SELECT * FROM ai_inventory_gap
             WHERE (:s='ALL' OR status=:s) ORDER BY updated_at DESC LIMIT 500"""),{"s":status.upper()}).fetchall()]
             return {"status":status.upper(),"rows":rows}
+
+
+    @app.get("/api/v2/intelligence/whatsapp-purity")
+    def whatsapp_purity(req:Request,status:str=Query("ALL"),limit:int=Query(200,ge=1,le=1000)):
+        if hasattr(core,"need_login"):core.need_login(req)
+        rows=purity_rows(engine,status,limit)
+        summary={}
+        for r in rows:
+            k=r.get("review_status") or "UNKNOWN"
+            summary[k]=summary.get(k,0)+1
+        return {"status":status.upper(),"count":len(rows),"summary":summary,"rows":rows}
 
     return app
 

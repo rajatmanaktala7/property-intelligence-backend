@@ -3,6 +3,7 @@ import re
 import json
 from sqlalchemy import create_engine, text
 from alliance_v2_schema import VERSION
+from alliance_v2_whatsapp_purity import build_purity
 from alliance_v2_normalize import (
     norm, ptype, area, num, money, phone, cid, pid,
     floor_norm, infer_frontage, infer_required_floor, infer_suitable
@@ -342,6 +343,9 @@ def rebuild_whatsapp(primary_engine):
                 result["status"] = "table_not_found"
                 return result
             rows = _read_rows(src)
+
+        purity = build_purity(primary_engine, source_engine)
+        result["purity"] = purity
 
         with primary_engine.begin() as c:
             for row in rows:
