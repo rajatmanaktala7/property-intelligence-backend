@@ -425,6 +425,32 @@ def run_prioritization(engine):
         "auto_approval_default": "DISABLED",
         "execution_mode": "BULK_SQL",
     }
+def priority_summary(engine):
+    ensure_priority_schema(engine)
+    with engine.connect() as c:
+        rows = c.execute(text("""
+          SELECT bucket,COUNT(*)::int n,
+                 COUNT(*) FILTER (WHERE auto_approve_safe)::int safe
+          FROM ai_whatsapp_review_priority
+          GROUP BY bucket
+        """)).mappings().all()
+        counts = {b: 0 for b in BUCKETS}
+        safe = 0
+        evaluated = 0
+        for row in rows:
+            counts[row["bucket"]] = int(row["n"] or 0)
+            safe += int(row["safe"] or 0)
+            evaluated += int(row["n"] or 0)
+    return {
+        "version": MODULE_VERSION,
+        "evaluated": evaluated,
+        "auto_approve_candidates": safe,
+        "buckets": counts,
+        "auto_approval_default": "DISABLED",
+        "execution_mode": "CACHED",
+        "refresh_endpoint": "/api/v2/intelligence/whatsapp-priority/run",
+    }
+
 def priority_rows(engine, bucket="ALL", limit=100, offset=0, search=""):
     ensure_priority_schema(engine)
     bucket = _s(bucket).upper() or "ALL"
@@ -519,8 +545,7 @@ def _e(v):
     return html.escape(str(v or ""))
 
 def render_priority_page(engine, bucket="ALL", limit=50, offset=0, search=""):
-    # Always refresh before rendering so queue is current.
-    summary = run_prioritization(engine)
+    summary = priority_summary(engine)
     rows = priority_rows(engine, bucket, limit, offset, search)
     cards = []
 
@@ -629,7 +654,7 @@ def register_priority_routes(core):
                      search: str = Query("")):
         if hasattr(core, "need_login"):
             core.need_login(req)
-        summary = run_prioritization(engine)
+        summary = priority_summary(engine)
         return {
             "version": MODULE_VERSION,
             "summary": summary,

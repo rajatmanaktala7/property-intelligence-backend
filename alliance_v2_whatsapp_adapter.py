@@ -5,7 +5,6 @@ from sqlalchemy import create_engine, text
 from alliance_v2_schema import VERSION
 from alliance_v2_whatsapp_purity import build_purity
 from alliance_v2_whatsapp_review_queue import apply_review_decisions
-from alliance_v2_review_prioritizer import run_prioritization
 from alliance_v2_purity_matcher_integration import promote_purity_to_matcher
 from alliance_v2_normalize import (
     norm, ptype, area, num, money, phone, cid, pid,
@@ -350,7 +349,7 @@ def rebuild_whatsapp(primary_engine):
         purity = build_purity(primary_engine, source_engine)
         result["purity"] = purity
         result["human_review"] = apply_review_decisions(primary_engine)
-        result["review_priority"] = run_prioritization(primary_engine)
+        result["review_priority"] = {"version":"2.4.2-DECOUPLED","status":"CACHED_ONLY","run_endpoint":"/api/v2/intelligence/whatsapp-priority/run"}
 
         with primary_engine.begin() as c:
             for row in rows:
