@@ -17,6 +17,7 @@ from alliance_v25h_post_processor import register_v25h_routes
 from alliance_v25i_post_processor import register_v25i_routes
 from alliance_v26_team_action import register_v26_routes
 from alliance_v27_inventory_acquisition import register_v27_routes
+from alliance_v28_external_discovery import register_v28_routes
 
 LOCATION_ALIASES={
     "cp":["connaught place","connaught circus","rajiv chowk","inner circle","outer circle"],
@@ -241,6 +242,7 @@ def register(core):
     register_v25i_routes(core)
     register_v26_routes(core)
     register_v27_routes(core)
+    register_v28_routes(core)
 
 
     @app.middleware("http")
