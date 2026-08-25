@@ -5,7 +5,7 @@ from sqlalchemy import text
 from fastapi import Request
 from fastapi.responses import HTMLResponse
 
-MODULE_VERSION = "2.5.0-PRODUCTION-MATCH-INTELLIGENCE"
+MODULE_VERSION = "2.5.1-SCHEMA-ADAPTIVE-PRODUCTION-MATCHER"
 
 def _norm(v):
     return re.sub(r"\s+", " ", str(v or "").strip().lower())
@@ -271,6 +271,29 @@ def score_match(req, prop):
         "rent_score": rent_score,
     }
 
+
+def _table_columns(engine, table_name):
+    with engine.connect() as c:
+        rows = c.execute(text("""
+          SELECT column_name
+          FROM information_schema.columns
+          WHERE table_schema = ANY(current_schemas(FALSE))
+            AND table_name = :table
+        """), {"table": table_name}).scalars().all()
+    return set(rows)
+
+def _pick(cols, *names):
+    for name in names:
+        if name in cols:
+            return name
+    return None
+
+def _expr(cols, alias, *names):
+    name = _pick(cols, *names)
+    if name:
+        return f"{name} AS {alias}" if name != alias else name
+    return f"NULL AS {alias}"
+
 def ensure_schema(engine):
     with engine.begin() as c:
         c.execute(text("""
@@ -298,11 +321,37 @@ def ensure_schema(engine):
 def run_match(engine, requirement_code):
     ensure_schema(engine)
 
+    req_cols = _table_columns(engine, "ai_requirement_index")
+    prop_cols = _table_columns(engine, "ai_property_index")
+
+    required_req = {"requirement_code"}
+    missing_req = sorted(required_req - req_cols)
+    if missing_req:
+        return {
+            "detail": "Requirement index schema incompatible",
+            "missing_columns": missing_req,
+            "available_columns": sorted(req_cols),
+        }
+
+    # Schema-adaptive requirement select. Live index currently uses `locations`;
+    # older/manual source tables may use `preferred_locations`.
+    req_select = [
+        _expr(req_cols, "requirement_code", "requirement_code"),
+        _expr(req_cols, "company_name", "company_name", "client_name"),
+        _expr(req_cols, "locations", "locations", "preferred_locations", "location"),
+        _expr(req_cols, "minimum_area_sqft", "minimum_area_sqft", "area_min_sqft"),
+        _expr(req_cols, "maximum_area_sqft", "maximum_area_sqft", "area_max_sqft"),
+        _expr(req_cols, "maximum_rent", "maximum_rent", "max_rent", "monthly_rent"),
+        _expr(req_cols, "transaction_type", "transaction_type"),
+        _expr(req_cols, "additional_points", "additional_points", "notes"),
+        _expr(req_cols, "minimum_frontage_ft", "minimum_frontage_ft", "frontage_ft"),
+        _expr(req_cols, "required_floor", "required_floor", "floor"),
+        _expr(req_cols, "suitable_for", "suitable_for", "requirement_type", "property_type"),
+    ]
+
     with engine.connect() as c:
-        req = c.execute(text("""
-          SELECT requirement_code,company_name,preferred_locations AS locations,
-                 minimum_area_sqft,maximum_area_sqft,maximum_rent,transaction_type,
-                 additional_points,minimum_frontage_ft,required_floor,suitable_for
+        req = c.execute(text(f"""
+          SELECT {", ".join(req_select)}
           FROM ai_requirement_index
           WHERE requirement_code=:code
           LIMIT 1
@@ -311,20 +360,66 @@ def run_match(engine, requirement_code):
     if not req:
         return {"detail": "Requirement not indexed"}
 
+    # Property schema is also adaptive so an optional column cannot crash V2.5.
+    required_prop = {"source_record_id"}
+    missing_prop = sorted(required_prop - prop_cols)
+    if missing_prop:
+        return {
+            "detail": "Property index schema incompatible",
+            "missing_columns": missing_prop,
+            "available_columns": sorted(prop_cols),
+        }
+
+    prop_select = [
+        _expr(prop_cols, "source_record_id", "source_record_id"),
+        _expr(prop_cols, "property_name", "property_name", "name"),
+        _expr(prop_cols, "location_raw", "location_raw", "location", "locations"),
+        _expr(prop_cols, "area_min_sqft", "area_min_sqft", "minimum_area_sqft"),
+        _expr(prop_cols, "area_max_sqft", "area_max_sqft", "maximum_area_sqft"),
+        _expr(prop_cols, "rent_psf_month", "rent_psf_month", "rent_psf"),
+        _expr(prop_cols, "monthly_rent", "monthly_rent", "rent_monthly"),
+        _expr(prop_cols, "transaction_type", "transaction_type"),
+        _expr(prop_cols, "canonical_property_type", "canonical_property_type", "property_type"),
+        _expr(prop_cols, "floor", "floor", "required_floor"),
+        _expr(prop_cols, "frontage_ft", "frontage_ft", "minimum_frontage_ft"),
+        _expr(prop_cols, "suitable_for", "suitable_for"),
+        _expr(prop_cols, "source_type", "source_type"),
+        _expr(prop_cols, "source_name", "source_name"),
+        _expr(prop_cols, "verification_status", "verification_status"),
+        _expr(prop_cols, "data_confidence_score", "data_confidence_score", "data_confidence"),
+    ]
+
+    match_eligible_clause = "TRUE"
+    if "match_eligible" in prop_cols:
+        match_eligible_clause = "COALESCE(p.match_eligible,FALSE)=TRUE"
+
     with engine.connect() as c:
-        props = c.execute(text("""
-          SELECT p.source_record_id,p.property_name,p.location_raw,p.area_min_sqft,p.area_max_sqft,
-                 p.rent_psf_month,p.monthly_rent,p.transaction_type,p.canonical_property_type,
-                 p.floor,p.frontage_ft,p.suitable_for,p.source_type,p.source_name,
-                 p.verification_status,p.data_confidence_score,
-                 COALESCE(e.duplicate_type,'UNIQUE') duplicate_type,
-                 COALESCE(e.suppress_from_matcher,FALSE) suppress_from_matcher
+        props = c.execute(text(f"""
+          SELECT {", ".join("p."+x if " AS " not in x and x != "NULL" else x for x in [])}
+        """)) if False else None
+
+    # Prefix selected real columns with p. while preserving aliases/NULL expressions.
+    def pexpr(expr):
+        if expr.startswith("NULL AS "):
+            return expr
+        if " AS " in expr:
+            left, right = expr.split(" AS ", 1)
+            return f"p.{left} AS {right}"
+        return f"p.{expr}"
+
+    property_sql = ", ".join(pexpr(x) for x in prop_select)
+
+    with engine.connect() as c:
+        props = c.execute(text(f"""
+          SELECT {property_sql},
+                 COALESCE(e.duplicate_type,'UNIQUE') AS duplicate_type,
+                 COALESCE(e.suppress_from_matcher,FALSE) AS suppress_from_matcher
           FROM ai_property_index p
           LEFT JOIN ai_whatsapp_entity_resolution e
             ON e.listing_id::text=p.source_record_id
            AND e.model_version='2.4.7A-DUPLICATE-SAFETY-CALIBRATION'
           WHERE COALESCE(e.suppress_from_matcher,FALSE)=FALSE
-            AND p.match_eligible=TRUE
+            AND {match_eligible_clause}
         """)).mappings().all()
 
     ranked = []
@@ -334,14 +429,20 @@ def run_match(engine, requirement_code):
         item = {**result, **dict(p)}
         ranked.append(item)
         rows_for_db.append({
-            "code": requirement_code, "id": p["source_record_id"],
-            "score": result["match_score"], "status": result["status"],
-            "action": result["action"], "hard": result["hard_rule_pass"],
+            "code": requirement_code,
+            "id": p["source_record_id"],
+            "score": result["match_score"],
+            "status": result["status"],
+            "action": result["action"],
+            "hard": result["hard_rule_pass"],
             "rej": json.dumps(result["rejection_reasons"]),
             "pos": json.dumps(result["positive_reasons"]),
-            "ls": result["location_score"], "ascore": result["area_score"],
-            "ts": result["type_score"], "fs": result["floor_score"],
-            "frs": result["frontage_score"], "rs": result["rent_score"],
+            "ls": result["location_score"],
+            "ascore": result["area_score"],
+            "ts": result["type_score"],
+            "fs": result["floor_score"],
+            "frs": result["frontage_score"],
+            "rs": result["rent_score"],
             "version": MODULE_VERSION,
         })
 
@@ -394,8 +495,11 @@ def run_match(engine, requirement_code):
         "top_rejected": top_rejected,
         "evaluated_properties": len(ranked),
         "suppression_policy": "EXACT_DUPLICATE and HIGH_CONF_DUPLICATE only",
+        "schema_mapping": {
+            "requirement_location_column": _pick(req_cols, "locations", "preferred_locations", "location"),
+            "property_location_column": _pick(prop_cols, "location_raw", "location", "locations"),
+        },
     }
-
 def register_v25_match_routes(core):
     app, engine = core.app, core.engine
     ensure_schema(engine)
