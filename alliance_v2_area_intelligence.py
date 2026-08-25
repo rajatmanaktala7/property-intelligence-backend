@@ -5,7 +5,7 @@ from sqlalchemy import create_engine, text
 from fastapi import Request
 from fastapi.responses import HTMLResponse
 
-MODULE_VERSION = "2.4.4A-AREA-RANGE-SAFE-RECOVERY"
+MODULE_VERSION = "2.4.4B-BATCHED-AREA-RECOVERY"
 
 AREA_UNIT_PATTERNS = {
     "SQFT": r"(?:sq\.?\s*ft|sqft|sft|sf|square\s*feet|square\s*foot)",
@@ -285,49 +285,121 @@ def extract_area_intelligence(raw_text):
     }
 
 def run_area_intelligence(primary_engine):
-    ensure_schema(primary_engine)
-    source_engine, owned = _source_engine(primary_engine)
-    try:
-        with source_engine.connect() as src:
-            rows = src.execute(text("""
-              SELECT id,raw_listing_text,summary
-              FROM wai_listings
-            """)).mappings().all()
+    """
+    V2.4.4B: resumable 250-row area recovery.
 
+    Each request processes only a small batch. Every evaluated row is
+    checkpointed in ai_whatsapp_area_intelligence, even if no safe area
+    is recovered, so later requests do not rescan the same row forever.
+
+    Raw wai_* source data is never modified.
+    """
+    ensure_schema(primary_engine)
+    batch_size = 250
+    source_engine, owned = _source_engine(primary_engine)
+
+    try:
         with primary_engine.connect() as c:
-            missing = {
+            batch_ids = [
                 str(r["listing_id"])
                 for r in c.execute(text("""
-                  SELECT listing_id
-                  FROM ai_whatsapp_purity
-                  WHERE recovered_area_min_sqft IS NULL
-                     OR recovered_area_max_sqft IS NULL
-                """)).mappings().all()
+                  SELECT p.listing_id
+                  FROM ai_whatsapp_purity p
+                  LEFT JOIN ai_whatsapp_area_intelligence a
+                    ON a.listing_id=p.listing_id
+                   AND a.model_version=:version
+                  WHERE (p.recovered_area_min_sqft IS NULL
+                      OR p.recovered_area_max_sqft IS NULL)
+                    AND a.listing_id IS NULL
+                  ORDER BY p.listing_id
+                  LIMIT :lim
+                """), {
+                    "version": "2.4.4B-BATCHED-AREA-RECOVERY",
+                    "lim": batch_size,
+                }).mappings().all()
+            ]
+
+        if not batch_ids:
+            return {
+                "version": "2.4.4B-BATCHED-AREA-RECOVERY",
+                "batch_size": batch_size,
+                "evaluated_this_batch": 0,
+                "recovered_area_rows": 0,
+                "remaining_unprocessed": 0,
+                "complete": True,
+                "source_data_modified": False,
+                "next_step": "Run V2.4.3 prioritization",
             }
 
-        upserts = []
+        binds = []
+        params = {}
+        for i, rid in enumerate(batch_ids):
+            key = f"id{i}"
+            binds.append(f"CAST(:{key} AS uuid)")
+            params[key] = rid
+
+        with source_engine.connect() as src:
+            rows = {
+                str(r["id"]): dict(r)
+                for r in src.execute(
+                    text(f"""
+                      SELECT id,raw_listing_text,summary
+                      FROM wai_listings
+                      WHERE id IN ({",".join(binds)})
+                    """),
+                    params,
+                ).mappings().all()
+            }
+
+        import json
+        checkpoints = []
         purity_updates = []
-        evaluated = recovered = labeled = ranged = rejected_tokens = 0
+        recovered = 0
+        labeled = 0
+        ranged = 0
+        rejected_tokens = 0
+        source_rows_missing = 0
 
-        for row in rows:
-            rid = str(row["id"])
-            if rid not in missing:
-                continue
-            evaluated += 1
-            raw = row.get("raw_listing_text") or row.get("summary") or ""
-            x = extract_area_intelligence(raw)
+        for rid in batch_ids:
+            row = rows.get(rid)
+
+            if row is None:
+                source_rows_missing += 1
+                x = {
+                    "area_min_sqft": None,
+                    "area_max_sqft": None,
+                    "carpet_area_sqft": None,
+                    "super_area_sqft": None,
+                    "built_up_area_sqft": None,
+                    "plot_area_sqft": None,
+                    "chargeable_area_sqft": None,
+                    "area_confidence": 0,
+                    "area_source": None,
+                    "recovery_method": "SOURCE_ROW_NOT_FOUND",
+                    "evidence_text": None,
+                    "rejected_numeric_tokens": [],
+                }
+            else:
+                raw = row.get("raw_listing_text") or row.get("summary") or ""
+                x = extract_area_intelligence(raw)
+
             rejected_tokens += len(x["rejected_numeric_tokens"])
-            if not x["area_min_sqft"]:
-                continue
 
-            recovered += 1
-            if "LABELED_AREA_EXTRACTION" in str(x["recovery_method"]):
-                labeled += 1
-            if "EXPLICIT_RANGE_WITH_UNIT" in str(x["recovery_method"]):
-                ranged += 1
+            if x["area_min_sqft"] is not None:
+                recovered += 1
 
-            import json
-            upserts.append({
+                if "LABELED_AREA_EXTRACTION" in str(x["recovery_method"]):
+                    labeled += 1
+                if "EXPLICIT_RANGE_WITH_UNIT" in str(x["recovery_method"]):
+                    ranged += 1
+
+                purity_updates.append({
+                    "id": rid,
+                    "amin": x["area_min_sqft"],
+                    "amax": x["area_max_sqft"],
+                })
+
+            checkpoints.append({
                 "id": rid,
                 "amin": x["area_min_sqft"],
                 "amax": x["area_max_sqft"],
@@ -338,72 +410,96 @@ def run_area_intelligence(primary_engine):
                 "charge": x["chargeable_area_sqft"],
                 "conf": x["area_confidence"],
                 "source": x["area_source"],
-                "method": x["recovery_method"],
+                "method": x["recovery_method"] or "NO_SAFE_EXPLICIT_AREA",
                 "evidence": x["evidence_text"],
                 "rejected": json.dumps(x["rejected_numeric_tokens"]),
-                "version": MODULE_VERSION,
+                "version": "2.4.4B-BATCHED-AREA-RECOVERY",
             })
-            purity_updates.append({"id": rid, "amin": x["area_min_sqft"], "amax": x["area_max_sqft"]})
 
-        if upserts:
-            with primary_engine.begin() as c:
-                c.execute(text("""
-                  INSERT INTO ai_whatsapp_area_intelligence(
-                    listing_id,area_min_sqft,area_max_sqft,carpet_area_sqft,super_area_sqft,
-                    built_up_area_sqft,plot_area_sqft,chargeable_area_sqft,area_confidence,
-                    area_source,recovery_method,evidence_text,rejected_numeric_tokens,
-                    model_version,evaluated_at
-                  )
-                  VALUES(
-                    CAST(:id AS uuid),:amin,:amax,:carpet,:super,:built,:plot,:charge,:conf,
-                    :source,:method,:evidence,CAST(:rejected AS jsonb),:version,NOW()
-                  )
-                  ON CONFLICT(listing_id) DO UPDATE SET
-                    area_min_sqft=EXCLUDED.area_min_sqft,
-                    area_max_sqft=EXCLUDED.area_max_sqft,
-                    carpet_area_sqft=EXCLUDED.carpet_area_sqft,
-                    super_area_sqft=EXCLUDED.super_area_sqft,
-                    built_up_area_sqft=EXCLUDED.built_up_area_sqft,
-                    plot_area_sqft=EXCLUDED.plot_area_sqft,
-                    chargeable_area_sqft=EXCLUDED.chargeable_area_sqft,
-                    area_confidence=EXCLUDED.area_confidence,
-                    area_source=EXCLUDED.area_source,
-                    recovery_method=EXCLUDED.recovery_method,
-                    evidence_text=EXCLUDED.evidence_text,
-                    rejected_numeric_tokens=EXCLUDED.rejected_numeric_tokens,
-                    model_version=EXCLUDED.model_version,
-                    evaluated_at=NOW()
-                """), upserts)
+        with primary_engine.begin() as c:
+            c.execute(text("""
+              INSERT INTO ai_whatsapp_area_intelligence(
+                listing_id,area_min_sqft,area_max_sqft,carpet_area_sqft,
+                super_area_sqft,built_up_area_sqft,plot_area_sqft,
+                chargeable_area_sqft,area_confidence,area_source,
+                recovery_method,evidence_text,rejected_numeric_tokens,
+                model_version,evaluated_at
+              )
+              VALUES(
+                CAST(:id AS uuid),:amin,:amax,:carpet,:super,:built,:plot,
+                :charge,:conf,:source,:method,:evidence,
+                CAST(:rejected AS jsonb),:version,NOW()
+              )
+              ON CONFLICT(listing_id) DO UPDATE SET
+                area_min_sqft=EXCLUDED.area_min_sqft,
+                area_max_sqft=EXCLUDED.area_max_sqft,
+                carpet_area_sqft=EXCLUDED.carpet_area_sqft,
+                super_area_sqft=EXCLUDED.super_area_sqft,
+                built_up_area_sqft=EXCLUDED.built_up_area_sqft,
+                plot_area_sqft=EXCLUDED.plot_area_sqft,
+                chargeable_area_sqft=EXCLUDED.chargeable_area_sqft,
+                area_confidence=EXCLUDED.area_confidence,
+                area_source=EXCLUDED.area_source,
+                recovery_method=EXCLUDED.recovery_method,
+                evidence_text=EXCLUDED.evidence_text,
+                rejected_numeric_tokens=EXCLUDED.rejected_numeric_tokens,
+                model_version=EXCLUDED.model_version,
+                evaluated_at=NOW()
+            """), checkpoints)
 
+            if purity_updates:
                 c.execute(text("""
                   UPDATE ai_whatsapp_purity
                   SET recovered_area_min_sqft=:amin,
                       recovered_area_max_sqft=:amax,
                       purity_score=LEAST(100,COALESCE(purity_score,0)+10),
                       review_status=CASE
-                        WHEN review_status IN ('LOW_CONFIDENCE','UNKNOWN') THEN 'NEEDS_REVIEW'
+                        WHEN review_status IN ('LOW_CONFIDENCE','UNKNOWN')
+                          THEN 'NEEDS_REVIEW'
                         ELSE review_status
                       END,
                       last_recovered_at=NOW()
                   WHERE listing_id=CAST(:id AS uuid)
-                    AND (recovered_area_min_sqft IS NULL OR recovered_area_max_sqft IS NULL)
+                    AND (recovered_area_min_sqft IS NULL
+                      OR recovered_area_max_sqft IS NULL)
                 """), purity_updates)
 
+        with primary_engine.connect() as c:
+            remaining = c.execute(text("""
+              SELECT COUNT(*)::int
+              FROM ai_whatsapp_purity p
+              LEFT JOIN ai_whatsapp_area_intelligence a
+                ON a.listing_id=p.listing_id
+               AND a.model_version=:version
+              WHERE (p.recovered_area_min_sqft IS NULL
+                  OR p.recovered_area_max_sqft IS NULL)
+                AND a.listing_id IS NULL
+            """), {
+                "version": "2.4.4B-BATCHED-AREA-RECOVERY"
+            }).scalar() or 0
+
         return {
-            "version": MODULE_VERSION,
-            "evaluated_missing_area_rows": evaluated,
+            "version": "2.4.4B-BATCHED-AREA-RECOVERY",
+            "batch_size": batch_size,
+            "evaluated_this_batch": len(batch_ids),
             "recovered_area_rows": recovered,
             "labeled_area_rows": labeled,
             "range_area_rows": ranged,
             "rejected_numeric_tokens": rejected_tokens,
+            "source_rows_missing": source_rows_missing,
+            "remaining_unprocessed": int(remaining),
+            "complete": int(remaining) == 0,
             "source_data_modified": False,
-            "derived_purity_updated": recovered,
-            "next_step": "Run V2.4.3 prioritization",
+            "derived_purity_updated": len(purity_updates),
+            "next_step": (
+                "Run V2.4.3 prioritization"
+                if int(remaining) == 0
+                else "Run next area batch"
+            ),
         }
     finally:
         if owned:
             source_engine.dispose()
-
 def area_summary(engine):
     ensure_schema(engine)
     with engine.connect() as c:
