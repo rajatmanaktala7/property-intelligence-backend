@@ -16909,3 +16909,12 @@ from whatsapp_property_intelligence_final import router as whatsapp_property_int
 app.include_router(whatsapp_property_intelligence_final_router)
 # === END WHATSAPP PROPERTY INTELLIGENCE FINAL ===
 
+
+
+# ALLIANCE V3.7.2 BEAUTIFUL DASHBOARD UI
+try:
+    import team_dashboard_v372 as _team_dashboard_v372
+    _team_dashboard_v372.register(app, engine, need_login)
+    print("Alliance V3.7.2 beautiful dashboard registered successfully")
+except Exception as _v372_error:
+    print("Alliance V3.7.2 dashboard registration skipped:", repr(_v372_error))
