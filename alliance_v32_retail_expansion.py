@@ -8,7 +8,7 @@ from sqlalchemy import text
 from fastapi import Request, Body
 from fastapi.responses import HTMLResponse
 
-MODULE_VERSION = "3.2.0-RETAIL-EXPANSION-INTENT-BOT"
+MODULE_VERSION = "3.2A-HEALTH-FIRST-RETAIL-EXPANSION-BOT"
 
 TARGET_ROLES = [
     "business development manager","business development officer",
@@ -419,20 +419,53 @@ def register_v32_retail_routes(core):
 
     @app.get("/api/v3/retail/status")
     def status(req:Request):
-        if hasattr(core,"need_login"): core.need_login(req)
-        ready=_schema_ready(engine)
-        if not ready:
-            return {"version":MODULE_VERSION,"status":"OK","schema_ready":False,
-                    "startup_schema_ddl":False,"next_step":"POST /api/v3/retail/setup"}
-        with engine.connect() as c:
-            contacts=int(c.execute(text("SELECT COUNT(*) FROM ai_retail_contact")).scalar() or 0)
-            signals=int(c.execute(text("SELECT COUNT(*) FROM ai_retail_expansion_signal")).scalar() or 0)
-            candidates=int(c.execute(text("SELECT COUNT(*) FROM ai_retail_requirement_candidate")).scalar() or 0)
-        return {"version":MODULE_VERSION,"status":"OK","schema_ready":True,
-                "contacts":contacts,"expansion_signals":signals,
+        if hasattr(core,"need_login"):
+            core.need_login(req)
+        # Health-first rule: NO database connection here.
+        return {
+            "version":MODULE_VERSION,
+            "status":"OK",
+            "service_ready":True,
+            "startup_schema_ddl":False,
+            "status_db_access":False,
+            "direct_linkedin_scraping":False,
+            "public_linkedin_profile_discovery":True,
+            "indiaretailing_news_signals":True,
+            "persistent_storage":True,
+            "next_step":"GET /api/v3/retail/db-status",
+        }
+
+    @app.get("/api/v3/retail/db-status")
+    def db_status(req:Request):
+        if hasattr(core,"need_login"):
+            core.need_login(req)
+        try:
+            ready=_schema_ready(engine)
+            if not ready:
+                return {
+                    "version":MODULE_VERSION,
+                    "status":"OK",
+                    "schema_ready":False,
+                    "next_step":"POST /api/v3/retail/setup",
+                }
+            with engine.connect() as c:
+                contacts=int(c.execute(text("SELECT COUNT(*) FROM ai_retail_contact")).scalar() or 0)
+                signals=int(c.execute(text("SELECT COUNT(*) FROM ai_retail_expansion_signal")).scalar() or 0)
+                candidates=int(c.execute(text("SELECT COUNT(*) FROM ai_retail_requirement_candidate")).scalar() or 0)
+            return {
+                "version":MODULE_VERSION,
+                "status":"OK",
+                "schema_ready":True,
+                "contacts":contacts,
+                "expansion_signals":signals,
                 "requirement_candidates":candidates,
-                "startup_schema_ddl":False,
-                "direct_linkedin_scraping":False,"persistent_storage":True}
+            }
+        except Exception as exc:
+            return {
+                "version":MODULE_VERSION,
+                "status":"DB_UNAVAILABLE",
+                "message":str(exc),
+            }
 
     @app.post("/api/v3/retail/setup")
     def setup(req:Request):
