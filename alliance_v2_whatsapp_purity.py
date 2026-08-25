@@ -2,6 +2,8 @@ import re
 from sqlalchemy import text
 from alliance_v2_normalize import norm, ptype, area, money, num, infer_frontage, infer_required_floor, infer_suitable
 
+VERSION = "1.1-SAFE-NUMERIC-RECOVERY"
+
 LOCATION_ALIASES = {
     "cp": "Connaught Place",
     "connaught place": "Connaught Place",
@@ -38,6 +40,11 @@ LOCATION_ALIASES = {
     "ghaziabad": "Ghaziabad",
 }
 
+GENERIC_LOCATIONS = {
+    "", "other", "others", "unknown", "not specified", "not available",
+    "na", "n a", "none", "nil", "-"
+}
+
 REQ_WORDS = [
     "require", "required", "requirement", "wanted", "looking for", "looking to lease",
     "looking to buy", "need ", "needed", "client looking", "tenant looking",
@@ -70,21 +77,52 @@ TYPE_PATTERNS = [
     ("RESIDENTIAL", ["apartment", "flat", "bhk", "builder floor"]),
 ]
 
+def _safe_float(v, low=None, high=None):
+    try:
+        x = float(v)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if x != x or x in (float("inf"), float("-inf")):
+        return None
+    if low is not None and x < low:
+        return None
+    if high is not None and x > high:
+        return None
+    return x
+
+def _clean_area_pair(amin, amax):
+    # Commercial/residential/land areas can be large, but phone-number sized values are not areas.
+    a = _safe_float(amin, 1, 100_000_000)
+    b = _safe_float(amax, 1, 100_000_000)
+    if a is None and b is None:
+        return None, None
+    if a is None:
+        a = b
+    if b is None:
+        b = a
+    if a > b:
+        a, b = b, a
+    return round(a, 2), round(b, 2)
+
 def canonical_location(*values):
-    text_value = " ".join(str(v or "") for v in values)
-    n = norm(text_value)
+    joined = " ".join(str(v or "") for v in values)
+    n = norm(joined)
     if not n:
         return None
+
     for alias, canonical in sorted(LOCATION_ALIASES.items(), key=lambda x: len(x[0]), reverse=True):
         if alias in n:
             return canonical
+
     sec = re.search(r"\b(?:sector|sec)\s*[- ]?(\d{1,3}[a-z]?)\b", n, re.I)
     if sec:
         prefix = "Gurgaon" if ("gurgaon" in n or "gurugram" in n) else "Noida" if "noida" in n else ""
         return ((prefix + " ") if prefix else "") + "Sector " + sec.group(1).upper()
-    for v in values:
+
+    # Do not promote placeholder locations such as "Other" into matchable geography.
+    for v in values[:-1]:
         s = str(v or "").strip()
-        if s:
+        if s and norm(s) not in GENERIC_LOCATIONS:
             return s
     return None
 
@@ -135,19 +173,59 @@ def detect_property_type(current, raw):
             return canonical, 85, "recovered_from_text"
     return "UNKNOWN", 0, "unresolved"
 
+def _explicit_area_from_raw(raw):
+    """
+    Recover an area from free text ONLY when an area unit is present.
+    This prevents '3rd floor' and 10-digit phone numbers from becoming areas.
+    """
+    s = str(raw or "").lower().replace(",", "")
+    patterns = [
+        r"\b\d+(?:\.\d+)?\s*(?:-|to|x)\s*\d+(?:\.\d+)?\s*(?:sq\.?\s*ft|sqft|sft|sf|square\s*feet)\b",
+        r"\b\d+(?:\.\d+)?\s*(?:sq\.?\s*ft|sqft|sft|sf|square\s*feet)\b",
+        r"\b\d+(?:\.\d+)?\s*(?:sq\.?\s*yd|sqyd|square\s*yard|yards?|yds?)\b",
+        r"\b\d+(?:\.\d+)?\s*(?:sq\.?\s*m|sqm|square\s*met(?:er|re)s?)\b",
+        r"\b\d+(?:\.\d+)?\s*(?:acre|acres)\b",
+    ]
+    for pat in patterns:
+        m = re.search(pat, s, re.I)
+        if m:
+            return _clean_area_pair(*area(m.group(0)))
+    return None, None
+
 def recover_area(area_text, area_numeric, raw):
+    # 1) Trust dedicated structured area fields, after sanity checks.
     amin, amax = area(area_text)
-    if amin is None:
-        amin = num(area_numeric)
-        amax = amin
-    if amin is None:
-        amin, amax = area(raw)
-    if amax is None:
-        amax = amin
-    return amin, amax
+    amin, amax = _clean_area_pair(amin, amax)
+    if amin is not None:
+        return amin, amax
+
+    n = _safe_float(area_numeric, 1, 100_000_000)
+    if n is not None:
+        return round(n, 2), round(n, 2)
+
+    # 2) Free text is allowed only with explicit area units.
+    return _explicit_area_from_raw(raw)
+
+def _explicit_money_from_raw(raw):
+    s = str(raw or "")
+    # Only consider raw text as money when currency/rent/price language is present.
+    if not re.search(
+        r"(?:₹|\brs\.?\b|\binr\b|\bcrore\b|\bcr\b|\blakh\b|\blac\b|\bprice\b|\brent\b|\basking\b|\bbudget\b)",
+        s, re.I
+    ):
+        return None
+    v = money(s)
+    return _safe_float(v, 0, 1_000_000_000_000)
 
 def recover_budget(budget_text, budget_numeric, raw):
-    return num(budget_numeric) or money(budget_text) or money(raw)
+    v = _safe_float(budget_numeric, 0, 1_000_000_000_000)
+    if v is not None:
+        return round(v, 2)
+    v = money(budget_text)
+    v = _safe_float(v, 0, 1_000_000_000_000)
+    if v is not None:
+        return round(v, 2)
+    return _explicit_money_from_raw(raw)
 
 def quality_score(tx, loc, typ, amin, phone_present, raw_conf, verified):
     score = 0
@@ -158,7 +236,9 @@ def quality_score(tx, loc, typ, amin, phone_present, raw_conf, verified):
     score += 8 if phone_present else 0
     score += 5 if verified else 0
     if raw_conf is not None:
-        score += min(7, max(0, float(raw_conf) / 15))
+        rc = _safe_float(raw_conf, 0, 100)
+        if rc is not None:
+            score += min(7, rc / 15)
     return round(min(100, score), 2)
 
 def ensure_schema(c):
@@ -197,13 +277,17 @@ def ensure_schema(c):
 
 def build_purity(primary_engine, source_engine):
     result = {
+        "version": VERSION,
         "rows_processed": 0,
         "usable_supply": 0,
         "usable_requirements": 0,
         "needs_review": 0,
+        "low_confidence": 0,
         "unknown_after_recovery": 0,
+        "invalid_area_rejected": 0,
         "duplicate_clusters": 0,
     }
+
     with source_engine.connect() as src:
         rows = [dict(x._mapping) for x in src.execute(text("""
             SELECT
@@ -218,6 +302,7 @@ def build_purity(primary_engine, source_engine):
 
     with primary_engine.begin() as c:
         ensure_schema(c)
+
         for r in rows:
             raw = str(r.get("raw_listing_text") or r.get("summary") or "")
             role, tx, tx_conf, tx_reason = detect_transaction(r.get("transaction"), raw)
@@ -225,11 +310,23 @@ def build_purity(primary_engine, source_engine):
             typ, type_conf, type_reason = detect_property_type(r.get("property_type"), raw)
             amin, amax = recover_area(r.get("area_text"), r.get("area_sqft_numeric"), raw)
             budget = recover_budget(r.get("budget_text"), r.get("budget_numeric"), raw)
-            frontage = infer_frontage(raw)
+            frontage = _safe_float(infer_frontage(raw), 0, 100_000)
             floor = infer_required_floor(raw) if role == "REQUIREMENT" else None
             suitable = infer_suitable(raw)
             verified = norm(r.get("status")) in {"verified", "approved"}
-            purity = quality_score(tx, loc, typ, amin, bool(r.get("phone")), r.get("confidence_score"), verified)
+
+            # Final defensive barrier before any NUMERIC insert.
+            amin, amax = _clean_area_pair(amin, amax)
+            if amin is None and (
+                r.get("area_text") not in (None, "", "NA", "N/A") or
+                r.get("area_sqft_numeric") not in (None, "")
+            ):
+                result["invalid_area_rejected"] += 1
+
+            purity = quality_score(
+                tx, loc, typ, amin, bool(r.get("phone")),
+                r.get("confidence_score"), verified
+            )
 
             if role == "UNKNOWN" or tx == "UNKNOWN":
                 review = "UNKNOWN"
@@ -301,6 +398,8 @@ def build_purity(primary_engine, source_engine):
                 result["usable_requirements"] += 1
             elif review == "NEEDS_REVIEW":
                 result["needs_review"] += 1
+            elif review == "LOW_CONFIDENCE":
+                result["low_confidence"] += 1
             elif review == "UNKNOWN":
                 result["unknown_after_recovery"] += 1
 
@@ -308,11 +407,13 @@ def build_purity(primary_engine, source_engine):
           SELECT COUNT(*) FROM (
             SELECT duplicate_cluster_key
             FROM ai_whatsapp_purity
-            WHERE duplicate_cluster_key IS NOT NULL AND duplicate_cluster_key <> ''
+            WHERE duplicate_cluster_key IS NOT NULL
+              AND duplicate_cluster_key <> ''
             GROUP BY duplicate_cluster_key
             HAVING COUNT(*) > 1
           ) q
         """)).scalar() or 0
+
     return result
 
 def purity_rows(primary_engine, status="ALL", limit=500):
