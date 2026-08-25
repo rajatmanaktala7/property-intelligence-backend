@@ -26,6 +26,7 @@ from alliance_v31_hospitality import register_v31_hospitality_routes
 from alliance_v32_retail_expansion import register_v32_retail_routes
 from alliance_v32b_retail_purity import register as register_v32b_retail_routes
 from alliance_v32c1_retail_stage import register as register_v32c1_retail_routes
+from alliance_v33_contact_vault import register as register_v33_contact_routes
 
 LOCATION_ALIASES={
     "cp":["connaught place","connaught circus","rajiv chowk","inner circle","outer circle"],
@@ -334,6 +335,7 @@ def register(core):
             summary[k]=summary.get(k,0)+1
         return {"status":status.upper(),"count":len(rows),"summary":summary,"rows":rows}
 
+    register_v33_contact_routes(core)
     return app
 
 
