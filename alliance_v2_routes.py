@@ -333,3 +333,12 @@ def register(core):
     return app
 
 
+
+
+# Alliance V3.2B Retail Expansion Purity Engine
+try:
+    import alliance_v32b_retail_purity as _alliance_v32b
+    _alliance_v32b.register(app, core)
+    print("Alliance V3.2B: routes registered successfully")
+except Exception as _v32b_error:
+    print("Alliance V3.2B registration skipped:", _v32b_error)
