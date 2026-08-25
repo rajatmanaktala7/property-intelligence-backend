@@ -90,13 +90,13 @@ def frontage_ft(v):
     if not s:return None
     m=re.search(r"(\d+(?:\.\d+)?)\s*(?:ft|feet|foot|')",s)
     if m:return float(m.group(1))
-    m=re.search(r"frontage\s*[:=-]?\s*(\d+(?:\.\d+)?)",s)
+    m=re.search(r"(?:frontage|fronatge|frontge|frontgage)\s*[:=-]?\s*(\d+(?:\.\d+)?)",s)
     return float(m.group(1)) if m else None
 
 def infer_frontage(text_value):
     s=str(text_value or "")
     patterns=[
-        r"(?:minimum|min\.?|min)?\s*frontage\s*[:=-]?\s*(\d+(?:\.\d+)?)\s*(?:ft|feet|foot|')?",
+        r"(?:minimum|min\.?|min)?\s*(?:frontage|fronatge|frontge|frontgage)\s*[:=-]?\s*(\d+(?:\.\d+)?)\s*(?:ft|feet|foot|')?",
         r"(\d+(?:\.\d+)?)\s*(?:ft|feet|foot|')\s*(?:frontage|front)"
     ]
     for p in patterns:
@@ -132,3 +132,4 @@ def infer_suitable(text_value):
     ]:
         if token in s and label not in tags:tags.append(label)
     return ",".join(tags) if tags else None
+
