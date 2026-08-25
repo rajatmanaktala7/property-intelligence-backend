@@ -5,7 +5,7 @@ from sqlalchemy import text
 from fastapi import Request
 from fastapi.responses import HTMLResponse
 
-MODULE_VERSION = "2.5.3-DIRECT-INDEX-INTROSPECTION"
+MODULE_VERSION = "2.5.4-NO-JOIN-FAST-PATH"
 
 def _norm(v):
     return re.sub(r"\s+", " ", str(v or "").strip().lower())
@@ -397,32 +397,34 @@ def run_match(engine, requirement_code):
 
     property_sql = ", ".join(pexpr(x) for x in prop_select)
 
-    clauses = ["COALESCE(e.suppress_from_matcher,FALSE)=FALSE"]
+    clauses = []
     params = {}
 
     if "match_eligible" in prop_cols:
         clauses.append("COALESCE(p.match_eligible,FALSE)=TRUE")
 
-    # Stage 1 hard prefilter: transaction.
     req_tx = _norm(req.get("transaction_type"))
     tx_col = _pick(prop_cols, "transaction_type")
     if req_tx and tx_col:
-        clauses.append(f"(LOWER(COALESCE(p.{tx_col},'')) = :req_tx OR LOWER(COALESCE(p.{tx_col},'')) = 'lease_or_sale')")
+        clauses.append(
+            f"(LOWER(COALESCE(p.{tx_col},'')) = :req_tx "
+            f"OR LOWER(COALESCE(p.{tx_col},'')) = 'lease_or_sale')"
+        )
         params["req_tx"] = req_tx
 
-    # Stage 1 location prefilter:
-    # Require at least one meaningful token from the requirement location.
     loc_col = _pick(prop_cols, "location_raw", "location", "locations")
-    loc_tokens = [t for t in _tokens(req.get("locations")) if t not in {"place","road","sector","block","delhi","ncr"}]
+    loc_tokens = [
+        t for t in _tokens(req.get("locations"))
+        if t not in {"place","road","sector","block","delhi","ncr"}
+    ]
     if loc_col and loc_tokens:
         loc_parts = []
-        for i, token in enumerate(sorted(loc_tokens, key=len, reverse=True)[:4]):
+        for i, token in enumerate(sorted(loc_tokens, key=len, reverse=True)[:3]):
             k = f"loc{i}"
             loc_parts.append(f"LOWER(COALESCE(p.{loc_col},'')) LIKE :{k}")
             params[k] = f"%{token}%"
         clauses.append("(" + " OR ".join(loc_parts) + ")")
 
-    # Stage 1 area coarse prefilter with 20% tolerance when columns exist.
     amin_col = _pick(prop_cols, "area_min_sqft", "minimum_area_sqft")
     amax_col = _pick(prop_cols, "area_max_sqft", "maximum_area_sqft")
     try:
@@ -443,38 +445,99 @@ def run_match(engine, requirement_code):
             f"(p.{amax_col} >= :area_low AND p.{amin_col} <= :area_high))"
         )
 
-    where_sql = " AND ".join(clauses)
+    where_sql = " AND ".join(clauses) if clauses else "TRUE"
 
-    # Bound the candidate pool to keep Railway requests fast.
-    candidate_limit = 1200
+    # Critical performance change:
+    # no duplicate-resolution JOIN here; just hit property index directly.
+    candidate_limit = 350
 
     with engine.connect() as c:
         props = c.execute(text(f"""
-          SELECT {property_sql},
-                 COALESCE(e.duplicate_type,'UNIQUE') AS duplicate_type,
-                 COALESCE(e.suppress_from_matcher,FALSE) AS suppress_from_matcher
+          SELECT {property_sql}
           FROM ai_property_index p
-          LEFT JOIN ai_whatsapp_entity_resolution e
-            ON e.listing_id::text=p.source_record_id
-           AND e.model_version='2.4.7A-DUPLICATE-SAFETY-CALIBRATION'
           WHERE {where_sql}
-          ORDER BY COALESCE(p.data_confidence_score,0) DESC NULLS LAST
           LIMIT {candidate_limit}
         """), params).mappings().all()
 
+    # Fetch duplicate flags only for shortlist IDs.
+    duplicate_map = {}
+    candidate_ids = [
+        str(p["source_record_id"])
+        for p in props
+        if p.get("source_record_id")
+    ]
+
+    # Only UUID-like WhatsApp listing IDs can exist in entity resolution.
+    uuid_ids = [
+        x for x in candidate_ids
+        if re.fullmatch(
+            r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",
+            x
+        )
+    ]
+
+    if uuid_ids:
+        for chunk_start in range(0, len(uuid_ids), 100):
+            chunk = uuid_ids[chunk_start:chunk_start+100]
+            bind = []
+            dparams = {"version": "2.4.7A-DUPLICATE-SAFETY-CALIBRATION"}
+            for i, rid in enumerate(chunk):
+                k = f"id{i}"
+                bind.append(f"CAST(:{k} AS uuid)")
+                dparams[k] = rid
+
+            with engine.connect() as c:
+                rows = c.execute(text(f"""
+                  SELECT listing_id,duplicate_type,suppress_from_matcher
+                  FROM ai_whatsapp_entity_resolution
+                  WHERE model_version=:version
+                    AND listing_id IN ({",".join(bind)})
+                """), dparams).mappings().all()
+
+            for row in rows:
+                duplicate_map[str(row["listing_id"])] = {
+                    "duplicate_type": row["duplicate_type"],
+                    "suppress_from_matcher": bool(row["suppress_from_matcher"]),
+                }
+
     ranked = []
-    for p in props:
+    suppressed_shortlist = 0
+
+    for p0 in props:
+        p = dict(p0)
+        dup = duplicate_map.get(
+            str(p.get("source_record_id")),
+            {"duplicate_type": "UNIQUE", "suppress_from_matcher": False}
+        )
+        p["duplicate_type"] = dup["duplicate_type"]
+        p["suppress_from_matcher"] = dup["suppress_from_matcher"]
+
+        if p["suppress_from_matcher"]:
+            suppressed_shortlist += 1
+            continue
+
         result = score_match(req, p)
-        ranked.append({**result, **dict(p)})
+        ranked.append({**result, **p})
 
-    ranked.sort(key=lambda x: (x["hard_rule_pass"], x["match_score"]), reverse=True)
-    actionable = [x for x in ranked if x["hard_rule_pass"] and x["match_score"] >= 70]
-    top_rejected = [x for x in ranked if not x["hard_rule_pass"]][:10]
+    ranked.sort(
+        key=lambda x: (x["hard_rule_pass"], x["match_score"]),
+        reverse=True
+    )
 
-    # Persist only useful results, not the entire candidate universe.
-    persist = actionable[:100] + top_rejected
+    actionable = [
+        x for x in ranked
+        if x["hard_rule_pass"] and x["match_score"] >= 70
+    ]
+    top_rejected = [
+        x for x in ranked
+        if not x["hard_rule_pass"]
+    ][:10]
+
+    # Performance safety: persist only the top 40 actionable + 10 rejected.
+    persist = actionable[:40] + top_rejected
     rows_for_db = []
     seen = set()
+
     for p in persist:
         rid = p["source_record_id"]
         if rid in seen:
@@ -502,21 +565,31 @@ def run_match(engine, requirement_code):
         with engine.begin() as c:
             c.execute(text("""
               INSERT INTO ai_v25_match_results(
-                requirement_code,source_record_id,match_score,status,action,hard_rule_pass,
-                rejection_reasons,positive_reasons,location_score,area_score,type_score,
-                floor_score,frontage_score,rent_score,model_version,evaluated_at
+                requirement_code,source_record_id,match_score,status,action,
+                hard_rule_pass,rejection_reasons,positive_reasons,
+                location_score,area_score,type_score,floor_score,
+                frontage_score,rent_score,model_version,evaluated_at
               )
               VALUES(
                 :code,:id,:score,:status,:action,:hard,
-                CAST(:rej AS jsonb),CAST(:pos AS jsonb),:ls,:ascore,:ts,:fs,:frs,:rs,:version,NOW()
+                CAST(:rej AS jsonb),CAST(:pos AS jsonb),
+                :ls,:ascore,:ts,:fs,:frs,:rs,:version,NOW()
               )
               ON CONFLICT(requirement_code,source_record_id) DO UPDATE SET
-                match_score=EXCLUDED.match_score,status=EXCLUDED.status,action=EXCLUDED.action,
-                hard_rule_pass=EXCLUDED.hard_rule_pass,rejection_reasons=EXCLUDED.rejection_reasons,
-                positive_reasons=EXCLUDED.positive_reasons,location_score=EXCLUDED.location_score,
-                area_score=EXCLUDED.area_score,type_score=EXCLUDED.type_score,
-                floor_score=EXCLUDED.floor_score,frontage_score=EXCLUDED.frontage_score,
-                rent_score=EXCLUDED.rent_score,model_version=EXCLUDED.model_version,evaluated_at=NOW()
+                match_score=EXCLUDED.match_score,
+                status=EXCLUDED.status,
+                action=EXCLUDED.action,
+                hard_rule_pass=EXCLUDED.hard_rule_pass,
+                rejection_reasons=EXCLUDED.rejection_reasons,
+                positive_reasons=EXCLUDED.positive_reasons,
+                location_score=EXCLUDED.location_score,
+                area_score=EXCLUDED.area_score,
+                type_score=EXCLUDED.type_score,
+                floor_score=EXCLUDED.floor_score,
+                frontage_score=EXCLUDED.frontage_score,
+                rent_score=EXCLUDED.rent_score,
+                model_version=EXCLUDED.model_version,
+                evaluated_at=NOW()
             """), rows_for_db)
 
     inventory_gap = None
@@ -532,7 +605,7 @@ def run_match(engine, requirement_code):
             "minimum_frontage_ft": req.get("minimum_frontage_ft"),
             "required_floor": req.get("required_floor"),
             "suitable_for": req.get("suitable_for"),
-            "reason": "No actionable property passed V2.5.2 shortlist + hard rules."
+            "reason": "No actionable property passed V2.5.4 no-join fast path."
         }
 
     return {
@@ -541,18 +614,22 @@ def run_match(engine, requirement_code):
         "matches": actionable[:30],
         "inventory_gap": inventory_gap,
         "top_rejected": top_rejected,
+        "shortlist_fetched": len(props),
+        "shortlist_suppressed": suppressed_shortlist,
         "evaluated_properties": len(ranked),
         "candidate_limit": candidate_limit,
         "persisted_results": len(rows_for_db),
-        "suppression_policy": "EXACT_DUPLICATE and HIGH_CONF_DUPLICATE only",
-        "schema_mapping": {
-            "requirement_location_column": _pick(req_cols, "locations", "preferred_locations", "location"),
-            "property_location_column": _pick(prop_cols, "location_raw", "location", "locations"),
-        },
-        "execution_mode": "FAST_SHORTLIST",
+        "execution_mode": "NO_JOIN_FAST_PATH",
         "introspection_mode": "SELECT_LIMIT_0",
-        "property_index_columns_detected": len(prop_cols),
-        "requirement_index_columns_detected": len(req_cols),
+        "suppression_policy": "V2.4.7A lookup after shortlist only",
+        "schema_mapping": {
+            "requirement_location_column": _pick(
+                req_cols, "locations", "preferred_locations", "location"
+            ),
+            "property_location_column": _pick(
+                prop_cols, "location_raw", "location", "locations"
+            ),
+        },
     }
 def register_v25_match_routes(core):
     app, engine = core.app, core.engine
