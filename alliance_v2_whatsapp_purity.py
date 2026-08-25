@@ -2,7 +2,7 @@ import re
 from sqlalchemy import text
 from alliance_v2_normalize import norm, ptype, area, money, num, infer_frontage, infer_required_floor, infer_suitable
 
-VERSION = "1.1-SAFE-NUMERIC-RECOVERY"
+VERSION = "1.2-LOCATION-SAFE-RECOVERY"
 
 LOCATION_ALIASES = {
     "cp": "Connaught Place",
@@ -105,27 +105,61 @@ def _clean_area_pair(amin, amax):
     return round(a, 2), round(b, 2)
 
 def canonical_location(*values):
+    # Location recovery with token/phrase boundaries.
+    # Short aliases like CP/GK must never match inside unrelated words.
     joined = " ".join(str(v or "") for v in values)
     n = norm(joined)
     if not n:
         return None
 
-    for alias, canonical in sorted(LOCATION_ALIASES.items(), key=lambda x: len(x[0]), reverse=True):
-        if alias in n:
+    extra_aliases = {
+        "south goa": "South Goa",
+        "north goa": "North Goa",
+        "panjim": "Panaji",
+        "panaji": "Panaji",
+        "margao": "Margao",
+        "madgaon": "Margao",
+        "vasco da gama": "Vasco da Gama",
+        "vasco": "Vasco da Gama",
+        "mapusa": "Mapusa",
+        "porvorim": "Porvorim",
+        "siolim": "Siolim",
+        "assagao": "Assagao",
+        "anjuna": "Anjuna",
+        "vagator": "Vagator",
+        "morjim": "Morjim",
+        "calangute": "Calangute",
+        "candolim": "Candolim",
+        "goa": "Goa",
+    }
+
+    aliases = dict(LOCATION_ALIASES)
+    aliases.update(extra_aliases)
+
+    def phrase_matches(alias):
+        escaped = re.escape(alias.strip()).replace(r"\ ", r"\s+")
+        pattern = rf"(?<![a-z0-9]){escaped}(?![a-z0-9])"
+        return re.search(pattern, n, re.I) is not None
+
+    for alias, canonical in sorted(aliases.items(), key=lambda x: len(x[0]), reverse=True):
+        if phrase_matches(alias):
             return canonical
 
     sec = re.search(r"\b(?:sector|sec)\s*[- ]?(\d{1,3}[a-z]?)\b", n, re.I)
     if sec:
-        prefix = "Gurgaon" if ("gurgaon" in n or "gurugram" in n) else "Noida" if "noida" in n else ""
+        prefix = (
+            "Gurgaon" if re.search(r"\b(?:gurgaon|gurugram)\b", n, re.I)
+            else "Noida" if re.search(r"\bnoida\b", n, re.I)
+            else ""
+        )
         return ((prefix + " ") if prefix else "") + "Sector " + sec.group(1).upper()
 
-    # Do not promote placeholder locations such as "Other" into matchable geography.
     for v in values[:-1]:
         s = str(v or "").strip()
         if s and norm(s) not in GENERIC_LOCATIONS:
             return s
-    return None
 
+    return None
 def detect_transaction(current, raw):
     cur = norm(current)
     t = norm(raw)
