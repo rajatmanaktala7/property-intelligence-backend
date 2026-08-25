@@ -217,9 +217,6 @@ def run_match(engine,code):
 def register(core):
     app,engine=core.app,core.engine
 
-    @app.on_event("startup")
-    def start():
-        setup(engine)
 
     @app.middleware("http")
     async def no_delete(req:Request,call_next):
@@ -284,3 +281,5 @@ def register(core):
             return {"status":status.upper(),"rows":rows}
 
     return app
+
+
