@@ -5,7 +5,7 @@ from sqlalchemy import text
 from fastapi import Request
 from fastapi.responses import HTMLResponse
 
-MODULE_VERSION = "2.5.2-FAST-SHORTLIST-PRODUCTION-MATCHER"
+MODULE_VERSION = "2.5.3-DIRECT-INDEX-INTROSPECTION"
 
 def _norm(v):
     return re.sub(r"\s+", " ", str(v or "").strip().lower())
@@ -273,14 +273,17 @@ def score_match(req, prop):
 
 
 def _table_columns(engine, table_name):
+    """
+    Inspect the live index object directly.
+    This works for tables, views, temp/session-visible objects and indexes
+    that are not discoverable through information_schema/current_schemas.
+    """
+    safe = str(table_name or "").strip()
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", safe):
+        raise ValueError("Unsafe table name")
     with engine.connect() as c:
-        rows = c.execute(text("""
-          SELECT column_name
-          FROM information_schema.columns
-          WHERE table_schema = ANY(current_schemas(FALSE))
-            AND table_name = :table
-        """), {"table": table_name}).scalars().all()
-    return set(rows)
+        result = c.execute(text(f"SELECT * FROM {safe} LIMIT 0"))
+        return set(result.keys())
 
 def _pick(cols, *names):
     for name in names:
@@ -329,6 +332,7 @@ def run_match(engine, requirement_code):
             "detail": "Requirement index schema incompatible",
             "missing_columns": ["requirement_code"],
             "available_columns": sorted(req_cols),
+            "introspection_mode": "SELECT_LIMIT_0",
         }
 
     req_select = [
@@ -361,6 +365,7 @@ def run_match(engine, requirement_code):
             "detail": "Property index schema incompatible",
             "missing_columns": ["source_record_id"],
             "available_columns": sorted(prop_cols),
+            "introspection_mode": "SELECT_LIMIT_0",
         }
 
     prop_select = [
@@ -545,6 +550,9 @@ def run_match(engine, requirement_code):
             "property_location_column": _pick(prop_cols, "location_raw", "location", "locations"),
         },
         "execution_mode": "FAST_SHORTLIST",
+        "introspection_mode": "SELECT_LIMIT_0",
+        "property_index_columns_detected": len(prop_cols),
+        "requirement_index_columns_detected": len(req_cols),
     }
 def register_v25_match_routes(core):
     app, engine = core.app, core.engine
