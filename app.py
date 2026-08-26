@@ -16949,3 +16949,10 @@ try:
     print("Alliance V3.7.6 registered successfully")
 except Exception as _v376_error:
     print("Alliance V3.7.6 registration skipped:", repr(_v376_error))
+
+
+# === WHATSAPP LIVE BRIDGE MODULE ===
+from whatsapp_live_bridge import router as whatsapp_live_bridge_router
+app.include_router(whatsapp_live_bridge_router)
+# === END WHATSAPP LIVE BRIDGE MODULE ===
+
