@@ -14,7 +14,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.utils import get_column_letter
 
-VERSION = "8.1-INTEGRATED-POSTGRES"
+VERSION = "8.2-LIVE-UPLOAD-STABILITY"
 
 SYSTEM_PROMPT = r'''
 You are a specialist Indian real-estate newspaper data extractor.
@@ -244,7 +244,52 @@ def _html_page():
 <div class="card" id="editCard" style="display:none"><h2>Edit Property</h2><form id="editForm"><input type="hidden" name="record_id" id="record_id"><div class="cols3"><div><label>Lead Type</label><input name="lead_type" id="lead_type"><label>Locality</label><input name="locality" id="locality"><label>Area</label><input name="area" id="area"><label>Price</label><input name="price" id="price"></div><div><label>Agency / Brand</label><input name="agency_brand" id="agency_brand"><label>Contact Person</label><input name="contact_person" id="contact_person"><label>Phone Number(s)</label><input name="phone_numbers" id="phone_numbers"><label>Verification</label><select name="verification" id="verification"><option>Unverified</option><option>Verified</option><option>Not Reachable</option><option>Archived</option></select></div><div><label>Completeness</label><input name="completeness" id="completeness"><label>Team Member</label><input name="team_member" id="team_member"><label>Source</label><input name="source" id="source"></div></div><label>Configuration / Details</label><textarea name="configuration_details" id="configuration_details" rows="4"></textarea><label>Notes</label><textarea name="notes" id="notes" rows="3"></textarea><button>Save Changes</button> <button type="button" class="btn secondary" onclick="document.getElementById('editCard').style.display='none'">Cancel</button></form></div>
 </div><script>
 const $=id=>document.getElementById(id); async function J(url,opt){let r=await fetch(url,opt);let t=await r.text();let d;try{d=JSON.parse(t)}catch{d={message:t}}if(!r.ok)throw new Error(d.message||d.detail||t);return d}
-$('uploadForm').onsubmit=async e=>{e.preventDefault();$('status').textContent='Processing full page with AI Vision...';let fd=new FormData(e.target);fd.set('high_accuracy',e.target.high_accuracy.checked?'true':'false');fd.set('replace_same',e.target.replace_same.checked?'true':'false');try{let d=await J('/api/newspaper/process',{method:'POST',body:fd});$('status').textContent=`Saved ${d.inserted} unique properties. ${d.skipped} duplicates skipped. Model: ${d.model}`;await loadRows()}catch(err){$('status').textContent='ERROR: '+err.message}}
+async function optimizeNewspaperFile(file){
+  if(!file || !file.type.startsWith('image/')) return file;
+  try{
+    const img=await createImageBitmap(file);
+    const maxSide=2800, scale=Math.min(1,maxSide/Math.max(img.width,img.height));
+    if(scale===1 && file.size<=5*1024*1024){img.close();return file}
+    const c=document.createElement('canvas');
+    c.width=Math.max(1,Math.round(img.width*scale));
+    c.height=Math.max(1,Math.round(img.height*scale));
+    c.getContext('2d',{alpha:false}).drawImage(img,0,0,c.width,c.height);
+    img.close();
+    const blob=await new Promise((resolve,reject)=>c.toBlob(
+      b=>b?resolve(b):reject(new Error('Image compression failed')),
+      'image/jpeg',0.90
+    ));
+    return new File([blob],(file.name||'newspaper').replace(/\.[^.]+$/,'')+'-optimized.jpg',{
+      type:'image/jpeg',lastModified:Date.now()
+    });
+  }catch(e){
+    return file;
+  }
+}
+$('uploadForm').onsubmit=async e=>{
+  e.preventDefault();
+  const input=e.target.querySelector('input[type=file]');
+  const original=input.files&&input.files[0];
+  if(!original){$('status').textContent='ERROR: Please select a newspaper image.';return}
+  $('status').textContent='Preparing newspaper image...';
+  try{
+    const file=await optimizeNewspaperFile(original);
+    const fd=new FormData();
+    fd.set('file',file,file.name);
+    fd.set('source_label',e.target.source_label.value||'Newspaper - Property');
+    fd.set('high_accuracy',e.target.high_accuracy.checked?'true':'false');
+    fd.set('replace_same',e.target.replace_same.checked?'true':'false');
+    $('status').textContent=`Uploading ${(file.size/1024/1024).toFixed(1)} MB and processing with AI Vision...`;
+    const d=await J('/api/newspaper/process',{method:'POST',body:fd});
+    $('status').textContent=`Saved ${d.inserted} unique properties. ${d.skipped} duplicates skipped. Model: ${d.model}`;
+    await loadRows();
+  }catch(err){
+    const m=(err&&err.message)||String(err);
+    $('status').textContent='ERROR: '+(m==='Failed to fetch'
+      ? 'Upload connection was interrupted. Retry once; the image is now auto-optimized before upload.'
+      : m);
+  }
+}
 function esc(s){return String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]))}
 let CACHE={};async function loadRows(){let d=await J('/api/newspaper/records?q='+encodeURIComponent($('q').value));CACHE=Object.fromEntries(d.rows.map(x=>[x.record_id,x]));$('count').textContent=d.rows.length+' property record(s)';$('rows').innerHTML=d.rows.map(x=>`<tr><td>${esc(x.date_captured||'')}</td><td>${esc(x.lead_type||'')}</td><td><b>${esc(x.locality||'')}</b></td><td>${esc(x.area||'')}</td><td>${esc(x.configuration_details||'')}</td><td>${esc(x.price||'')}</td><td>${esc(x.agency_brand||'')}</td><td>${esc(x.contact_person||'')}</td><td><b>${esc(x.phone_numbers||'')}</b></td><td>${esc(x.verification||'')}</td><td class=rowactions><button class="btn green" onclick="editRowById('${x.record_id}')">Edit</button><button onclick="delRow('${x.record_id}')">Delete</button></td></tr>`).join('')}
 function editRowById(id){let x=CACHE[id];if(!x)return;for(let k of ['record_id','lead_type','locality','area','price','agency_brand','contact_person','phone_numbers','verification','completeness','team_member','source','configuration_details','notes'])if($(k))$(k).value=x[k]||'';$('editCard').style.display='block';$('editCard').scrollIntoView({behavior:'smooth'})}
@@ -290,6 +335,10 @@ def register(core):
         try:
             img = Image.open(io.BytesIO(content))
             img = ImageOps.exif_transpose(img).convert('RGB')
+            # V20.1: cap very large phone photos before Vision processing.
+            max_side = 2800
+            if max(img.size) > max_side:
+                img.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)
         except Exception:
             raise HTTPException(400, 'Unsupported or invalid image file')
         sha = hashlib.sha256(content).hexdigest()

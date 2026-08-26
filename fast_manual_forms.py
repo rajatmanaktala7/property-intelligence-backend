@@ -6,7 +6,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel
 from sqlalchemy import text
 
-V19_VERSION='19.3.1-PROPERTY-TYPE-RENDER-FIX'
+V19_VERSION='20.1-GOA-PROPERTY-FORM-FIX'
 PROPERTY_TYPES=['Retail Shop','High Street Retail','Mall Retail','Office','Restaurant','Cafe','Banquet / Wedding Venue','Hotel','Guest House','Lounge','Club','Bar','Farmhouse','Warehouse','Industrial','Land','Mixed Use','Residential / Villa']
 
 class FastProperty(BaseModel):
@@ -46,10 +46,12 @@ class FastRequirement(BaseModel):
 
 def parse_area(v):
     s=str(v or '').lower().replace(',',' ')
-    m=re.search(r'(\d+(?:\.\d+)?)\s*(?:sq\.?\s*ft|sqft|square\s*feet)',s)
+    m=re.search(r'(\d+(?:\.\d+)?)\s*(?:sq\.?\s*ft|sqft|sq\s*feet|square\s*feet)',s)
     if m:return float(m.group(1))
-    m=re.search(r'(\d+(?:\.\d+)?)\s*(?:sq\.?\s*m|sqm|sqmt|square\s*met(?:er|re)s?)',s)
+    m=re.search(r'(\d+(?:\.\d+)?)\s*(?:sq\.?\s*m(?:t|ts|tr|trs)?|sqm|sqmt|sqmtr|m2|m²|square\s*met(?:er|re)s?)',s)
     if m:return round(float(m.group(1))*10.7639104167,2)
+    m=re.search(r'(\d+(?:\.\d+)?)\s*(?:acre|acres)',s)
+    if m:return round(float(m.group(1))*43560,2)
     m=re.search(r'(\d+(?:\.\d+)?)',s)
     return float(m.group(1)) if m else None
 
@@ -78,9 +80,9 @@ def _property_page(d):
 <div class=card><form id=f autocomplete=off><input id=editcode type=hidden><div class=g>
 <div><b>Property Name</b><input name=property_name></div><div><b>City</b><input name=city value="{{city}}"></div>
 <div style="grid-column:1/-1"><b>Property Types *</b><div class=checks>{{checks}}</div></div>
-<div><b>Location *</b><input name=location required></div><div><b>Google Location</b><input name=google_location></div>
-<div><b>Area Details *</b><input name=area_text placeholder="5000 sqft / 2.5 acre" required></div><div><b>Rent Details *</b><input name=rent_text placeholder="5 lakhs" required></div>
-<div><b>Transaction</b><select name=transaction_type><option>LEASE</option><option>SALE</option></select></div><div><b>Floor</b><input name=floor></div>
+<div><b>Location *</b><input name=location required placeholder="Siolim / Assagao / Anjuna"></div><div><b>Google Location (Optional)</b><input name=google_location placeholder="Optional Google Maps link or pin"><div class=help>Not required. Property can be saved without Google location.</div></div>
+<div><b>Area *</b><input name=area_text placeholder="500 sq m / 5000 sqft / 2.5 acre / type manually" required><div class=help>Mandatory free text. Sq m, sqm, sqmt, sqft and acre are accepted.</div></div><div><b id=amountLabel>Rent Amount *</b><input name=rent_text id=amountInput placeholder="5 lakhs" required><div class=help id=amountHelp>Enter rent amount.</div></div>
+<div><b>Transaction</b><select name=transaction_type id=transaction_type><option>LEASE</option><option>SALE</option></select></div><div><b>Floor</b><input name=floor></div>
 <div><b>Frontage</b><input name=frontage></div><div><b>Parking</b><input name=parking></div><div><b>Possession</b><input name=possession></div><div><b>Suitable For</b><input name=suitable_for></div>
 <div><b>Nearby Brands</b><input name=nearby_brands></div><div><b>Owner/Broker Name</b><input name=owner_broker_name></div><div><b>Contact Number</b><input name=contact_number></div>
 <div><b>Contact Role</b><select name=contact_role><option>UNVERIFIED</option><option>OWNER</option><option>BROKER</option></select></div>
@@ -95,7 +97,7 @@ def _property_page(d):
 <div id=progressBox class="card hidden"><b>Upload Progress</b><div id=fileProgress></div></div>
 </form></div>
 
-<div class=card><h3>Recent Manual Properties</h3><table><thead><tr><th>Code</th><th>Property</th><th>Location</th><th>Area</th><th>Rent</th><th>Actions</th></tr></thead><tbody id=rows></tbody></table></div></div>
+<div class=card><h3>Recent Manual Properties</h3><table><thead><tr><th>Code</th><th>Property</th><th>Location</th><th>Area</th><th>Amount</th><th>Actions</th></tr></thead><tbody id=rows></tbody></table></div></div>
 
 <script>
 const DIV='{{d}}',CHUNK=4*1024*1024;let currentMedia=null,submitting=false;const selected={{IMAGE:[],VIDEO:[],BROCHURE:[]}};
@@ -104,6 +106,8 @@ function render(kind){{const ids={{IMAGE:'ilist',VIDEO:'vlist',BROCHURE:'blist'}
 function add(kind,files){{const seen=new Set(selected[kind].map(key));for(const f of Array.from(files||[]))if(!seen.has(key(f))){{selected[kind].push(f);seen.add(key(f))}}render(kind)}}
 function setup(kind,dropId,pickId){{const drop=document.getElementById(dropId),pick=document.getElementById(pickId);drop.onclick=()=>pick.click();pick.onchange=()=>{{add(kind,pick.files);pick.value=''}};drop.ondragover=e=>{{e.preventDefault();drop.classList.add('drag')}};drop.ondragleave=()=>drop.classList.remove('drag');drop.ondrop=e=>{{e.preventDefault();drop.classList.remove('drag');add(kind,e.dataTransfer.files)}}}}
 setup('IMAGE','idrop','ipick');setup('VIDEO','vdrop','vpick');setup('BROCHURE','bdrop','bpick');
+function syncAmountLabel(){{const t=document.getElementById('transaction_type'),sale=t&&t.value==='SALE',l=document.getElementById('amountLabel'),i=document.getElementById('amountInput'),h=document.getElementById('amountHelp');if(l)l.textContent=sale?'Sale Amount *':'Rent Amount *';if(i)i.placeholder=sale?'10 crore / 95000000':'5 lakhs / 500000';if(h)h.textContent=sale?'Enter total sale price.':'Enter rent amount.';}}
+document.getElementById('transaction_type').addEventListener('change',syncAmountLabel);syncAmountLabel();
 function clearMedia(){{selected.IMAGE=[];selected.VIDEO=[];selected.BROCHURE=[];render('IMAGE');render('VIDEO');render('BROCHURE')}}
 function bodyFromForm(){{let fd=new FormData(f),b={{property_types:[...document.querySelectorAll('[name=ptype]:checked')].map(x=>x.value)}};for(let [k,v] of fd.entries())if(k!=='ptype')b[k]=String(v).trim()||null;return b}}
 function resetForm(){{f.reset();editcode.value='';cancel.classList.add('hidden');save.textContent='Save Property + Upload Media';clearMedia();msg.textContent='Ready for next property.'}}
@@ -111,9 +115,9 @@ async function J(u,o={{}}){{let r=await fetch(u,o),d={{}};try{{d=await r.json()}
 function row(file,kind){{let id='p_'+Math.random().toString(36).slice(2);fileProgress.insertAdjacentHTML('beforeend',`<div class=fileRow id="${{id}}"><b>${{kind}} · ${{file.name}}</b><div class=progress><div class=bar></div></div><span>Waiting</span></div>`);return document.getElementById(id)}}
 async function uploadOne(pc,file,kind,rw){{let total=Math.max(1,Math.ceil(file.size/CHUNK));let s=await J('/api/v18/media/start',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{property_code:pc,media_type:kind,filename:file.name,mime_type:file.type||'application/octet-stream',total_size:file.size,total_chunks:total}})}});for(let i=0;i<total;i++){{let blob=file.slice(i*CHUNK,Math.min(file.size,(i+1)*CHUNK)),fd=new FormData();fd.append('file',blob,file.name+'.part'+i);await J('/api/v18/media/chunk/'+encodeURIComponent(s.upload_id)+'/'+i,{{method:'POST',body:fd}});let pct=Math.round((i+1)/total*90);rw.querySelector('.bar').style.width=pct+'%';rw.querySelector('span').textContent='Uploading '+pct+'%'}}await J('/api/v18/media/finalize/'+encodeURIComponent(s.upload_id),{{method:'POST'}});rw.querySelector('.bar').style.width='100%';rw.querySelector('span').textContent='SAVED'}}
 async function uploadAll(pc){{progressBox.classList.remove('hidden');fileProgress.innerHTML='';let ok=0,fail=0,errs=[];for(const kind of ['IMAGE','VIDEO','BROCHURE'])for(const file of selected[kind]){{let rw=row(file,kind);try{{await uploadOne(pc,file,kind,rw);ok++}}catch(e){{fail++;errs.push(kind+' '+file.name+': '+e.message);rw.querySelector('span').textContent='FAILED: '+e.message}}}}let s=await J('/api/v18/property/'+encodeURIComponent(pc)+'/media-status');return {{ok,fail,errs,counts:s.counts||{{}}}}}}
-f.onsubmit=async e=>{{e.preventDefault();if(submitting)return;let b=bodyFromForm();if(!b.property_types.length||!b.location||!b.area_text||!b.rent_text){{msg.textContent='Property Type, Location, Area and Rent are mandatory.';return}}submitting=true;save.disabled=true;let ec=editcode.value;try{{let x=await J(ec?'/api/v19/property/'+encodeURIComponent(ec):'/api/v19/property?division='+DIV,{{method:ec?'PUT':'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify(b)}});let pc=x.property_code||ec;msg.textContent=(ec?'Updated ':'Saved ')+pc+'. Uploading media...';let m=await uploadAll(pc),c=m.counts;msg.textContent=(ec?'UPDATED ':'SAVED ')+pc+'\\nPictures in DB: '+(c.IMAGE||0)+' · Videos in DB: '+(c.VIDEO||0)+' · Brochures in DB: '+(c.BROCHURE||0)+'\\nThis operation: '+m.ok+' saved, '+m.fail+' failed.'+(m.errs.length?'\\n'+m.errs.join('\\n'):'');await load();if(!ec){{f.reset();editcode.value='';clearMedia()}}}}catch(err){{msg.textContent='ERROR: '+err.message}}finally{{submitting=false;save.disabled=false}}}};
+f.onsubmit=async e=>{{e.preventDefault();if(submitting)return;let b=bodyFromForm();if(!b.property_types.length||!b.location||!b.area_text||!b.rent_text){{msg.textContent='Property Type, Location, Area and Amount are mandatory. Google Location is optional.';return}}submitting=true;save.disabled=true;let ec=editcode.value;try{{let x=await J(ec?'/api/v19/property/'+encodeURIComponent(ec):'/api/v19/property?division='+DIV,{{method:ec?'PUT':'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify(b)}});let pc=x.property_code||ec;msg.textContent=(ec?'Updated ':'Saved ')+pc+'. Uploading media...';let m=await uploadAll(pc),c=m.counts;msg.textContent=(ec?'UPDATED ':'SAVED ')+pc+'\\nPictures in DB: '+(c.IMAGE||0)+' · Videos in DB: '+(c.VIDEO||0)+' · Brochures in DB: '+(c.BROCHURE||0)+'\\nThis operation: '+m.ok+' saved, '+m.fail+' failed.'+(m.errs.length?'\\n'+m.errs.join('\\n'):'');await load();if(!ec){{f.reset();editcode.value='';clearMedia()}}}}catch(err){{msg.textContent='ERROR: '+err.message}}finally{{submitting=false;save.disabled=false}}}};
 async function load(){{let d=await J('/api/v19/properties?division='+DIV);rows.innerHTML=(d.rows||[]).map(x=>`<tr><td>${{x.property_code}}</td><td>${{x.property_name||''}}</td><td>${{x.location||''}}</td><td>${{x.area_text||x.area_sqft||''}}</td><td>${{x.rent_text||x.rent_amount||''}}</td><td><button class=btn onclick='editP("${{x.property_code}}")'>Edit</button></td></tr>`).join('')}}
-async function editP(c){{let d=await J('/api/v19/property/'+encodeURIComponent(c)),x=d.property||{{}};f.reset();for(let el of f.elements)if(el.name&&el.name!=='ptype'&&x[el.name]!=null)el.value=x[el.name];document.querySelectorAll('[name=ptype]').forEach(z=>z.checked=(x.property_types||[]).includes(z.value));editcode.value=c;cancel.classList.remove('hidden');save.textContent='Save Changes + Upload Media';clearMedia();scrollTo(0,0)}}
+async function editP(c){{let d=await J('/api/v19/property/'+encodeURIComponent(c)),x=d.property||{{}};f.reset();for(let el of f.elements)if(el.name&&el.name!=='ptype'&&x[el.name]!=null)el.value=x[el.name];document.querySelectorAll('[name=ptype]').forEach(z=>z.checked=(x.property_types||[]).includes(z.value));editcode.value=c;cancel.classList.remove('hidden');save.textContent='Save Changes + Upload Media';clearMedia();syncAmountLabel();scrollTo(0,0)}}
 load();
 </script></body></html>""".replace("{{city}}",city).replace("{checks}",checks).replace("{{checks}}",checks).replace("{{d}}",d)
 
