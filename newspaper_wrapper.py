@@ -1,48 +1,47 @@
+
 import app as core
+from datetime import datetime, timezone
 
 app = core.app
 
+# Alliance V2 is useful, but failure must not take down the core app.
 try:
     from alliance_v2_routes import register as register_alliance_v2
     register_alliance_v2(core)
+    ALLIANCE_V2_STATUS={"status":"HEALTHY","error":None}
     print("Alliance V2: routes registered successfully")
 except Exception as e:
-    print("Alliance V2 registration warning:", type(e).__name__, str(e))
+    ALLIANCE_V2_STATUS={"status":"DEGRADED","error":f"{type(e).__name__}: {e}"}
+    print("Alliance V2 registration warning:",type(e).__name__,str(e))
 
-# Newspaper V8.3 only.
-# Do NOT register newspaper_intelligence.register(core) here.
+# Exactly one optional-module registry. No direct V3.8.1 / V3.8.2 stacking.
 try:
-    import newspaper_upload_v83 as _newspaper_v83
-    _newspaper_v83.register(core)
-    print("Newspaper V8.3 self-healing upload registered successfully")
+    import alliance_module_registry as registry
+    OPTIONAL_MODULES=registry.register_all(core)
 except Exception as e:
-    print("Newspaper V8.3 registration warning:", type(e).__name__, str(e))
+    OPTIONAL_MODULES={
+        "registry":{
+            "status":"DEGRADED",
+            "error":f"{type(e).__name__}: {e}"
+        }
+    }
 
 @app.get("/production-health")
 def production_health():
     return {
-        "status": "OK",
-        "service": "Alliance Property Intelligence",
-        "core_app_loaded": True,
-        "wrapper": "NEWSPAPER_V8_3_1_NO_STARTUP_HANG",
-        "legacy_newspaper_startup_registration": False,
-        "newspaper_mode": "ON_DEMAND_SELF_HEALING"
+        "status":"OK",
+        "service":"Alliance Property Intelligence",
+        "wrapper":"V3.8-STABLE-CONSOLIDATED",
+        "core_app_loaded":True,
+        "alliance_v2":ALLIANCE_V2_STATUS,
+        "optional_modules":OPTIONAL_MODULES,
+        "timestamp_utc":datetime.now(timezone.utc).isoformat(),
     }
 
-
-# ALLIANCE V3.8 SOURCE-AWARE MATCHER
-try:
-    import alliance_v38_source_aware_matcher as _v38
-    _v38.register(core)
-    print("Alliance V3.8 source-aware matcher registered successfully")
-except Exception as e:
-    print("Alliance V3.8 registration warning:", type(e).__name__, str(e))
-
-# ALLIANCE V3.8.2B STARTUP SAFE MANUAL ADAPTER
-try:
-    import alliance_v382b_clean_entity_databases as _v382b
-    _v382b.register(core)
-    print("Alliance V3.8.2B startup-safe manual adapter registered successfully")
-except Exception as e:
-    print("Alliance V3.8.2B registration warning:",type(e).__name__,str(e))
-
+@app.get("/module-health")
+def module_health():
+    return {
+        "wrapper":"V3.8-STABLE-CONSOLIDATED",
+        "alliance_v2":ALLIANCE_V2_STATUS,
+        "modules":OPTIONAL_MODULES,
+    }
