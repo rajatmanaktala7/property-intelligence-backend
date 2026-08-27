@@ -7,7 +7,7 @@ from fastapi import Request
 from fastapi.responses import HTMLResponse
 from sqlalchemy import text
 
-VERSION = "LIVE-FEED-SMART-MARKET-3.5"
+VERSION = "LIVE-FEED-SMART-MARKET-3.6-COMPLETE"
 
 
 def _esc(v):
@@ -625,6 +625,28 @@ MARKET_EQUIVALENTS = {
             "Gurgaon": ["Golf Course Road", "MG Road Gurgaon", "Cyber City", "Sohna Road", "Sector 44 Gurgaon"],
             "Noida": ["Sector 18 Noida", "Sector 62 Noida", "Sector 125 Noida", "Sector 132 Noida", "Sector 142 Noida"],
         },
+        "office_lease": {
+            "Saket": ["Nehru Place", "Jasola", "Okhla", "Greater Kailash", "Malviya Nagar"],
+            "Connaught Place": ["Barakhamba Road", "ITO", "Karol Bagh", "Nehru Place", "Aerocity"],
+            "Gurgaon": ["Cyber City", "Golf Course Road", "MG Road Gurgaon", "Sector 44 Gurgaon", "Sohna Road"],
+            "Noida": ["Sector 62 Noida", "Sector 125 Noida", "Sector 132 Noida", "Sector 142 Noida", "Sector 18 Noida"],
+            "Rajouri Garden": ["Kirti Nagar", "Punjabi Bagh", "Janakpuri", "Pitampura", "Naraina"],
+        },
+        "residential_lease": {
+            "Saket": ["Greater Kailash 1", "Greater Kailash 2", "Malviya Nagar", "Panchsheel Park", "Vasant Kunj"],
+            "Greater Kailash 1": ["Greater Kailash 2", "Defence Colony", "Panchsheel Park", "Kailash Colony", "Saket"],
+            "Greater Kailash 2": ["Greater Kailash 1", "CR Park", "Panchsheel Park", "Defence Colony", "Saket"],
+            "Vasant Kunj": ["Vasant Vihar", "Saket", "Chattarpur", "Panchsheel Park", "Greater Kailash"],
+            "Gurgaon": ["Golf Course Road", "DLF Phase 1", "DLF Phase 2", "Golf Course Extension", "Sector 56 Gurgaon"],
+            "Noida": ["Sector 44 Noida", "Sector 93 Noida", "Sector 100 Noida", "Sector 104 Noida", "Sector 137 Noida"],
+        },
+        "warehouse_industrial": {
+            "Delhi": ["Naraina", "Mayapuri", "Okhla", "Mundka", "Bawana"],
+            "Gurgaon": ["Udyog Vihar", "Manesar", "Bilaspur", "Sohna Road", "Pataudi Road"],
+            "Noida": ["Sector 63 Noida", "Sector 67 Noida", "Sector 80 Noida", "Sector 83 Noida", "Greater Noida"],
+            "Faridabad": ["Mathura Road Faridabad", "Sector 24 Faridabad", "Sector 58 Faridabad", "Ballabgarh", "Prithla"],
+            "Ghaziabad": ["Sahibabad", "Mohan Nagar", "Loni", "Meerut Road", "Dasna"],
+        },
     },
     "Goa": {
         "restaurant": {
@@ -646,6 +668,26 @@ MARKET_EQUIVALENTS = {
             "Mapusa": ["Porvorim", "Panaji", "Siolim", "Assagao", "Calangute"],
             "Margao": ["Panaji", "Vasco da Gama", "Ponda", "Colva", "Benaulim"],
         },
+        "office_lease": {
+            "Panaji": ["Porvorim", "Dona Paula", "Mapusa", "Margao", "Vasco da Gama"],
+            "Porvorim": ["Panaji", "Mapusa", "Dona Paula", "Pilerne", "Candolim"],
+            "Margao": ["Panaji", "Vasco da Gama", "Ponda", "Colva", "Benaulim"],
+            "Mapusa": ["Porvorim", "Panaji", "Siolim", "Calangute", "Assagao"],
+        },
+        "residential_lease": {
+            "Siolim": ["Assagao", "Vagator", "Morjim", "Anjuna", "Parra"],
+            "Assagao": ["Siolim", "Vagator", "Anjuna", "Parra", "Mapusa"],
+            "Panaji": ["Dona Paula", "Porvorim", "Miramar", "Caranzalem", "Taleigao"],
+            "Porvorim": ["Panaji", "Mapusa", "Dona Paula", "Pilerne", "Candolim"],
+            "Calangute": ["Candolim", "Arpora", "Baga", "Nagoa", "Anjuna"],
+            "Margao": ["Benaulim", "Colva", "Navelim", "Fatorda", "Cavelossim"],
+        },
+        "warehouse_industrial": {
+            "Panaji": ["Porvorim", "Pilerne", "Mapusa", "Vasco da Gama", "Verna"],
+            "Margao": ["Verna", "Vasco da Gama", "Ponda", "Cuncolim", "Navelim"],
+            "Mapusa": ["Porvorim", "Pilerne", "Panaji", "Thivim", "Colvale"],
+            "Vasco da Gama": ["Verna", "Margao", "Panaji", "Ponda", "Cortalim"],
+        },
     },
 }
 
@@ -655,30 +697,76 @@ def _market_context(row):
     tx = str(row.get("clean_transaction") or row.get("transaction_type") or "").upper()
     loc = str(row.get("clean_location") or row.get("location") or row.get("locality") or "").strip()
 
-    if typ in {"RESTAURANT", "CAFE", "BANQUET", "HOTEL", "GUEST_HOUSE", "CLUB", "LOUNGE"}:
+    hospitality = {"RESTAURANT","CAFE","BANQUET","HOTEL","GUEST_HOUSE","CLUB","LOUNGE"}
+    retail = {"RETAIL_SHOP","COMMERCIAL_SHOP","COMMERCIAL_SHOWROOM","SHOWROOM","SHOP"}
+    residential = {"RESIDENTIAL","VILLA","INDEPENDENT_HOUSE_VILLA","APARTMENT","FLAT","BUILDER_FLOOR"}
+    office = {"OFFICE","COMMERCIAL_OFFICE","WORKSPACE"}
+    industrial = {"WAREHOUSE","WAREHOUSE_INDUSTRIAL","INDUSTRIAL","FACTORY","GODOWN"}
+
+    if typ in hospitality:
         context = "restaurant"
-    elif typ in {"RETAIL_SHOP", "COMMERCIAL_SHOP", "COMMERCIAL_SHOWROOM"} and tx in {"LEASE", "LEASE_OR_SALE"}:
-        context = "retail"
-    elif typ in {"RESIDENTIAL", "VILLA", "INDEPENDENT_HOUSE_VILLA"} and tx in {"SALE", "LEASE_OR_SALE"}:
-        context = "residential_sale"
-    elif tx in {"SALE", "LEASE_OR_SALE"}:
+    elif typ in industrial:
+        context = "warehouse_industrial"
+    elif typ in office:
+        context = "office_lease" if tx in {"LEASE","LEASE_OR_SALE"} else "commercial_sale"
+    elif typ in residential:
+        context = "residential_sale" if tx in {"SALE","LEASE_OR_SALE"} else "residential_lease"
+    elif typ in retail:
+        context = "retail" if tx in {"LEASE","LEASE_OR_SALE"} else "commercial_sale"
+    elif tx in {"SALE","LEASE_OR_SALE"}:
         context = "commercial_sale"
     else:
-        context = "retail"
+        context = "office_lease"
 
-    region = "Goa" if loc in {
+    goa_locations = {
         "Siolim","Assagao","Vagator","Morjim","Anjuna","Panaji","Porvorim",
-        "Calangute","Candolim","Margao","Mapusa","Benaulim","Colva","Vasco da Gama"
-    } else "Delhi NCR"
-
+        "Calangute","Candolim","Margao","Mapusa","Benaulim","Colva","Vasco da Gama",
+        "Dona Paula","Miramar","Caranzalem","Taleigao","Pilerne","Verna","Ponda"
+    }
+    region = "Goa" if loc in goa_locations else "Delhi NCR"
     return region, context, loc
-
 
 def _alternative_markets(row, limit=5):
     region, context, loc = _market_context(row)
-    options = MARKET_EQUIVALENTS.get(region, {}).get(context, {}).get(loc, [])
-    return options[:limit]
+    context_map = MARKET_EQUIVALENTS.get(region, {}).get(context, {})
 
+    # Exact mapped market first.
+    if loc in context_map:
+        return context_map[loc][:limit]
+
+    # Broader city fallback for industrial/office use-cases.
+    n = (loc or "").lower()
+    aliases = [
+        ("gurgaon", "Gurgaon"), ("gurugram", "Gurgaon"),
+        ("noida", "Noida"), ("faridabad", "Faridabad"),
+        ("ghaziabad", "Ghaziabad"), ("delhi", "Delhi"),
+        ("panaji", "Panaji"), ("porvorim", "Porvorim"),
+        ("margao", "Margao"), ("mapusa", "Mapusa"),
+        ("vasco", "Vasco da Gama"),
+    ]
+    for token, canonical in aliases:
+        if token in n and canonical in context_map:
+            return context_map[canonical][:limit]
+
+    # If location is missing, infer sensible city-level alternatives from region/context.
+    if not loc:
+        default_key = {
+            ("Delhi NCR","warehouse_industrial"): "Gurgaon",
+            ("Delhi NCR","office_lease"): "Gurgaon",
+            ("Delhi NCR","retail"): "Saket",
+            ("Delhi NCR","restaurant"): "Saket",
+            ("Delhi NCR","residential_sale"): "Saket",
+            ("Delhi NCR","residential_lease"): "Saket",
+            ("Goa","warehouse_industrial"): "Panaji",
+            ("Goa","office_lease"): "Panaji",
+            ("Goa","restaurant"): "Siolim",
+            ("Goa","residential_sale"): "Siolim",
+            ("Goa","residential_lease"): "Siolim",
+        }.get((region, context))
+        if default_key and default_key in context_map:
+            return context_map[default_key][:limit]
+
+    return []
 
 def _attach_market_intelligence(rows):
     out = []
@@ -688,11 +776,13 @@ def _attach_market_intelligence(rows):
         x["market_region"] = region
         x["market_context"] = context
         x["alternative_markets"] = _alternative_markets(x)
-        x["market_reason"] = (
-            f"Comparable {context.replace('_',' ')} markets to {loc}"
-            if loc and x["alternative_markets"]
-            else "No curated alternative-market map available"
-        )
+        if x["alternative_markets"]:
+            if loc:
+                x["market_reason"] = f"Comparable {context.replace('_',' ')} markets to {loc}"
+            else:
+                x["market_reason"] = f"Suggested {context.replace('_',' ')} markets because location is missing"
+        else:
+            x["market_reason"] = "No mapped alternative found yet"
         out.append(x)
     return out
 
@@ -771,6 +861,10 @@ def register(wrapped):
                         "HOT": sum(1 for x in ranked if x["priority_band"] == "HOT"),
                         "STRONG": sum(1 for x in ranked if x["priority_band"] == "STRONG"),
                         "REVIEW": sum(1 for x in ranked if x["priority_band"] == "REVIEW"),
+                    },
+                    "market_coverage": {
+                        "with_alternatives": sum(1 for x in ranked if x.get("alternative_markets")),
+                        "without_alternatives": sum(1 for x in ranked if not x.get("alternative_markets")),
                     },
                     "top_priority_sample": [
                         {
