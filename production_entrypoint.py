@@ -254,11 +254,12 @@ def _load_core():
     try:
         import newspaper_wrapper as wrapped
 
-        stabilization = _late_register_intelligence(wrapped)
+        import alliance_production_surface as production_surface
+        stabilization = production_surface.register(wrapped)
 
         CORE_APP = wrapped.app
         BOOT["core_loaded"] = True
-        BOOT["state"] = "READY" if stabilization.get("same_app_object") else "DEGRADED"
+        BOOT["state"] = "READY" if stabilization.get("registered") else "DEGRADED"
         BOOT["stabilization"] = stabilization
         BOOT["completed_at"] = datetime.now(timezone.utc).isoformat()
         print("[health-first] Alliance core application loaded successfully")
