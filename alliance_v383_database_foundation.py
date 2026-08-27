@@ -359,8 +359,12 @@ def _migrate(engine, limit=10000):
 def register(core):
     app, engine, need_login = core.app, core.engine, core.need_login
     router = APIRouter(tags=["Alliance Canonical Database V383"])
+    # STARTUP HOTFIX:
+    # Never run the full legacy migration while newspaper_wrapper is importing.
+    # Route registration must stay fast so Railway core can become READY.
+    # Existing canonical data is preserved. Manual resync remains available at /api/v383/sync.
     try:
-        _migrate(engine)
+        _ensure_schema(engine)
         startup_status, startup_error = "READY", None
     except Exception as exc:
         startup_status = "DEGRADED"
@@ -380,7 +384,7 @@ def register(core):
                 "location_aliases":c.execute(text("SELECT COUNT(*) FROM alliance_location_aliases WHERE approved=TRUE")).scalar(),
             }
         return {"version":VERSION,"status":startup_status,"startup_error":startup_error,
-                "authoritative_foundation":True,"legacy_tables_preserved":True,"counts":counts}
+                "authoritative_foundation":True,"legacy_tables_preserved":True,"startup_mode":"SCHEMA_ONLY_NONBLOCKING","counts":counts}
 
     @router.post("/api/v383/sync")
     def sync(req: Request, limit: int = Query(10000, ge=1, le=50000)):
