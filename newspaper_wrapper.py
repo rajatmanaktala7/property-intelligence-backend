@@ -71,3 +71,11 @@ try:
 except Exception as e:
     print("Alliance V4.5 takeover warning:",type(e).__name__,str(e))
 
+# ALLIANCE V4.6 UNIFIED LIVE INTELLIGENCE
+try:
+    import alliance_v46_unified_intelligence as _v46
+    _v46.register(core)
+    print("Alliance V4.6 unified live intelligence registered successfully")
+except Exception as e:
+    print("Alliance V4.6 registration warning:",type(e).__name__,str(e))
+
