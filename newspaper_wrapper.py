@@ -46,11 +46,11 @@ def module_health():
         "modules":OPTIONAL_MODULES,
     }
 
-# ALLIANCE V4.0 WHATSAPP NORMALIZED PIPELINE
+# ALLIANCE V4.1B EXACT GIRJA SPLITTER
 try:
-    import alliance_v40_whatsapp_pipeline as _v40
-    _v40.register(core)
-    print("Alliance V4.0 WhatsApp normalized pipeline registered successfully")
+    import alliance_v41b_whatsapp_splitter as _v41b
+    _v41b.register(core)
+    print("Alliance V4.1B exact Girja splitter registered successfully")
 except Exception as e:
-    print("Alliance V4.0 WhatsApp pipeline registration warning:",type(e).__name__,str(e))
+    print("Alliance V4.1B registration warning:",type(e).__name__,str(e))
 
