@@ -45,3 +45,12 @@ def module_health():
         "alliance_v2":ALLIANCE_V2_STATUS,
         "modules":OPTIONAL_MODULES,
     }
+
+# ALLIANCE V3.9 DATA QUALITY
+try:
+    import alliance_v39_data_quality as _v39
+    _v39.register(core)
+    print("Alliance V3.9 data quality registered successfully")
+except Exception as e:
+    print("Alliance V3.9 data quality registration warning:",type(e).__name__,str(e))
+
