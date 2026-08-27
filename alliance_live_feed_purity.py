@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import hashlib
+import re
+
 from fastapi import Request
 from fastapi.responses import HTMLResponse
 from sqlalchemy import text
 
-VERSION = "LIVE-FEED-PROVEN-RESTORE-3.1"
+VERSION = "LIVE-FEED-PROVEN-RESTORE-3.2-VISIBLE-ENTITY-FIX"
 
 
 def _esc(v):
@@ -26,7 +29,8 @@ def _source_engine(core):
 def _exists(conn, table):
     return bool(
         conn.execute(
-            text("SELECT to_regclass(:t)"), {"t": f"public.{table}"}
+            text("SELECT to_regclass(:t)"),
+            {"t": f"public.{table}"},
         ).scalar()
     )
 
@@ -60,12 +64,13 @@ def _detect_source(conn):
     if _exists(conn, "wai_listings"):
         wai_listings = _count(conn, "wai_listings")
 
-    if wa_properties > 0:
-        selected = "wa_properties"
-    elif wai_listings > 0:
-        selected = "wai_listings"
-    else:
-        selected = "none"
+    selected = (
+        "wa_properties"
+        if wa_properties > 0
+        else "wai_listings"
+        if wai_listings > 0
+        else "none"
+    )
 
     return {
         "selected_source": selected,
@@ -80,11 +85,8 @@ def status(core):
     out = {
         "status": "OK",
         "version": VERSION,
-        "mode": "READ_EXISTING_PROVEN_LEADS",
+        "mode": "READ_EXISTING_PROVEN_LEADS_WITH_VISIBLE_ENTITY_SPLIT",
         "using_separate_whatsapp_database": bool(dispose),
-        "wa_properties_exists": False,
-        "wa_requirements_exists": False,
-        "wai_listings_exists": False,
         "selected_source": "none",
         "wa_properties_count": 0,
         "wa_requirements_count": 0,
@@ -92,9 +94,6 @@ def status(core):
     }
     try:
         with engine.connect() as conn:
-            out["wa_properties_exists"] = _exists(conn, "wa_properties")
-            out["wa_requirements_exists"] = _exists(conn, "wa_requirements")
-            out["wai_listings_exists"] = _exists(conn, "wai_listings")
             out.update(_detect_source(conn))
     except Exception as exc:
         out["status"] = "ERROR"
@@ -116,6 +115,7 @@ def _rows_from_wa_properties(conn, q, limit):
               COALESCE(locality,'') ILIKE :q OR
               COALESCE(property_type,'') ILIKE :q OR
               COALESCE(raw_text,'') ILIKE :q OR
+              COALESCE(parent_message_text,'') ILIKE :q OR
               COALESCE(broker_name,'') ILIKE :q OR
               COALESCE(broker_phone,'') ILIKE :q OR
               COALESCE(owner_name,'') ILIKE :q OR
@@ -128,6 +128,7 @@ def _rows_from_wa_properties(conn, q, limit):
 
     sql = f"""
       SELECT
+        id,
         wa_property_id,
         source_item_no,
         first_seen,
@@ -159,7 +160,8 @@ def _rows_from_wa_properties(conn, q, limit):
         sender_phone,
         duplicate_status,
         confidence,
-        raw_text
+        raw_text,
+        parent_message_text
       FROM wa_properties
       WHERE {" AND ".join(where)}
       ORDER BY COALESCE(last_seen,first_seen) DESC NULLS LAST, id DESC
@@ -192,6 +194,7 @@ def _rows_from_wai_listings(conn, q, limit):
 
     sql = f"""
       SELECT
+        l.id,
         l.id::text AS wa_property_id,
         1 AS source_item_no,
         COALESCE(rm.sent_at,l.created_at)::text AS first_seen,
@@ -224,22 +227,17 @@ def _rows_from_wai_listings(conn, q, limit):
         NULL::text AS parking,
         NULL::text AS suitable_for,
         NULL::text AS nearby_brands,
-        CASE
-          WHEN lower(COALESCE(l.status,'')) IN ('inactive','closed','deleted') THEN 'INACTIVE'
-          ELSE 'UNKNOWN'
-        END AS availability,
+        'UNKNOWN'::text AS availability,
         COALESCE(ct.display_name,l.poster_name) AS broker_name,
         COALESCE(ct.phone,rm.sender_phone) AS broker_phone,
         NULL::text AS owner_name,
         NULL::text AS owner_phone,
         COALESCE(rm.sender_display_name,l.poster_name) AS sender_name,
         COALESCE(rm.sender_phone,ct.phone) AS sender_phone,
-        CASE
-          WHEN l.duplicate_of IS NULL THEN 'UNIQUE'
-          ELSE 'POSSIBLE_DUPLICATE'
-        END AS duplicate_status,
+        CASE WHEN l.duplicate_of IS NULL THEN 'UNIQUE' ELSE 'POSSIBLE_DUPLICATE' END AS duplicate_status,
         l.confidence_score AS confidence,
-        COALESCE(NULLIF(l.raw_listing_text,''),l.summary,'') AS raw_text
+        COALESCE(NULLIF(l.raw_listing_text,''),l.summary,'') AS raw_text,
+        COALESCE(NULLIF(l.raw_listing_text,''),l.summary,'') AS parent_message_text
       FROM wai_listings l
       LEFT JOIN wai_contacts ct ON ct.id=l.contact_id
       LEFT JOIN wai_raw_messages rm ON rm.id=l.source_message_id
@@ -269,6 +267,76 @@ def get_rows(core, q="", limit=500):
             engine.dispose()
 
 
+def _norm_entity(v):
+    return re.sub(r"\s+", " ", str(v or "")).strip().lower()
+
+
+def _visible_entities(rows):
+    """
+    Historical wa_properties may contain old multi-property raw_text values.
+    For display only, use the proven split_inventory() again and flatten rows.
+    No database writes occur.
+    """
+    from whatsapp_intelligence import split_inventory
+
+    out = []
+    seen = set()
+
+    for row in rows:
+        d = dict(row)
+        raw = str(d.get("raw_text") or "").strip()
+        parent = str(d.get("parent_message_text") or "").strip()
+
+        # Use raw_text first. If it is suspiciously identical to a long parent message,
+        # split the parent. This handles historical rows created before splitter fixes.
+        candidate = raw or parent
+
+        try:
+            parts = split_inventory(candidate) if candidate else []
+        except Exception:
+            parts = [candidate] if candidate else []
+
+        if not parts:
+            parts = [candidate] if candidate else [""]
+
+        # If raw_text is one clean item but parent contains many items, split parent
+        # only when raw_text == parent or raw_text is empty.
+        if parent and (not raw or _norm_entity(raw) == _norm_entity(parent)):
+            try:
+                parent_parts = split_inventory(parent)
+                if len(parent_parts) > len(parts):
+                    parts = parent_parts
+            except Exception:
+                pass
+
+        for idx, part in enumerate(parts, start=1):
+            part = str(part or "").strip()
+            if not part:
+                continue
+
+            fp = hashlib.sha1(
+                (
+                    str(d.get("wa_property_id") or d.get("id") or "")
+                    + "|"
+                    + _norm_entity(part)
+                ).encode("utf-8")
+            ).hexdigest()
+
+            if fp in seen:
+                continue
+            seen.add(fp)
+
+            x = dict(d)
+            x["visible_entity_no"] = idx
+            x["visible_entity_text"] = part
+            x["visible_entity_id"] = (
+                f"{d.get('wa_property_id') or d.get('id')}-E{idx}"
+            )
+            out.append(x)
+
+    return out
+
+
 def register(wrapped):
     app = wrapped.app
     core = wrapped.core
@@ -294,13 +362,15 @@ def register(wrapped):
 
     def sample():
         try:
-            source, rows, detected = get_rows(core, "", 25)
+            source, stored_rows, detected = get_rows(core, "", 50)
+            visible = _visible_entities(stored_rows)
             return {
                 "status": "OK",
                 "version": VERSION,
                 "source": source,
-                "sample_count": len(rows),
-                "one_property_per_row": source == "wa_properties",
+                "stored_rows_sampled": len(stored_rows),
+                "visible_entities_after_split": len(visible),
+                "split_gain": len(visible) - len(stored_rows),
                 "counts": detected,
             }
         except Exception as exc:
@@ -313,11 +383,26 @@ def register(wrapped):
     def debug():
         result = status(core)
         try:
-            source, rows, detected = get_rows(core, "", 5)
-            result["selected_source"] = source
-            result["sample_count"] = len(rows)
-            result["sample_ids"] = [str(x.get("wa_property_id")) for x in rows]
-            result["counts"] = detected
+            source, stored_rows, detected = get_rows(core, "", 100)
+            visible = _visible_entities(stored_rows)
+            multi = {}
+            for row in visible:
+                base = str(row.get("wa_property_id") or row.get("id"))
+                multi[base] = multi.get(base, 0) + 1
+
+            result.update(
+                {
+                    "selected_source": source,
+                    "stored_rows_sampled": len(stored_rows),
+                    "visible_entities_after_split": len(visible),
+                    "split_gain": len(visible) - len(stored_rows),
+                    "multi_entity_stored_rows": sum(1 for n in multi.values() if n > 1),
+                    "sample_visible_ids": [
+                        x.get("visible_entity_id") for x in visible[:10]
+                    ],
+                    "counts": detected,
+                }
+            )
         except Exception as exc:
             result["sample_error"] = f"{type(exc).__name__}: {exc}"
         return result
@@ -330,7 +415,10 @@ def register(wrapped):
             limit = 500
 
         try:
-            source, rows, detected = get_rows(core, q, limit)
+            # Fetch fewer stored rows than the absolute maximum because a row
+            # may expand into several visible entities.
+            source, stored_rows, detected = get_rows(core, q, limit)
+            rows = _visible_entities(stored_rows)
         except Exception as exc:
             return HTMLResponse(
                 f"""<!doctype html><html><body style='font-family:Arial;padding:30px'>
@@ -342,7 +430,7 @@ def register(wrapped):
             )
 
         trs = []
-        for row in rows:
+        for row in rows[:1500]:
             price = []
             if row.get("rent_inr") not in (None, ""):
                 price.append("Rent: " + str(row.get("rent_inr")))
@@ -363,7 +451,9 @@ def register(wrapped):
             )
 
             location = " · ".join(
-                str(x) for x in [row.get("location"), row.get("locality")] if x
+                str(x)
+                for x in [row.get("location"), row.get("locality")]
+                if x
             )
             area = row.get("available_area_sqft") or row.get("area_sqft") or "—"
 
@@ -375,7 +465,7 @@ def register(wrapped):
                 <td>{_esc(location or '—')}</td>
                 <td>{_esc(area)}</td>
                 <td>{_esc(' | '.join(price) or '—')}</td>
-                <td style='min-width:440px;white-space:pre-wrap'>{_esc(row.get('raw_text') or '—')}</td>
+                <td style='min-width:440px;white-space:pre-wrap'>{_esc(row.get('visible_entity_text') or '—')}</td>
                 <td>{_esc(contact or '—')}</td>
                 <td>{_esc(row.get('duplicate_status') or '—')}</td>
                 <td>{_esc(row.get('confidence') or '—')}</td>
@@ -401,7 +491,7 @@ def register(wrapped):
             .ok{{color:#176b3a;font-weight:700}}
             </style></head><body>
             <header><h2 style='margin:0'>WhatsApp Property Leads</h2>
-            <small>Proven property source · requirements excluded · no reprocessing during page load</small></header>
+            <small>One visible property entity per row · historical multi-property rows re-split safely in memory</small></header>
             <main>
             <div class='card'>
               <form>
@@ -409,13 +499,13 @@ def register(wrapped):
                 <input type='hidden' name='limit' value='{limit}'>
                 <button>Search</button>
               </form>
-              <p><span class='ok'>{len(rows)} property leads</span> · source table: <b>{_esc(source)}</b></p>
-              <p>wa_properties: <b>{detected['wa_properties_count']}</b> · wai_listings: <b>{detected['wai_listings_count']}</b> · requirements kept separate: <b>{detected['wa_requirements_count']}</b></p>
+              <p><span class='ok'>{len(rows)} visible property entities</span> from <b>{len(stored_rows)}</b> stored rows · source: <b>{_esc(source)}</b></p>
+              <p>wa_properties: <b>{detected['wa_properties_count']}</b> · requirements kept separate: <b>{detected['wa_requirements_count']}</b></p>
               <p><a href='/api/live-feed-purity/debug'>Diagnostics</a></p>
             </div>
             <div class='card' style='overflow:auto'>
               <table>
-              <tr><th>Latest</th><th>Transaction</th><th>Type</th><th>Location</th><th>Area</th><th>Price/Rent</th><th>Property Details</th><th>Contact</th><th>Duplicate</th><th>Confidence</th></tr>
+              <tr><th>Latest</th><th>Transaction</th><th>Type</th><th>Location</th><th>Area</th><th>Price/Rent</th><th>Property Entity</th><th>Contact</th><th>Duplicate</th><th>Confidence</th></tr>
               {body}
               </table>
             </div>
