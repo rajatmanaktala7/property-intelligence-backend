@@ -37,3 +37,12 @@ try:
     print("Alliance V3.8 source-aware matcher registered successfully")
 except Exception as e:
     print("Alliance V3.8 registration warning:", type(e).__name__, str(e))
+
+
+# ALLIANCE V3.8.1 CLEAN ENTITY DATABASES
+try:
+    import alliance_v381_clean_entity_databases as _v381
+    _v381.register(core)
+    print("Alliance V3.8.1 clean entity databases registered successfully")
+except Exception as e:
+    print("Alliance V3.8.1 registration warning:",type(e).__name__,str(e))
