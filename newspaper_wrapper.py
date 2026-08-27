@@ -46,11 +46,11 @@ def module_health():
         "modules":OPTIONAL_MODULES,
     }
 
-# ALLIANCE V4.1B EXACT GIRJA SPLITTER
+# ALLIANCE V4.2 CLEAN SOURCES
 try:
-    import alliance_v41b_whatsapp_splitter as _v41b
-    _v41b.register(core)
-    print("Alliance V4.1B exact Girja splitter registered successfully")
+    import alliance_v42_clean_sources as _v42
+    _v42.register(core)
+    print("Alliance V4.2 clean sources registered successfully")
 except Exception as e:
-    print("Alliance V4.1B registration warning:",type(e).__name__,str(e))
+    print("Alliance V4.2 registration warning:",type(e).__name__,str(e))
 
