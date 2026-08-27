@@ -46,11 +46,11 @@ def module_health():
         "modules":OPTIONAL_MODULES,
     }
 
-# ALLIANCE V3.9 DATA QUALITY
+# ALLIANCE V4.0 WHATSAPP NORMALIZED PIPELINE
 try:
-    import alliance_v39_data_quality as _v39
-    _v39.register(core)
-    print("Alliance V3.9 data quality registered successfully")
+    import alliance_v40_whatsapp_pipeline as _v40
+    _v40.register(core)
+    print("Alliance V4.0 WhatsApp normalized pipeline registered successfully")
 except Exception as e:
-    print("Alliance V3.9 data quality registration warning:",type(e).__name__,str(e))
+    print("Alliance V4.0 WhatsApp pipeline registration warning:",type(e).__name__,str(e))
 

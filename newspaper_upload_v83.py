@@ -96,7 +96,7 @@ input{padding:9px}.btn,button{background:#865f3d;color:#fff;border:0;border-radi
 <form id=f><input type=file name=file accept="image/*" capture="environment" required><br><br>
 <input name=source_label value="Newspaper - Property"><label><input type=checkbox name=high_accuracy checked> High Accuracy</label><br><br>
 <button>Upload & Process</button></form><div id=s class=status>Ready.</div></div>
-<div class=card><a class="btn green" href="/newspaper-database-clean">Open Newspaper Database</a></div>
+<div class=card><a class="btn green" href="/newspaper-property-database-v40">Open Newspaper Database</a></div>
 <script>
 f.onsubmit=async e=>{e.preventDefault();s.textContent='UPLOAD: sending image...';let fd=new FormData(f);fd.set('high_accuracy',f.high_accuracy.checked?'true':'false');
 try{let r=await fetch('/api/newspaper-v83/process',{method:'POST',body:fd,credentials:'include'});let t=await r.text();let d;try{d=JSON.parse(t)}catch(_){d={detail:t}}
@@ -137,8 +137,7 @@ catch(err){s.textContent='ERROR\\n'+err.message}}
                     c.execute(text("""UPDATE pi_newspaper_sources SET image_content=:b,original_filename=:f,mime_type=:m,
                       source_label=:s,extraction_status='PROCESSING',error_message=NULL,updated_at=NOW() WHERE id=:id"""),
                       {"b":content,"f":filename,"m":mime,"s":source_label,"id":sid})
-                    c.execute(text("""DELETE FROM pi_newspaper_properties WHERE source_id=:sid
-                      AND COALESCE(verification,'Unverified')!='Verified'"""),{"sid":sid})
+                    # V4.0 non-destructive reprocess: preserve historical extraction rows.
                 else:
                     sid=c.execute(text("""INSERT INTO pi_newspaper_sources(
                       source_hash,original_filename,mime_type,image_content,source_label,extraction_status)
