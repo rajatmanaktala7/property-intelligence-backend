@@ -108,6 +108,56 @@ code{{background:#f5eee5;padding:4px 6px;border-radius:5px}}
     )
 
 
+@health_app.get("/core-route-status")
+def core_route_status():
+    routes = []
+    if CORE_APP is not None and hasattr(CORE_APP, "router"):
+        for r in CORE_APP.router.routes:
+            p = getattr(r, "path", None)
+            methods = sorted(list(getattr(r, "methods", set()) or set()))
+            if p:
+                routes.append({"path": p, "methods": methods})
+    wanted = [
+        "/api/v383/status",
+        "/api/v46/status",
+        "/api/v451/live/status",
+        "/api/v451/live/properties",
+        "/api/live-bootstrap-status",
+        "/whatsapp-live",
+        "/whatsapp-live/feed",
+    ]
+    present = {w: any(x["path"] == w for x in routes) for w in wanted}
+    return {
+        "status": "OK",
+        "boot_state": BOOT.get("state"),
+        "core_loaded": BOOT.get("core_loaded"),
+        "core_app_present": CORE_APP is not None,
+        "wanted_routes_present": present,
+        "route_count": len(routes),
+        "routes": routes,
+    }
+
+@health_app.get("/api/live-bootstrap-status")
+def shell_live_bootstrap_status():
+    routes = []
+    if CORE_APP is not None and hasattr(CORE_APP, "router"):
+        routes = [getattr(r, "path", None) for r in CORE_APP.router.routes if getattr(r, "path", None)]
+    return {
+        "status": "OK" if BOOT.get("core_loaded") else "STARTING",
+        "served_by": "production_entrypoint health shell",
+        "boot_state": BOOT.get("state"),
+        "core_loaded": BOOT.get("core_loaded"),
+        "v383_registered": "/api/v383/status" in routes,
+        "v46_registered": "/api/v46/status" in routes,
+        "v451_registered": "/api/v451/live/status" in routes,
+        "v451_properties_registered": "/api/v451/live/properties" in routes,
+        "whatsapp_live_registered": "/whatsapp-live" in routes,
+        "whatsapp_feed_registered": "/whatsapp-live/feed" in routes,
+        "core_bootstrap_route_registered": routes.count("/api/live-bootstrap-status") > 0,
+        "route_count": len(routes),
+    }
+
+
 def _load_core():
     global CORE_APP
 
@@ -157,6 +207,8 @@ class HealthFirstDispatcher:
         "/healthz",
         "/readyz",
         "/boot-status",
+        "/core-route-status",
+        "/api/live-bootstrap-status",
     }
 
     async def __call__(self, scope: dict[str, Any], receive, send):
