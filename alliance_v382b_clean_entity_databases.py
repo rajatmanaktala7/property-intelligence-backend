@@ -6,7 +6,7 @@ from fastapi import APIRouter, Request, Body, Query, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import text, create_engine
 
-VERSION = "3.8.2B-STARTUP-SAFE-MANUAL-PI-PROPERTIES-ADAPTER"
+VERSION = "3.8-STABLE.1-TIMEOUT-GUARD"
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS ai_clean_property_entity(
@@ -191,6 +191,41 @@ def _upsert(c,row):
         updated_at=NOW()
     """),row)
 
+
+def _set_timeout(conn, milliseconds=3000):
+    try:
+        conn.execute(text(f"SET LOCAL statement_timeout = {int(milliseconds)}"))
+    except Exception:
+        pass
+
+def _fast_table_status(engine, table_names):
+    """
+    Metadata-only source discovery.
+    Never scans source tables and never runs COUNT(*).
+    reltuples is approximate but fast and sufficient for source health.
+    """
+    out=[]
+    try:
+        with engine.begin() as c:
+            _set_timeout(c, 2500)
+            rows=c.execute(text("""
+                SELECT c.relname AS table_name,
+                       GREATEST(c.reltuples::bigint,0) AS approx_rows
+                FROM pg_class c
+                JOIN pg_namespace n ON n.oid=c.relnamespace
+                WHERE n.nspname='public'
+                  AND c.relname = ANY(:names)
+                  AND c.relkind IN ('r','p')
+            """),{"names":list(table_names)}).mappings().all()
+            found={r["table_name"]:dict(r) for r in rows}
+            for name in table_names:
+                if name in found:
+                    out.append({"table":name,"approx_count":int(found[name]["approx_rows"] or 0)})
+    except Exception as e:
+        return [{"status":"DEGRADED","error":f"{type(e).__name__}: {e}"}]
+    return out
+
+
 def register(core):
     app=core.app
     engine=core.engine
@@ -205,6 +240,8 @@ def register(core):
             "version":VERSION,
             "status":"OK",
             "startup_schema_ddl":False,
+            "get_schema_ddl":False,
+            "statement_timeout_guard":True,
             "manual_authoritative_table":"pi_properties",
             "description":True,
             "edit":True,
@@ -221,7 +258,7 @@ def register(core):
             raise HTTPException(500,f"SETUP_FAILED: {type(e).__name__}: {e}")
 
     @router.post("/api/v382/sync/whatsapp")
-    def sync_whatsapp(req:Request,limit:int=Query(1000,ge=1,le=5000)):
+    def sync_whatsapp(req:Request,limit:int=Query(500,ge=1,le=1000)):
         need_login(req)
         _ensure_schema(engine)
         w=_wa_engine()
@@ -257,7 +294,7 @@ def register(core):
         return {"status":"OK","clean_entities_created_or_updated":count}
 
     @router.post("/api/v382/sync/source/{source}")
-    def sync_source(source:str,req:Request,limit:int=Query(5000,ge=1,le=10000)):
+    def sync_source(source:str,req:Request,limit:int=Query(1000,ge=1,le=2000)):
         need_login(req)
         _ensure_schema(engine)
         src=source.upper()
@@ -276,8 +313,18 @@ def register(core):
         if not table or not _exists(engine,table):
             return {"status":"NOT_READY","source":src,"count":0}
 
-        with engine.connect() as c:
-            rows=[dict(x) for x in c.execute(text(f'SELECT * FROM "{table}" LIMIT :lim'),{"lim":limit}).mappings().all()]
+        try:
+            with engine.begin() as c:
+                _set_timeout(c,8000)
+                rows=[dict(x) for x in c.execute(text(f'SELECT * FROM "{table}" LIMIT :lim'),{"lim":limit}).mappings().all()]
+        except Exception as e:
+            return {
+                "status":"DEGRADED",
+                "source":src,
+                "source_table":table,
+                "count":0,
+                "error":f"{type(e).__name__}: {e}"
+            }
 
         count=0
         with engine.begin() as c:
@@ -376,38 +423,33 @@ def register(core):
     @router.get("/api/v382/source-status")
     def source_status(req:Request):
         need_login(req)
-        candidates={
-            "MANUAL":["pi_properties","ai_manual_property_final","pi_manual_property_final","manual_property_final"],
-            "MAGAZINE":["pi_magazine_master"],
-            "NEWSPAPER":["pi_newspaper_properties"],
+        out={
+            "MANUAL":_fast_table_status(engine,["pi_properties","ai_manual_property_final","pi_manual_property_final","manual_property_final"]),
+            "MAGAZINE":_fast_table_status(engine,["pi_magazine_master"]),
+            "NEWSPAPER":_fast_table_status(engine,["pi_newspaper_properties"]),
         }
-        out={}
-        with engine.connect() as c:
-            for src,names in candidates.items():
-                found=[]
-                for name in names:
-                    if _exists(engine,name):
-                        try:
-                            count=c.execute(text(f'SELECT COUNT(*) FROM "{name}"')).scalar()
-                        except Exception:
-                            count=None
-                        found.append({"table":name,"count":count})
-                out[src]=found
+        # WhatsApp gets a connection check only; never COUNT(*) here.
         w=_wa_engine()
-        if w is not None:
-            try:
-                with w.connect() as c:
-                    out["WHATSAPP"]=[{"table":"wa_properties","count":c.execute(text("SELECT COUNT(*) FROM wa_properties")).scalar()}]
-            except Exception as e:
-                out["WHATSAPP"]=[{"error":str(e)}]
-        else:
+        if w is None:
             out["WHATSAPP"]=[]
-        return {"version":VERSION,"sources":out}
+        else:
+            try:
+                with w.begin() as c:
+                    _set_timeout(c,2000)
+                    exists=c.execute(text("SELECT to_regclass('public.wa_properties') IS NOT NULL")).scalar()
+                out["WHATSAPP"]=[{"table":"wa_properties","status":"READY"}] if exists else []
+            except Exception as e:
+                out["WHATSAPP"]=[{"status":"DEGRADED","error":f"{type(e).__name__}: {e}"}]
+        return {
+            "version":VERSION,
+            "status":"OK",
+            "count_mode":"APPROXIMATE_METADATA_ONLY",
+            "sources":out
+        }
 
     @router.get("/api/v382/entities")
-    def entities(req:Request,source:str="ALL",q:str="",limit:int=Query(1000,ge=1,le=5000)):
+    def entities(req:Request,source:str="ALL",q:str="",limit:int=Query(500,ge=1,le=1000)):
         need_login(req)
-        _ensure_schema(engine)
         wh=["active=TRUE"]
         p={"lim":limit}
         if source.upper()!="ALL":
@@ -417,11 +459,30 @@ def register(core):
             wh.append("(COALESCE(property_name,'') ILIKE :q OR COALESCE(description,'') ILIKE :q OR COALESCE(location,'') ILIKE :q OR COALESCE(contact_name,'') ILIKE :q OR COALESCE(contact_phone,'') ILIKE :q)")
             p["q"]="%"+q.strip()+"%"
 
-        with engine.connect() as c:
-            rows=c.execute(text(
-                "SELECT * FROM ai_clean_property_entity WHERE "+" AND ".join(wh)+
-                " ORDER BY capture_date DESC NULLS LAST,id DESC LIMIT :lim"
-            ),p).mappings().all()
+        try:
+            with engine.begin() as c:
+                _set_timeout(c,4000)
+                exists=c.execute(text("SELECT to_regclass('public.ai_clean_property_entity') IS NOT NULL")).scalar()
+                if not exists:
+                    return {
+                        "version":VERSION,
+                        "status":"SETUP_REQUIRED",
+                        "count":0,
+                        "rows":[],
+                        "next_step":"POST /api/v382/setup"
+                    }
+                rows=c.execute(text(
+                    "SELECT * FROM ai_clean_property_entity WHERE "+" AND ".join(wh)+
+                    " ORDER BY capture_date DESC NULLS LAST,id DESC LIMIT :lim"
+                ),p).mappings().all()
+        except Exception as e:
+            return {
+                "version":VERSION,
+                "status":"DEGRADED",
+                "count":0,
+                "rows":[],
+                "error":f"{type(e).__name__}: {e}"
+            }
 
         out=[]
         for r in rows:
