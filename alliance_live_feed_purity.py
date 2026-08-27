@@ -5,7 +5,7 @@ from fastapi import Request
 from fastapi.responses import HTMLResponse
 from sqlalchemy import text
 
-VERSION="LIVE-FEED-PURITY-FINAL-2.5-RAW-REBUILD"
+VERSION="LIVE-FEED-PURITY-2.6-SAFE-LIVE"
 
 REQ=[r"\bwanted\b",r"\brequirement\b",r"\brequired\b",r"\blooking for\b",r"\bneed(?:ed)?\b",r"\bclient budget\b",r"\btenant meeting\b",r"\bimmediate required\b"]
 INV=[r"\bavailable for rent\b",r"\bavailable for sale\b",r"\bavailable on sale\b",r"\bfor rent\b",r"\bfor sale\b",r"\bto[- ]?let\b",r"\basking\b",r"\bdemand\b",r"\brent\b",r"\blease\b",r"\bsale\b",r"\bbhk\b",r"\bsq\.?\s*ft\b",r"\bsqft\b",r"\bsq\.?\s*yd",r"\bsqyd",r"\bvilla\b",r"\bapartment\b",r"\bflat\b",r"\bkothi\b",r"\bplot\b",r"\boffice\b",r"\bshop\b",r"\bshowroom\b",r"\bcommercial\b",r"\bwarehouse\b",r"\bpre[- ]?rented\b",r"\bpre[- ]?leased\b"]
@@ -295,17 +295,184 @@ def rows(core,q="",limit=1000):
     if q.strip():w.append("(entity_text ILIKE :q OR source_group ILIKE :q OR sender_name ILIKE :q OR contact_phones ILIKE :q)");p["q"]="%"+q.strip()+"%"
     with core.engine.connect() as c:return c.execute(text(f"SELECT entity_code,created_at,source_group,sender_name,contact_phones,entity_text,canonical_property_code FROM alliance_live_feed_entities WHERE {' AND '.join(w)} ORDER BY created_at DESC,id DESC LIMIT :lim"),p).mappings().all()
 def esc(v):return str(v or "").replace("&","&amp;").replace("<","&lt;").replace(">","&gt;").replace('"',"&quot;")
+
+def safe_source_status(core):
+    """Fast read-only source diagnostics. Never runs sync/canonical writes."""
+    try:
+        d=source_diagnostics(core)
+    except Exception as exc:
+        d={"error":f"{type(exc).__name__}: {exc}"}
+    try:
+        ensure(core.engine)
+        with core.engine.connect() as c:
+            d["active_staged_entities"]=int(c.execute(text(
+                "SELECT COUNT(*) FROM alliance_live_feed_entities WHERE status='ACTIVE'"
+            )).scalar() or 0)
+            d["active_inventory_entities"]=int(c.execute(text(
+                "SELECT COUNT(*) FROM alliance_live_feed_entities WHERE status='ACTIVE' AND classification='PROPERTY_INVENTORY'"
+            )).scalar() or 0)
+    except Exception as exc:
+        d["staging_error"]=f"{type(exc).__name__}: {exc}"
+    return {"status":"OK","version":VERSION,"mode":"SAFE_READ_ONLY","source_diagnostics":d}
+
+def safe_raw_rows(core, limit=250):
+    """
+    Read original WhatsApp messages with NO joins and NO writes.
+    This is intentionally small and fast for the visible page.
+    """
+    import alliance_v2_whatsapp_adapter as wa_adapter
+    source_engine,should_dispose=wa_adapter._source_engine(core.engine)
+    try:
+        with source_engine.connect() as c:
+            if not c.execute(text("SELECT to_regclass('public.wai_raw_messages') IS NOT NULL")).scalar():
+                return []
+            cols=_wa_columns(c,"wai_raw_messages")
+            text_col=_pick(cols,[
+                "raw_text","raw_message","message_text","message","text","body",
+                "content","message_body","payload_text","plain_text"
+            ])
+            if not text_col:
+                return []
+            id_col=_pick(cols,["id","message_id","raw_message_id","event_id"])
+            date_col=_pick(cols,["sent_at","created_at","received_at","timestamp","message_time"])
+            phone_col=_pick(cols,["sender_phone","phone","from_phone","contact_phone"])
+            name_col=_pick(cols,["sender_display_name","sender_name","display_name","contact_name"])
+            group_col=_pick(cols,["group_name","source_group_name","chat_name","group_title","source_group"])
+
+            id_expr=f'"{id_col}"::text' if id_col else "row_number() over ()::text"
+            date_expr=f'"{date_col}"' if date_col else "NOW()"
+            phone_expr=f'COALESCE("{phone_col}"::text,\'\')' if phone_col else "''"
+            name_expr=f'COALESCE("{name_col}"::text,\'\')' if name_col else "''"
+            group_expr=f'COALESCE("{group_col}"::text,\'\')' if group_col else "''"
+
+            sql=f"""
+                SELECT
+                  {id_expr} AS source_event_id,
+                  {group_expr} AS source_group,
+                  {name_expr} AS sender_name,
+                  {phone_expr} AS sender_phone,
+                  "{text_col}"::text AS raw_message,
+                  {date_expr} AS created_at
+                FROM wai_raw_messages
+                WHERE NULLIF(BTRIM("{text_col}"::text),'') IS NOT NULL
+                ORDER BY {date_expr} DESC NULLS LAST
+                LIMIT :lim
+            """
+            return c.execute(text(sql),{"lim":max(1,min(int(limit),500))}).mappings().all()
+    finally:
+        if should_dispose:
+            source_engine.dispose()
+
+def safe_live_entities(core, limit=250):
+    """
+    Split/filter only in memory for page rendering.
+    No INSERT/UPDATE/UPSERT and no canonical database writes.
+    """
+    out=[]
+    for ev in safe_raw_rows(core,limit):
+        raw=norm(ev["raw_message"])
+        cls=classify(raw)
+        if cls!="PROPERTY_INVENTORY":
+            continue
+        parts=split_property_entities(raw)
+        for i,entity in enumerate(parts,1):
+            if classify(entity)!="PROPERTY_INVENTORY":
+                continue
+            out.append({
+                "source_event_id":ev["source_event_id"],
+                "entity_index":i,
+                "created_at":ev["created_at"],
+                "source_group":ev["source_group"],
+                "sender_name":ev["sender_name"],
+                "sender_phone":ev["sender_phone"],
+                "entity_text":entity,
+                "contact_phones":" | ".join(phones(entity) or ([ev["sender_phone"]] if ev["sender_phone"] else [])),
+            })
+    return out
+
 def register(wrapped):
-    app=wrapped.app;core=wrapped.core;owned={"/whatsapp-live/feed","/api/live-feed-purity/status","/api/live-feed-purity/sample"}
-    app.router.routes[:]=[r for r in app.router.routes if not(getattr(r,"path",None) in owned and "GET" in (getattr(r,"methods",set()) or set()))]
+    app=wrapped.app
+    core=wrapped.core
+
+    owned={"/whatsapp-live/feed","/api/live-feed-purity/status","/api/live-feed-purity/sample"}
+    app.router.routes[:]=[
+        r for r in app.router.routes
+        if not (getattr(r,"path",None) in owned and "GET" in (getattr(r,"methods",set()) or set()))
+    ]
+
     def status():
-        result=sync(core,3000)
-        result["source_diagnostics"]=source_diagnostics(core)
-        return result
-    def sample():return {"version":VERSION,"engine":"FINAL","registered":True}
+        return safe_source_status(core)
+
+    def sample():
+        rr=safe_raw_rows(core,25)
+        entity_count=0
+        inventory_messages=0
+        for ev in rr:
+            raw=norm(ev["raw_message"])
+            if classify(raw)=="PROPERTY_INVENTORY":
+                inventory_messages+=1
+                entity_count+=len(split_property_entities(raw))
+        return {
+            "status":"OK",
+            "version":VERSION,
+            "mode":"SAFE_READ_ONLY",
+            "raw_messages_sampled":len(rr),
+            "inventory_messages":inventory_messages,
+            "property_entities_after_split":entity_count,
+        }
+
     def feed(request:Request):
-        sync(core,3000);q=str(request.query_params.get("q") or "").strip();rr=rows(core,q,1000)
-        trs="".join(f"<tr><td>{esc(r['created_at'])}</td><td>{esc(r['source_group'])}</td><td>{esc(r['sender_name'])}</td><td style='min-width:520px;white-space:pre-wrap'>{esc(r['entity_text'])}</td><td>{esc(r['contact_phones'] or '—')}</td><td>{esc(r['canonical_property_code'] or '—')}</td></tr>" for r in rr)
-        return HTMLResponse(f"""<!doctype html><html><head><meta charset='utf-8'><title>Clean Live Property Feed</title><style>body{{font-family:Arial;background:#f6f2ec;margin:0}}header{{background:#5a4635;color:white;padding:18px}}main{{padding:18px}}table{{width:100%;border-collapse:collapse;background:white}}th,td{{padding:8px;border-bottom:1px solid #ddd;text-align:left;vertical-align:top;font-size:12px}}th{{background:#f2e8dc}}input{{width:80%;padding:10px}}button{{padding:10px}}</style></head><body><header><h2>Clean Live Property Feed</h2><small>One property per row · requirements separated · noise excluded</small></header><main><form><input name='q' value='{esc(q)}' placeholder='Search property, location, broker or phone'><button>Search</button></form><p>{len(rr)} clean property entities</p><table><tr><th>Received</th><th>Group</th><th>Sender</th><th>Property Entity</th><th>Contact</th><th>Canonical Property</th></tr>{trs}</table></main></body></html>""")
-    app.add_api_route("/api/live-feed-purity/status",status,methods=["GET"]);app.add_api_route("/api/live-feed-purity/sample",sample,methods=["GET"]);app.add_api_route("/whatsapp-live/feed",feed,methods=["GET"])
-    return {"status":"REGISTERED","version":VERSION}
+        q=str(request.query_params.get("q") or "").strip().lower()
+        try:
+            lim=int(request.query_params.get("limit") or 250)
+        except Exception:
+            lim=250
+        ents=safe_live_entities(core,max(25,min(lim,500)))
+        if q:
+            ents=[
+                x for x in ents
+                if q in one(x.get("entity_text")).lower()
+                or q in one(x.get("source_group")).lower()
+                or q in one(x.get("sender_name")).lower()
+                or q in one(x.get("contact_phones")).lower()
+            ]
+
+        trs="".join(
+            f"""<tr>
+            <td>{esc(x['created_at'])}</td>
+            <td>{esc(x['source_group'] or '—')}</td>
+            <td>{esc(x['sender_name'] or '—')}</td>
+            <td style='min-width:520px;white-space:pre-wrap'>{esc(x['entity_text'])}</td>
+            <td>{esc(x['contact_phones'] or '—')}</td>
+            </tr>"""
+            for x in ents[:750]
+        )
+
+        return HTMLResponse(f"""<!doctype html><html><head><meta charset='utf-8'>
+        <meta name='viewport' content='width=device-width,initial-scale=1'>
+        <title>Clean Live Property Feed</title>
+        <style>
+        body{{font-family:Arial;background:#f6f2ec;margin:0;color:#2f2923}}
+        header{{background:#5a4635;color:white;padding:18px 24px}}
+        main{{padding:18px;max-width:1800px;margin:auto}}
+        .card{{background:white;border:1px solid #ddd0c2;border-radius:10px;padding:12px;margin-bottom:12px}}
+        table{{width:100%;border-collapse:collapse;background:white}}
+        th,td{{padding:8px;border-bottom:1px solid #ddd;text-align:left;vertical-align:top;font-size:12px}}
+        th{{background:#f2e8dc;position:sticky;top:0}}
+        input{{width:75%;padding:10px}}button{{padding:10px}}
+        </style></head><body>
+        <header><h2 style='margin:0'>Clean Live Property Feed</h2>
+        <small>Safe live mode · original WhatsApp messages · one property per entity · no database writes during page load</small></header>
+        <main><div class='card'>
+        <form><input name='q' value='{esc(q)}' placeholder='Search project, area, broker or phone'>
+        <input type='hidden' name='limit' value='{lim}'><button>Search</button></form>
+        <p><b>{len(ents)}</b> clean property entities generated from the latest raw WhatsApp messages.</p>
+        </div><div class='card' style='overflow:auto'>
+        <table><tr><th>Received</th><th>Group</th><th>Sender</th><th>Property Entity</th><th>Contact</th></tr>
+        {trs or '<tr><td colspan=5>No property inventory found in the current sample.</td></tr>'}
+        </table></div></main></body></html>""")
+
+    app.add_api_route("/api/live-feed-purity/status",status,methods=["GET"])
+    app.add_api_route("/api/live-feed-purity/sample",sample,methods=["GET"])
+    app.add_api_route("/whatsapp-live/feed",feed,methods=["GET"])
+    return {"status":"REGISTERED","version":VERSION,"mode":"SAFE_READ_ONLY"}
