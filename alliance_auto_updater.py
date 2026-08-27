@@ -3,7 +3,7 @@ import os, time, threading, traceback
 from datetime import datetime, timezone
 from sqlalchemy import text
 
-VERSION = "4.4.0-AUTO-UPDATER"
+VERSION = "4.5.0-LIVE-TAKEOVER-UPDATER"
 STATE = {
     "status": "IDLE",
     "version": VERSION,
@@ -16,6 +16,7 @@ STATE = {
 }
 _LOCK = threading.Lock()
 _STARTED = False
+_CORE = None
 
 def _utc():
     return datetime.now(timezone.utc).isoformat()
@@ -120,15 +121,29 @@ def _loop(core):
     limit = int(os.getenv("ALLIANCE_AUTO_UPDATE_LIMIT", "5000"))
     run_once(core, force=False, limit=limit)
 
-    interval = max(120, int(os.getenv("ALLIANCE_AUTO_REFRESH_SECONDS", "300")))
+    interval = max(60, int(os.getenv("ALLIANCE_AUTO_REFRESH_SECONDS", "60")))
     STATE["refresh_interval_seconds"] = interval
 
     while True:
         time.sleep(interval)
         run_once(core, force=False, limit=limit)
 
+def request_refresh(force=False):
+    if _CORE is None:
+        return {"status":"SKIPPED","reason":"CORE_NOT_READY"}
+    t=threading.Thread(
+        target=run_once,
+        args=(_CORE,),
+        kwargs={"force":force,"limit":int(os.getenv("ALLIANCE_AUTO_UPDATE_LIMIT","5000"))},
+        name="alliance-live-refresh",
+        daemon=True,
+    )
+    t.start()
+    return {"status":"QUEUED"}
+
 def start(core):
-    global _STARTED
+    global _STARTED, _CORE
+    _CORE = core
     if _STARTED:
         return STATE
 

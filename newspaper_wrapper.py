@@ -63,3 +63,11 @@ try:
 except Exception as e:
     print("Alliance V4.4 registration warning:", type(e).__name__, str(e))
 
+# ALLIANCE V4.5 LIVE WHATSAPP TAKEOVER
+try:
+    import alliance_v45_live_whatsapp_takeover as _v45
+    _v45.register(core)
+    print("Alliance V4.5 Live WhatsApp takeover registered successfully")
+except Exception as e:
+    print("Alliance V4.5 takeover warning:",type(e).__name__,str(e))
+
