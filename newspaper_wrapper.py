@@ -46,11 +46,20 @@ def module_health():
         "modules":OPTIONAL_MODULES,
     }
 
-# ALLIANCE V4.3 CLEAN WHATSAPP PROPERTY MASTER
+
+# ALLIANCE V4.4 AUTO-UPDATING WHATSAPP MASTER
 try:
-    import alliance_v43_whatsapp_property_master as _v43
-    _v43.register(core)
-    print("Alliance V4.3 clean WhatsApp Property Master registered successfully")
+    import alliance_v44_whatsapp_property_master as _v44
+    _v44.register(core)
+
+    import alliance_auto_updater as _auto44
+    _auto44.start(core)
+
+    @app.get("/api/v44/auto-update/status")
+    def _v44_auto_status():
+        return _auto44.STATE
+
+    print("Alliance V4.4 auto-updating WhatsApp master registered successfully")
 except Exception as e:
-    print("Alliance V4.3 registration warning:",type(e).__name__,str(e))
+    print("Alliance V4.4 registration warning:", type(e).__name__, str(e))
 
