@@ -7,7 +7,7 @@ from fastapi import Request
 from fastapi.responses import HTMLResponse
 from sqlalchemy import text
 
-VERSION = "LIVE-FEED-PURITY-CLEANUP-3.3"
+VERSION = "LIVE-FEED-PRIORITY-3.4"
 
 
 def _esc(v):
@@ -478,6 +478,119 @@ def _clean_visible_rows(rows, min_score=60):
 
     return out, stats
 
+
+def _priority_score(row):
+    """
+    Business-priority score for already-clean property entities.
+    Keeps purity separate from prioritization.
+    """
+    import math
+    from datetime import datetime, timezone
+
+    score = 0.0
+    reasons = []
+
+    # Base purity contribution.
+    purity = float(row.get("clean_score") or 0)
+    score += min(35.0, purity * 0.35)
+    if purity >= 75:
+        reasons.append("high purity")
+
+    # Contact usability.
+    has_owner = bool(row.get("owner_phone"))
+    has_broker = bool(row.get("broker_phone"))
+    has_sender = bool(row.get("sender_phone"))
+    if has_owner:
+        score += 16
+        reasons.append("owner contact")
+    elif has_broker:
+        score += 12
+        reasons.append("broker contact")
+    elif has_sender:
+        score += 8
+        reasons.append("sender contact")
+
+    # Core commercial fields.
+    if row.get("clean_location"):
+        score += 8
+        reasons.append("location clear")
+    if row.get("clean_property_type") and str(row.get("clean_property_type")).upper() != "UNKNOWN":
+        score += 6
+        reasons.append("type clear")
+    if row.get("clean_transaction") and str(row.get("clean_transaction")).upper() != "UNKNOWN":
+        score += 6
+        reasons.append("transaction clear")
+    if row.get("clean_area_min_sqft"):
+        score += 8
+        reasons.append("area available")
+    if row.get("clean_budget"):
+        score += 8
+        reasons.append("price/rent available")
+
+    # Availability / freshness.
+    availability = str(row.get("availability") or "").upper()
+    if availability in {"VERIFIED", "AVAILABLE", "ACTIVE"}:
+        score += 5
+        reasons.append("availability positive")
+
+    dt = row.get("last_seen") or row.get("first_seen")
+    age_days = None
+    if dt:
+        try:
+            if isinstance(dt, str):
+                x = dt.replace("Z", "+00:00")
+                parsed = datetime.fromisoformat(x)
+            else:
+                parsed = dt
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            age_days = max(0, (datetime.now(timezone.utc) - parsed).total_seconds() / 86400)
+        except Exception:
+            age_days = None
+
+    if age_days is not None:
+        if age_days <= 3:
+            score += 8
+            reasons.append("very fresh")
+        elif age_days <= 7:
+            score += 6
+            reasons.append("fresh")
+        elif age_days <= 30:
+            score += 3
+
+    # Duplicate risk penalty.
+    dup = str(row.get("duplicate_status") or "").upper()
+    if "DUPLICATE" in dup and "UNIQUE" not in dup:
+        score -= 10
+        reasons.append("duplicate risk")
+
+    score = round(max(0.0, min(100.0, score)), 2)
+
+    if score >= 80:
+        band = "HOT"
+    elif score >= 65:
+        band = "STRONG"
+    else:
+        band = "REVIEW"
+
+    row = dict(row)
+    row["priority_score"] = score
+    row["priority_band"] = band
+    row["priority_reason"] = ", ".join(reasons[:6])
+    return row
+
+
+def _prioritize_rows(rows):
+    ranked = [_priority_score(x) for x in rows]
+    ranked.sort(
+        key=lambda x: (
+            0 if x["priority_band"] == "HOT" else 1 if x["priority_band"] == "STRONG" else 2,
+            -float(x.get("priority_score") or 0),
+            str(x.get("last_seen") or x.get("first_seen") or ""),
+        )
+    )
+    return ranked
+
 def register(wrapped):
     app = wrapped.app
     core = wrapped.core
@@ -506,6 +619,12 @@ def register(wrapped):
             source, stored_rows, detected = get_rows(core, "", 50)
             visible = _visible_entities(stored_rows)
             clean, purity_stats = _clean_visible_rows(visible, 60)
+            ranked = _prioritize_rows(clean)
+            bands = {
+                "HOT": sum(1 for x in ranked if x["priority_band"] == "HOT"),
+                "STRONG": sum(1 for x in ranked if x["priority_band"] == "STRONG"),
+                "REVIEW": sum(1 for x in ranked if x["priority_band"] == "REVIEW"),
+            }
             return {
                 "status": "OK",
                 "version": VERSION,
@@ -513,6 +632,7 @@ def register(wrapped):
                 "stored_rows_sampled": len(stored_rows),
                 "visible_entities_after_split": len(visible),
                 "clean_entities": len(clean),
+                "priority_bands": bands,
                 "purity_stats": purity_stats,
                 "counts": detected,
             }
@@ -529,6 +649,7 @@ def register(wrapped):
             source, stored_rows, detected = get_rows(core, "", 100)
             visible = _visible_entities(stored_rows)
             clean, purity_stats = _clean_visible_rows(visible, 60)
+            ranked = _prioritize_rows(clean)
             multi = {}
             for row in visible:
                 base = str(row.get("wa_property_id") or row.get("id"))
@@ -540,6 +661,22 @@ def register(wrapped):
                     "stored_rows_sampled": len(stored_rows),
                     "visible_entities_after_split": len(visible),
                     "clean_entities_after_purity": len(clean),
+                    "priority_bands": {
+                        "HOT": sum(1 for x in ranked if x["priority_band"] == "HOT"),
+                        "STRONG": sum(1 for x in ranked if x["priority_band"] == "STRONG"),
+                        "REVIEW": sum(1 for x in ranked if x["priority_band"] == "REVIEW"),
+                    },
+                    "top_priority_sample": [
+                        {
+                            "id": x.get("visible_entity_id"),
+                            "band": x.get("priority_band"),
+                            "score": x.get("priority_score"),
+                            "location": x.get("clean_location"),
+                            "type": x.get("clean_property_type"),
+                            "transaction": x.get("clean_transaction"),
+                        }
+                        for x in ranked[:10]
+                    ],
                     "purity_stats": purity_stats,
                     "multi_entity_stored_rows": sum(1 for n in multi.values() if n > 1),
                     "sample_visible_ids": [
@@ -564,7 +701,8 @@ def register(wrapped):
             # may expand into several visible entities.
             source, stored_rows, detected = get_rows(core, q, limit)
             visible_rows = _visible_entities(stored_rows)
-            rows, purity_stats = _clean_visible_rows(visible_rows, 60)
+            clean_rows, purity_stats = _clean_visible_rows(visible_rows, 60)
+            rows = _prioritize_rows(clean_rows)
         except Exception as exc:
             return HTMLResponse(
                 f"""<!doctype html><html><body style='font-family:Arial;padding:30px'>
@@ -605,6 +743,7 @@ def register(wrapped):
 
             trs.append(
                 f"""<tr>
+                <td><b>{_esc(row.get('priority_band'))}</b><br>{_esc(row.get('priority_score'))}</td>
                 <td>{_esc(row.get('last_seen') or row.get('first_seen') or '—')}</td>
                 <td><b>{_esc(row.get('clean_transaction') or row.get('transaction_type') or '—')}</b></td>
                 <td>{_esc(row.get('clean_property_type') or row.get('property_type') or '—')}</td>
@@ -615,6 +754,7 @@ def register(wrapped):
                 <td>{_esc(contact or '—')}</td>
                 <td>{_esc(row.get('duplicate_status') or '—')}</td>
                 <td>{_esc(row.get('clean_score') or row.get('confidence') or '—')}</td>
+                <td>{_esc(row.get('priority_reason') or '—')}</td>
                 </tr>"""
             )
 
@@ -637,7 +777,7 @@ def register(wrapped):
             .ok{{color:#176b3a;font-weight:700}}
             </style></head><body>
             <header><h2 style='margin:0'>WhatsApp Property Leads</h2>
-            <small>Clean active WhatsApp inventory · requirements, inactive rows, low-quality rows and exact duplicates filtered out</small></header>
+            <small>Priority WhatsApp inventory · purity-filtered leads ranked HOT / STRONG / REVIEW</small></header>
             <main>
             <div class='card'>
               <form>
@@ -646,13 +786,14 @@ def register(wrapped):
                 <button>Search</button>
               </form>
               <p><span class='ok'>{len(rows)} clean property leads</span> from <b>{len(stored_rows)}</b> stored rows · source: <b>{_esc(source)}</b></p>
+              <p>HOT <b>{sum(1 for x in rows if x['priority_band']=='HOT')}</b> · STRONG <b>{sum(1 for x in rows if x['priority_band']=='STRONG')}</b> · REVIEW <b>{sum(1 for x in rows if x['priority_band']=='REVIEW')}</b></p>
               <p>wa_properties: <b>{detected['wa_properties_count']}</b> · requirements kept separate: <b>{detected['wa_requirements_count']}</b></p>
               <p>Filtered: requirements <b>{purity_stats['requirements_removed']}</b> · inactive <b>{purity_stats['inactive_removed']}</b> · low quality <b>{purity_stats['low_quality_removed']}</b> · duplicates <b>{purity_stats['duplicate_removed']}</b> · unknown <b>{purity_stats['unknown_removed']}</b></p>
               <p><a href='/api/live-feed-purity/debug'>Diagnostics</a></p>
             </div>
             <div class='card' style='overflow:auto'>
               <table>
-              <tr><th>Latest</th><th>Transaction</th><th>Type</th><th>Location</th><th>Area</th><th>Price/Rent</th><th>Property Entity</th><th>Contact</th><th>Duplicate</th><th>Confidence</th></tr>
+              <tr><th>Priority</th><th>Latest</th><th>Transaction</th><th>Type</th><th>Location</th><th>Area</th><th>Price/Rent</th><th>Property Entity</th><th>Contact</th><th>Duplicate</th><th>Purity</th><th>Why Priority</th></tr>
               {body}
               </table>
             </div>
