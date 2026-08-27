@@ -38,20 +38,11 @@ try:
 except Exception as e:
     print("Alliance V3.8 registration warning:", type(e).__name__, str(e))
 
-
-# ALLIANCE V3.8.1 CLEAN ENTITY DATABASES
+# ALLIANCE V3.8.2B STARTUP SAFE MANUAL ADAPTER
 try:
-    import alliance_v381_clean_entity_databases as _v381
-    _v381.register(core)
-    print("Alliance V3.8.1 clean entity databases registered successfully")
+    import alliance_v382b_clean_entity_databases as _v382b
+    _v382b.register(core)
+    print("Alliance V3.8.2B startup-safe manual adapter registered successfully")
 except Exception as e:
-    print("Alliance V3.8.1 registration warning:",type(e).__name__,str(e))
+    print("Alliance V3.8.2B registration warning:",type(e).__name__,str(e))
 
-
-# ALLIANCE V3.8.2 MANUAL DATABASE ADAPTER
-try:
-    import alliance_v382_clean_entity_databases as _v382
-    _v382.register(core)
-    print("Alliance V3.8.2 manual pi_properties adapter registered successfully")
-except Exception as e:
-    print("Alliance V3.8.2 registration warning:",type(e).__name__,str(e))
