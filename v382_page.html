@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Clean Property Databases V3.8-STABLE.1</title>
+<title>Clean Property Databases V3.8.2B</title>
 <style>
 body{margin:0;font-family:Arial;background:#efe4d2;color:#2d261f}
 header{background:#5d4937;color:#fff;padding:15px 20px;position:sticky;top:0;z-index:5}
@@ -21,10 +21,10 @@ th{background:#f7ecdf;position:sticky;top:0}
 </style>
 </head>
 <body>
-<header><a class="btn" href="/workspace">← Dashboard</a> <b style="margin-left:12px">Clean Property Databases V3.8-STABLE.1</b></header>
+<header><a class="btn" href="/workspace">← Dashboard</a> <b style="margin-left:12px">Clean Property Databases V3.8.2B</b></header>
 <div class="wrap">
 <div class="card">
-<h2>One Property = One Entity</h2><p><b>Manual source:</b> pi_properties · Startup-safe V3.8-STABLE.1</p>
+<h2>One Property = One Entity</h2><p><b>Manual source:</b> pi_properties · Startup-safe V3.8.2B</p>
 <p>Every database shows Description, Contact Number, Verification, Capture Date, Edit and Delete.</p>
 <div class="toolbar">
 <button onclick="sync('WHATSAPP')">Re-split WhatsApp</button>
@@ -65,7 +65,7 @@ async function sync(s){
 }
 
 async function load(){
-  let d=await J('/api/v382/entities?source='+encodeURIComponent(source.value)+'&q='+encodeURIComponent(q.value||'')+'&limit=500');
+  let d=await J('/api/v382/entities?source='+encodeURIComponent(source.value)+'&q='+encodeURIComponent(q.value||'')+'&limit=2000');
   count.textContent=d.count+' clean property entities';
   rows.innerHTML=(d.rows||[]).map(x=>`<tr>
     <td class="src ${E(x.source_type)}">${E(x.source_type)}<br>${E(x.source_name)}</td>
