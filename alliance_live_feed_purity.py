@@ -7,7 +7,7 @@ from fastapi import Request
 from fastapi.responses import HTMLResponse
 from sqlalchemy import text
 
-VERSION = "LIVE-FEED-PRIORITY-3.4"
+VERSION = "LIVE-FEED-SMART-MARKET-3.5"
 
 
 def _esc(v):
@@ -591,6 +591,111 @@ def _prioritize_rows(rows):
     )
     return ranked
 
+
+MARKET_EQUIVALENTS = {
+    "Delhi NCR": {
+        "restaurant": {
+            "Saket": ["Malviya Nagar", "Hauz Khas", "Greater Kailash 1", "Greater Kailash 2", "Vasant Kunj"],
+            "Greater Kailash 1": ["Greater Kailash 2", "Defence Colony", "Kailash Colony", "Nehru Place", "Saket"],
+            "Greater Kailash 2": ["Greater Kailash 1", "Defence Colony", "Kailash Colony", "Saket", "CR Park"],
+            "Defence Colony": ["Greater Kailash 1", "Greater Kailash 2", "Lajpat Nagar", "South Extension", "Kailash Colony"],
+            "Connaught Place": ["Khan Market", "Lodhi Colony", "Defence Colony", "South Extension", "Aerocity"],
+            "Rajouri Garden": ["Punjabi Bagh", "Janakpuri", "Kirti Nagar", "Pitampura", "Dwarka"],
+            "Noida": ["Sector 18 Noida", "Sector 104 Noida", "Sector 75 Noida", "Sector 142 Noida", "Greater Noida"],
+            "Gurgaon": ["Golf Course Road", "Cyber Hub", "Sector 29 Gurgaon", "Sector 56 Gurgaon", "Sohna Road"],
+        },
+        "retail": {
+            "Saket": ["Malviya Nagar", "Hauz Khas", "Greater Kailash 1", "Nehru Place", "Vasant Kunj"],
+            "Connaught Place": ["Khan Market", "Janpath", "Karol Bagh", "South Extension", "Lajpat Nagar"],
+            "Rajouri Garden": ["Punjabi Bagh", "Janakpuri", "Tilak Nagar", "Pitampura", "Dwarka"],
+            "Gurgaon": ["Golf Course Road", "MG Road Gurgaon", "Sohna Road", "Sector 56 Gurgaon", "Cyber Hub"],
+            "Noida": ["Sector 18 Noida", "Sector 104 Noida", "Sector 75 Noida", "Sector 137 Noida", "Greater Noida"],
+        },
+        "residential_sale": {
+            "Saket": ["Greater Kailash 1", "Greater Kailash 2", "Malviya Nagar", "Panchsheel Park", "Vasant Kunj"],
+            "Greater Kailash 1": ["Greater Kailash 2", "Panchsheel Park", "Defence Colony", "Kailash Colony", "Saket"],
+            "Greater Kailash 2": ["Greater Kailash 1", "Panchsheel Park", "CR Park", "Defence Colony", "Saket"],
+            "Vasant Kunj": ["Vasant Vihar", "Saket", "Chattarpur", "Panchsheel Park", "Greater Kailash"],
+            "Gurgaon": ["Golf Course Road", "Golf Course Extension", "DLF Phase 1", "DLF Phase 2", "Sector 56 Gurgaon"],
+            "Noida": ["Sector 44 Noida", "Sector 93 Noida", "Sector 100 Noida", "Sector 104 Noida", "Sector 137 Noida"],
+        },
+        "commercial_sale": {
+            "Saket": ["Nehru Place", "Okhla", "Jasola", "Greater Kailash", "Malviya Nagar"],
+            "Connaught Place": ["Barakhamba Road", "ITO", "Karol Bagh", "Nehru Place", "Aerocity"],
+            "Gurgaon": ["Golf Course Road", "MG Road Gurgaon", "Cyber City", "Sohna Road", "Sector 44 Gurgaon"],
+            "Noida": ["Sector 18 Noida", "Sector 62 Noida", "Sector 125 Noida", "Sector 132 Noida", "Sector 142 Noida"],
+        },
+    },
+    "Goa": {
+        "restaurant": {
+            "Siolim": ["Assagao", "Vagator", "Anjuna", "Morjim", "Mapusa"],
+            "Assagao": ["Siolim", "Vagator", "Anjuna", "Parra", "Mapusa"],
+            "Panaji": ["Porvorim", "Dona Paula", "Miramar", "Caranzalem", "Candolim"],
+            "Calangute": ["Candolim", "Baga", "Anjuna", "Arpora", "Vagator"],
+            "Margao": ["Colva", "Benaulim", "Navelim", "Fatorda", "Cavelossim"],
+        },
+        "residential_sale": {
+            "Siolim": ["Assagao", "Vagator", "Morjim", "Anjuna", "Parra"],
+            "Assagao": ["Siolim", "Vagator", "Anjuna", "Parra", "Mapusa"],
+            "Panaji": ["Dona Paula", "Porvorim", "Miramar", "Caranzalem", "Taleigao"],
+            "Calangute": ["Candolim", "Arpora", "Baga", "Nagoa", "Anjuna"],
+            "Margao": ["Benaulim", "Colva", "Navelim", "Fatorda", "Cavelossim"],
+        },
+        "commercial_sale": {
+            "Panaji": ["Porvorim", "Mapusa", "Margao", "Vasco da Gama", "Ponda"],
+            "Mapusa": ["Porvorim", "Panaji", "Siolim", "Assagao", "Calangute"],
+            "Margao": ["Panaji", "Vasco da Gama", "Ponda", "Colva", "Benaulim"],
+        },
+    },
+}
+
+
+def _market_context(row):
+    typ = str(row.get("clean_property_type") or row.get("property_type") or "").upper()
+    tx = str(row.get("clean_transaction") or row.get("transaction_type") or "").upper()
+    loc = str(row.get("clean_location") or row.get("location") or row.get("locality") or "").strip()
+
+    if typ in {"RESTAURANT", "CAFE", "BANQUET", "HOTEL", "GUEST_HOUSE", "CLUB", "LOUNGE"}:
+        context = "restaurant"
+    elif typ in {"RETAIL_SHOP", "COMMERCIAL_SHOP", "COMMERCIAL_SHOWROOM"} and tx in {"LEASE", "LEASE_OR_SALE"}:
+        context = "retail"
+    elif typ in {"RESIDENTIAL", "VILLA", "INDEPENDENT_HOUSE_VILLA"} and tx in {"SALE", "LEASE_OR_SALE"}:
+        context = "residential_sale"
+    elif tx in {"SALE", "LEASE_OR_SALE"}:
+        context = "commercial_sale"
+    else:
+        context = "retail"
+
+    region = "Goa" if loc in {
+        "Siolim","Assagao","Vagator","Morjim","Anjuna","Panaji","Porvorim",
+        "Calangute","Candolim","Margao","Mapusa","Benaulim","Colva","Vasco da Gama"
+    } else "Delhi NCR"
+
+    return region, context, loc
+
+
+def _alternative_markets(row, limit=5):
+    region, context, loc = _market_context(row)
+    options = MARKET_EQUIVALENTS.get(region, {}).get(context, {}).get(loc, [])
+    return options[:limit]
+
+
+def _attach_market_intelligence(rows):
+    out = []
+    for row in rows:
+        x = dict(row)
+        region, context, loc = _market_context(x)
+        x["market_region"] = region
+        x["market_context"] = context
+        x["alternative_markets"] = _alternative_markets(x)
+        x["market_reason"] = (
+            f"Comparable {context.replace('_',' ')} markets to {loc}"
+            if loc and x["alternative_markets"]
+            else "No curated alternative-market map available"
+        )
+        out.append(x)
+    return out
+
 def register(wrapped):
     app = wrapped.app
     core = wrapped.core
@@ -600,6 +705,7 @@ def register(wrapped):
         "/api/live-feed-purity/status",
         "/api/live-feed-purity/sample",
         "/api/live-feed-purity/debug",
+        "/api/live-feed-purity/market-suggestions",
     }
 
     app.router.routes[:] = [
@@ -619,7 +725,7 @@ def register(wrapped):
             source, stored_rows, detected = get_rows(core, "", 50)
             visible = _visible_entities(stored_rows)
             clean, purity_stats = _clean_visible_rows(visible, 60)
-            ranked = _prioritize_rows(clean)
+            ranked = _attach_market_intelligence(_prioritize_rows(clean))
             bands = {
                 "HOT": sum(1 for x in ranked if x["priority_band"] == "HOT"),
                 "STRONG": sum(1 for x in ranked if x["priority_band"] == "STRONG"),
@@ -649,7 +755,7 @@ def register(wrapped):
             source, stored_rows, detected = get_rows(core, "", 100)
             visible = _visible_entities(stored_rows)
             clean, purity_stats = _clean_visible_rows(visible, 60)
-            ranked = _prioritize_rows(clean)
+            ranked = _attach_market_intelligence(_prioritize_rows(clean))
             multi = {}
             for row in visible:
                 base = str(row.get("wa_property_id") or row.get("id"))
@@ -674,6 +780,7 @@ def register(wrapped):
                             "location": x.get("clean_location"),
                             "type": x.get("clean_property_type"),
                             "transaction": x.get("clean_transaction"),
+                            "alternative_markets": x.get("alternative_markets"),
                         }
                         for x in ranked[:10]
                     ],
@@ -689,6 +796,29 @@ def register(wrapped):
             result["sample_error"] = f"{type(exc).__name__}: {exc}"
         return result
 
+
+    def market_suggestions(request: Request):
+        location = str(request.query_params.get("location") or "").strip()
+        property_type = str(request.query_params.get("property_type") or "").strip()
+        transaction = str(request.query_params.get("transaction") or "").strip()
+
+        probe = {
+            "clean_location": location,
+            "clean_property_type": property_type,
+            "clean_transaction": transaction,
+        }
+        region, context, loc = _market_context(probe)
+        return {
+            "status": "OK",
+            "version": VERSION,
+            "location": loc,
+            "property_type": property_type,
+            "transaction": transaction,
+            "market_region": region,
+            "market_context": context,
+            "alternatives": _alternative_markets(probe),
+        }
+
     def feed(request: Request):
         q = str(request.query_params.get("q") or "").strip()
         try:
@@ -702,7 +832,7 @@ def register(wrapped):
             source, stored_rows, detected = get_rows(core, q, limit)
             visible_rows = _visible_entities(stored_rows)
             clean_rows, purity_stats = _clean_visible_rows(visible_rows, 60)
-            rows = _prioritize_rows(clean_rows)
+            rows = _attach_market_intelligence(_prioritize_rows(clean_rows))
         except Exception as exc:
             return HTMLResponse(
                 f"""<!doctype html><html><body style='font-family:Arial;padding:30px'>
@@ -755,6 +885,7 @@ def register(wrapped):
                 <td>{_esc(row.get('duplicate_status') or '—')}</td>
                 <td>{_esc(row.get('clean_score') or row.get('confidence') or '—')}</td>
                 <td>{_esc(row.get('priority_reason') or '—')}</td>
+                <td>{_esc(' → '.join(row.get('alternative_markets') or []) or '—')}</td>
                 </tr>"""
             )
 
@@ -777,7 +908,7 @@ def register(wrapped):
             .ok{{color:#176b3a;font-weight:700}}
             </style></head><body>
             <header><h2 style='margin:0'>WhatsApp Property Leads</h2>
-            <small>Priority WhatsApp inventory · purity-filtered leads ranked HOT / STRONG / REVIEW</small></header>
+            <small>Smart Market WhatsApp inventory · HOT / STRONG / REVIEW plus context-aware alternative micro-markets</small></header>
             <main>
             <div class='card'>
               <form>
@@ -793,7 +924,7 @@ def register(wrapped):
             </div>
             <div class='card' style='overflow:auto'>
               <table>
-              <tr><th>Priority</th><th>Latest</th><th>Transaction</th><th>Type</th><th>Location</th><th>Area</th><th>Price/Rent</th><th>Property Entity</th><th>Contact</th><th>Duplicate</th><th>Purity</th><th>Why Priority</th></tr>
+              <tr><th>Priority</th><th>Latest</th><th>Transaction</th><th>Type</th><th>Location</th><th>Area</th><th>Price/Rent</th><th>Property Entity</th><th>Contact</th><th>Duplicate</th><th>Purity</th><th>Why Priority</th><th>Smart Alternative Markets</th></tr>
               {body}
               </table>
             </div>
@@ -803,6 +934,7 @@ def register(wrapped):
     app.add_api_route("/api/live-feed-purity/status", api_status, methods=["GET"])
     app.add_api_route("/api/live-feed-purity/sample", sample, methods=["GET"])
     app.add_api_route("/api/live-feed-purity/debug", debug, methods=["GET"])
+    app.add_api_route("/api/live-feed-purity/market-suggestions", market_suggestions, methods=["GET"])
     app.add_api_route("/whatsapp-live/feed", feed, methods=["GET"])
 
     return {"status": "REGISTERED", "version": VERSION}
