@@ -17,6 +17,7 @@ BOOT = {
     "trace": None,
     "started_at": datetime.now(timezone.utc).isoformat(),
     "completed_at": None,
+    "stabilization": None,
 }
 
 CORE_APP = None
@@ -141,6 +142,8 @@ def core_route_status():
         "late_registration": LATE_REGISTRATION,
         "wanted_routes_present": present,
         "route_count": len(routes),
+        "core_app_id": id(CORE_APP) if CORE_APP is not None else None,
+        "stabilization": BOOT.get("stabilization"),
         "routes": routes,
     }
 
@@ -173,49 +176,75 @@ def _route_exists(app_obj, path):
         return False
 
 
-def _late_register_intelligence():
-    import app as core
+def _late_register_intelligence(wrapped):
+    core = wrapped.core
+    authoritative_app = wrapped.app
+
+    def route_exists(path):
+        return any(getattr(r, "path", None) == path for r in authoritative_app.router.routes)
+
+    results = {}
 
     try:
-        if _route_exists(core.app, "/api/v383/status"):
-            LATE_REGISTRATION["v383"] = {"status": "ALREADY_REGISTERED", "error": None}
+        if route_exists("/api/v383/status"):
+            results["v383"] = {"status": "ALREADY_REGISTERED", "error": None}
         else:
             import alliance_v383_database_foundation as v383
             v383.register(core)
-            LATE_REGISTRATION["v383"] = {
-                "status": "REGISTERED" if _route_exists(core.app, "/api/v383/status") else "NO_ROUTE",
+            results["v383"] = {
+                "status": "REGISTERED" if route_exists("/api/v383/status") else "NO_ROUTE",
                 "error": None,
             }
     except Exception as exc:
-        LATE_REGISTRATION["v383"] = {"status": "ERROR", "error": f"{type(exc).__name__}: {exc}"}
+        results["v383"] = {"status": "ERROR", "error": f"{type(exc).__name__}: {exc}"}
 
     try:
-        if _route_exists(core.app, "/api/v46/status"):
-            LATE_REGISTRATION["v46"] = {"status": "ALREADY_REGISTERED", "error": None}
+        if route_exists("/api/v46/status"):
+            results["v46"] = {"status": "ALREADY_REGISTERED", "error": None}
         else:
             import alliance_v46_unified_intelligence as v46
             v46.register(core)
-            LATE_REGISTRATION["v46"] = {
-                "status": "REGISTERED" if _route_exists(core.app, "/api/v46/status") else "NO_ROUTE",
+            results["v46"] = {
+                "status": "REGISTERED" if route_exists("/api/v46/status") else "NO_ROUTE",
                 "error": None,
             }
     except Exception as exc:
-        LATE_REGISTRATION["v46"] = {"status": "ERROR", "error": f"{type(exc).__name__}: {exc}"}
+        results["v46"] = {"status": "ERROR", "error": f"{type(exc).__name__}: {exc}"}
 
     try:
-        if _route_exists(core.app, "/api/v451/live/status"):
-            LATE_REGISTRATION["v451"] = {"status": "ALREADY_REGISTERED", "error": None}
+        if route_exists("/api/v451/live/status"):
+            results["v451"] = {"status": "ALREADY_REGISTERED", "error": None}
         else:
             import alliance_v45_live_whatsapp_takeover as v451
             v451.register(core)
-            LATE_REGISTRATION["v451"] = {
-                "status": "REGISTERED" if _route_exists(core.app, "/api/v451/live/status") else "NO_ROUTE",
+            results["v451"] = {
+                "status": "REGISTERED" if route_exists("/api/v451/live/status") else "NO_ROUTE",
                 "error": None,
             }
     except Exception as exc:
-        LATE_REGISTRATION["v451"] = {"status": "ERROR", "error": f"{type(exc).__name__}: {exc}"}
+        results["v451"] = {"status": "ERROR", "error": f"{type(exc).__name__}: {exc}"}
 
-    return dict(LATE_REGISTRATION)
+    LATE_REGISTRATION.clear()
+    LATE_REGISTRATION.update(results)
+
+    required = [
+        "/api/v383/status",
+        "/api/v46/status",
+        "/api/v451/live/status",
+        "/api/v451/live/properties",
+        "/whatsapp-live",
+        "/whatsapp-live/feed",
+    ]
+    missing = [p for p in required if not route_exists(p)]
+    return {
+        "results": dict(results),
+        "missing_routes": missing,
+        "route_count": len(authoritative_app.router.routes),
+        "authoritative_app_id": id(authoritative_app),
+        "core_app_id": id(core.app),
+        "same_app_object": authoritative_app is core.app,
+    }
+
 
 def _load_core():
     global CORE_APP
@@ -225,11 +254,12 @@ def _load_core():
     try:
         import newspaper_wrapper as wrapped
 
-        _late_register_intelligence()
+        stabilization = _late_register_intelligence(wrapped)
 
         CORE_APP = wrapped.app
         BOOT["core_loaded"] = True
-        BOOT["state"] = "READY"
+        BOOT["state"] = "READY" if stabilization.get("same_app_object") else "DEGRADED"
+        BOOT["stabilization"] = stabilization
         BOOT["completed_at"] = datetime.now(timezone.utc).isoformat()
         print("[health-first] Alliance core application loaded successfully")
 
