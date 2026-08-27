@@ -7,7 +7,7 @@ from fastapi import Request
 from fastapi.responses import HTMLResponse
 from sqlalchemy import text
 
-VERSION = "LIVE-FEED-PROVEN-RESTORE-3.2-VISIBLE-ENTITY-FIX"
+VERSION = "LIVE-FEED-PURITY-CLEANUP-3.3"
 
 
 def _esc(v):
@@ -337,6 +337,147 @@ def _visible_entities(rows):
     return out
 
 
+
+def _clean_visible_rows(rows, min_score=60):
+    """
+    Apply the existing Alliance WhatsApp purity engine to stored wa_properties
+    rows without rewriting the database.
+
+    Main feed policy:
+      - supply only
+      - not inactive/closed/deleted
+      - no requirement-like text
+      - recovered transaction/location/type where possible
+      - safe area and price recovery
+      - quality >= min_score
+      - collapse exact duplicate fingerprints in the visible result
+    """
+    from alliance_v2_whatsapp_purity import (
+        detect_transaction,
+        canonical_location,
+        detect_property_type,
+        recover_area,
+        recover_budget,
+        quality_score,
+    )
+
+    out = []
+    seen = set()
+    stats = {
+        "input_entities": 0,
+        "kept": 0,
+        "requirements_removed": 0,
+        "inactive_removed": 0,
+        "low_quality_removed": 0,
+        "duplicate_removed": 0,
+        "unknown_removed": 0,
+    }
+
+    for row in rows:
+        stats["input_entities"] += 1
+        d = dict(row)
+        raw = str(d.get("visible_entity_text") or d.get("raw_text") or "")
+        current_tx = d.get("transaction_type")
+        current_type = d.get("property_type")
+        current_loc = d.get("location") or d.get("locality")
+        availability = str(d.get("availability") or "").strip().lower()
+
+        if availability in {"inactive", "closed", "deleted", "unavailable"}:
+            stats["inactive_removed"] += 1
+            continue
+
+        role, tx, tx_conf, tx_reason = detect_transaction(current_tx, raw)
+        if role == "REQUIREMENT":
+            stats["requirements_removed"] += 1
+            continue
+
+        if role != "SUPPLY" or tx == "UNKNOWN":
+            stats["unknown_removed"] += 1
+            continue
+
+        loc = canonical_location(
+            d.get("location"),
+            d.get("locality"),
+            d.get("address"),
+            raw,
+        )
+        typ, type_conf, type_reason = detect_property_type(current_type, raw)
+
+        area_text = (
+            str(d.get("available_area_sqft") or "")
+            if d.get("available_area_sqft") not in (None, "")
+            else str(d.get("area_sqft") or "")
+        )
+        area_numeric = d.get("available_area_sqft") or d.get("area_sqft")
+        amin, amax = recover_area(area_text, area_numeric, raw)
+
+        if tx == "LEASE":
+            budget_numeric = d.get("rent_inr")
+        elif tx == "SALE":
+            budget_numeric = d.get("sale_price_inr")
+        else:
+            budget_numeric = d.get("rent_inr") or d.get("sale_price_inr")
+
+        budget = recover_budget(None, budget_numeric, raw)
+
+        phone_present = bool(
+            d.get("owner_phone")
+            or d.get("broker_phone")
+            or d.get("sender_phone")
+        )
+
+        raw_conf = d.get("confidence")
+        verified = str(d.get("availability") or "").upper() == "VERIFIED"
+
+        score = quality_score(
+            tx,
+            loc,
+            typ,
+            amin,
+            phone_present,
+            raw_conf,
+            verified,
+        )
+
+        if score < min_score:
+            stats["low_quality_removed"] += 1
+            continue
+
+        # Exact visible duplicate barrier.
+        fp = "|".join(
+            [
+                str(loc or "").strip().lower(),
+                str(typ or "").strip().lower(),
+                str(tx or "").strip().lower(),
+                str(round(float(amin or 0), -1) if amin else 0),
+                str(round(float(budget or 0), -1) if budget else 0),
+                str(d.get("broker_phone") or d.get("owner_phone") or d.get("sender_phone") or "").strip(),
+                re.sub(r"\W+", "", raw.lower())[:180],
+            ]
+        )
+
+        if fp in seen:
+            stats["duplicate_removed"] += 1
+            continue
+        seen.add(fp)
+
+        d["clean_role"] = role
+        d["clean_transaction"] = tx
+        d["clean_transaction_confidence"] = tx_conf
+        d["clean_transaction_reason"] = tx_reason
+        d["clean_location"] = loc
+        d["clean_property_type"] = typ
+        d["clean_property_type_confidence"] = type_conf
+        d["clean_property_type_reason"] = type_reason
+        d["clean_area_min_sqft"] = amin
+        d["clean_area_max_sqft"] = amax
+        d["clean_budget"] = budget
+        d["clean_score"] = score
+        out.append(d)
+        stats["kept"] += 1
+
+    return out, stats
+
 def register(wrapped):
     app = wrapped.app
     core = wrapped.core
@@ -364,13 +505,15 @@ def register(wrapped):
         try:
             source, stored_rows, detected = get_rows(core, "", 50)
             visible = _visible_entities(stored_rows)
+            clean, purity_stats = _clean_visible_rows(visible, 60)
             return {
                 "status": "OK",
                 "version": VERSION,
                 "source": source,
                 "stored_rows_sampled": len(stored_rows),
                 "visible_entities_after_split": len(visible),
-                "split_gain": len(visible) - len(stored_rows),
+                "clean_entities": len(clean),
+                "purity_stats": purity_stats,
                 "counts": detected,
             }
         except Exception as exc:
@@ -385,6 +528,7 @@ def register(wrapped):
         try:
             source, stored_rows, detected = get_rows(core, "", 100)
             visible = _visible_entities(stored_rows)
+            clean, purity_stats = _clean_visible_rows(visible, 60)
             multi = {}
             for row in visible:
                 base = str(row.get("wa_property_id") or row.get("id"))
@@ -395,10 +539,11 @@ def register(wrapped):
                     "selected_source": source,
                     "stored_rows_sampled": len(stored_rows),
                     "visible_entities_after_split": len(visible),
-                    "split_gain": len(visible) - len(stored_rows),
+                    "clean_entities_after_purity": len(clean),
+                    "purity_stats": purity_stats,
                     "multi_entity_stored_rows": sum(1 for n in multi.values() if n > 1),
                     "sample_visible_ids": [
-                        x.get("visible_entity_id") for x in visible[:10]
+                        x.get("visible_entity_id") for x in clean[:10]
                     ],
                     "counts": detected,
                 }
@@ -418,7 +563,8 @@ def register(wrapped):
             # Fetch fewer stored rows than the absolute maximum because a row
             # may expand into several visible entities.
             source, stored_rows, detected = get_rows(core, q, limit)
-            rows = _visible_entities(stored_rows)
+            visible_rows = _visible_entities(stored_rows)
+            rows, purity_stats = _clean_visible_rows(visible_rows, 60)
         except Exception as exc:
             return HTMLResponse(
                 f"""<!doctype html><html><body style='font-family:Arial;padding:30px'>
@@ -450,25 +596,25 @@ def register(wrapped):
                 if x
             )
 
-            location = " · ".join(
+            location = row.get("clean_location") or " · ".join(
                 str(x)
                 for x in [row.get("location"), row.get("locality")]
                 if x
             )
-            area = row.get("available_area_sqft") or row.get("area_sqft") or "—"
+            area = row.get("clean_area_min_sqft") or row.get("available_area_sqft") or row.get("area_sqft") or "—"
 
             trs.append(
                 f"""<tr>
                 <td>{_esc(row.get('last_seen') or row.get('first_seen') or '—')}</td>
-                <td><b>{_esc(row.get('transaction_type') or '—')}</b></td>
-                <td>{_esc(row.get('property_type') or '—')}</td>
+                <td><b>{_esc(row.get('clean_transaction') or row.get('transaction_type') or '—')}</b></td>
+                <td>{_esc(row.get('clean_property_type') or row.get('property_type') or '—')}</td>
                 <td>{_esc(location or '—')}</td>
                 <td>{_esc(area)}</td>
                 <td>{_esc(' | '.join(price) or '—')}</td>
                 <td style='min-width:440px;white-space:pre-wrap'>{_esc(row.get('visible_entity_text') or '—')}</td>
                 <td>{_esc(contact or '—')}</td>
                 <td>{_esc(row.get('duplicate_status') or '—')}</td>
-                <td>{_esc(row.get('confidence') or '—')}</td>
+                <td>{_esc(row.get('clean_score') or row.get('confidence') or '—')}</td>
                 </tr>"""
             )
 
@@ -491,7 +637,7 @@ def register(wrapped):
             .ok{{color:#176b3a;font-weight:700}}
             </style></head><body>
             <header><h2 style='margin:0'>WhatsApp Property Leads</h2>
-            <small>One visible property entity per row · historical multi-property rows re-split safely in memory</small></header>
+            <small>Clean active WhatsApp inventory · requirements, inactive rows, low-quality rows and exact duplicates filtered out</small></header>
             <main>
             <div class='card'>
               <form>
@@ -499,8 +645,9 @@ def register(wrapped):
                 <input type='hidden' name='limit' value='{limit}'>
                 <button>Search</button>
               </form>
-              <p><span class='ok'>{len(rows)} visible property entities</span> from <b>{len(stored_rows)}</b> stored rows · source: <b>{_esc(source)}</b></p>
+              <p><span class='ok'>{len(rows)} clean property leads</span> from <b>{len(stored_rows)}</b> stored rows · source: <b>{_esc(source)}</b></p>
               <p>wa_properties: <b>{detected['wa_properties_count']}</b> · requirements kept separate: <b>{detected['wa_requirements_count']}</b></p>
+              <p>Filtered: requirements <b>{purity_stats['requirements_removed']}</b> · inactive <b>{purity_stats['inactive_removed']}</b> · low quality <b>{purity_stats['low_quality_removed']}</b> · duplicates <b>{purity_stats['duplicate_removed']}</b> · unknown <b>{purity_stats['unknown_removed']}</b></p>
               <p><a href='/api/live-feed-purity/debug'>Diagnostics</a></p>
             </div>
             <div class='card' style='overflow:auto'>
