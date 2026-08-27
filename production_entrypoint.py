@@ -257,6 +257,9 @@ def _load_core():
         import alliance_production_surface as production_surface
         stabilization = production_surface.register(wrapped)
 
+        import alliance_live_feed_purity as live_feed_purity
+        live_feed_purity.register(wrapped)
+
         CORE_APP = wrapped.app
         BOOT["core_loaded"] = True
         BOOT["state"] = "READY" if stabilization.get("registered") else "DEGRADED"
