@@ -5,7 +5,7 @@ from fastapi import Request
 from fastapi.responses import HTMLResponse
 from sqlalchemy import text
 
-VERSION="LIVE-FEED-PURITY-FINAL-2.4-EXACT-WHATSAPP-SOURCE"
+VERSION="LIVE-FEED-PURITY-FINAL-2.5-RAW-REBUILD"
 
 REQ=[r"\bwanted\b",r"\brequirement\b",r"\brequired\b",r"\blooking for\b",r"\bneed(?:ed)?\b",r"\bclient budget\b",r"\btenant meeting\b",r"\bimmediate required\b"]
 INV=[r"\bavailable for rent\b",r"\bavailable for sale\b",r"\bavailable on sale\b",r"\bfor rent\b",r"\bfor sale\b",r"\bto[- ]?let\b",r"\basking\b",r"\bdemand\b",r"\brent\b",r"\blease\b",r"\bsale\b",r"\bbhk\b",r"\bsq\.?\s*ft\b",r"\bsqft\b",r"\bsq\.?\s*yd",r"\bsqyd",r"\bvilla\b",r"\bapartment\b",r"\bflat\b",r"\bkothi\b",r"\bplot\b",r"\boffice\b",r"\bshop\b",r"\bshowroom\b",r"\bcommercial\b",r"\bwarehouse\b",r"\bpre[- ]?rented\b",r"\bpre[- ]?leased\b"]
@@ -109,59 +109,112 @@ def ensure(engine):
     "CREATE INDEX IF NOT EXISTS idx_live_feed_entities_fp ON alliance_live_feed_entities(entity_fingerprint)"]
     with engine.begin() as c:
         for s in stmts:c.execute(text(s))
+def _wa_columns(c, table):
+    rows=c.execute(text("""
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_schema='public' AND table_name=:t
+        ORDER BY ordinal_position
+    """),{"t":table}).scalars().all()
+    return [str(x) for x in rows]
+
+def _pick(cols, options):
+    lower={x.lower():x for x in cols}
+    for o in options:
+        if o in lower:
+            return lower[o]
+    return None
+
 def event_rows(core,limit=3000):
     """
-    Exact production WhatsApp source bridge.
-
-    The existing Alliance WhatsApp V2 adapter may use a separate
-    WHATSAPP_DATABASE_URL. Reuse its source-engine logic and read the same
-    wai_listings / wai_contacts data already powering the working WhatsApp
-    intelligence system.
+    Final source behavior:
+    1. Use the same separate WHATSAPP_DATABASE_URL as the working V2 adapter.
+    2. Prefer ORIGINAL wai_raw_messages so line breaks / multi-property structure survive.
+    3. Dynamically discover the raw-message text column.
+    4. Enrich sender/group from wai_listings where possible.
+    5. Fall back to wai_listings only if raw messages cannot be read.
     """
     import alliance_v2_whatsapp_adapter as wa_adapter
-
-    source_engine, should_dispose = wa_adapter._source_engine(core.engine)
+    source_engine,should_dispose=wa_adapter._source_engine(core.engine)
     try:
         with source_engine.connect() as c:
-            # Primary source: already-normalized WhatsApp listings.
-            if c.execute(text("SELECT to_regclass('public.wai_listings') IS NOT NULL")).scalar():
-                n=int(c.execute(text("SELECT COUNT(*) FROM wai_listings")).scalar() or 0)
-                if n>0:
-                    rows=c.execute(text("""
-                        SELECT
-                          l.id::text AS source_event_id,
-                          COALESCE(l.source_group_name,'') AS source_group,
-                          COALESCE(ct.display_name,l.poster_name,'') AS sender_name,
-                          COALESCE(ct.phone,rm.sender_phone,'') AS sender_phone,
-                          COALESCE(NULLIF(l.raw_listing_text,''),NULLIF(l.summary,''),'') AS raw_message,
-                          COALESCE(l.created_at,rm.sent_at,NOW()) AS created_at
-                        FROM wai_listings l
-                        LEFT JOIN wai_contacts ct ON ct.id=l.contact_id
-                        LEFT JOIN wai_raw_messages rm ON rm.id=l.source_message_id
-                        WHERE NULLIF(BTRIM(COALESCE(NULLIF(l.raw_listing_text,''),NULLIF(l.summary,''),'')),'') IS NOT NULL
-                        ORDER BY COALESCE(l.created_at,rm.sent_at) DESC NULLS LAST,l.id DESC
-                        LIMIT :lim
-                    """),{"lim":limit}).mappings().all()
-                    if rows:
-                        return rows
+            raw_exists=bool(c.execute(text("SELECT to_regclass('public.wai_raw_messages') IS NOT NULL")).scalar())
+            if raw_exists:
+                cols=_wa_columns(c,"wai_raw_messages")
+                text_col=_pick(cols,[
+                    "raw_text","raw_message","message_text","message","text","body",
+                    "content","message_body","payload_text","plain_text"
+                ])
+                id_col=_pick(cols,["id","message_id","raw_message_id","event_id"])
+                date_col=_pick(cols,["sent_at","created_at","received_at","timestamp","message_time"])
+                phone_col=_pick(cols,["sender_phone","phone","from_phone","contact_phone"])
+                name_col=_pick(cols,["sender_display_name","sender_name","display_name","contact_name"])
 
-            # Secondary source: legacy local bridge, if populated.
-            if c.execute(text("SELECT to_regclass('public.wa_bridge_events') IS NOT NULL")).scalar():
-                n=int(c.execute(text("SELECT COUNT(*) FROM wa_bridge_events")).scalar() or 0)
-                if n>0:
-                    rows=c.execute(text("""
-                        SELECT e.id::text source_event_id,
-                               COALESCE(g.group_name,'') source_group,
-                               COALESCE(e.sender_name,'') sender_name,
-                               COALESCE(e.sender_phone,'') sender_phone,
-                               COALESCE(e.raw_text,'') raw_message,
-                               e.created_at
-                        FROM wa_bridge_events e
-                        LEFT JOIN wa_bridge_groups g ON g.group_id=e.group_id
-                        ORDER BY e.id DESC LIMIT :lim
-                    """),{"lim":limit}).mappings().all()
-                    if rows:
-                        return rows
+                if text_col:
+                    id_expr=f'rm."{id_col}"::text' if id_col else "row_number() over ()::text"
+                    date_expr=f'rm."{date_col}"' if date_col else "NOW()"
+                    phone_expr=f'COALESCE(rm."{phone_col}"::text,\'\')' if phone_col else "''"
+                    name_expr=f'COALESCE(rm."{name_col}"::text,\'\')' if name_col else "''"
+
+                    # Group name is normally held on the derived listing, linked by source_message_id.
+                    list_exists=bool(c.execute(text("SELECT to_regclass('public.wai_listings') IS NOT NULL")).scalar())
+                    if list_exists and id_col:
+                        sql=f"""
+                            SELECT
+                              'RAW-' || {id_expr} AS source_event_id,
+                              COALESCE(MAX(l.source_group_name),'') AS source_group,
+                              COALESCE(NULLIF({name_expr},''),MAX(l.poster_name),'') AS sender_name,
+                              COALESCE(NULLIF({phone_expr},''),MAX(ct.phone),'') AS sender_phone,
+                              rm."{text_col}"::text AS raw_message,
+                              {date_expr} AS created_at
+                            FROM wai_raw_messages rm
+                            LEFT JOIN wai_listings l ON l.source_message_id=rm."{id_col}"
+                            LEFT JOIN wai_contacts ct ON ct.id=l.contact_id
+                            WHERE NULLIF(BTRIM(rm."{text_col}"::text),'') IS NOT NULL
+                            GROUP BY rm."{id_col}", rm."{text_col}", {date_expr}, {phone_expr}, {name_expr}
+                            ORDER BY {date_expr} DESC NULLS LAST
+                            LIMIT :lim
+                        """
+                    else:
+                        sql=f"""
+                            SELECT
+                              'RAW-' || {id_expr} AS source_event_id,
+                              '' AS source_group,
+                              {name_expr} AS sender_name,
+                              {phone_expr} AS sender_phone,
+                              rm."{text_col}"::text AS raw_message,
+                              {date_expr} AS created_at
+                            FROM wai_raw_messages rm
+                            WHERE NULLIF(BTRIM(rm."{text_col}"::text),'') IS NOT NULL
+                            ORDER BY {date_expr} DESC NULLS LAST
+                            LIMIT :lim
+                        """
+                    try:
+                        rows=c.execute(text(sql),{"lim":limit}).mappings().all()
+                        if rows:
+                            return rows
+                    except Exception:
+                        pass
+
+            # Fallback: normalized listings.
+            if c.execute(text("SELECT to_regclass('public.wai_listings') IS NOT NULL")).scalar():
+                rows=c.execute(text("""
+                    SELECT
+                      'LISTING-' || l.id::text AS source_event_id,
+                      COALESCE(l.source_group_name,'') AS source_group,
+                      COALESCE(ct.display_name,l.poster_name,'') AS sender_name,
+                      COALESCE(ct.phone,rm.sender_phone,'') AS sender_phone,
+                      COALESCE(NULLIF(l.raw_listing_text,''),NULLIF(l.summary,''),'') AS raw_message,
+                      COALESCE(l.created_at,rm.sent_at,NOW()) AS created_at
+                    FROM wai_listings l
+                    LEFT JOIN wai_contacts ct ON ct.id=l.contact_id
+                    LEFT JOIN wai_raw_messages rm ON rm.id=l.source_message_id
+                    WHERE NULLIF(BTRIM(COALESCE(NULLIF(l.raw_listing_text,''),NULLIF(l.summary,''),'')),'') IS NOT NULL
+                    ORDER BY COALESCE(l.created_at,rm.sent_at) DESC NULLS LAST,l.id DESC
+                    LIMIT :lim
+                """),{"lim":limit}).mappings().all()
+                if rows:
+                    return rows
     finally:
         if should_dispose:
             source_engine.dispose()
@@ -170,27 +223,28 @@ def event_rows(core,limit=3000):
 def source_diagnostics(core):
     import os
     import alliance_v2_whatsapp_adapter as wa_adapter
-    source_engine, should_dispose=wa_adapter._source_engine(core.engine)
+    source_engine,should_dispose=wa_adapter._source_engine(core.engine)
     out={
         "whatsapp_database_url_configured":bool((os.getenv("WHATSAPP_DATABASE_URL") or "").strip()),
         "using_separate_whatsapp_database":bool(should_dispose),
-        "wai_listings_exists":False,
-        "wai_listings_count":0,
-        "wai_contacts_count":0,
+        "raw_source_preferred":True,
+        "wai_raw_messages_exists":False,
         "wai_raw_messages_count":0,
+        "wai_raw_text_column":None,
+        "wai_listings_count":0,
     }
     try:
         with source_engine.connect() as c:
-            for table,key in [
-                ("wai_listings","wai_listings_count"),
-                ("wai_contacts","wai_contacts_count"),
-                ("wai_raw_messages","wai_raw_messages_count"),
-            ]:
-                exists=bool(c.execute(text("SELECT to_regclass(:t)"),{"t":f"public.{table}"}).scalar())
-                if table=="wai_listings":
-                    out["wai_listings_exists"]=exists
-                if exists:
-                    out[key]=int(c.execute(text(f"SELECT COUNT(*) FROM {table}")).scalar() or 0)
+            if c.execute(text("SELECT to_regclass('public.wai_raw_messages') IS NOT NULL")).scalar():
+                out["wai_raw_messages_exists"]=True
+                out["wai_raw_messages_count"]=int(c.execute(text("SELECT COUNT(*) FROM wai_raw_messages")).scalar() or 0)
+                cols=_wa_columns(c,"wai_raw_messages")
+                out["wai_raw_text_column"]=_pick(cols,[
+                    "raw_text","raw_message","message_text","message","text","body",
+                    "content","message_body","payload_text","plain_text"
+                ])
+            if c.execute(text("SELECT to_regclass('public.wai_listings') IS NOT NULL")).scalar():
+                out["wai_listings_count"]=int(c.execute(text("SELECT COUNT(*) FROM wai_listings")).scalar() or 0)
     except Exception as exc:
         out["error"]=f"{type(exc).__name__}: {exc}"
     finally:
@@ -203,7 +257,11 @@ def efp(t):
     return hashlib.sha1(x.encode()).hexdigest()
 def sync(core,limit=3000):
     import alliance_v383_database_foundation as canon
-    ensure(core.engine);counts={"source_events":0,"entities":0,"inventory":0,"requirements":0,"rejected":0,"review":0}
+    ensure(core.engine)
+    # Rebuild only the visible purity staging layer. Canonical/legacy source data is untouched.
+    with core.engine.begin() as _c:
+        _c.execute(text("UPDATE alliance_live_feed_entities SET status='STALE' WHERE status='ACTIVE'"))
+    counts={"source_events":0,"entities":0,"inventory":0,"requirements":0,"rejected":0,"review":0}
     for ev in reversed(event_rows(core,limit)):
         raw=norm(ev["raw_message"]);parts=split_property_entities(raw) if classify(raw)=="PROPERTY_INVENTORY" else [raw]
         with core.engine.begin() as c:
