@@ -46,11 +46,11 @@ def module_health():
         "modules":OPTIONAL_MODULES,
     }
 
-# ALLIANCE V4.2 CLEAN SOURCES
+# ALLIANCE V4.3 CLEAN WHATSAPP PROPERTY MASTER
 try:
-    import alliance_v42_clean_sources as _v42
-    _v42.register(core)
-    print("Alliance V4.2 clean sources registered successfully")
+    import alliance_v43_whatsapp_property_master as _v43
+    _v43.register(core)
+    print("Alliance V4.3 clean WhatsApp Property Master registered successfully")
 except Exception as e:
-    print("Alliance V4.2 registration warning:",type(e).__name__,str(e))
+    print("Alliance V4.3 registration warning:",type(e).__name__,str(e))
 
