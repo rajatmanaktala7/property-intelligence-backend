@@ -5,7 +5,7 @@ from fastapi import Request
 from fastapi.responses import HTMLResponse
 from sqlalchemy import text
 
-VERSION="LIVE-FEED-PURITY-FINAL-2.2"
+VERSION="LIVE-FEED-PURITY-FINAL-2.3-SOURCE-BRIDGE"
 
 REQ=[r"\bwanted\b",r"\brequirement\b",r"\brequired\b",r"\blooking for\b",r"\bneed(?:ed)?\b",r"\bclient budget\b",r"\btenant meeting\b",r"\bimmediate required\b"]
 INV=[r"\bavailable for rent\b",r"\bavailable for sale\b",r"\bavailable on sale\b",r"\bfor rent\b",r"\bfor sale\b",r"\bto[- ]?let\b",r"\basking\b",r"\bdemand\b",r"\brent\b",r"\blease\b",r"\bsale\b",r"\bbhk\b",r"\bsq\.?\s*ft\b",r"\bsqft\b",r"\bsq\.?\s*yd",r"\bsqyd",r"\bvilla\b",r"\bapartment\b",r"\bflat\b",r"\bkothi\b",r"\bplot\b",r"\boffice\b",r"\bshop\b",r"\bshowroom\b",r"\bcommercial\b",r"\bwarehouse\b",r"\bpre[- ]?rented\b",r"\bpre[- ]?leased\b"]
@@ -109,13 +109,150 @@ def ensure(engine):
     "CREATE INDEX IF NOT EXISTS idx_live_feed_entities_fp ON alliance_live_feed_entities(entity_fingerprint)"]
     with engine.begin() as c:
         for s in stmts:c.execute(text(s))
+def _safe_ident(name):
+    return bool(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", str(name or "")))
+
+def _candidate_sources(c):
+    """
+    Discover populated WhatsApp-like tables without hard-coding one schema.
+    Scores candidates by:
+      1) WhatsApp-ish table name
+      2) presence of a usable text/message column
+      3) sender/source/date columns
+      4) actual row count
+    """
+    rows = c.execute(text("""
+        SELECT table_name, column_name
+        FROM information_schema.columns
+        WHERE table_schema='public'
+          AND (
+            lower(table_name) LIKE '%whatsapp%'
+            OR lower(table_name) LIKE 'wa_%'
+            OR lower(table_name) LIKE '%message%'
+            OR lower(table_name) LIKE '%capture%'
+          )
+        ORDER BY table_name, ordinal_position
+    """)).mappings().all()
+
+    tables = {}
+    for r in rows:
+        tables.setdefault(r["table_name"], []).append(r["column_name"])
+
+    text_cols = ["raw_text","message","message_text","text","description","raw_message","content","body","entity_text"]
+    sender_cols = ["sender_name","contact_name","advertiser_name","broker_name","owner_name","name"]
+    phone_cols = ["sender_phone","phone","contact_number","contact_no","mobile","contact_name_number"]
+    source_cols = ["group_name","source_group","source","group_title","chat_name","group_id"]
+    date_cols = ["created_at","captured_on","captured_at","received_at","timestamp","message_time","updated_at"]
+    id_cols = ["id","event_id","message_id","record_id","entity_id","listing_id"]
+
+    out = []
+    for table, cols in tables.items():
+        if not _safe_ident(table):
+            continue
+        lower = {x.lower(): x for x in cols}
+        def pick(options):
+            for x in options:
+                if x in lower:
+                    return lower[x]
+            return None
+
+        tc = pick(text_cols)
+        if not tc:
+            continue
+
+        try:
+            count = int(c.execute(text(f'SELECT COUNT(*) FROM "{table}"')).scalar() or 0)
+        except Exception:
+            continue
+        if count <= 0:
+            continue
+
+        score = 0
+        lname = table.lower()
+        score += 30 if "whatsapp" in lname else 0
+        score += 20 if lname.startswith("wa_") else 0
+        score += 10 if "capture" in lname else 0
+        score += 10 if "message" in lname else 0
+        score += min(count, 10000) / 1000.0
+
+        item = {
+            "table": table,
+            "count": count,
+            "score": score,
+            "text_col": tc,
+            "sender_col": pick(sender_cols),
+            "phone_col": pick(phone_cols),
+            "source_col": pick(source_cols),
+            "date_col": pick(date_cols),
+            "id_col": pick(id_cols),
+        }
+        out.append(item)
+
+    return sorted(out, key=lambda x: (x["score"], x["count"]), reverse=True)
+
+def _read_candidate(c, cand, limit):
+    table = cand["table"]
+    for k in ["text_col","sender_col","phone_col","source_col","date_col","id_col"]:
+        if cand.get(k) and not _safe_ident(cand[k]):
+            return []
+
+    def expr(col, default_sql):
+        return f'COALESCE("{col}"::text, \'\')' if col else default_sql
+
+    id_expr = f'"{cand["id_col"]}"::text' if cand.get("id_col") else "row_number() over ()::text"
+    source_expr = expr(cand.get("source_col"), "''")
+    sender_expr = expr(cand.get("sender_col"), "''")
+    phone_expr = expr(cand.get("phone_col"), "''")
+    text_expr = expr(cand.get("text_col"), "''")
+    date_expr = f'"{cand["date_col"]}"' if cand.get("date_col") else "NOW()"
+    order_expr = f'"{cand["date_col"]}" DESC NULLS LAST' if cand.get("date_col") else "1 DESC"
+
+    sql = f"""
+        SELECT
+          {id_expr} AS source_event_id,
+          {source_expr} AS source_group,
+          {sender_expr} AS sender_name,
+          {phone_expr} AS sender_phone,
+          {text_expr} AS raw_message,
+          {date_expr} AS created_at
+        FROM "{table}"
+        WHERE NULLIF(BTRIM({text_expr}), '') IS NOT NULL
+        ORDER BY {order_expr}
+        LIMIT :lim
+    """
+    return c.execute(text(sql), {"lim": limit}).mappings().all()
+
 def event_rows(core,limit=3000):
+    """
+    Source Bridge:
+    - use wa_bridge_events if populated
+    - otherwise auto-detect the best populated WhatsApp/message table
+    - never returns zero just because one expected table is empty
+    """
     with core.engine.connect() as c:
+        # First preference: original live bridge, but only if it actually has data.
         if c.execute(text("SELECT to_regclass('public.wa_bridge_events') IS NOT NULL")).scalar():
-            return c.execute(text("""SELECT e.id::text source_event_id,COALESCE(g.group_name,'') source_group,
-            COALESCE(e.sender_name,'') sender_name,COALESCE(e.sender_phone,'') sender_phone,
-            COALESCE(e.raw_text,'') raw_message,e.created_at FROM wa_bridge_events e
-            LEFT JOIN wa_bridge_groups g ON g.group_id=e.group_id ORDER BY e.id DESC LIMIT :lim"""),{"lim":limit}).mappings().all()
+            n = int(c.execute(text("SELECT COUNT(*) FROM wa_bridge_events")).scalar() or 0)
+            if n > 0:
+                rows = c.execute(text("""SELECT e.id::text source_event_id,COALESCE(g.group_name,'') source_group,
+                COALESCE(e.sender_name,'') sender_name,COALESCE(e.sender_phone,'') sender_phone,
+                COALESCE(e.raw_text,'') raw_message,e.created_at FROM wa_bridge_events e
+                LEFT JOIN wa_bridge_groups g ON g.group_id=e.group_id ORDER BY e.id DESC LIMIT :lim"""),
+                {"lim":limit}).mappings().all()
+                if rows:
+                    return rows
+
+        # Fallback across the actual production schema.
+        for cand in _candidate_sources(c):
+            # Avoid feeding the purity engine from its own output table.
+            if cand["table"] == "alliance_live_feed_entities":
+                continue
+            try:
+                rows = _read_candidate(c, cand, limit)
+                if rows:
+                    return rows
+            except Exception:
+                continue
     return []
 def efp(t):
     x=one(t).lower();x=re.sub(r"\+?91?\d[\d\s\-]{8,}","",x);x=re.sub(r"\W+"," ",x)
@@ -159,7 +296,18 @@ def esc(v):return str(v or "").replace("&","&amp;").replace("<","&lt;").replace(
 def register(wrapped):
     app=wrapped.app;core=wrapped.core;owned={"/whatsapp-live/feed","/api/live-feed-purity/status","/api/live-feed-purity/sample"}
     app.router.routes[:]=[r for r in app.router.routes if not(getattr(r,"path",None) in owned and "GET" in (getattr(r,"methods",set()) or set()))]
-    def status():return sync(core,3000)
+    def status():
+        result=sync(core,3000)
+        try:
+            with core.engine.connect() as c:
+                result["source_candidates"]=[
+                    {"table":x["table"],"rows":x["count"],"score":round(x["score"],2),"text_col":x["text_col"]}
+                    for x in _candidate_sources(c)[:8]
+                    if x["table"]!="alliance_live_feed_entities"
+                ]
+        except Exception as exc:
+            result["source_candidates_error"]=f"{type(exc).__name__}: {exc}"
+        return result
     def sample():return {"version":VERSION,"engine":"FINAL","registered":True}
     def feed(request:Request):
         sync(core,3000);q=str(request.query_params.get("q") or "").strip();rr=rows(core,q,1000)
