@@ -28,3 +28,12 @@ def production_health():
         "legacy_newspaper_startup_registration": False,
         "newspaper_mode": "ON_DEMAND_SELF_HEALING"
     }
+
+
+# ALLIANCE V3.8 SOURCE-AWARE MATCHER
+try:
+    import alliance_v38_source_aware_matcher as _v38
+    _v38.register(core)
+    print("Alliance V3.8 source-aware matcher registered successfully")
+except Exception as e:
+    print("Alliance V3.8 registration warning:", type(e).__name__, str(e))
