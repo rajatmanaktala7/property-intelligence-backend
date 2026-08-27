@@ -41,3 +41,12 @@ def production_health():
         "core_app_loaded": True,
         "wrapper": "PRODUCTION_FAIL_SAFE_V1"
     }
+
+
+# NEWSPAPER V8.3 SELF-HEALING UPLOAD
+try:
+    import newspaper_upload_v83 as _newspaper_v83
+    _newspaper_v83.register(core)
+    print("Newspaper V8.3 self-healing upload registered successfully")
+except Exception as e:
+    print("Newspaper V8.3 registration warning:", type(e).__name__, str(e))
