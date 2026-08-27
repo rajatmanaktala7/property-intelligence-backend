@@ -21,6 +21,12 @@ BOOT = {
 
 CORE_APP = None
 
+LATE_REGISTRATION = {
+    "v383": {"status": "NOT_RUN", "error": None},
+    "v46": {"status": "NOT_RUN", "error": None},
+    "v451": {"status": "NOT_RUN", "error": None},
+}
+
 
 # ------------------------------------------------------------
 # HEALTH SHELL
@@ -132,6 +138,7 @@ def core_route_status():
         "boot_state": BOOT.get("state"),
         "core_loaded": BOOT.get("core_loaded"),
         "core_app_present": CORE_APP is not None,
+        "late_registration": LATE_REGISTRATION,
         "wanted_routes_present": present,
         "route_count": len(routes),
         "routes": routes,
@@ -145,6 +152,7 @@ def shell_live_bootstrap_status():
     return {
         "status": "OK" if BOOT.get("core_loaded") else "STARTING",
         "served_by": "production_entrypoint health shell",
+        "late_registration": LATE_REGISTRATION,
         "boot_state": BOOT.get("state"),
         "core_loaded": BOOT.get("core_loaded"),
         "v383_registered": "/api/v383/status" in routes,
@@ -158,6 +166,57 @@ def shell_live_bootstrap_status():
     }
 
 
+def _route_exists(app_obj, path):
+    try:
+        return any(getattr(r, "path", None) == path for r in app_obj.router.routes)
+    except Exception:
+        return False
+
+
+def _late_register_intelligence():
+    import app as core
+
+    try:
+        if _route_exists(core.app, "/api/v383/status"):
+            LATE_REGISTRATION["v383"] = {"status": "ALREADY_REGISTERED", "error": None}
+        else:
+            import alliance_v383_database_foundation as v383
+            v383.register(core)
+            LATE_REGISTRATION["v383"] = {
+                "status": "REGISTERED" if _route_exists(core.app, "/api/v383/status") else "NO_ROUTE",
+                "error": None,
+            }
+    except Exception as exc:
+        LATE_REGISTRATION["v383"] = {"status": "ERROR", "error": f"{type(exc).__name__}: {exc}"}
+
+    try:
+        if _route_exists(core.app, "/api/v46/status"):
+            LATE_REGISTRATION["v46"] = {"status": "ALREADY_REGISTERED", "error": None}
+        else:
+            import alliance_v46_unified_intelligence as v46
+            v46.register(core)
+            LATE_REGISTRATION["v46"] = {
+                "status": "REGISTERED" if _route_exists(core.app, "/api/v46/status") else "NO_ROUTE",
+                "error": None,
+            }
+    except Exception as exc:
+        LATE_REGISTRATION["v46"] = {"status": "ERROR", "error": f"{type(exc).__name__}: {exc}"}
+
+    try:
+        if _route_exists(core.app, "/api/v451/live/status"):
+            LATE_REGISTRATION["v451"] = {"status": "ALREADY_REGISTERED", "error": None}
+        else:
+            import alliance_v45_live_whatsapp_takeover as v451
+            v451.register(core)
+            LATE_REGISTRATION["v451"] = {
+                "status": "REGISTERED" if _route_exists(core.app, "/api/v451/live/status") else "NO_ROUTE",
+                "error": None,
+            }
+    except Exception as exc:
+        LATE_REGISTRATION["v451"] = {"status": "ERROR", "error": f"{type(exc).__name__}: {exc}"}
+
+    return dict(LATE_REGISTRATION)
+
 def _load_core():
     global CORE_APP
 
@@ -165,6 +224,8 @@ def _load_core():
 
     try:
         import newspaper_wrapper as wrapped
+
+        _late_register_intelligence()
 
         CORE_APP = wrapped.app
         BOOT["core_loaded"] = True
