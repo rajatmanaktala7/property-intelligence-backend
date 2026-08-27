@@ -79,3 +79,10 @@ try:
 except Exception as e:
     print("Alliance V4.6 registration warning:",type(e).__name__,str(e))
 
+# ALLIANCE V3.8.3 CANONICAL DATABASE FOUNDATION
+try:
+    import alliance_v383_database_foundation as _v383
+    _v383.register(core)
+    print("Alliance V3.8.3 canonical database foundation registered successfully")
+except Exception as e:
+    print("Alliance V3.8.3 database foundation warning:", type(e).__name__, str(e))
