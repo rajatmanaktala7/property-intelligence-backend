@@ -9,8 +9,8 @@ from sqlalchemy import text
 from starlette.middleware.base import BaseHTTPMiddleware
 import alliance_live_feed_purity_legacy36 as _legacy
 
-VERSION="5.4-FIXED-FIELDS-SINGLE-MATCHER"
-OWNER="ALLIANCE_V54_WHATSAPP_DATA_WORKSPACE"
+VERSION="5.3-DATE-CORRECT-SINGLE-MATCHER"
+OWNER="ALLIANCE_V53_WHATSAPP_DATA_WORKSPACE"
 
 LOCATION_ALIASES={
  "KALKAJI":["KALKAJI"],"SAKET":["SAKET","SAKET DISTRICT CENTRE","DISTRICT CENTRE SAKET","DLF AVENUE SAKET","SELECT CITYWALK","SELECT CITY WALK"],
@@ -54,26 +54,6 @@ def ptype(v):
     if any(x in n for x in ("RESIDENTIAL","APARTMENT","FLAT","VILLA","KOTHI","BHK","BUILDER FLOOR","INDEPENDENT HOUSE","PENTHOUSE")):return "Residential"
     if any(x in n for x in ("PLOT","LAND","FARMHOUSE")):return "Land"
     return "Property"
-
-
-PHONE_RE=re.compile(r"(?<!\d)(?:\+?91[\s-]?)?[6-9]\d(?:[\s-]?\d){8}(?!\d)")
-
-def contact_number(v):
-    raw=str(v or "")
-    m=PHONE_RE.search(raw)
-    if not m:return ""
-    d=re.sub(r"\D","",m.group(0))
-    if len(d)==12 and d.startswith("91"): d=d[2:]
-    if len(d)==11 and d.startswith("0"): d=d[1:]
-    return ("+91 "+d) if len(d)==10 else m.group(0).strip()
-
-def contact_name(v):
-    raw=str(v or "").strip()
-    ph=PHONE_RE.search(raw)
-    if ph:
-        raw=(raw[:ph.start()]+" "+raw[ph.end():]).strip(" ·|-/,")
-    raw=re.sub(r"\s*[·|/,-]\s*$","",raw).strip()
-    return raw
 
 def noise(v):
     n=norm(v)
@@ -218,11 +198,11 @@ def rpt(r):return ptype(" ".join(str(r.get(k) or "") for k in ("property_type","
 
 def page(body,active="availability"):
     tabs="".join(f"<a class='tab {'on' if active==k else ''}' href='/whatsapp-live?section={k}'>{label}</a>" for k,label in
-      [("availability","1. Availability"),("requirements","2. Date-wise Requirements")]) + "<a class='tab matcher' href='/deal-match-ai-v60'>3. Alliance Deal Matcher</a>"
+      [("availability","1. Availability"),("requirements","2. Date-wise Requirements")])
     return f"""<!doctype html><html><head><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'><title>WhatsApp Group Property Workspace</title><style>
     *{{box-sizing:border-box}}body{{margin:0;font-family:Arial;background:#efe4d2;color:#2c251e}}header{{background:#594634;color:#fff;padding:18px 24px}}
     nav,main{{max-width:1900px;margin:auto}}nav{{padding:12px 18px;background:#fffaf4;display:flex;gap:8px;flex-wrap:wrap}}a,.btn,button{{background:#6c543f;color:#fff;text-decoration:none;border:0;border-radius:7px;padding:9px 12px;font-weight:800;cursor:pointer}}
-    main{{padding:18px}}.tabs{{display:flex;gap:10px;margin-bottom:14px;flex-wrap:wrap}}.tab{{background:#ad9882}}.tab.on{{background:#594634}}.tab.matcher{{background:#315f8d}}.card{{background:#fffdf9;border:1px solid #d9c9b7;border-radius:12px;padding:14px;margin-bottom:14px}}
+    main{{padding:18px}}.tabs{{display:flex;gap:10px;margin-bottom:14px;flex-wrap:wrap}}.tab{{background:#ad9882}}.tab.on{{background:#594634}}.card{{background:#fffdf9;border:1px solid #d9c9b7;border-radius:12px;padding:14px;margin-bottom:14px}}
     .scroll{{overflow:auto;max-height:72vh}}table{{width:100%;min-width:1550px;border-collapse:collapse;background:white}}th,td{{padding:9px;border-bottom:1px solid #eee1d1;text-align:left;vertical-align:top;font-size:12px}}
     th{{background:#f7ecdf;position:sticky;top:0}}.desc{{min-width:400px;max-width:620px;line-height:1.4}}.loc{{font-weight:800;min-width:130px}}input,textarea,select{{width:100%;padding:9px;border:1px solid #cdbba8;border-radius:7px}}
     .grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:10px}}.green{{background:#39734a}}.red{{background:#963d35}}.blue{{background:#315f8d}}.muted{{color:#756757}}.good{{color:#246b3d;font-weight:800}}
@@ -235,7 +215,7 @@ def prop_table(rows):
     for r in rows:
         rid=esc(r.get("record_id"))
         tr.append(f"""<tr><td>{rid}</td><td>{esc(r.get('transaction'))}</td><td class=desc>{esc(r.get('description'))}</td><td class=loc>{esc(r.get('location'))}</td>
-        <td>{esc(r.get('property_type'))}</td><td>{esc(r.get('area'))}</td><td>{esc(r.get('price'))}</td><td>{esc(contact_name(r.get('contact_name_number')))}</td><td><b>{esc(contact_number(r.get('contact_name_number')))}</b></td><td>{esc(r.get('source'))}</td>
+        <td>{esc(r.get('property_type'))}</td><td>{esc(r.get('area'))}</td><td>{esc(r.get('price'))}</td><td>{esc(r.get('contact_name_number'))}</td><td>{esc(r.get('source'))}</td>
         <td>{esc(r.get('captured_on'))}</td><td>{esc(r.get('verification'))}</td><td><a class='btn green' href='/whatsapp-live/edit/{rid}'>Edit</a>
         <form style='display:inline' method=post action='/whatsapp-live/delete/{rid}'><button class=red onclick="return confirm('Hide from working database? Original source remains preserved.')">Delete</button></form></td></tr>""")
     return "".join(tr)
@@ -251,21 +231,22 @@ def render_workspace(request):
         trs=""
         for r in rs:
             rid=esc(r.get("wa_requirement_id"));raw=str(r.get("raw_text") or "")
+            matcher=f"/deal-match-ai-v60?q={quote_plus(raw)}&mode=SMART&min_score=70"
             trs+=f"""<tr><td><b>{esc(r.get('effective_date_label'))}</b></td><td>{rid}</td><td class=loc>{esc(rloc(r))}</td><td>{esc(rtx(r))}</td><td>{esc(rpt(r))}</td>
               <td class=desc>{esc(raw)}</td><td>{esc(r.get('minimum_area_sqft'))} - {esc(r.get('maximum_area_sqft'))}</td><td>{esc(r.get('budget_max_inr'))}</td>
-              <td>{esc(r.get('contact_name'))}</td><td><b>{esc(r.get('contact_phone'))}</b></td><td>{esc(r.get('source_group'))}</td></tr>"""
+              <td>{esc(r.get('contact_name'))} · {esc(r.get('contact_phone'))}</td><td>{esc(r.get('source_group'))}</td>
+              <td><a class='btn blue' href='{esc(matcher)}'>Run Alliance Matcher</a></td></tr>"""
         body=f"""<div class=card><h2>2. Date-wise Requirements</h2><p class=muted>Date uses the original WhatsApp message timestamp first, converted to India time. Server ingestion time is only a fallback.</p>
-        <p><a class='btn blue' href='/deal-match-ai-v60'>Run Alliance Deal Matcher</a> <span class=muted>Single matcher for WhatsApp, Newspaper, Master and other property databases.</span></p>
         <form method=get><input type=hidden name=section value=requirements><div class=grid><div><label>Requirement Date</label><input type=date name=date value='{esc(selected)}'></div>
         <div style='align-self:end'><button>Show Date</button> <a class=btn href='/whatsapp-live?section=requirements'>Show All</a></div></div></form></div>
-        <div class=scroll><table><tr><th>Date</th><th>ID</th><th>Location</th><th>Transaction</th><th>Type</th><th>Description</th><th>Area</th><th>Budget</th><th>Contact Name</th><th>Contact Number</th><th>Source</th></tr>
+        <div class=scroll><table><tr><th>Date</th><th>ID</th><th>Location</th><th>Transaction</th><th>Type</th><th>Description</th><th>Area</th><th>Budget</th><th>Contact</th><th>Source</th><th>Matcher</th></tr>
         {trs or '<tr><td colspan=11>No active requirements for this date.</td></tr>'}</table></div>"""
         return HTMLResponse(page(body,"requirements"))
     q=request.query_params.get("q","");rows=properties(q=q)
     body=f"""<div class=card><h2>1. Availability</h2><form><input type=hidden name=section value=availability><div class=grid><div><label>Search</label><input name=q value='{esc(q)}' placeholder='Kalkaji, Saket, rent, commercial...'></div>
     <div style='align-self:end'><button>Search</button></div></div></form><p class=muted>Availability is a clean property database. Matching is handled only by Alliance Deal Match AI to avoid overlapping engines.</p></div>
-    <div class=scroll><table><tr><th>Record</th><th>Rent/Sale</th><th>Description</th><th>Location</th><th>Property Type</th><th>Area</th><th>Price/Rent</th><th>Contact Name</th><th>Contact Number</th><th>Source</th><th>Captured</th><th>Verification</th><th>Action</th></tr>
-    {prop_table(rows) or '<tr><td colspan=13>No clean availability records.</td></tr>'}</table></div>"""
+    <div class=scroll><table><tr><th>Record</th><th>Rent/Sale</th><th>Description</th><th>Location</th><th>Property Type</th><th>Area</th><th>Price/Rent</th><th>Contact</th><th>Source</th><th>Captured</th><th>Verification</th><th>Action</th></tr>
+    {prop_table(rows) or '<tr><td colspan=12>No clean availability records.</td></tr>'}</table></div>"""
     return HTMLResponse(page(body,"availability"))
 
 def render_edit(record_id):
@@ -331,10 +312,10 @@ def register(wrapped):
     if not getattr(app.state,"alliance_v53_authoritative_middleware",False):
         app.add_middleware(V53AuthoritativeMiddleware);app.state.alliance_v53_authoritative_middleware=True
 
-    @app.get("/api/v54/status")
+    @app.get("/api/v53/status")
     def status():
         return {"status":"OK","version":VERSION,"owner":OWNER,"sections":["Availability","Date-wise Requirements"],
-          "single_matcher":"/deal-match-ai-v60","local_whatsapp_matcher_removed":True,"single_matcher_button_position":"TOP_ONLY",
+          "single_matcher":"/deal-match-ai-v60","local_whatsapp_matcher_removed":True,
           "requirement_date_source":"original wa_messages.message_timestamp, fallback wa_requirements.created_at",
-          "requirement_timezone":"Asia/Kolkata","ordinal_date_format":"28th Aug 2026","source_preserved":True,"contact_name_column":True,"contact_number_column":True,"fixed_field_order":True}
+          "requirement_timezone":"Asia/Kolkata","ordinal_date_format":"28th Aug 2026","source_preserved":True}
     return {"status":"REGISTERED","version":VERSION,"owner":OWNER,"legacy":legacy_result}
