@@ -1,13 +1,13 @@
-
 from __future__ import annotations
 
+import asyncio
 import threading
 import traceback
 from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import FastAPI
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 
 
 BOOT = {
@@ -28,33 +28,75 @@ LATE_REGISTRATION = {
     "v451": {"status": "NOT_RUN", "error": None},
 }
 
+# -----------------------------------------------------------------------------
+# PRODUCTION STABILITY GUARD
+#
+# Why this exists:
+# - The Alliance application contains many synchronous/database-backed routes.
+# - FastAPI executes sync routes in a threadpool.
+# - If too many slow/stuck sync requests arrive together, the threadpool can be
+#   exhausted and a sync /healthz route can also stop responding.
+#
+# Fix:
+# - Health-shell handlers are fully async and bypass the core app.
+# - Core request concurrency is bounded so browser tabs cannot flood the core.
+# - If the core gate is saturated, new core requests get a fast 503 instead of
+#   silently piling up and making the whole service appear dead.
+# -----------------------------------------------------------------------------
 
-# ------------------------------------------------------------
+MAX_CORE_REQUESTS = 12
+CORE_GATE_WAIT_SECONDS = 2.5
+_CORE_GATE: asyncio.Semaphore | None = None
+
+RUNTIME = {
+    "active_core_requests": 0,
+    "peak_core_requests": 0,
+    "rejected_core_requests": 0,
+    "completed_core_requests": 0,
+    "last_core_path": None,
+    "last_core_started_at": None,
+    "last_core_completed_at": None,
+}
+
+
+def _utcnow() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _get_core_gate() -> asyncio.Semaphore:
+    global _CORE_GATE
+    if _CORE_GATE is None:
+        _CORE_GATE = asyncio.Semaphore(MAX_CORE_REQUESTS)
+    return _CORE_GATE
+
+
+# -----------------------------------------------------------------------------
 # HEALTH SHELL
-# This app is created BEFORE importing the full Alliance app.
-# Railway can therefore receive /healthz immediately.
-# ------------------------------------------------------------
+# Created BEFORE importing the full Alliance app so Railway can always receive
+# health/diagnostic responses independently of the main application.
+# -----------------------------------------------------------------------------
 
 health_app = FastAPI(
     title="Alliance Health Shell",
-    version="3.0-HEALTH-FIRST",
+    version="3.1-HEALTH-FIRST-STABLE",
 )
 
 
 @health_app.get("/healthz")
-def healthz():
+async def healthz():
     return {
         "status": "ok",
         "service": "alliance-property-intelligence",
         "health_shell": True,
         "boot_state": BOOT["state"],
         "core_loaded": BOOT["core_loaded"],
-        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+        "active_core_requests": RUNTIME["active_core_requests"],
+        "timestamp_utc": _utcnow(),
     }
 
 
 @health_app.get("/readyz")
-def readyz():
+async def readyz():
     return JSONResponse(
         status_code=200 if BOOT["core_loaded"] else 503,
         content={
@@ -62,21 +104,37 @@ def readyz():
             "boot_state": BOOT["state"],
             "core_loaded": BOOT["core_loaded"],
             "error": BOOT["error"],
+            "active_core_requests": RUNTIME["active_core_requests"],
         },
     )
 
 
 @health_app.get("/boot-status")
-def boot_status():
+async def boot_status():
     return {
         "service": "Alliance AI Deal Intelligence OS",
         **BOOT,
-        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+        "runtime": dict(RUNTIME),
+        "max_core_requests": MAX_CORE_REQUESTS,
+        "timestamp_utc": _utcnow(),
+    }
+
+
+@health_app.get("/runtime-status")
+async def runtime_status():
+    return {
+        "status": "OK",
+        "boot_state": BOOT["state"],
+        "core_loaded": BOOT["core_loaded"],
+        "max_core_requests": MAX_CORE_REQUESTS,
+        "core_gate_wait_seconds": CORE_GATE_WAIT_SECONDS,
+        **RUNTIME,
+        "timestamp_utc": _utcnow(),
     }
 
 
 @health_app.get("/", response_class=HTMLResponse)
-def shell_home():
+async def shell_home():
     if BOOT["core_loaded"]:
         return HTMLResponse(
             "<html><body><h3>Alliance core loaded.</h3>"
@@ -116,7 +174,7 @@ code{{background:#f5eee5;padding:4px 6px;border-radius:5px}}
 
 
 @health_app.get("/core-route-status")
-def core_route_status():
+async def core_route_status():
     routes = []
     if CORE_APP is not None and hasattr(CORE_APP, "router"):
         for r in CORE_APP.router.routes:
@@ -124,6 +182,7 @@ def core_route_status():
             methods = sorted(list(getattr(r, "methods", set()) or set()))
             if p:
                 routes.append({"path": p, "methods": methods})
+
     wanted = [
         "/api/v383/status",
         "/api/v46/status",
@@ -144,14 +203,20 @@ def core_route_status():
         "route_count": len(routes),
         "core_app_id": id(CORE_APP) if CORE_APP is not None else None,
         "stabilization": BOOT.get("stabilization"),
+        "runtime": dict(RUNTIME),
         "routes": routes,
     }
 
+
 @health_app.get("/api/live-bootstrap-status")
-def shell_live_bootstrap_status():
+async def shell_live_bootstrap_status():
     routes = []
     if CORE_APP is not None and hasattr(CORE_APP, "router"):
-        routes = [getattr(r, "path", None) for r in CORE_APP.router.routes if getattr(r, "path", None)]
+        routes = [
+            getattr(r, "path", None)
+            for r in CORE_APP.router.routes
+            if getattr(r, "path", None)
+        ]
     return {
         "status": "OK" if BOOT.get("core_loaded") else "STARTING",
         "served_by": "production_entrypoint health shell",
@@ -166,6 +231,7 @@ def shell_live_bootstrap_status():
         "whatsapp_feed_registered": "/whatsapp-live/feed" in routes,
         "core_bootstrap_route_registered": routes.count("/api/live-bootstrap-status") > 0,
         "route_count": len(routes),
+        "runtime": dict(RUNTIME),
     }
 
 
@@ -181,7 +247,10 @@ def _late_register_intelligence(wrapped):
     authoritative_app = wrapped.app
 
     def route_exists(path):
-        return any(getattr(r, "path", None) == path for r in authoritative_app.router.routes)
+        return any(
+            getattr(r, "path", None) == path
+            for r in authoritative_app.router.routes
+        )
 
     results = {}
 
@@ -190,39 +259,53 @@ def _late_register_intelligence(wrapped):
             results["v383"] = {"status": "ALREADY_REGISTERED", "error": None}
         else:
             import alliance_v383_database_foundation as v383
+
             v383.register(core)
             results["v383"] = {
                 "status": "REGISTERED" if route_exists("/api/v383/status") else "NO_ROUTE",
                 "error": None,
             }
     except Exception as exc:
-        results["v383"] = {"status": "ERROR", "error": f"{type(exc).__name__}: {exc}"}
+        results["v383"] = {
+            "status": "ERROR",
+            "error": f"{type(exc).__name__}: {exc}",
+        }
 
     try:
         if route_exists("/api/v46/status"):
             results["v46"] = {"status": "ALREADY_REGISTERED", "error": None}
         else:
             import alliance_v46_unified_intelligence as v46
+
             v46.register(core)
             results["v46"] = {
                 "status": "REGISTERED" if route_exists("/api/v46/status") else "NO_ROUTE",
                 "error": None,
             }
     except Exception as exc:
-        results["v46"] = {"status": "ERROR", "error": f"{type(exc).__name__}: {exc}"}
+        results["v46"] = {
+            "status": "ERROR",
+            "error": f"{type(exc).__name__}: {exc}",
+        }
 
     try:
         if route_exists("/api/v451/live/status"):
             results["v451"] = {"status": "ALREADY_REGISTERED", "error": None}
         else:
             import alliance_v45_live_whatsapp_takeover as v451
+
             v451.register(core)
             results["v451"] = {
-                "status": "REGISTERED" if route_exists("/api/v451/live/status") else "NO_ROUTE",
+                "status": "REGISTERED"
+                if route_exists("/api/v451/live/status")
+                else "NO_ROUTE",
                 "error": None,
             }
     except Exception as exc:
-        results["v451"] = {"status": "ERROR", "error": f"{type(exc).__name__}: {exc}"}
+        results["v451"] = {
+            "status": "ERROR",
+            "error": f"{type(exc).__name__}: {exc}",
+        }
 
     LATE_REGISTRATION.clear()
     LATE_REGISTRATION.update(results)
@@ -255,16 +338,30 @@ def _load_core():
         import newspaper_wrapper as wrapped
 
         import alliance_production_surface as production_surface
+
         stabilization = production_surface.register(wrapped)
 
         import alliance_live_feed_purity as live_feed_purity
+
         live_feed_purity.register(wrapped)
+
+        # Safe late-registration check. It does not duplicate routes; each module
+        # is registered only when its expected route is genuinely absent.
+        try:
+            late = _late_register_intelligence(wrapped)
+            stabilization = dict(stabilization or {})
+            stabilization["late_registration_check"] = late
+        except Exception as exc:
+            stabilization = dict(stabilization or {})
+            stabilization["late_registration_check"] = {
+                "error": f"{type(exc).__name__}: {exc}"
+            }
 
         CORE_APP = wrapped.app
         BOOT["core_loaded"] = True
         BOOT["state"] = "READY" if stabilization.get("registered") else "DEGRADED"
         BOOT["stabilization"] = stabilization
-        BOOT["completed_at"] = datetime.now(timezone.utc).isoformat()
+        BOOT["completed_at"] = _utcnow()
         print("[health-first] Alliance core application loaded successfully")
 
     except Exception as exc:
@@ -272,7 +369,7 @@ def _load_core():
         BOOT["state"] = "FAILED"
         BOOT["error"] = f"{type(exc).__name__}: {exc}"
         BOOT["trace"] = traceback.format_exc(limit=30)
-        BOOT["completed_at"] = datetime.now(timezone.utc).isoformat()
+        BOOT["completed_at"] = _utcnow()
 
         print(
             "[health-first] Alliance core failed:",
@@ -291,29 +388,73 @@ _loader.start()
 
 class HealthFirstDispatcher:
     """
-    ASGI dispatcher.
+    Stable ASGI dispatcher.
 
-    /healthz, /readyz and /boot-status always go to the tiny health shell.
-    Every other route goes to the Alliance core once it is ready.
-    Until then, requests get a controlled 503 rather than a Railway 502.
+    Health/diagnostic endpoints always bypass the full Alliance application.
+    Core HTTP requests are concurrency-bounded to prevent multiple browser tabs
+    or slow DB routes from exhausting the sync worker pool.
     """
 
     HEALTH_PATHS = {
         "/healthz",
         "/readyz",
         "/boot-status",
+        "/runtime-status",
         "/core-route-status",
         "/api/live-bootstrap-status",
     }
 
-    async def __call__(self, scope: dict[str, Any], receive, send):
-        if scope["type"] not in {"http", "websocket", "lifespan"}:
+    async def _serve_core(self, scope: dict[str, Any], receive, send):
+        if CORE_APP is None or not BOOT["core_loaded"]:
             await health_app(scope, receive, send)
             return
 
-        if scope["type"] == "lifespan":
-            # Uvicorn lifecycle belongs to the shell.
-            # The existing Alliance core remains a request application.
+        gate = _get_core_gate()
+        acquired = False
+        path = scope.get("path", "")
+
+        try:
+            try:
+                await asyncio.wait_for(gate.acquire(), timeout=CORE_GATE_WAIT_SECONDS)
+                acquired = True
+            except asyncio.TimeoutError:
+                RUNTIME["rejected_core_requests"] += 1
+                response = PlainTextResponse(
+                    "Alliance is busy processing earlier requests. Please retry.",
+                    status_code=503,
+                    headers={"Retry-After": "3"},
+                )
+                await response(scope, receive, send)
+                return
+
+            RUNTIME["active_core_requests"] += 1
+            RUNTIME["peak_core_requests"] = max(
+                RUNTIME["peak_core_requests"],
+                RUNTIME["active_core_requests"],
+            )
+            RUNTIME["last_core_path"] = path
+            RUNTIME["last_core_started_at"] = _utcnow()
+
+            await CORE_APP(scope, receive, send)
+
+        finally:
+            if acquired:
+                RUNTIME["active_core_requests"] = max(
+                    0, RUNTIME["active_core_requests"] - 1
+                )
+                RUNTIME["completed_core_requests"] += 1
+                RUNTIME["last_core_completed_at"] = _utcnow()
+                gate.release()
+
+    async def __call__(self, scope: dict[str, Any], receive, send):
+        scope_type = scope.get("type")
+
+        if scope_type not in {"http", "websocket", "lifespan"}:
+            await health_app(scope, receive, send)
+            return
+
+        if scope_type == "lifespan":
+            # Uvicorn lifecycle belongs to the tiny health shell.
             await health_app(scope, receive, send)
             return
 
@@ -323,12 +464,15 @@ class HealthFirstDispatcher:
             await health_app(scope, receive, send)
             return
 
-        if BOOT["core_loaded"] and CORE_APP is not None:
-            await CORE_APP(scope, receive, send)
+        if scope_type == "websocket":
+            # Do not semaphore-gate long-lived websocket sessions.
+            if BOOT["core_loaded"] and CORE_APP is not None:
+                await CORE_APP(scope, receive, send)
+            else:
+                await health_app(scope, receive, send)
             return
 
-        # Core is not ready. Return controlled shell response.
-        await health_app(scope, receive, send)
+        await self._serve_core(scope, receive, send)
 
 
 app = HealthFirstDispatcher()
