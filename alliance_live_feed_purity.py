@@ -2,13 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import re
-import unicodedata
 
 from fastapi import Request
 from fastapi.responses import HTMLResponse
 from sqlalchemy import text
 
-VERSION = "WHATSAPP-CLEAN-DATABASE-3.8-ENTITY-FIRST"
+VERSION = "PROPERTY-FINDER-AI-3.7-ACCURACY-FIRST"
 
 
 def _esc(v):
@@ -20,276 +19,6 @@ def _esc(v):
         .replace('"', "&quot;")
         .replace("'", "&#39;")
     )
-
-
-def _wa_text_normalize(value):
-    """Normalize WhatsApp decorative Unicode without changing meaning."""
-    txt = unicodedata.normalize("NFKC", str(value or ""))
-    txt = txt.replace("\u00a0", " ").replace("\u200b", "").replace("\u200e", "").replace("\u200f", "")
-    txt = txt.replace("–", "-").replace("—", "-")
-    txt = re.sub(r"[ \t]+", " ", txt)
-    return txt.strip()
-
-
-def _clean_classify_text(value):
-    """
-    Accuracy-first role classifier.
-    Demand intent wins over generic words such as 'rent' or 'sale'.
-    """
-    txt = _wa_text_normalize(value)
-    low = txt.lower()
-
-    demand_patterns = [
-        r"\brequire(?:d|ment|ments)?\b", r"\blooking\s+for\b", r"\bneed(?:ed|s)?\b",
-        r"\bwanted\b", r"\bclient\s+(?:looking|requires?|needs?)\b",
-        r"\bbuyer\s+requirement\b", r"\btenant\s+requirement\b",
-        r"\bmandate\b", r"\burgent\s+requirement\b",
-    ]
-    supply_patterns = [
-        r"\bavailable\b", r"\bavailability\b", r"\bfor\s+sale\b",
-        r"\bfor\s+rent\b", r"\bfor\s+lease\b", r"\bready\s+to\s+move\b",
-        r"\bvacant\b", r"\bdeal\s+available\b", r"\binventory\b",
-    ]
-    property_patterns = [
-        r"\bbhk\b", r"\bflat\b", r"\bapartment\b", r"\bvilla\b", r"\bkothi\b",
-        r"\bshop\b", r"\bshowroom\b", r"\boffice\b", r"\bwarehouse\b",
-        r"\bplot\b", r"\bfarm\s*house\b", r"\brestaurant\b", r"\bbanquet\b",
-        r"\bhotel\b", r"\bguest\s*house\b", r"\bsq\.?\s*ft\b", r"\bsqft\b",
-        r"\byards?\b", r"\bgaj\b", r"\bsq\.?\s*m\b", r"\bsqm\b",
-    ]
-
-    demand = sum(bool(re.search(p, low, re.I)) for p in demand_patterns)
-    supply = sum(bool(re.search(p, low, re.I)) for p in supply_patterns)
-    prop = sum(bool(re.search(p, low, re.I)) for p in property_patterns)
-
-    # Explicit demand phrases have priority, including "wanted for rent".
-    if demand > 0:
-        return "PROPERTY_REQUIREMENT", min(.99, .82 + .035*demand + .012*prop)
-
-    if supply > 0 and prop > 0:
-        return "PROPERTY_INVENTORY", min(.99, .80 + .035*supply + .012*prop)
-
-    # Strong property description with price/contact but no explicit availability.
-    if prop >= 2 and (re.search(r"(?:₹|rs\.?|inr|\b\d+(?:\.\d+)?\s*(?:k|lac|lakh|cr|crore)\b)", low, re.I)
-                      or re.search(r"(?<!\d)[6-9]\d{9}(?!\d)", re.sub(r"\D", "", txt))):
-        return "PROPERTY_INVENTORY", min(.95, .72 + .025*prop)
-
-    # Contact/business-card only.
-    digits = re.sub(r"\D", "", txt)
-    if any(ch.isdigit() for ch in digits) and len(digits) >= 10:
-        return "PROPERTY_CONTACT", .72
-
-    return "NEEDS_REVIEW", .55
-
-
-def _clean_is_noise_text(value):
-    txt = _wa_text_normalize(value)
-    low = txt.lower().strip()
-    kind, _ = _clean_classify_text(txt)
-    if kind in {"PROPERTY_REQUIREMENT", "PROPERTY_INVENTORY"}:
-        return False, ""
-    if re.match(r"^(good morning|gm|good evening|good night|thanks|thank you|ok|okay|noted|shared)\b", low):
-        return True, "Greeting/non-transactional message"
-    if "instagram.com/" in low or "youtube.com/" in low or "facebook.com/" in low:
-        return True, "Link-only/non-property message"
-    if len(re.sub(r"\W", "", low)) < 8:
-        return True, "Too little actionable content"
-    return kind == "NEEDS_REVIEW", "No reliable actionable property signal" if kind == "NEEDS_REVIEW" else ""
-
-
-def _clean_split_inventory_text(value, fallback_splitter=None):
-    """
-    Entity-first splitter.
-    Keeps one physical property per visible/database row where the message
-    contains clear repeated blocks. Conservative fallback prevents over-split.
-    """
-    raw_original = str(value or "").replace("\r\n", "\n").replace("\r", "\n").strip()
-    raw = _wa_text_normalize(raw_original)
-    if not raw:
-        return []
-
-    # First retain the proven legacy splitter when it already finds entities.
-    if fallback_splitter:
-        try:
-            legacy = [str(x or "").strip() for x in fallback_splitter(raw) if str(x or "").strip()]
-            if len(legacy) > 1:
-                return legacy
-        except Exception:
-            pass
-
-    # Emoji/Unicode numbered bullets: 1️⃣ / 2️⃣ etc.
-    emoji_num = re.split(r"(?m)(?=^\s*[0-9]{1,2}\s*[️⃣\u20e3])", raw)
-    emoji_num = [x.strip() for x in emoji_num if x.strip()]
-    if len(emoji_num) >= 2:
-        strong = sum(1 for x in emoji_num if re.search(r"\b(?:bhk|sqft|sq ft|yard|gaj|rent|price|cr|lakh|lac)\b", x, re.I))
-        if strong >= 2:
-            return emoji_num
-
-    # Blank-line portfolio blocks. Common header/contact are carried into children.
-    paras = [re.sub(r"\n+", "\n", x).strip() for x in re.split(r"\n\s*\n+", raw) if x.strip()]
-    if len(paras) >= 3:
-        def prop_block(x):
-            low = x.lower()
-            spec = bool(re.search(r"\b(?:\d+\s*bhk|sqft|sq ft|sq\.?\s*yd|yards?|gaj|sq\.?\s*m|sqm)\b", low))
-            money = bool(re.search(r"(?:₹|rs\.?|inr|\b\d+(?:\.\d+)?\s*(?:k|lac|lakh|lakhs|cr|crore|crores)\b)", low))
-            tx = bool(re.search(r"\b(?:rent|sale|lease|available|asking|demand|price)\b", low))
-            return (spec and (money or tx)) or (money and tx)
-
-        candidates = [i for i, x in enumerate(paras) if prop_block(x)]
-        if len(candidates) >= 2:
-            prefix = []
-            suffix = []
-            first_i, last_i = candidates[0], candidates[-1]
-            for x in paras[:first_i]:
-                if len(x) <= 220 and not re.search(r"(?<!\d)[6-9]\d{9}(?!\d)", re.sub(r"\D", "", x)):
-                    prefix.append(x)
-            for x in paras[last_i+1:]:
-                if re.search(r"(?:contact|call|mob|phone|dm|whatsapp)", x, re.I) or re.search(r"\d{10}", re.sub(r"\D", "", x)):
-                    suffix.append(x)
-
-            out = []
-            for i in candidates:
-                child_parts = prefix[-1:] + [paras[i]] + suffix[:1]
-                child = "\n\n".join(x for x in child_parts if x).strip()
-                if child:
-                    out.append(child)
-            if len(out) >= 2:
-                return out
-
-    # Repeated short project/name headings followed by specs.
-    lines = [x.strip() for x in raw.splitlines() if x.strip()]
-    anchors = []
-    generic = {"available for rent","available for sale","inventory for sale","deal available on sale",
-               "properties available","contact","for rent","for sale"}
-    for i, line in enumerate(lines):
-        low = line.lower().strip("*_ -")
-        if not low or low in generic or len(line) > 65:
-            continue
-        alpha = re.sub(r"[^A-Za-z]", "", line)
-        upper_ratio = (sum(c.isupper() for c in alpha) / max(1, len(alpha))) if alpha else 0
-        follow = " ".join(lines[i+1:i+4])
-        if upper_ratio >= .65 and re.search(r"\b(?:bhk|sqft|sq ft|rent|price|cr|lakh|lac|yard|gaj)\b", follow, re.I):
-            anchors.append(i)
-
-    if len(anchors) >= 2:
-        out = []
-        common_tail = ""
-        for j, a in enumerate(anchors):
-            b = anchors[j+1] if j+1 < len(anchors) else len(lines)
-            child_lines = lines[a:b]
-            child = "\n".join(child_lines).strip()
-            if re.search(r"\b(?:bhk|sqft|sq ft|rent|price|cr|lakh|lac|yard|gaj)\b", child, re.I):
-                out.append(child)
-        if len(out) >= 2:
-            return out
-
-    return [raw]
-
-
-def _patch_runtime_whatsapp_engine():
-    """Patch both modules in memory so new live intake and display share one policy."""
-    try:
-        import whatsapp_intelligence as wi
-        old_split = getattr(wi, "split_inventory", None)
-
-        def split_fixed(txt):
-            return _clean_split_inventory_text(txt, old_split)
-
-        wi.classify = _clean_classify_text
-        wi.is_noise = _clean_is_noise_text
-        wi.split_inventory = split_fixed
-
-        # The bridge imported functions with `from whatsapp_intelligence import ...`.
-        # Replace those bound references too if the bridge is already loaded.
-        try:
-            import whatsapp_live_bridge as bridge
-            bridge.classify = _clean_classify_text
-            bridge.is_noise = _clean_is_noise_text
-            bridge.split_inventory = split_fixed
-        except Exception:
-            pass
-
-        return {"patched": True, "unicode_normalization": True, "entity_splitter": True}
-    except Exception as exc:
-        return {"patched": False, "error": f"{type(exc).__name__}: {exc}"}
-
-
-def _fmt_money(v):
-    if v in (None, "", "UNKNOWN"):
-        return "—"
-    try:
-        n = float(v)
-        if n >= 10_000_000:
-            return f"₹{n/10_000_000:.2f} Cr"
-        if n >= 100_000:
-            return f"₹{n/100_000:.2f} L"
-        return f"₹{n:,.0f}"
-    except Exception:
-        return str(v)
-
-
-def _configuration(raw):
-    txt = _wa_text_normalize(raw)
-    bits = []
-    m = re.search(r"\b(\d+(?:\.\d+)?)\s*BHK\b", txt, re.I)
-    if m:
-        bits.append(f"{m.group(1)} BHK")
-    for label, pat in [
-        ("Furnished", r"\bfully\s+furnished\b"),
-        ("Semi Furnished", r"\bsemi\s*furnished\b"),
-        ("Unfurnished", r"\bunfurnished\b"),
-    ]:
-        if re.search(pat, txt, re.I):
-            bits.append(label)
-            break
-    return " · ".join(bits) or "—"
-
-
-def _database_shell(title, subtitle, body, active=""):
-    nav = [
-        ("Live Database", "/whatsapp-live/feed"),
-        ("Requirements", "/whatsapp-live/requirements"),
-        ("Availability", "/whatsapp-live/availability"),
-        ("AI Property Finder", "/property-finder"),
-        ("Sources", "/whatsapp-live/sources"),
-        ("Dashboard", "/whatsapp-live"),
-    ]
-    links = "".join(
-        f"<a class='{'active' if name==active else ''}' href='{url}'>{_esc(name)}</a>"
-        for name, url in nav
-    )
-    return f"""<!doctype html><html><head><meta charset='utf-8'>
-    <meta name='viewport' content='width=device-width,initial-scale=1'>
-    <title>{_esc(title)}</title>
-    <style>
-    *{{box-sizing:border-box}} body{{margin:0;font-family:Arial,Helvetica,sans-serif;background:#f6f3ee;color:#28231f}}
-    header{{background:#3f352d;color:white;padding:20px 24px}}
-    header h1{{margin:0 0 4px;font-size:24px}} header small{{color:#ded4cb}}
-    nav{{display:flex;gap:7px;flex-wrap:wrap;background:white;border-bottom:1px solid #ddd3c9;padding:9px 18px;position:sticky;top:0;z-index:20}}
-    nav a{{text-decoration:none;color:#493d34;padding:8px 10px;border-radius:7px;font-size:13px}}
-    nav a.active,nav a:hover{{background:#4d4036;color:white}}
-    main{{max-width:1900px;margin:18px auto;padding:0 14px}}
-    .card{{background:white;border:1px solid #ded5cc;border-radius:10px;padding:13px;margin-bottom:12px}}
-    .kpis{{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:9px;margin:10px 0}}
-    .kpi{{background:#faf8f5;border:1px solid #e5ddd5;border-radius:8px;padding:10px}}
-    .kpi b{{display:block;font-size:21px;margin-top:3px}}
-    form.filters{{display:grid;grid-template-columns:minmax(240px,2fr) repeat(3,minmax(120px,1fr)) auto;gap:8px;align-items:end}}
-    input,select{{width:100%;padding:9px;border:1px solid #cdbfb1;border-radius:6px;background:white}}
-    button{{padding:10px 14px;border:0;border-radius:6px;background:#4d4036;color:white;font-weight:700;cursor:pointer}}
-    .scroll{{overflow:auto;max-height:72vh;border:1px solid #e4dcd4;border-radius:8px}}
-    table{{width:100%;border-collapse:collapse;background:white;font-size:12px;min-width:1450px}}
-    th,td{{padding:8px 9px;border-bottom:1px solid #ece5df;text-align:left;vertical-align:top}}
-    th{{background:#ede5dd;position:sticky;top:0;z-index:2;white-space:nowrap}}
-    tr:hover td{{background:#fcfaf7}}
-    .entity{{min-width:320px;white-space:pre-wrap;max-width:500px}}
-    .phone{{white-space:nowrap;font-weight:700}}
-    .badge{{display:inline-block;padding:3px 7px;border-radius:999px;font-size:11px;font-weight:700;background:#eee7df}}
-    .supply{{background:#e8f5ec;color:#17643a}} .demand{{background:#fff1d6;color:#805800}}
-    .muted{{color:#766b63}} .small{{font-size:11px}}
-    @media(max-width:900px){{form.filters{{grid-template-columns:1fr 1fr}}}}
-    </style></head><body>
-    <header><h1>{_esc(title)}</h1><small>{_esc(subtitle)}</small></header>
-    <nav>{links}</nav><main>{body}</main></body></html>"""
 
 
 def _source_engine(core):
@@ -647,7 +376,7 @@ def _clean_visible_rows(rows, min_score=60):
     for row in rows:
         stats["input_entities"] += 1
         d = dict(row)
-        raw = _wa_text_normalize(d.get("visible_entity_text") or d.get("raw_text") or "")
+        raw = str(d.get("visible_entity_text") or d.get("raw_text") or "")
         current_tx = d.get("transaction_type")
         current_type = d.get("property_type")
         current_loc = d.get("location") or d.get("locality")
@@ -1485,136 +1214,12 @@ def _finder_result_public(x):
     }
 
 
-
-def _get_requirement_rows(core, q="", limit=1000):
-    engine, dispose = _source_engine(core)
-    try:
-        with engine.connect() as conn:
-            if not _exists(conn, "wa_requirements"):
-                return [], {"wa_requirements_count": 0}
-            params = {"lim": max(25, min(int(limit or 1000), 3000))}
-            where = ["COALESCE(r.status,'ACTIVE')='ACTIVE'"]
-            if q:
-                params["q"] = "%" + q + "%"
-                where.append("""(
-                    COALESCE(r.preferred_locations,'') ILIKE :q OR
-                    COALESCE(r.property_type,'') ILIKE :q OR
-                    COALESCE(r.transaction_type,'') ILIKE :q OR
-                    COALESCE(r.contact_name,'') ILIKE :q OR
-                    COALESCE(r.contact_phone,'') ILIKE :q OR
-                    COALESCE(r.company_name,'') ILIKE :q OR
-                    COALESCE(r.raw_text,'') ILIKE :q OR
-                    COALESCE(s.group_name,s.source_name,'') ILIKE :q
-                )""")
-            sql = f"""
-            SELECT r.*,
-                   COALESCE(s.group_name,s.source_name) AS source_group,
-                   COALESCE(m.message_timestamp,r.created_at::text) AS received_at,
-                   COALESCE(m.sender_name,r.contact_name) AS source_sender,
-                   COALESCE(m.sender_phone,r.contact_phone) AS source_phone
-            FROM wa_requirements r
-            LEFT JOIN wa_sources s ON s.source_id=r.source_id
-            LEFT JOIN wa_messages m ON m.message_id=r.message_id
-            WHERE {" AND ".join(where)}
-            ORDER BY r.created_at DESC, r.id DESC
-            LIMIT :lim
-            """
-            rows = [dict(x) for x in conn.execute(text(sql), params).mappings().all()]
-            return rows, {"wa_requirements_count": _count(conn, "wa_requirements", "COALESCE(status,'ACTIVE')='ACTIVE'")}
-    finally:
-        if dispose:
-            engine.dispose()
-
-
-def _clean_requirement_rows(rows):
-    out = []
-    seen = set()
-    for d0 in rows:
-        d = dict(d0)
-        raw = _wa_text_normalize(d.get("raw_text") or "")
-        kind, inferred_conf = _clean_classify_text(raw)
-        # A stored requirement remains authoritative unless text very clearly says supply.
-        if kind == "PROPERTY_INVENTORY" and not re.search(
-            r"\b(require(?:d|ment)?|looking\s+for|need(?:ed|s)?|wanted|client\s+(?:looking|requires?|needs?))\b",
-            raw, re.I
-        ):
-            continue
-
-        tx = _finder_tx(d.get("transaction_type"))
-        if tx == "UNKNOWN":
-            low = raw.lower()
-            tx = "SALE" if re.search(r"\b(?:buy|purchase|for sale|sale)\b", low) else "LEASE"
-
-        loc = d.get("preferred_locations") or d.get("city") or "—"
-        typ = d.get("property_type") or "UNKNOWN"
-        contact_phone = d.get("contact_phone") or d.get("source_phone")
-        contact_name = d.get("contact_name") or d.get("source_sender")
-        fp = "|".join([
-            _finder_norm(loc), _finder_type(typ), tx,
-            str(d.get("minimum_area_sqft") or ""), str(d.get("maximum_area_sqft") or ""),
-            str(d.get("budget_max_inr") or ""), str(contact_phone or "")
-        ])
-        if fp in seen:
-            continue
-        seen.add(fp)
-
-        d["clean_transaction"] = tx
-        d["clean_location"] = loc
-        d["clean_property_type"] = typ
-        d["clean_contact_phone"] = contact_phone
-        d["clean_contact_name"] = contact_name
-        d["clean_confidence"] = max(float(d.get("confidence") or 0), inferred_conf*100)
-        d["clean_raw"] = raw
-        out.append(d)
-    return out
-
-
-def _recover_recent_false_negatives(core, wanted_kind, limit=300):
-    """
-    Read-only recovery for historical REJECTED/REVIEW rows.
-    Does not write to the DB. New intake is fixed by runtime classifier patch.
-    """
-    engine, dispose = _source_engine(core)
-    try:
-        with engine.connect() as conn:
-            if not _exists(conn, "wa_messages"):
-                return []
-            sql = """
-            SELECT m.message_id, m.source_id, m.message_timestamp, m.sender_name,
-                   m.sender_phone, m.raw_text, m.classification, m.confidence,
-                   COALESCE(s.group_name,s.source_name) AS source_group
-            FROM wa_messages m
-            LEFT JOIN wa_sources s ON s.source_id=m.source_id
-            WHERE COALESCE(m.classification,'') IN ('REJECTED','NEEDS_REVIEW','PROPERTY_CONTACT')
-            ORDER BY m.id DESC
-            LIMIT :lim
-            """
-            rows = conn.execute(text(sql), {"lim": max(50, min(int(limit), 1500))}).mappings().all()
-            recovered = []
-            for r0 in rows:
-                r = dict(r0)
-                raw = _wa_text_normalize(r.get("raw_text") or "")
-                kind, conf = _clean_classify_text(raw)
-                if kind != wanted_kind:
-                    continue
-                r["recovered_kind"] = kind
-                r["recovered_confidence"] = round(conf*100, 2)
-                recovered.append(r)
-            return recovered
-    finally:
-        if dispose:
-            engine.dispose()
-
 def register(wrapped):
     app = wrapped.app
     core = wrapped.core
-    engine_patch = _patch_runtime_whatsapp_engine()
 
     owned = {
         "/whatsapp-live/feed",
-        "/whatsapp-live/requirements",
-        "/whatsapp-live/availability",
-        "/api/whatsapp-clean-database/status",
         "/api/live-feed-purity/status",
         "/api/live-feed-purity/sample",
         "/api/live-feed-purity/debug",
@@ -1878,298 +1483,117 @@ def register(wrapped):
         </div>
         </main></body></html>""")
 
-    def _query_filters(request):
-        q = str(request.query_params.get("q") or "").strip()
-        tx = str(request.query_params.get("transaction") or "").strip().upper()
-        typ = str(request.query_params.get("property_type") or "").strip().upper()
-        loc = str(request.query_params.get("location") or "").strip()
-        try:
-            limit = max(25, min(int(request.query_params.get("limit") or 750), 2000))
-        except Exception:
-            limit = 750
-        return q, tx, typ, loc, limit
-
-    def _filter_supply(rows, tx="", typ="", loc=""):
-        out = []
-        for x in rows:
-            if tx and _finder_tx(x.get("clean_transaction") or x.get("transaction_type")) != tx:
-                continue
-            if typ and typ not in _finder_type(x.get("clean_property_type") or x.get("property_type")):
-                continue
-            if loc and _finder_norm(loc) not in _finder_norm(x.get("clean_location") or x.get("location") or x.get("locality")):
-                continue
-            out.append(x)
-        return out
-
-    def _filter_demand(rows, tx="", typ="", loc=""):
-        out = []
-        for x in rows:
-            if tx and _finder_tx(x.get("clean_transaction") or x.get("transaction_type")) != tx:
-                continue
-            if typ and typ not in _finder_type(x.get("clean_property_type") or x.get("property_type")):
-                continue
-            if loc and _finder_norm(loc) not in _finder_norm(x.get("clean_location") or x.get("preferred_locations")):
-                continue
-            out.append(x)
-        return out
-
-    def clean_db_status():
-        base = status(core)
-        try:
-            reqs, rc = _get_requirement_rows(core, "", 50)
-            recovered_req = _recover_recent_false_negatives(core, "PROPERTY_REQUIREMENT", 500)
-            recovered_inv = _recover_recent_false_negatives(core, "PROPERTY_INVENTORY", 500)
-            base.update({
-                "clean_database_version": VERSION,
-                "runtime_engine_patch": engine_patch,
-                "requirements_sample_clean": len(_clean_requirement_rows(reqs)),
-                "historical_false_negative_candidates": {
-                    "requirements": len(recovered_req),
-                    "inventory": len(recovered_inv),
-                },
-                "entity_contract": "ONE_ROW_ONE_PROPERTY_OR_REQUIREMENT",
-                "views": [
-                    "/whatsapp-live/feed",
-                    "/whatsapp-live/requirements",
-                    "/whatsapp-live/availability",
-                ],
-            })
-        except Exception as exc:
-            base["clean_database_error"] = f"{type(exc).__name__}: {exc}"
-        return base
-
-    def availability_page(request: Request):
-        q, tx, typ, loc, limit = _query_filters(request)
-        try:
-            source, stored_rows, detected = get_rows(core, q, limit)
-            visible = _visible_entities(stored_rows)
-            clean, purity_stats = _clean_visible_rows(visible, 55)
-            rows = _attach_market_intelligence(_prioritize_rows(clean))
-            rows = _filter_supply(rows, tx, typ, loc)
-            recovered = _recover_recent_false_negatives(core, "PROPERTY_INVENTORY", 500)
-        except Exception as exc:
-            return HTMLResponse(_database_shell(
-                "Availability Database", "One property per row",
-                f"<div class='card'><b>Error:</b> {_esc(type(exc).__name__)}: {_esc(exc)}</div>",
-                "Availability"
-            ), status_code=500)
-
-        trs = []
-        for x in rows[:1500]:
-            txv = _finder_tx(x.get("clean_transaction") or x.get("transaction_type"))
-            price = x.get("rent_inr") if txv == "LEASE" else x.get("sale_price_inr")
-            contact_name = x.get("owner_name") or x.get("broker_name") or x.get("sender_name")
-            contact_phone = x.get("owner_phone") or x.get("broker_phone") or x.get("sender_phone")
-            raw = x.get("visible_entity_text") or x.get("raw_text") or ""
-            area_min = x.get("clean_area_min_sqft") or x.get("available_area_sqft") or x.get("area_sqft")
-            area_max = x.get("clean_area_max_sqft")
-            area = f"{area_min:,.0f}" if isinstance(area_min,(int,float)) else str(area_min or "—")
-            if area_max and area_max != area_min:
-                try: area = f"{float(area_min):,.0f} - {float(area_max):,.0f}"
-                except Exception: pass
-            trs.append(f"""<tr>
-            <td>{_esc(x.get('last_seen') or x.get('first_seen') or '—')}</td>
-            <td><b>{_esc(x.get('visible_entity_id') or x.get('wa_property_id'))}</b></td>
-            <td>{_esc(x.get('clean_location') or x.get('location') or x.get('locality') or '—')}</td>
-            <td>{_esc(x.get('clean_property_type') or x.get('property_type') or '—')}</td>
-            <td>{_esc(_configuration(raw))}</td>
-            <td>{_esc(txv)}</td>
-            <td>{_esc(area)}</td>
-            <td>{_esc(x.get('floor') or '—')}</td>
-            <td>{_esc(_fmt_money(price))}</td>
-            <td>{_esc(x.get('availability') or 'UNKNOWN')}</td>
-            <td>{_esc(contact_name or '—')}</td>
-            <td class='phone'>{_esc(contact_phone or '—')}</td>
-            <td><span class='badge supply'>{_esc(x.get('priority_band') or 'REVIEW')} {_esc(x.get('priority_score') or '')}</span></td>
-            <td>{_esc(x.get('clean_score') or x.get('confidence') or '—')}</td>
-            <td class='entity'>{_esc(raw)}</td>
-            </tr>""")
-
-        body = "".join(trs) or "<tr><td colspan='15'>No clean availability found for these filters.</td></tr>"
-        kpis = f"""<div class='kpis'>
-          <div class='kpi'>Clean Availability<b>{len(rows)}</b></div>
-          <div class='kpi'>Stored Rows Read<b>{len(stored_rows)}</b></div>
-          <div class='kpi'>False-Negative Candidates<b>{len(recovered)}</b><span class='small muted'>recent rejected/review, read-only recovery</span></div>
-          <div class='kpi'>DB Inventory<b>{detected.get('wa_properties_count',0)}</b></div>
-        </div>"""
-        filters = f"""<div class='card'><form class='filters'>
-          <label>Search<input name='q' value='{_esc(q)}' placeholder='location, contact, type, text'></label>
-          <label>Location<input name='location' value='{_esc(loc)}'></label>
-          <label>Type<input name='property_type' value='{_esc(typ)}'></label>
-          <label>Transaction<select name='transaction'><option value=''>All</option>
-          <option value='LEASE' {'selected' if tx=='LEASE' else ''}>LEASE</option>
-          <option value='SALE' {'selected' if tx=='SALE' else ''}>SALE</option></select></label>
-          <button>Filter</button></form>{kpis}</div>"""
-        table = f"""<div class='card'><div class='scroll'><table>
-        <thead><tr><th>Date</th><th>Property ID</th><th>Location</th><th>Property Type</th>
-        <th>Configuration</th><th>Transaction</th><th>Area Sqft</th><th>Floor</th>
-        <th>Rent / Sale Price</th><th>Availability</th><th>Contact Name</th><th>Contact No.</th>
-        <th>AI Priority</th><th>Purity</th><th>Original Property Text</th></tr></thead>
-        <tbody>{body}</tbody></table></div></div>"""
-        return HTMLResponse(_database_shell(
-            "WhatsApp Availability Database",
-            "Newspaper-style clean inventory · one physical property per row · raw message retained only for audit",
-            filters + table, "Availability"
-        ))
-
-    def requirements_page(request: Request):
-        q, tx, typ, loc, limit = _query_filters(request)
-        try:
-            stored, counts = _get_requirement_rows(core, q, limit)
-            rows = _filter_demand(_clean_requirement_rows(stored), tx, typ, loc)
-            recovered = _recover_recent_false_negatives(core, "PROPERTY_REQUIREMENT", 500)
-        except Exception as exc:
-            return HTMLResponse(_database_shell(
-                "Requirements Database", "One requirement per row",
-                f"<div class='card'><b>Error:</b> {_esc(type(exc).__name__)}: {_esc(exc)}</div>",
-                "Requirements"
-            ), status_code=500)
-
-        trs = []
-        for x in rows[:1500]:
-            amin = x.get("minimum_area_sqft")
-            amax = x.get("maximum_area_sqft")
-            if amin and amax and amin != amax:
-                area = f"{float(amin):,.0f} - {float(amax):,.0f}"
-            elif amin or amax:
-                area = f"{float(amin or amax):,.0f}"
-            else:
-                area = "—"
-            bmin, bmax = x.get("budget_min_inr"), x.get("budget_max_inr")
-            budget = _fmt_money(bmax or bmin)
-            if bmin and bmax and bmin != bmax:
-                budget = f"{_fmt_money(bmin)} - {_fmt_money(bmax)}"
-            raw = x.get("clean_raw") or x.get("raw_text") or ""
-            trs.append(f"""<tr>
-            <td>{_esc(x.get('received_at') or x.get('created_at') or '—')}</td>
-            <td><b>{_esc(x.get('wa_requirement_id'))}</b></td>
-            <td>{_esc(x.get('clean_location') or '—')}</td>
-            <td>{_esc(x.get('clean_property_type') or '—')}</td>
-            <td>{_esc(_finder_tx(x.get('clean_transaction')))}</td>
-            <td>{_esc(area)}</td>
-            <td>{_esc(budget)}</td>
-            <td>{_esc(x.get('floor_preference') or '—')}</td>
-            <td>{_esc(x.get('suitable_category') or '—')}</td>
-            <td>{_esc(x.get('company_name') or x.get('client_name') or '—')}</td>
-            <td>{_esc(x.get('clean_contact_name') or '—')}</td>
-            <td class='phone'>{_esc(x.get('clean_contact_phone') or '—')}</td>
-            <td>{_esc(x.get('source_group') or '—')}</td>
-            <td>{_esc(round(float(x.get('clean_confidence') or 0),1))}</td>
-            <td class='entity'>{_esc(raw)}</td>
-            </tr>""")
-        body = "".join(trs) or "<tr><td colspan='15'>No clean requirement found for these filters.</td></tr>"
-        kpis = f"""<div class='kpis'>
-          <div class='kpi'>Clean Requirements<b>{len(rows)}</b></div>
-          <div class='kpi'>Stored Requirements Read<b>{len(stored)}</b></div>
-          <div class='kpi'>False-Negative Candidates<b>{len(recovered)}</b><span class='small muted'>recent rejected/review, read-only recovery</span></div>
-          <div class='kpi'>Active Requirement DB<b>{counts.get('wa_requirements_count',0)}</b></div>
-        </div>"""
-        filters = f"""<div class='card'><form class='filters'>
-          <label>Search<input name='q' value='{_esc(q)}' placeholder='location, brand, contact, requirement'></label>
-          <label>Location<input name='location' value='{_esc(loc)}'></label>
-          <label>Type<input name='property_type' value='{_esc(typ)}'></label>
-          <label>Transaction<select name='transaction'><option value=''>All</option>
-          <option value='LEASE' {'selected' if tx=='LEASE' else ''}>LEASE</option>
-          <option value='SALE' {'selected' if tx=='SALE' else ''}>SALE</option></select></label>
-          <button>Filter</button></form>{kpis}</div>"""
-        table = f"""<div class='card'><div class='scroll'><table>
-        <thead><tr><th>Date</th><th>Requirement ID</th><th>Preferred Location</th><th>Property Type</th>
-        <th>Transaction</th><th>Area Sqft</th><th>Budget</th><th>Floor</th><th>Suitable For</th>
-        <th>Client / Company</th><th>Contact Name</th><th>Contact No.</th><th>Source Group</th>
-        <th>AI Confidence</th><th>Original Requirement Text</th></tr></thead>
-        <tbody>{body}</tbody></table></div></div>"""
-        return HTMLResponse(_database_shell(
-            "WhatsApp Requirement Database",
-            "Newspaper-style demand database · one actionable requirement per row · searchable and matcher-ready",
-            filters + table, "Requirements"
-        ))
-
     def feed(request: Request):
-        q, tx, typ, loc, limit = _query_filters(request)
+        q = str(request.query_params.get("q") or "").strip()
         try:
-            source, stored_rows, detected = get_rows(core, q, limit)
-            supply = _filter_supply(
-                _attach_market_intelligence(_prioritize_rows(
-                    _clean_visible_rows(_visible_entities(stored_rows), 55)[0]
-                )), tx, typ, loc
-            )
-            req_stored, req_counts = _get_requirement_rows(core, q, limit)
-            demand = _filter_demand(_clean_requirement_rows(req_stored), tx, typ, loc)
-        except Exception as exc:
-            return HTMLResponse(_database_shell(
-                "Live Property Database", "Clean entity feed",
-                f"<div class='card'><b>Error:</b> {_esc(type(exc).__name__)}: {_esc(exc)}</div>",
-                "Live Database"
-            ), status_code=500)
+            limit = max(25, min(int(request.query_params.get("limit") or 500), 1000))
+        except Exception:
+            limit = 500
 
-        unified = []
-        for x in supply:
-            dt = str(x.get("last_seen") or x.get("first_seen") or "")
-            unified.append((dt, "AVAILABILITY", x))
-        for x in demand:
-            dt = str(x.get("received_at") or x.get("created_at") or "")
-            unified.append((dt, "REQUIREMENT", x))
-        unified.sort(key=lambda t: t[0], reverse=True)
+        try:
+            # Fetch fewer stored rows than the absolute maximum because a row
+            # may expand into several visible entities.
+            source, stored_rows, detected = get_rows(core, q, limit)
+            visible_rows = _visible_entities(stored_rows)
+            clean_rows, purity_stats = _clean_visible_rows(visible_rows, 60)
+            rows = _attach_market_intelligence(_prioritize_rows(clean_rows))
+        except Exception as exc:
+            return HTMLResponse(
+                f"""<!doctype html><html><body style='font-family:Arial;padding:30px'>
+                <h2>WhatsApp Property Leads</h2>
+                <p><b>Feed error:</b> {_esc(type(exc).__name__)}: {_esc(exc)}</p>
+                <p><a href='/api/live-feed-purity/debug'>Open live-feed diagnostics</a></p>
+                </body></html>""",
+                status_code=500,
+            )
 
         trs = []
-        for _, role, x in unified[:1500]:
-            if role == "AVAILABILITY":
-                txv = _finder_tx(x.get("clean_transaction") or x.get("transaction_type"))
-                price = x.get("rent_inr") if txv == "LEASE" else x.get("sale_price_inr")
-                contact_name = x.get("owner_name") or x.get("broker_name") or x.get("sender_name")
-                contact_phone = x.get("owner_phone") or x.get("broker_phone") or x.get("sender_phone")
-                raw = x.get("visible_entity_text") or x.get("raw_text") or ""
-                area = x.get("clean_area_min_sqft") or x.get("available_area_sqft") or x.get("area_sqft") or "—"
-                eid = x.get("visible_entity_id") or x.get("wa_property_id")
-                locv = x.get("clean_location") or x.get("location") or x.get("locality") or "—"
-                typv = x.get("clean_property_type") or x.get("property_type") or "—"
-                statusv = x.get("priority_band") or "REVIEW"
-                value = _fmt_money(price)
-            else:
-                txv = _finder_tx(x.get("clean_transaction"))
-                contact_name = x.get("clean_contact_name")
-                contact_phone = x.get("clean_contact_phone")
-                raw = x.get("clean_raw") or x.get("raw_text") or ""
-                area = x.get("minimum_area_sqft") or x.get("maximum_area_sqft") or "—"
-                eid = x.get("wa_requirement_id")
-                locv = x.get("clean_location") or "—"
-                typv = x.get("clean_property_type") or "—"
-                statusv = "ACTIVE"
-                value = _fmt_money(x.get("budget_max_inr") or x.get("budget_min_inr"))
-            trs.append(f"""<tr>
-            <td>{_esc(_)}</td><td><span class='badge {'supply' if role=='AVAILABILITY' else 'demand'}'>{role}</span></td>
-            <td><b>{_esc(eid)}</b></td><td>{_esc(locv)}</td><td>{_esc(typv)}</td><td>{_esc(txv)}</td>
-            <td>{_esc(area)}</td><td>{_esc(value)}</td><td>{_esc(contact_name or '—')}</td>
-            <td class='phone'>{_esc(contact_phone or '—')}</td><td>{_esc(statusv)}</td>
-            <td class='entity'>{_esc(raw)}</td></tr>""")
-        body = "".join(trs) or "<tr><td colspan='12'>No clean entities found.</td></tr>"
-        kpis = f"""<div class='kpis'>
-        <div class='kpi'>Availability<b>{len(supply)}</b></div>
-        <div class='kpi'>Requirements<b>{len(demand)}</b></div>
-        <div class='kpi'>Total Clean Entities<b>{len(unified)}</b></div>
-        <div class='kpi'>Inventory DB<b>{detected.get('wa_properties_count',0)}</b></div>
-        <div class='kpi'>Requirement DB<b>{req_counts.get('wa_requirements_count',0)}</b></div>
-        </div>"""
-        filters = f"""<div class='card'><form class='filters'>
-          <label>Search<input name='q' value='{_esc(q)}' placeholder='search clean database'></label>
-          <label>Location<input name='location' value='{_esc(loc)}'></label>
-          <label>Type<input name='property_type' value='{_esc(typ)}'></label>
-          <label>Transaction<select name='transaction'><option value=''>All</option>
-          <option value='LEASE' {'selected' if tx=='LEASE' else ''}>LEASE</option>
-          <option value='SALE' {'selected' if tx=='SALE' else ''}>SALE</option></select></label>
-          <button>Filter</button></form>{kpis}
-          <div class='small muted'>Raw WhatsApp text is retained only as audit evidence. Main working view is structured entities.</div>
-        </div>"""
-        table = f"""<div class='card'><div class='scroll'><table>
-        <thead><tr><th>Date</th><th>Entity</th><th>ID</th><th>Location</th><th>Property Type</th>
-        <th>Transaction</th><th>Area Sqft</th><th>Rent / Price / Budget</th><th>Contact Name</th>
-        <th>Contact No.</th><th>Status</th><th>Original Text</th></tr></thead>
-        <tbody>{body}</tbody></table></div></div>"""
-        return HTMLResponse(_database_shell(
-            "WhatsApp Live Clean Database",
-            "Property Capture OS format · clean requirements + clean availability · one entity per row",
-            filters + table, "Live Database"
-        ))
+        for row in rows[:1500]:
+            price = []
+            if row.get("rent_inr") not in (None, ""):
+                price.append("Rent: " + str(row.get("rent_inr")))
+            if row.get("sale_price_inr") not in (None, ""):
+                price.append("Sale: " + str(row.get("sale_price_inr")))
+
+            contact = " | ".join(
+                str(x)
+                for x in [
+                    row.get("owner_name"),
+                    row.get("owner_phone"),
+                    row.get("broker_name"),
+                    row.get("broker_phone"),
+                    row.get("sender_name"),
+                    row.get("sender_phone"),
+                ]
+                if x
+            )
+
+            location = row.get("clean_location") or " · ".join(
+                str(x)
+                for x in [row.get("location"), row.get("locality")]
+                if x
+            )
+            area = row.get("clean_area_min_sqft") or row.get("available_area_sqft") or row.get("area_sqft") or "—"
+
+            trs.append(
+                f"""<tr>
+                <td><b>{_esc(row.get('priority_band'))}</b><br>{_esc(row.get('priority_score'))}</td>
+                <td>{_esc(row.get('last_seen') or row.get('first_seen') or '—')}</td>
+                <td><b>{_esc(row.get('clean_transaction') or row.get('transaction_type') or '—')}</b></td>
+                <td>{_esc(row.get('clean_property_type') or row.get('property_type') or '—')}</td>
+                <td>{_esc(location or '—')}</td>
+                <td>{_esc(area)}</td>
+                <td>{_esc(' | '.join(price) or '—')}</td>
+                <td style='min-width:440px;white-space:pre-wrap'>{_esc(row.get('visible_entity_text') or '—')}</td>
+                <td>{_esc(contact or '—')}</td>
+                <td>{_esc(row.get('duplicate_status') or '—')}</td>
+                <td>{_esc(row.get('clean_score') or row.get('confidence') or '—')}</td>
+                <td>{_esc(row.get('priority_reason') or '—')}</td>
+                <td>{_esc(' → '.join(row.get('alternative_markets') or []) or '—')}</td>
+                </tr>"""
+            )
+
+        body = "".join(trs) or "<tr><td colspan='10'>No property leads found.</td></tr>"
+
+        return HTMLResponse(
+            f"""<!doctype html><html><head><meta charset='utf-8'>
+            <meta name='viewport' content='width=device-width,initial-scale=1'>
+            <title>WhatsApp Property Leads</title>
+            <style>
+            body{{font-family:Arial;margin:0;background:#f5f1eb;color:#29231e}}
+            header{{background:#4e4034;color:white;padding:18px 22px}}
+            main{{padding:18px;max-width:1900px;margin:auto}}
+            .card{{background:white;border:1px solid #ddd0c2;border-radius:10px;padding:12px;margin-bottom:12px}}
+            table{{width:100%;border-collapse:collapse;background:white}}
+            th,td{{padding:8px;border-bottom:1px solid #e8e1da;text-align:left;vertical-align:top;font-size:12px}}
+            th{{background:#eee4da;position:sticky;top:0}}
+            input{{width:75%;padding:10px;border:1px solid #baa896;border-radius:6px}}
+            button{{padding:10px 14px;background:#5a4635;color:white;border:0;border-radius:6px}}
+            .ok{{color:#176b3a;font-weight:700}}
+            </style></head><body>
+            <header><h2 style='margin:0'>WhatsApp Property Leads</h2>
+            <small>Smart Market WhatsApp inventory · HOT / STRONG / REVIEW plus context-aware alternative micro-markets</small></header>
+            <main>
+            <div class='card'>
+              <form>
+                <input name='q' value='{_esc(q)}' placeholder='Search location, property type, broker, owner, phone or details'>
+                <input type='hidden' name='limit' value='{limit}'>
+                <button>Search</button>
+              </form>
+              <p><span class='ok'>{len(rows)} clean property leads</span> from <b>{len(stored_rows)}</b> stored rows · source: <b>{_esc(source)}</b></p>
+              <p>HOT <b>{sum(1 for x in rows if x['priority_band']=='HOT')}</b> · STRONG <b>{sum(1 for x in rows if x['priority_band']=='STRONG')}</b> · REVIEW <b>{sum(1 for x in rows if x['priority_band']=='REVIEW')}</b></p>
+              <p>wa_properties: <b>{detected['wa_properties_count']}</b> · requirements kept separate: <b>{detected['wa_requirements_count']}</b></p>
+              <p>Filtered: requirements <b>{purity_stats['requirements_removed']}</b> · inactive <b>{purity_stats['inactive_removed']}</b> · low quality <b>{purity_stats['low_quality_removed']}</b> · duplicates <b>{purity_stats['duplicate_removed']}</b> · unknown <b>{purity_stats['unknown_removed']}</b></p>
+              <p><a href='/api/live-feed-purity/debug'>Diagnostics</a></p>
+            </div>
+            <div class='card' style='overflow:auto'>
+              <table>
+              <tr><th>Priority</th><th>Latest</th><th>Transaction</th><th>Type</th><th>Location</th><th>Area</th><th>Price/Rent</th><th>Property Entity</th><th>Contact</th><th>Duplicate</th><th>Purity</th><th>Why Priority</th><th>Smart Alternative Markets</th></tr>
+              {body}
+              </table>
+            </div>
+            </main></body></html>"""
+        )
 
     app.add_api_route("/api/live-feed-purity/status", api_status, methods=["GET"])
     app.add_api_route("/api/live-feed-purity/sample", sample, methods=["GET"])
@@ -2177,9 +1601,6 @@ def register(wrapped):
     app.add_api_route("/api/live-feed-purity/market-suggestions", market_suggestions, methods=["GET"])
     app.add_api_route("/api/property-finder/search", property_finder_search, methods=["GET"])
     app.add_api_route("/property-finder", property_finder_page, methods=["GET"])
-    app.add_api_route("/api/whatsapp-clean-database/status", clean_db_status, methods=["GET"])
     app.add_api_route("/whatsapp-live/feed", feed, methods=["GET"])
-    app.add_api_route("/whatsapp-live/requirements", requirements_page, methods=["GET"])
-    app.add_api_route("/whatsapp-live/availability", availability_page, methods=["GET"])
 
-    return {"status": "REGISTERED", "version": VERSION, "engine_patch": engine_patch}
+    return {"status": "REGISTERED", "version": VERSION}
