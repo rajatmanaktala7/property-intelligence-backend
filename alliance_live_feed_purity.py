@@ -8,8 +8,8 @@ from sqlalchemy import text
 from starlette.middleware.base import BaseHTTPMiddleware
 import alliance_live_feed_purity_legacy36 as _legacy
 
-VERSION = "5.5-CONTACT-RECOVERY-SINGLE-MATCHER"
-OWNER = "ALLIANCE_V55_WHATSAPP_PRESENTATION_ONLY"
+VERSION = "5.6-COMPACT-QUALITY-GATED-WHATSAPP"
+OWNER = "ALLIANCE_V56_WHATSAPP_PRESENTATION_ONLY"
 
 LOCATION_ALIASES = {
     "KALKAJI":["KALKAJI"],
@@ -141,6 +141,65 @@ def clean_contact_name(value):
     raw = re.sub(r"\s+", " ", raw).strip(" ·|/,-")
     return raw
 
+
+GENERIC_BAD = {
+    "PROPERTY","PROPERTY AVAILABLE","AVAILABLE PROPERTY","AVAILABLE","DETAILS AVAILABLE",
+    "CONTACT FOR DETAILS","PLEASE CALL","CALL FOR DETAILS","MORE DETAILS","UNKNOWN",
+    "PROPERTY AVAILABILITY","RENT PROPERTY","SALE PROPERTY"
+}
+
+def meaningful_property(item):
+    """Read-side quality gate. Never deletes the source row."""
+    desc = str(item.get("description") or item.get("raw_text") or "").strip()
+    n = norm(desc)
+    if not n or n in GENERIC_BAD or len(n) < 18:
+        return False
+
+    loc = str(item.get("location") or "")
+    txn = str(item.get("transaction") or "")
+    fam = str(item.get("property_type") or "")
+    area = str(item.get("area") or "").strip()
+    price = str(item.get("price") or "").strip()
+
+    # A usable inventory row needs a property identity, not merely a person/contact fragment.
+    anchors = 0
+    if loc and loc.lower() != "unknown": anchors += 1
+    if txn and txn != "UNKNOWN": anchors += 1
+    if fam and fam != "Property": anchors += 1
+    if area and area not in {"-", "0", "None"}: anchors += 1
+    if price and price not in {"-", "0", "None"}: anchors += 1
+
+    # Strong property words also count as identity evidence.
+    if any(x in n for x in (
+        "BHK","SQFT","SQ FT","SQ YD","SQYD","APARTMENT","FLAT","VILLA","FLOOR",
+        "SHOP","SHOWROOM","OFFICE","RESTAURANT","BANQUET","PLOT","LAND","FARM",
+        "WAREHOUSE","GODOWN","HOTEL","PENTHOUSE"
+    )):
+        anchors += 1
+
+    # Girja / broker summary fragments should not appear unless the actual property is identifiable.
+    if "GIRJA" in n and anchors < 3:
+        return False
+
+    return anchors >= 2
+
+def phone_lines_html(value):
+    phones = [x.strip() for x in str(value or "").split("/") if x.strip()]
+    if not phones:
+        return "—"
+    if len(phones) == 1:
+        return f"<span class='phone'>{esc(phones[0])}</span>"
+    return "".join(
+        f"<div class='phoneLine'><b>{i}.</b> {esc(ph)}</div>"
+        for i, ph in enumerate(phones, 1)
+    )
+
+def compact_description(value, limit=220):
+    raw = re.sub(r"\s+", " ", str(value or "")).strip()
+    if len(raw) <= limit:
+        return raw
+    return raw[:limit-1].rstrip() + "…"
+
 def _engine():
     import whatsapp_live_bridge as live
     return live.wa_engine
@@ -248,6 +307,9 @@ def properties(q="", include_deleted=False, limit=2500):
             "contact_name": cname or "",
             "contact_number": format_phones(phones),
         }
+
+        if not meaningful_property(item):
+            continue
 
         if qn:
             hay = norm(" ".join(str(v or "") for v in item.values()))
@@ -363,12 +425,16 @@ def page(body,active="availability"):
     .tab{{background:#ad9882}}.tab.on{{background:#594634}}.tab.matcher{{background:#315f8d}}
     .card{{background:#fffdf9;border:1px solid #d9c9b7;border-radius:12px;padding:14px;margin-bottom:14px}}
     .scroll{{overflow:auto;max-height:72vh}}
-    table{{width:100%;min-width:1750px;border-collapse:collapse;background:white}}
-    th,td{{padding:9px;border-bottom:1px solid #eee1d1;text-align:left;vertical-align:top;font-size:12px}}
-    th{{background:#f7ecdf;position:sticky;top:0}}
-    .desc{{min-width:400px;max-width:620px;line-height:1.4}}
-    .loc{{font-weight:800;min-width:130px}}
+    table{{width:100%;min-width:1280px;border-collapse:collapse;background:white;table-layout:fixed}}
+    th,td{{padding:5px 6px;border-bottom:1px solid #eee1d1;text-align:left;vertical-align:top;font-size:10.5px;line-height:1.25}}
+    th{{background:#f7ecdf;position:sticky;top:0;font-size:10px}}
+    .desc{{width:260px;max-width:260px;line-height:1.25}}
+    .loc{{font-weight:800;width:95px}}
     .phone{{font-weight:900;white-space:nowrap}}
+    .phoneLine{{white-space:nowrap;margin-bottom:2px}}
+    .rid{{width:82px;word-break:break-all}}
+    .smallcol{{width:72px}}.namecol{{width:95px}}.sourcecol{{width:105px}}
+    .actioncol{{width:82px}}
     input,textarea,select{{width:100%;padding:9px;border:1px solid #cdbba8;border-radius:7px}}
     .grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:10px}}
     .green{{background:#39734a}}.red{{background:#963d35}}.blue{{background:#315f8d}}
@@ -390,24 +456,23 @@ def prop_table(rows):
     tr=[]
     for r in rows:
         rid = esc(r.get("record_id"))
+        full_desc = str(r.get("description") or "")
+        short_desc = compact_description(full_desc)
         tr.append(f"""<tr>
-        <td>{rid}</td>
-        <td>{esc(r.get('transaction'))}</td>
-        <td class=desc>{esc(r.get('description'))}</td>
+        <td class=rid>{rid}</td>
+        <td class=smallcol>{esc(r.get('transaction'))}</td>
+        <td class=desc title="{esc(full_desc)}">{esc(short_desc)}</td>
         <td class=loc>{esc(r.get('location'))}</td>
-        <td>{esc(r.get('property_type'))}</td>
-        <td>{esc(r.get('area'))}</td>
-        <td>{esc(r.get('price'))}</td>
-        <td>{esc(r.get('contact_name'))}</td>
-        <td class=phone>{esc(r.get('contact_number'))}</td>
-        <td>{esc(r.get('source'))}</td>
-        <td>{esc(r.get('captured_on'))}</td>
-        <td>{esc(r.get('verification'))}</td>
-        <td>
+        <td class=smallcol>{esc(r.get('property_type'))}</td>
+        <td class=smallcol>{esc(r.get('area'))}</td>
+        <td class=smallcol>{esc(r.get('price'))}</td>
+        <td class=namecol>{esc(r.get('contact_name'))}</td>
+        <td>{phone_lines_html(r.get('contact_number'))}</td>
+        <td class=sourcecol>{esc(r.get('source'))}</td>
+        <td class=smallcol>{esc(r.get('captured_on'))}</td>
+        <td class=smallcol>{esc(r.get('verification'))}</td>
+        <td class=actioncol>
           <a class='btn green' href='/whatsapp-live/edit/{rid}'>Edit</a>
-          <form style='display:inline' method=post action='/whatsapp-live/delete/{rid}'>
-            <button class=red onclick="return confirm('Hide from working database? Original WhatsApp source remains preserved.')">Delete</button>
-          </form>
         </td>
         </tr>""")
     return "".join(tr)
@@ -424,18 +489,23 @@ def render_workspace(request):
         trs = ""
 
         for r in rs:
+            full_raw = str(r.get("raw_text") or "")
+            short_raw = compact_description(full_raw, 240)
+            matcher_q = __import__("urllib.parse", fromlist=["quote_plus"]).quote_plus(full_raw)
+            matcher_url = f"/deal-match-ai-v60?q={matcher_q}&mode=SMART&min_score=70"
             trs += f"""<tr>
-              <td><b>{esc(r.get('effective_date_label'))}</b></td>
-              <td>{esc(r.get('wa_requirement_id'))}</td>
+              <td class=smallcol><b>{esc(r.get('effective_date_label'))}</b></td>
+              <td class=rid>{esc(r.get('wa_requirement_id'))}</td>
               <td class=loc>{esc(rloc(r))}</td>
-              <td>{esc(rtx(r))}</td>
-              <td>{esc(rpt(r))}</td>
-              <td class=desc>{esc(r.get('raw_text'))}</td>
-              <td>{esc(r.get('minimum_area_sqft'))} - {esc(r.get('maximum_area_sqft'))}</td>
-              <td>{esc(r.get('budget_max_inr'))}</td>
-              <td>{esc(r.get('display_contact_name'))}</td>
-              <td class=phone>{esc(r.get('display_contact_number'))}</td>
-              <td>{esc(r.get('source_group'))}</td>
+              <td class=smallcol>{esc(rtx(r))}</td>
+              <td class=smallcol>{esc(rpt(r))}</td>
+              <td class=desc title="{esc(full_raw)}">{esc(short_raw)}</td>
+              <td class=smallcol>{esc(r.get('minimum_area_sqft'))} - {esc(r.get('maximum_area_sqft'))}</td>
+              <td class=smallcol>{esc(r.get('budget_max_inr'))}</td>
+              <td class=namecol>{esc(r.get('display_contact_name'))}</td>
+              <td>{phone_lines_html(r.get('display_contact_number'))}</td>
+              <td class=sourcecol>{esc(r.get('source_group'))}</td>
+              <td class=actioncol><a class='btn blue' href='{esc(matcher_url)}'>Run Matcher</a></td>
             </tr>"""
 
         body=f"""<div class=card>
@@ -454,9 +524,9 @@ def render_workspace(request):
         <tr>
           <th>Date</th><th>ID</th><th>Location</th><th>Transaction</th><th>Type</th>
           <th>Description</th><th>Area</th><th>Budget</th><th>Contact Name</th>
-          <th>Contact Number</th><th>Source</th>
+          <th>Contact Number</th><th>Source</th><th>Matcher</th>
         </tr>
-        {trs or '<tr><td colspan=11>No active requirements for this date.</td></tr>'}
+        {trs or '<tr><td colspan=12>No active requirements for this date.</td></tr>'}
         </table></div>"""
 
         return HTMLResponse(page(body,"requirements"))
@@ -473,7 +543,7 @@ def render_workspace(request):
         <div style='align-self:end'><button>Search</button></div>
       </div>
     </form>
-    <p class=muted>Phone numbers are recovered from stored contact fields first, then from the original WhatsApp message if the contact field is blank.</p>
+    <p class=muted>Clean working inventory only. Meaningless broker/summary fragments are hidden from this view and from matching; original WhatsApp source data remains preserved.</p>
     </div>
     <div class=scroll><table>
     <tr>
@@ -625,7 +695,14 @@ def register(wrapped):
         app.add_middleware(V55AuthoritativeMiddleware)
         app.state.alliance_v53_authoritative_middleware = True
 
-    @app.get("/api/v55/status")
+    accuracy_status = None
+    try:
+        import alliance_match_accuracy_v61 as _acc61
+        accuracy_status = _acc61.install()
+    except Exception as e:
+        accuracy_status = {"status":"DEGRADED","error":f"{type(e).__name__}: {e}"}
+
+    @app.get("/api/v56/status")
     def status():
         return {
             "status":"OK",
@@ -645,9 +722,9 @@ def register(wrapped):
             ],
             "multiple_phone_numbers":True,
             "single_matcher":"/deal-match-ai-v60",
-            "row_level_matcher_buttons":False,
-            "old_match_section_redirect":True,
-            "source_preserved":True,
+            "requirement_row_matcher_buttons":True,
+            "old_match_section_redirect":True,"compact_table":True,"meaningful_inventory_gate":True,
+            "source_preserved":True,"matcher_accuracy_layer":"V6.1",
         }
 
     return {"status":"REGISTERED","version":VERSION,"owner":OWNER,"legacy":legacy_result}
