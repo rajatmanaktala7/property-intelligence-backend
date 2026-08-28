@@ -8,8 +8,8 @@ from sqlalchemy import text
 from starlette.middleware.base import BaseHTTPMiddleware
 import alliance_live_feed_purity_legacy36 as _legacy
 
-VERSION = "6.0-WHATSAPP-LOCATION-FIRST-GATE"
-OWNER = "ALLIANCE_V60_WHATSAPP_LOCATION_FIRST_GATE"
+VERSION = "6.1-WHATSAPP-USABLE-PROPERTY-PURITY"
+OWNER = "ALLIANCE_V61_WHATSAPP_USABLE_PROPERTY_PURITY"
 
 LOCATION_ALIASES = {
     "KALKAJI":["KALKAJI"],
@@ -368,22 +368,128 @@ def _valid_location_value(value):
     if any(x in nv for x in ("PROPERTY PROPOSAL","PROPERTY GROUP","REAL ESTATE AGENT","WESTERN LINE PROPERTY")): return False
     return True
 
+
+PROPERTY_DETAIL_WORDS = (
+    "BHK","SHOP","SHOWROOM","OFFICE","RESTAURANT","CAFE","BANQUET","WAREHOUSE",
+    "GODOWN","VILLA","APARTMENT","FLAT","FLOOR","PLOT","LAND","FARMHOUSE",
+    "BUILDER FLOOR","SCO","BOOTH","KIOSK","INDUSTRIAL","BASEMENT","GROUND FLOOR",
+    "FIRST FLOOR","SECOND FLOOR","THIRD FLOOR","LOWER FLOOR","UPPER GROUND",
+    "TERRACE","FRONTAGE","SQ FT","SQFT","SFT","SQ YD","SQYD","SQ M","SQM","ACRE"
+)
+
+COMMERCIAL_TERM_WORDS = (
+    "SECURITY DEPOSIT","DEPOSIT","CAM","MAINTENANCE","LOCK IN","LOCK-IN",
+    "LEASE TERM","LEASE PERIOD","BROKERAGE","ESCALATION","ADVANCE","TOKEN",
+    "NOTICE PERIOD","FIT OUT","FIT-OUT","RENT FREE","RENT-FREE"
+)
+
+def _combined_property_text(item):
+    return " ".join(str(item.get(k) or "") for k in (
+        "description","clean_description","raw_text","configuration_details",
+        "property_subtype","configuration","project_name","building_name",
+        "floor","frontage"
+    ))
+
+def _has_usable_property_detail(item):
+    textv = norm(_combined_property_text(item))
+    if any(norm(word) in textv for word in PROPERTY_DETAIL_WORDS):
+        return True
+    for k in (
+        "area","area_sqft","available_area_sqft","configuration","configuration_details",
+        "project_name","building_name","property_subtype","floor","frontage","plot_area"
+    ):
+        v = str(item.get(k) or "").strip()
+        if v and v.lower() not in {"unknown","none","property","-","—","0"}:
+            if k == "configuration_details":
+                nv = norm(v)
+                generic = {
+                    norm(item.get("location")),
+                    norm(item.get("property_type")),
+                    (norm(item.get("location")) + " " + norm(item.get("property_type"))).strip(),
+                }
+                if nv in generic:
+                    continue
+            return True
+    return False
+
+def _commercial_term_contamination(item):
+    desc = str(item.get("description") or "")
+    raw = str(item.get("raw_text") or "")
+    textv = (desc + " " + raw).upper()
+    if not any(word in textv for word in COMMERCIAL_TERM_WORDS):
+        return False, ""
+    if not _has_usable_property_detail(item):
+        return True, "Commercial term fragment is not an independent property"
+    m = re.search(r"SECURITY\s+DEPOSIT.{0,40}?(\d+(?:\.\d+)?)\s*MONTH", textv)
+    price = item.get("price") or item.get("rent") or item.get("rent_value")
+    if m and price not in (None, ""):
+        try:
+            if float(str(price).replace(",", "").strip()) == float(m.group(1)):
+                return True, "Security-deposit month count was interpreted as rent"
+        except Exception:
+            pass
+    return False, ""
+
+def _usable_property_status(item):
+    contaminated, reason = _commercial_term_contamination(item)
+    if contaminated:
+        return "REJECT_EXTRACTION_CONTAMINATION", reason
+
+    has_detail = _has_usable_property_detail(item)
+    has_location = _valid_location_value(item.get("location"))
+    typed = str(item.get("property_type") or "").strip() not in {"","Property","Unknown","UNKNOWN"}
+
+    # Known location + generic Residential/Commercial is a holding record, never clean.
+    if has_location and typed and not has_detail:
+        return "HOLDING_PROPERTY_DETAILS_REQUIRED", "Location is known but usable property details are missing"
+
+    # A genuine-looking property with details but no location must be held.
+    if not has_location and has_detail:
+        return "HOLDING_LOCATION_REQUIRED", "Location could not be confidently recovered"
+
+    if not _has_specific_property_identity(item):
+        return "REJECT_FRAGMENT", "Not a meaningful independent property"
+
+    if not has_location:
+        return "HOLDING_LOCATION_REQUIRED", "Location could not be confidently recovered"
+
+    transaction = str(
+        item.get("transaction") or item.get("rent_sale") or item.get("lead_type") or ""
+    ).upper().strip()
+    if transaction in {"", "UNKNOWN", "NONE", "PROPERTY"}:
+        return "INCOMPLETE", "Transaction type is missing"
+
+    price = item.get("price")
+    if price in (None, "", "0", 0):
+        return "INCOMPLETE", "Rent/sale price is missing"
+
+    return "CLEAN", ""
+
 def _location_first_status(item):
     if not _has_specific_property_identity(item): return "REJECT_FRAGMENT"
     if not _valid_location_value(item.get("location")): return "HOLDING_LOCATION_REQUIRED"
     return "CLEAN"
 
 def _apply_location_first_gate(rows):
-    clean=[]; holding=[]; rejected=[]
+    clean = []
+    holding = []
+    rejected = []
     for item in rows:
-        x=dict(item); status=_location_first_status(x)
-        x["property_purity_status"]=status; x["matcher_eligible"]=(status=="CLEAN")
-        if status=="CLEAN": clean.append(x)
-        elif status=="HOLDING_LOCATION_REQUIRED":
-            x["holding_reason"]="Location could not be confidently recovered from property or parent message"; holding.append(x)
+        x = dict(item)
+        status, reason = _usable_property_status(x)
+        x["property_purity_status"] = status
+        x["matcher_eligible"] = (status == "CLEAN")
+        if reason:
+            x["purity_reason"] = reason
+        if status == "CLEAN":
+            clean.append(x)
+        elif status in ("INCOMPLETE","HOLDING_LOCATION_REQUIRED","HOLDING_PROPERTY_DETAILS_REQUIRED"):
+            x["holding_reason"] = reason
+            holding.append(x)
         else:
-            x["holding_reason"]="Not a meaningful independent property entity"; rejected.append(x)
-    return clean,holding,rejected
+            x["holding_reason"] = reason
+            rejected.append(x)
+    return clean, holding, rejected
 
 def split_multi_property(item):
     """Non-destructive read-side splitter for obvious bundled listings."""
@@ -971,7 +1077,7 @@ def register(wrapped):
             "single_matcher":"/deal-match-ai-v60",
             "requirement_row_matcher_buttons":True,
             "old_match_section_redirect":True,"compact_table":False,"uniform_result_theme":True,"technical_ids_hidden":True,"description_expanded":True,"meaningful_inventory_gate":True,"multi_property_reconstruction":True,"clean_description_primary":True,
-            "source_preserved":True,"matcher_accuracy_layer":"V6.1","property_purity_gate":True,"fragment_filter":True,"read_side_dedupe":True,"commercial_terms_validator":True,"parent_context_inheritance":True,"location_first_gate":True,"unknown_location_excluded":True,"matcher_requires_location":True,
+            "source_preserved":True,"matcher_accuracy_layer":"V6.1","property_purity_gate":True,"fragment_filter":True,"read_side_dedupe":True,"commercial_terms_validator":True,"parent_context_inheritance":True,"location_first_gate":True,"unknown_location_excluded":True,"matcher_requires_location":True,"usable_property_gate":True,"commercial_term_contamination_gate":True,"generic_location_property_excluded":True,"incomplete_property_matcher_disabled":True,
         }
 
     return {"status":"REGISTERED","version":VERSION,"owner":OWNER,"legacy":legacy_result}
