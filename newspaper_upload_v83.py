@@ -7,7 +7,7 @@ from sqlalchemy import text
 from PIL import Image, ImageOps
 import newspaper_intelligence as legacy
 
-VERSION="8.4-INTEGRATED-CAPTURE-DATABASE"
+VERSION="8.5-UPLOAD-PROGRESS-INTEGRATED-DB"
 
 def register(core):
     app=core.app
@@ -155,6 +155,7 @@ If none are missed return [].
         .wrap{{max-width:1850px;margin:auto;padding:18px}}.card{{background:#fff;border:1px solid #d8cab8;border-radius:14px;padding:18px;margin-bottom:14px}}
         input{{padding:9px;border:1px solid #ccb9a6;border-radius:7px}}.file{{width:100%}}.btn,button{{background:#865f3d;color:#fff;border:0;border-radius:8px;padding:10px 13px;font-weight:800;text-decoration:none;cursor:pointer}}
         .green{{background:#16845b}}.status{{white-space:pre-wrap;background:#f7f1e8;border:1px solid #dfd1bf;padding:12px;border-radius:9px;margin-top:12px}}
+        .progress{{height:15px;background:#e5d8c9;border-radius:999px;overflow:hidden;margin-top:10px}}.bar{{height:100%;width:0%;background:#16845b;transition:width .15s}}.pct{{font-weight:900}}
         .scroll{{overflow:auto;max-height:68vh}}table{{width:100%;min-width:1500px;border-collapse:collapse}}th,td{{padding:9px;border-bottom:1px solid #eee1d1;text-align:left;vertical-align:top;font-size:12px}}
         th{{background:#f7ecdf;position:sticky;top:0}}.desc{{min-width:350px;max-width:600px}}.loc{{font-weight:800}}.top{{display:flex;gap:8px;flex-wrap:wrap}}
         </style></head><body><header><b>Newspaper Property Capture & Database V8.4</b><br><small>One page: Upload → AI extraction → Clean Newspaper Database</small></header><div class=wrap>
@@ -162,17 +163,57 @@ If none are missed return [].
         <div class=card><h2>Upload Newspaper Picture</h2><p>Upload the full newspaper page. The original image is saved before AI extraction.</p>
         <form id=f><input class=file type=file name=file accept="image/*" capture="environment" required><br><br>
         <input name=source_label value="Newspaper - Property"><label><input type=checkbox name=high_accuracy checked> High Accuracy second pass</label><br><br>
-        <button>Upload & Process</button></form><div id=s class=status>Ready.</div></div>
+        <button id=uploadBtn>Upload & Process</button></form><div id=s class=status>Ready.</div>
+        <div id=progressBox style="display:none"><div style="display:flex;justify-content:space-between"><span id=progressLabel>Preparing...</span><span class=pct id=progressPct>0%</span></div>
+        <div class=progress><div class=bar id=progressBar></div></div></div></div>
         <div class=card id=newspaper-database><h2>Newspaper Database</h2>
         <form method=get><input name=q value="{esc(q)}" placeholder="Search locality, broker, phone, price, description..." style="min-width:420px"><button>Search</button></form>
         <p><b>{len(rows)}</b> records displayed. {esc(err or '')}</p>
         <div class=scroll><table><tr><th>Date</th><th>Lead Type</th><th>Locality</th><th>Area</th><th>Description</th><th>Price</th><th>Agency</th><th>Contact</th><th>Phone</th><th>Verification</th><th>ID</th></tr>
         {''.join(trs) or '<tr><td colspan=11>No newspaper records found.</td></tr>'}</table></div></div>
         <script>
-        f.onsubmit=async e=>{{e.preventDefault();s.textContent='UPLOAD: sending image...';let fd=new FormData(f);fd.set('high_accuracy',f.high_accuracy.checked?'true':'false');
-        try{{let r=await fetch('/api/newspaper-v83/process',{{method:'POST',body:fd,credentials:'include'}});let t=await r.text();let d;try{{d=JSON.parse(t)}}catch(_){{d={{detail:t}}}}
-        if(!r.ok)throw Error((d.stage?d.stage+': ':'')+(d.detail||d.message||t));s.textContent='SUCCESS\\nSaved: '+d.inserted+'\\nDuplicates: '+d.skipped+'\\nModel: '+d.model+'\\nSource ID: '+d.source_id+'\\nRefreshing database...';setTimeout(()=>location.href='/newspaper-v83#newspaper-database',800)}}
-        catch(err){{s.textContent='ERROR\\n'+err.message}}}}
+        function setProgress(pct,label){{
+          progressBox.style.display='block';
+          progressPct.textContent=pct+'%';
+          progressBar.style.width=pct+'%';
+          if(label)progressLabel.textContent=label;
+        }}
+        f.onsubmit=e=>{{
+          e.preventDefault();
+          const file=f.file.files[0];
+          if(!file){{s.textContent='Please choose a newspaper image.';return}}
+          uploadBtn.disabled=true;
+          s.textContent='Starting upload...';
+          setProgress(0,'Uploading '+file.name);
+          const fd=new FormData(f);
+          fd.set('high_accuracy',f.high_accuracy.checked?'true':'false');
+          const xhr=new XMLHttpRequest();
+          xhr.open('POST','/api/newspaper-v83/process',true);
+          xhr.withCredentials=true;
+          xhr.upload.onprogress=ev=>{{
+            if(ev.lengthComputable){{
+              const pct=Math.min(100,Math.round((ev.loaded/ev.total)*100));
+              setProgress(pct,'Uploading '+file.name);
+              s.textContent='UPLOAD '+pct+'%';
+            }}
+          }};
+          xhr.upload.onload=()=>{{
+            setProgress(100,'Upload complete · AI extraction in progress');
+            s.textContent='UPLOAD 100%\nNow processing newspaper with AI. Do not upload again.';
+          }};
+          xhr.onerror=()=>{{uploadBtn.disabled=false;s.textContent='UPLOAD ERROR: Network connection failed.'}};
+          xhr.onload=()=>{{
+            uploadBtn.disabled=false;
+            let d;try{{d=JSON.parse(xhr.responseText)}}catch(_){{d={{detail:xhr.responseText}}}}
+            if(xhr.status<200||xhr.status>=300){{
+              s.textContent='ERROR\n'+(d.detail||d.message||xhr.responseText);return;
+            }}
+            setProgress(100,'Completed');
+            s.textContent='SUCCESS\nSaved: '+d.inserted+'\nDuplicates: '+d.skipped+'\nModel: '+d.model+'\nSource ID: '+d.source_id;
+            setTimeout(()=>location.href='/newspaper-v83#newspaper-database',800);
+          }};
+          xhr.send(fd);
+        }}
         </script></div></body></html>"""
         return HTMLResponse(body)
 
