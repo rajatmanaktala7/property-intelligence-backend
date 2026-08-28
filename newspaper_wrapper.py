@@ -21,7 +21,7 @@ def production_health():
     return {
         "status":"OK",
         "service":"Alliance Property Intelligence",
-        "wrapper":"V3.8-STABLE-CONSOLIDATED",
+        "wrapper":"V3.8-STABLE-CONSOLIDATED+V6-DEAL-MATCH",
         "core_app_loaded":True,
         "alliance_v2":ALLIANCE_V2_STATUS,
         "optional_modules":OPTIONAL_MODULES,
@@ -30,16 +30,11 @@ def production_health():
 
 @app.get("/module-health")
 def module_health():
-    return {
-        "wrapper":"V3.8-STABLE-CONSOLIDATED",
-        "alliance_v2":ALLIANCE_V2_STATUS,
-        "modules":OPTIONAL_MODULES,
-    }
+    return {"wrapper":"V3.8-STABLE-CONSOLIDATED+V6-DEAL-MATCH","alliance_v2":ALLIANCE_V2_STATUS,"modules":OPTIONAL_MODULES}
 
 try:
     import alliance_v44_whatsapp_property_master as _v44
     _v44.register(core)
-
     import alliance_auto_updater as _auto44
     _auto44.start(core)
 
@@ -70,13 +65,14 @@ try:
 except Exception as e:
     V451_ERROR=f"{type(e).__name__}: {e}"
 
-# IMPORTANT:
-# Do NOT intercept /whatsapp-live/feed in middleware here.
-# production_entrypoint loads alliance_live_feed_purity afterwards.
-# V5.1 must remain the final owner for:
-#   /whatsapp-live
-#   /whatsapp-live/feed
-#   /whatsapp-live/requirements
+V60_ERROR=None
+V60_STATUS=None
+try:
+    import alliance_deal_match_ai_v60 as _v60
+    V60_STATUS=_v60.register(core)
+except Exception as e:
+    V60_ERROR=f"{type(e).__name__}: {e}"
+    print("Alliance V6 Deal Match AI registration warning:", V60_ERROR)
 
 @app.get("/api/live-bootstrap-status")
 def live_bootstrap_status():
@@ -84,23 +80,23 @@ def live_bootstrap_status():
     for r in app.router.routes:
         p=getattr(r,"path",None)
         if p in {
-            "/whatsapp-live",
-            "/whatsapp-live/feed",
-            "/api/v451/live/status",
-            "/api/v451/live/properties",
-            "/api/v383/status",
-            "/api/v46/status",
-            "/api/v51/status",
+            "/whatsapp-live","/whatsapp-live/feed",
+            "/api/v451/live/status","/api/v451/live/properties",
+            "/api/v383/status","/api/v46/status",
+            "/api/v51/status","/api/v52/status",
+            "/deal-match-ai-v60","/api/v60/status","/api/v60/deal-match"
         }:
             paths.append(p)
 
     return {
-        "status":"OK" if V451_ERROR is None else "DEGRADED",
+        "status":"OK" if V451_ERROR is None and V60_ERROR is None else "DEGRADED",
         "v383_error":V383_ERROR,
         "v46_error":V46_ERROR,
         "v451_error":V451_ERROR,
+        "v60_error":V60_ERROR,
+        "v60_status":V60_STATUS,
         "registered_paths":sorted(set(paths)),
         "live_feed_owner":"ROUTE_LAYER_FINAL_OWNER",
         "middleware_intercepts_whatsapp_feed":False,
-        "expected_final_module":"alliance_live_feed_purity V5.1",
+        "deal_match_ai_owner":"alliance_deal_match_ai_v60",
     }
