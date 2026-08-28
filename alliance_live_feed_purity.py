@@ -8,8 +8,8 @@ from sqlalchemy import text
 from starlette.middleware.base import BaseHTTPMiddleware
 import alliance_live_feed_purity_legacy36 as _legacy
 
-VERSION = "5.6-COMPACT-QUALITY-GATED-WHATSAPP"
-OWNER = "ALLIANCE_V56_WHATSAPP_PRESENTATION_ONLY"
+VERSION = "5.7-RECONSTRUCTED-CLEAN-WHATSAPP"
+OWNER = "ALLIANCE_V57_WHATSAPP_RECONSTRUCTION"
 
 LOCATION_ALIASES = {
     "KALKAJI":["KALKAJI"],
@@ -200,6 +200,139 @@ def compact_description(value, limit=220):
         return raw
     return raw[:limit-1].rstrip() + "…"
 
+
+
+def _money_label(v, transaction):
+    try:
+        x=float(v)
+    except Exception:
+        return str(v or "").strip()
+    if x<=0:return ""
+    if x>=10000000:
+        return f"₹{x/10000000:.2f} Cr"
+    if x>=100000:
+        return f"₹{x/100000:.2f} L"
+    if transaction=="RENT":
+        return f"₹{x:,.0f}/month"
+    return f"₹{x:,.0f}"
+
+def _configuration_from_text(textv):
+    n=str(textv or "")
+    bits=[]
+    for pat in [
+        r"(?i)\b\d(?:\.5)?\s*BHK(?:\s*\+?\s*(?:SERVANT|SER|SQ))?\b",
+        r"(?i)\b\d\s*/\s*\d\s*BHK(?:\s*\+?\s*(?:SERVANT|SER))?\b",
+        r"(?i)\b(?:FULLY|SEMI)\s+FURNISHED\b",
+        r"(?i)\bUNFURNISHED\b",
+        r"(?i)\bGROUND FLOOR\b|\bFIRST FLOOR\b|\bSECOND FLOOR\b|\bTHIRD FLOOR\b|\bLOWER FLOOR\b|\bUPPER GROUND\b",
+    ]:
+        m=re.search(pat,n)
+        if m:
+            val=re.sub(r"\s+"," ",m.group(0)).strip()
+            if val.upper() not in [x.upper() for x in bits]: bits.append(val)
+    return " · ".join(bits)
+
+def _area_from_text(textv):
+    s=str(textv or "")
+    patterns=[
+        (r"(?i)\b(\d{2,7}(?:\.\d+)?)\s*(?:sq\.?\s*ft|sqft|sft)\b","sq ft"),
+        (r"(?i)\b(\d{2,6}(?:\.\d+)?)\s*(?:sq\.?\s*yds?|sq\.?\s*yards?|yds?|gaj)\b","sq yd"),
+        (r"(?i)\b(\d+(?:\.\d+)?)\s*(?:acres?|acre)\b","acre"),
+        (r"(?i)\b(\d{2,7}(?:\.\d+)?)\s*(?:sq\.?\s*m|sqm|m2)\b","sq m"),
+    ]
+    for pat,unit in patterns:
+        m=re.search(pat,s)
+        if m:return f"{m.group(1)} {unit}"
+    return ""
+
+def _price_from_text(textv, transaction):
+    s=str(textv or "")
+    # Prefer explicit rent for RENT and explicit total/price for SALE.
+    pats=[]
+    if transaction=="RENT":
+        pats += [r"(?i)(?:rent|rental|asking)\s*[:@-]?\s*₹?\s*(\d+(?:\.\d+)?)\s*(l|lac|lakh|k)?"]
+    else:
+        pats += [r"(?i)(?:price|total|sale|asking)\s*[:@-]?\s*₹?\s*(\d+(?:\.\d+)?)\s*(cr|crore|l|lac|lakh)?"]
+    pats += [r"(?i)₹\s*(\d+(?:\.\d+)?)\s*(cr|crore|l|lac|lakh|k)"]
+    for pat in pats:
+        m=re.search(pat,s)
+        if not m:continue
+        x=float(m.group(1));u=(m.group(2) or '').lower()
+        if u in ('cr','crore'):x*=10000000
+        elif u in ('l','lac','lakh'):x*=100000
+        elif u=='k':x*=1000
+        return x
+    return None
+
+def build_clean_description(item):
+    loc=str(item.get('location') or '').strip()
+    fam=str(item.get('property_type') or '').strip()
+    txv=str(item.get('transaction') or '').strip()
+    raw=str(item.get('description') or item.get('raw_text') or '')
+    cfg=_configuration_from_text(raw)
+    area=str(item.get('area') or '').strip() or _area_from_text(raw)
+    price=item.get('price')
+    if not price:
+        price=_price_from_text(raw,txv)
+    parts=[]
+    if loc and loc.lower()!='unknown':parts.append(loc)
+    if fam and fam!='Property':parts.append(fam)
+    if cfg:parts.append(cfg)
+    if area and area not in {'-','None','0'}:parts.append(area)
+    pl=_money_label(price,txv)
+    if pl:parts.append(('Rent ' if txv=='RENT' else 'Price ')+pl)
+    # Add only meaningful short feature phrases, never dump the raw broker message.
+    n=norm(raw)
+    for label,words in [
+        ('Park Facing',['PARK FACING']),('Fully Furnished',['FULLY FURNISHED']),
+        ('Semi Furnished',['SEMI FURNISHED']),('Unfurnished',['UNFURNISHED']),
+        ('Private Pool',['PRIVATE POOL']),('Terrace',['TERRACE']),('Sea View',['SEA VIEW'])
+    ]:
+        if any(w in n for w in words) and label not in parts:parts.append(label)
+    return ' · '.join(parts[:7]) or compact_description(raw,180)
+
+def split_multi_property(item):
+    """Non-destructive read-side splitter for obvious bundled listings."""
+    raw=str(item.get('raw_text') or item.get('description') or '')
+    # Numbered/emoji list rows or repeated line items with rent/price.
+    lines=[re.sub(r"\s+"," ",x).strip() for x in raw.splitlines() if re.sub(r"\s+"," ",x).strip()]
+    starts=[]
+    for i,line in enumerate(lines):
+        if re.match(r"^(?:\d+[.)]|[1-9]️⃣|[①②③④⑤⑥⑦⑧⑨]|•\s*\d+)",line):
+            starts.append(i)
+    chunks=[]
+    if len(starts)>=2:
+        for j,st in enumerate(starts):
+            en=starts[j+1] if j+1<len(starts) else len(lines)
+            ch=' '.join(lines[st:en])
+            if len(norm(ch))>=15:chunks.append(ch)
+    else:
+        # Common broker list: each property sits on its own line and contains area/rent/price/config.
+        candidate_lines=[x for x in lines if (
+            re.search(r"(?i)\b(BHK|SQ\.?\s*FT|SQFT|SQ\.?\s*YD|RENT|PRICE|CR\b|LAC|LAKH)\b",x)
+            and len(norm(x))>=18
+        )]
+        if len(candidate_lines)>=3:
+            chunks=candidate_lines
+    if len(chunks)<2:
+        x=dict(item);x['clean_description']=build_clean_description(x);return [x]
+
+    out=[]
+    for idx,ch in enumerate(chunks,1):
+        child=dict(item)
+        child['raw_text']=ch
+        child['description']=ch
+        child['location']=canonical_location(ch,item.get('location'))
+        child['transaction']=tx(ch) if tx(ch)!='UNKNOWN' else item.get('transaction')
+        child['property_type']=ptype(ch) if ptype(ch)!='Property' else item.get('property_type')
+        child['area']=_area_from_text(ch) or item.get('area')
+        pv=_price_from_text(ch,child.get('transaction'))
+        if pv is not None:child['price']=pv
+        child['clean_description']=build_clean_description(child)
+        child['display_child_index']=idx
+        out.append(child)
+    return out
+
 def _engine():
     import whatsapp_live_bridge as live
     return live.wa_engine
@@ -316,7 +449,10 @@ def properties(q="", include_deleted=False, limit=2500):
             if qn not in hay and not all(t in hay for t in qn.split()):
                 continue
 
-        out.append(item)
+        for child in split_multi_property(item):
+            if meaningful_property(child):
+                child["clean_description"] = child.get("clean_description") or build_clean_description(child)
+                out.append(child)
 
     return out
 
@@ -425,14 +561,14 @@ def page(body,active="availability"):
     .tab{{background:#ad9882}}.tab.on{{background:#594634}}.tab.matcher{{background:#315f8d}}
     .card{{background:#fffdf9;border:1px solid #d9c9b7;border-radius:12px;padding:14px;margin-bottom:14px}}
     .scroll{{overflow:auto;max-height:72vh}}
-    table{{width:100%;min-width:1280px;border-collapse:collapse;background:white;table-layout:fixed}}
-    th,td{{padding:5px 6px;border-bottom:1px solid #eee1d1;text-align:left;vertical-align:top;font-size:10.5px;line-height:1.25}}
-    th{{background:#f7ecdf;position:sticky;top:0;font-size:10px}}
-    .desc{{width:260px;max-width:260px;line-height:1.25}}
+    table{{width:100%;min-width:1280px;border-collapse:collapse;background:white;table-layout:auto}}
+    th,td{{padding:5px 6px;border-bottom:1px solid #eee1d1;text-align:left;vertical-align:top;font-size:13px;line-height:1.35}}
+    th{{background:#f7ecdf;position:sticky;top:0;font-size:12px}}
+    .desc{{width:420px;max-width:420px;line-height:1.4;font-size:13.5px}}
     .loc{{font-weight:800;width:95px}}
     .phone{{font-weight:900;white-space:nowrap}}
     .phoneLine{{white-space:nowrap;margin-bottom:2px}}
-    .rid{{width:82px;word-break:break-all}}
+    
     .smallcol{{width:72px}}.namecol{{width:95px}}.sourcecol{{width:105px}}
     .actioncol{{width:82px}}
     input,textarea,select{{width:100%;padding:9px;border:1px solid #cdbba8;border-radius:7px}}
@@ -456,10 +592,9 @@ def prop_table(rows):
     tr=[]
     for r in rows:
         rid = esc(r.get("record_id"))
-        full_desc = str(r.get("description") or "")
-        short_desc = compact_description(full_desc)
+        full_desc = str(r.get("clean_description") or r.get("description") or "")
+        short_desc = compact_description(full_desc, 360)
         tr.append(f"""<tr>
-        <td class=rid>{rid}</td>
         <td class=smallcol>{esc(r.get('transaction'))}</td>
         <td class=desc title="{esc(full_desc)}">{esc(short_desc)}</td>
         <td class=loc>{esc(r.get('location'))}</td>
@@ -490,13 +625,12 @@ def render_workspace(request):
 
         for r in rs:
             full_raw = str(r.get("raw_text") or "")
-            short_raw = compact_description(full_raw, 240)
+            short_raw = compact_description(full_raw, 360)
             matcher_q = __import__("urllib.parse", fromlist=["quote_plus"]).quote_plus(full_raw)
             matcher_url = f"/deal-match-ai-v60?q={matcher_q}&mode=SMART&min_score=70"
             trs += f"""<tr>
               <td class=smallcol><b>{esc(r.get('effective_date_label'))}</b></td>
-              <td class=rid>{esc(r.get('wa_requirement_id'))}</td>
-              <td class=loc>{esc(rloc(r))}</td>
+                            <td class=loc>{esc(rloc(r))}</td>
               <td class=smallcol>{esc(rtx(r))}</td>
               <td class=smallcol>{esc(rpt(r))}</td>
               <td class=desc title="{esc(full_raw)}">{esc(short_raw)}</td>
@@ -522,11 +656,11 @@ def render_workspace(request):
         </form></div>
         <div class=scroll><table>
         <tr>
-          <th>Date</th><th>ID</th><th>Location</th><th>Transaction</th><th>Type</th>
+          <th>Date</th><th>Location</th><th>Transaction</th><th>Type</th>
           <th>Description</th><th>Area</th><th>Budget</th><th>Contact Name</th>
           <th>Contact Number</th><th>Source</th><th>Matcher</th>
         </tr>
-        {trs or '<tr><td colspan=12>No active requirements for this date.</td></tr>'}
+        {trs or '<tr><td colspan=11>No active requirements for this date.</td></tr>'}
         </table></div>"""
 
         return HTMLResponse(page(body,"requirements"))
@@ -547,7 +681,6 @@ def render_workspace(request):
     </div>
     <div class=scroll><table>
     <tr>
-      <th>Record</th>
       <th>Rent/Sale</th>
       <th>Description</th>
       <th>Location</th>
@@ -561,7 +694,7 @@ def render_workspace(request):
       <th>Verification</th>
       <th>Action</th>
     </tr>
-    {prop_table(rows) or '<tr><td colspan=13>No clean availability records.</td></tr>'}
+    {prop_table(rows) or '<tr><td colspan=12>No clean availability records.</td></tr>'}
     </table></div>"""
 
     return HTMLResponse(page(body,"availability"))
@@ -695,6 +828,13 @@ def register(wrapped):
         app.add_middleware(V55AuthoritativeMiddleware)
         app.state.alliance_v53_authoritative_middleware = True
 
+    theme_status = None
+    try:
+        import alliance_results_theme_v70 as _theme70
+        theme_status = _theme70.register(wrapped)
+    except Exception as e:
+        theme_status = {"status":"DEGRADED","error":f"{type(e).__name__}: {e}"}
+
     accuracy_status = None
     try:
         import alliance_match_accuracy_v61 as _acc61
@@ -702,7 +842,7 @@ def register(wrapped):
     except Exception as e:
         accuracy_status = {"status":"DEGRADED","error":f"{type(e).__name__}: {e}"}
 
-    @app.get("/api/v56/status")
+    @app.get("/api/v57/status")
     def status():
         return {
             "status":"OK",
@@ -723,7 +863,7 @@ def register(wrapped):
             "multiple_phone_numbers":True,
             "single_matcher":"/deal-match-ai-v60",
             "requirement_row_matcher_buttons":True,
-            "old_match_section_redirect":True,"compact_table":True,"meaningful_inventory_gate":True,
+            "old_match_section_redirect":True,"compact_table":False,"uniform_result_theme":True,"technical_ids_hidden":True,"description_expanded":True,"meaningful_inventory_gate":True,"multi_property_reconstruction":True,"clean_description_primary":True,
             "source_preserved":True,"matcher_accuracy_layer":"V6.1",
         }
 

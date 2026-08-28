@@ -1,7 +1,7 @@
 from __future__ import annotations
 import re
 
-VERSION="6.1-QUALITY-GATED-ACCURACY-LAYER"
+VERSION="6.2-RECONSTRUCTED-INVENTORY-ACCURACY"
 _INSTALLED=False
 _ORIGINAL_ELIGIBILITY=None
 _ORIGINAL_WA=None
@@ -50,10 +50,33 @@ def install():
     def wa_filtered(core,limit=5000):
         rows=_ORIGINAL_WA(core,limit)
         out=[]
+        try:
+            import alliance_live_feed_purity as wa_ui
+        except Exception:
+            wa_ui=None
         for c in rows:
             p=v60.normalize_candidate(c)
-            if meaningful_candidate(p):
-                out.append(c)
+            if not meaningful_candidate(p):
+                continue
+            if wa_ui is None:
+                out.append(c);continue
+            seed={
+                "description":c.get("description"),"raw_text":c.get("description"),
+                "location":p.get("location"),"transaction":p.get("transaction"),
+                "property_type":p.get("family") or c.get("property_type_raw"),
+                "area":c.get("area"),"price":c.get("price"),
+                "contact_number":c.get("contact"),"source":c.get("source_name")
+            }
+            children=wa_ui.split_multi_property(seed)
+            for child in children:
+                cc=dict(c)
+                cc["description"]=child.get("clean_description") or child.get("description") or c.get("description")
+                cc["location_raw"]=child.get("location") or c.get("location_raw")
+                cc["transaction_raw"]=child.get("transaction") or c.get("transaction_raw")
+                cc["property_type_raw"]=child.get("property_type") or c.get("property_type_raw")
+                cc["area"]=v60.to_float(child.get("area")) or c.get("area")
+                if child.get("price") not in (None,""): cc["price"]=v60.money_value(child.get("price"))
+                out.append(cc)
         return out
 
     def eligibility_v61(req,p,allow_nearby=False):
