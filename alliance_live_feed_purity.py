@@ -8,8 +8,8 @@ from sqlalchemy import text
 from starlette.middleware.base import BaseHTTPMiddleware
 import alliance_live_feed_purity_legacy36 as _legacy
 
-VERSION = "5.7-RECONSTRUCTED-CLEAN-WHATSAPP"
-OWNER = "ALLIANCE_V57_WHATSAPP_RECONSTRUCTION"
+VERSION = "5.8-WHATSAPP-PROPERTY-PURITY-GATE"
+OWNER = "ALLIANCE_V58_WHATSAPP_PROPERTY_PURITY_GATE"
 
 LOCATION_ALIASES = {
     "KALKAJI":["KALKAJI"],
@@ -148,6 +148,51 @@ GENERIC_BAD = {
     "PROPERTY AVAILABILITY","RENT PROPERTY","SALE PROPERTY"
 }
 
+
+def _has_specific_property_identity(item):
+    desc=str(item.get("description") or "").strip(); n=norm(desc)
+    loc=str(item.get("location") or "").strip(); fam=str(item.get("property_type") or "").strip()
+    area=str(item.get("area") or "").strip(); price=str(item.get("price") or "").strip()
+    strong=any(x in n for x in ("BHK","SQFT","SQ FT","SQ YD","APARTMENT","FLAT","VILLA","FLOOR","SHOP","SHOWROOM","OFFICE","RESTAURANT","BANQUET","WAREHOUSE","GODOWN","HOTEL","PLOT","LAND","FARMHOUSE"))
+    has_area=bool(area and area not in {"-","0","None","Unknown"})
+    has_price=bool(price and price not in {"-","0","None","Unknown"})
+    has_loc=bool(loc and loc.lower()!="unknown"); typed=bool(fam and fam!="Property")
+    if n in {"RESIDENTIAL","COMMERCIAL","LAND","PROPERTY"}: return False
+    if has_price and not (strong or has_area or (has_loc and typed)): return False
+    if has_loc and not (strong or has_area or has_price or typed): return False
+    return strong or has_area or (has_loc and typed and has_price)
+
+def _money_review(item):
+    txv=str(item.get("transaction") or "").upper()
+    raw=str(item.get("description") or item.get("raw_text") or "")
+    try: value=float(str(item.get("price") or "").replace(",","").strip())
+    except Exception: value=None
+    if value is None or value<=0: return "UNKNOWN","Commercial term not stated"
+    if txv=="RENT":
+        if re.search(r"(?i)(?:per\s*sq|/\s*sq|psf|sq\.?\s*ft\s*(?:pm|per month))",raw):
+            return "NEEDS_REVIEW","Rent appears to be a per-square-foot rate"
+        if value<5000: return "NEEDS_REVIEW","Stored rent is unusually low; may be per-square-foot or missing unit"
+        if value>=100000000: return "NEEDS_REVIEW","Stored monthly rent is unusually high; verify unit and amount"
+    if txv=="SALE" and value<100000: return "NEEDS_REVIEW","Stored sale price is unusually low; verify unit and amount"
+    return "OK",""
+
+def _purity_key(item):
+    desc=norm(item.get("clean_description") or item.get("description") or "")
+    for token in ("FULLY FURNISHED","SEMI FURNISHED","UNFURNISHED"): desc=desc.replace(token," ")
+    desc=re.sub(r"\s+"," ",desc).strip()
+    return "|".join((norm(item.get("location")),norm(item.get("transaction")),norm(item.get("property_type")),norm(item.get("area")),norm(item.get("price")),desc))
+
+def _dedupe_clean_properties(rows):
+    chosen={}; order=[]
+    def richness(x):
+        score=sum(1 for k in ("location","property_type","area","price","contact_name","contact_number") if str(x.get(k) or "").strip().lower() not in {"","unknown","property","-","none"})
+        return score+min(len(str(x.get("clean_description") or ""))//40,5)
+    for item in rows:
+        key=_purity_key(item)
+        if key not in chosen: chosen[key]=item; order.append(key)
+        elif richness(item)>richness(chosen[key]): chosen[key]=item
+    return [chosen[k] for k in order]
+
 def meaningful_property(item):
     """Read-side quality gate. Never deletes the source row."""
     desc = str(item.get("description") or item.get("raw_text") or "").strip()
@@ -179,6 +224,9 @@ def meaningful_property(item):
 
     # Girja / broker summary fragments should not appear unless the actual property is identifiable.
     if "GIRJA" in n and anchors < 3:
+        return False
+
+    if not _has_specific_property_identity(item):
         return False
 
     return anchors >= 2
@@ -293,7 +341,10 @@ def build_clean_description(item):
 
 def split_multi_property(item):
     """Non-destructive read-side splitter for obvious bundled listings."""
-    raw=str(item.get('raw_text') or item.get('description') or '')
+    description=str(item.get('description') or '').strip()
+    raw_text=str(item.get('raw_text') or '').strip()
+    # V5.8: do not re-split the same parent message for every already-split master row.
+    raw=description if description and norm(description) not in GENERIC_BAD else (raw_text or description)
     # Numbered/emoji list rows or repeated line items with rent/price.
     lines=[re.sub(r"\s+"," ",x).strip() for x in raw.splitlines() if re.sub(r"\s+"," ",x).strip()]
     starts=[]
@@ -452,9 +503,12 @@ def properties(q="", include_deleted=False, limit=2500):
         for child in split_multi_property(item):
             if meaningful_property(child):
                 child["clean_description"] = child.get("clean_description") or build_clean_description(child)
+                term_status,term_reason=_money_review(child)
+                child["commercial_terms_status"]=term_status
+                child["commercial_terms_reason"]=term_reason
                 out.append(child)
 
-    return out
+    return _dedupe_clean_properties(out)
 
 def _parse_message_ts(value):
     if not value: return None
@@ -600,7 +654,9 @@ def prop_table(rows):
         <td class=loc>{esc(r.get('location'))}</td>
         <td class=smallcol>{esc(r.get('property_type'))}</td>
         <td class=smallcol>{esc(r.get('area'))}</td>
-        <td class=smallcol>{esc(r.get('price'))}</td>
+        <td class=smallcol>{esc(r.get('price'))}
+          {("<div style='color:#9a3d2f;font-weight:800'>NEEDS REVIEW</div><div class=muted>"+esc(r.get('commercial_terms_reason'))+"</div>") if r.get('commercial_terms_status')=='NEEDS_REVIEW' else ""}
+        </td>
         <td class=namecol>{esc(r.get('contact_name'))}</td>
         <td>{phone_lines_html(r.get('contact_number'))}</td>
         <td class=sourcecol>{esc(r.get('source'))}</td>
@@ -864,7 +920,7 @@ def register(wrapped):
             "single_matcher":"/deal-match-ai-v60",
             "requirement_row_matcher_buttons":True,
             "old_match_section_redirect":True,"compact_table":False,"uniform_result_theme":True,"technical_ids_hidden":True,"description_expanded":True,"meaningful_inventory_gate":True,"multi_property_reconstruction":True,"clean_description_primary":True,
-            "source_preserved":True,"matcher_accuracy_layer":"V6.1",
+            "source_preserved":True,"matcher_accuracy_layer":"V6.1","property_purity_gate":True,"fragment_filter":True,"read_side_dedupe":True,"commercial_terms_validator":True,
         }
 
     return {"status":"REGISTERED","version":VERSION,"owner":OWNER,"legacy":legacy_result}
