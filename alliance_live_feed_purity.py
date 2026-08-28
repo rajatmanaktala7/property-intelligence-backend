@@ -7,7 +7,7 @@ from fastapi import Request
 from fastapi.responses import HTMLResponse
 from sqlalchemy import text
 
-VERSION = "LIVE-FEED-SMART-MARKET-3.6-COMPLETE"
+VERSION = "PROPERTY-FINDER-AI-3.7-ACCURACY-FIRST"
 
 
 def _esc(v):
@@ -786,6 +786,434 @@ def _attach_market_intelligence(rows):
         out.append(x)
     return out
 
+
+# ---------------------------------------------------------------------------
+# PROPERTY FINDER AI 3.7
+# Accuracy-first, explainable matching.
+# Requirement -> hard gates -> exact-market scoring -> alternative-market
+# scoring -> commercial fit -> data confidence -> ranked shortlist.
+# ---------------------------------------------------------------------------
+
+TYPE_FAMILIES = {
+    "RESTAURANT": {"RESTAURANT", "CAFE", "LOUNGE", "CLUB", "BANQUET"},
+    "CAFE": {"CAFE", "RESTAURANT", "LOUNGE"},
+    "LOUNGE": {"LOUNGE", "CLUB", "RESTAURANT", "CAFE"},
+    "CLUB": {"CLUB", "LOUNGE", "RESTAURANT"},
+    "BANQUET": {"BANQUET", "HOTEL", "GUEST_HOUSE"},
+    "HOTEL": {"HOTEL", "GUEST_HOUSE", "BANQUET"},
+    "GUEST_HOUSE": {"GUEST_HOUSE", "HOTEL", "INDEPENDENT_HOUSE_VILLA"},
+    "OFFICE": {"OFFICE", "COMMERCIAL_OFFICE", "WORKSPACE"},
+    "COMMERCIAL_OFFICE": {"COMMERCIAL_OFFICE", "OFFICE", "WORKSPACE"},
+    "COMMERCIAL_SHOP": {"COMMERCIAL_SHOP", "RETAIL_SHOP", "COMMERCIAL_SHOWROOM", "SHOWROOM", "SHOP"},
+    "RETAIL_SHOP": {"RETAIL_SHOP", "COMMERCIAL_SHOP", "COMMERCIAL_SHOWROOM", "SHOWROOM", "SHOP"},
+    "COMMERCIAL_SHOWROOM": {"COMMERCIAL_SHOWROOM", "SHOWROOM", "COMMERCIAL_SHOP", "RETAIL_SHOP"},
+    "SHOWROOM": {"SHOWROOM", "COMMERCIAL_SHOWROOM", "COMMERCIAL_SHOP", "RETAIL_SHOP"},
+    "WAREHOUSE_INDUSTRIAL": {"WAREHOUSE_INDUSTRIAL", "WAREHOUSE", "INDUSTRIAL", "FACTORY", "GODOWN"},
+    "WAREHOUSE": {"WAREHOUSE", "WAREHOUSE_INDUSTRIAL", "INDUSTRIAL", "GODOWN"},
+    "RESIDENTIAL": {"RESIDENTIAL", "APARTMENT", "FLAT", "BUILDER_FLOOR", "INDEPENDENT_HOUSE_VILLA", "VILLA"},
+    "INDEPENDENT_HOUSE_VILLA": {"INDEPENDENT_HOUSE_VILLA", "VILLA", "RESIDENTIAL"},
+    "VILLA": {"VILLA", "INDEPENDENT_HOUSE_VILLA", "RESIDENTIAL"},
+}
+
+LOCATION_ALIASES = {
+    "gurugram": "gurgaon",
+    "new delhi": "delhi",
+    "greater kailash i": "greater kailash 1",
+    "greater kailash ii": "greater kailash 2",
+    "gk 1": "greater kailash 1",
+    "gk1": "greater kailash 1",
+    "gk 2": "greater kailash 2",
+    "gk2": "greater kailash 2",
+    "cp": "connaught place",
+}
+
+
+def _finder_norm(v):
+    x = re.sub(r"[^a-z0-9]+", " ", str(v or "").lower()).strip()
+    x = re.sub(r"\s+", " ", x)
+    return LOCATION_ALIASES.get(x, x)
+
+
+def _finder_float(v):
+    if v in (None, ""):
+        return None
+    try:
+        return float(str(v).replace(",", "").strip())
+    except Exception:
+        return None
+
+
+def _finder_tx(v):
+    x = str(v or "").strip().upper()
+    if x in {"RENT", "RENTAL", "LEASING"}:
+        return "LEASE"
+    if x in {"SELL", "SELLING"}:
+        return "SALE"
+    return x or "UNKNOWN"
+
+
+def _finder_type(v):
+    return str(v or "").strip().upper().replace(" ", "_") or "UNKNOWN"
+
+
+def _type_fit(required, actual):
+    req = _finder_type(required)
+    act = _finder_type(actual)
+    if req in {"", "UNKNOWN", "ANY"}:
+        return 1.0, "type not restricted"
+    if req == act:
+        return 1.0, "exact property type"
+    if act in TYPE_FAMILIES.get(req, set()):
+        return 0.72, "compatible property type"
+    return 0.0, "property type mismatch"
+
+
+def _transaction_fit(required, actual):
+    req = _finder_tx(required)
+    act = _finder_tx(actual)
+    if req in {"", "UNKNOWN", "ANY"}:
+        return 1.0, "transaction not restricted"
+    if req == act:
+        return 1.0, "exact transaction"
+    if act == "LEASE_OR_SALE" and req in {"LEASE", "SALE"}:
+        return 0.92, "property supports requested transaction"
+    if req == "LEASE_OR_SALE" and act in {"LEASE", "SALE"}:
+        return 0.86, "one requested transaction available"
+    return 0.0, "transaction mismatch"
+
+
+def _location_fit(required, row):
+    req = _finder_norm(required)
+    actual_raw = row.get("clean_location") or row.get("location") or row.get("locality") or ""
+    actual = _finder_norm(actual_raw)
+
+    if not req:
+        return 0.70, "location not restricted", "UNSPECIFIED"
+
+    if req == actual:
+        return 1.0, "exact location", "EXACT"
+
+    if req and actual and (req in actual or actual in req):
+        return 0.92, "same location / sub-market", "EXACT"
+
+    # Compare against curated alternative markets generated from the requirement.
+    probe = {
+        "clean_location": required,
+        "clean_property_type": row.get("_requirement_type"),
+        "clean_transaction": row.get("_requirement_transaction"),
+    }
+    alternatives = [_finder_norm(x) for x in _alternative_markets(probe, limit=8)]
+    if actual and actual in alternatives:
+        rank = alternatives.index(actual)
+        return max(0.62, 0.80 - rank * 0.025), "AI alternative market", "ALTERNATIVE"
+
+    return 0.0, "location mismatch", "OUTSIDE"
+
+
+def _area_fit(req_min, req_max, row):
+    rmin = _finder_float(req_min)
+    rmax = _finder_float(req_max)
+    if rmin is None and rmax is None:
+        return 1.0, "area not restricted"
+
+    pmin = _finder_float(row.get("clean_area_min_sqft") or row.get("available_area_sqft") or row.get("area_sqft"))
+    pmax = _finder_float(row.get("clean_area_max_sqft") or pmin)
+    if pmin is None:
+        return 0.45, "property area unknown"
+
+    if rmin is None:
+        rmin = 0.0
+    if rmax is None:
+        rmax = max(rmin * 1.35, rmin + 1)
+
+    if pmax >= rmin and pmin <= rmax:
+        # overlap
+        midpoint_req = (rmin + rmax) / 2 if rmax else rmin
+        midpoint_prop = (pmin + pmax) / 2
+        delta = abs(midpoint_prop - midpoint_req) / max(midpoint_req, 1)
+        return max(0.78, 1.0 - min(delta, 0.22)), "area within requirement"
+
+    # Near miss tolerance, never equal to an exact fit.
+    if pmax < rmin:
+        gap = (rmin - pmax) / max(rmin, 1)
+    else:
+        gap = (pmin - rmax) / max(rmax, 1)
+
+    if gap <= 0.10:
+        return 0.70, "area within 10% tolerance"
+    if gap <= 0.20:
+        return 0.45, "area within 20% tolerance"
+    return 0.0, "area outside acceptable range"
+
+
+def _budget_fit(req_min, req_max, transaction, row):
+    lo = _finder_float(req_min)
+    hi = _finder_float(req_max)
+    if lo is None and hi is None:
+        return 1.0, "budget not restricted"
+
+    tx = _finder_tx(transaction)
+    price = (
+        _finder_float(row.get("rent_inr") or row.get("clean_budget"))
+        if tx == "LEASE"
+        else _finder_float(row.get("sale_price_inr") or row.get("clean_budget"))
+    )
+    if price is None:
+        return 0.48, "price/rent unknown"
+
+    if lo is not None and price < lo:
+        # Cheaper is normally commercially acceptable, but not a perfect signal.
+        return 0.88, "within budget, below minimum indication"
+
+    if hi is None or price <= hi:
+        return 1.0, "within budget"
+
+    over = (price - hi) / max(hi, 1)
+    if over <= 0.05:
+        return 0.78, "within 5% budget tolerance"
+    if over <= 0.10:
+        return 0.55, "within 10% budget tolerance"
+    return 0.0, "over budget"
+
+
+def _data_confidence(row):
+    points = 0.0
+    reasons = []
+    if row.get("clean_score"):
+        q = min(1.0, float(row.get("clean_score") or 0) / 100.0)
+        points += q * 0.35
+        if q >= .75:
+            reasons.append("clean data")
+    if row.get("owner_phone"):
+        points += 0.22
+        reasons.append("owner contact")
+    elif row.get("broker_phone"):
+        points += 0.18
+        reasons.append("broker contact")
+    elif row.get("sender_phone"):
+        points += 0.12
+        reasons.append("sender contact")
+    if row.get("clean_area_min_sqft"):
+        points += 0.12
+    if row.get("rent_inr") or row.get("sale_price_inr") or row.get("clean_budget"):
+        points += 0.12
+    if str(row.get("availability") or "").upper() in {"VERIFIED", "AVAILABLE", "ACTIVE"}:
+        points += 0.12
+        reasons.append("availability positive")
+    if row.get("last_seen") or row.get("first_seen"):
+        points += 0.07
+    return min(1.0, points), reasons
+
+
+def _score_property_match(requirement, row):
+    x = dict(row)
+    x["_requirement_type"] = requirement.get("property_type")
+    x["_requirement_transaction"] = requirement.get("transaction")
+
+    tx_fit, tx_reason = _transaction_fit(requirement.get("transaction"), x.get("clean_transaction") or x.get("transaction_type"))
+    type_fit, type_reason = _type_fit(requirement.get("property_type"), x.get("clean_property_type") or x.get("property_type"))
+    loc_fit, loc_reason, loc_class = _location_fit(requirement.get("location"), x)
+    area_fit, area_reason = _area_fit(requirement.get("min_area_sqft"), requirement.get("max_area_sqft"), x)
+    budget_fit, budget_reason = _budget_fit(
+        requirement.get("min_budget"),
+        requirement.get("max_budget"),
+        requirement.get("transaction"),
+        x,
+    )
+
+    # Hard commercial gates. Wrong transaction/type/location cannot become a
+    # "strong" match because of other fields.
+    hard_reject = []
+    if tx_fit == 0:
+        hard_reject.append(tx_reason)
+    if type_fit == 0 and requirement.get("property_type"):
+        hard_reject.append(type_reason)
+    if loc_fit == 0 and requirement.get("location"):
+        hard_reject.append(loc_reason)
+    if area_fit == 0:
+        hard_reject.append(area_reason)
+    if budget_fit == 0:
+        hard_reject.append(budget_reason)
+
+    confidence, confidence_reasons = _data_confidence(x)
+
+    # Match score weights = 100.
+    # Location and type are deliberately dominant for real-estate finding.
+    score = (
+        loc_fit * 30.0 +
+        type_fit * 20.0 +
+        tx_fit * 15.0 +
+        area_fit * 15.0 +
+        budget_fit * 10.0 +
+        confidence * 10.0
+    )
+    if hard_reject:
+        score = min(score, 49.0)
+
+    score = round(max(0.0, min(100.0, score)), 2)
+
+    if hard_reject:
+        band = "REJECT"
+    elif loc_class == "EXACT" and score >= 86:
+        band = "EXACT"
+    elif score >= 76:
+        band = "STRONG"
+    elif loc_class == "ALTERNATIVE" and score >= 66:
+        band = "ALTERNATIVE"
+    elif score >= 60:
+        band = "REVIEW"
+    else:
+        band = "REJECT"
+
+    reasons = [
+        loc_reason,
+        type_reason,
+        tx_reason,
+        area_reason,
+        budget_reason,
+    ] + confidence_reasons
+
+    x.pop("_requirement_type", None)
+    x.pop("_requirement_transaction", None)
+    x["match_score"] = score
+    x["match_band"] = band
+    x["location_match_class"] = loc_class
+    x["match_reasons"] = reasons[:8]
+    x["hard_reject_reasons"] = hard_reject
+    x["match_components"] = {
+        "location": round(loc_fit * 30, 2),
+        "property_type": round(type_fit * 20, 2),
+        "transaction": round(tx_fit * 15, 2),
+        "area": round(area_fit * 15, 2),
+        "budget": round(budget_fit * 10, 2),
+        "data_confidence": round(confidence * 10, 2),
+    }
+    return x
+
+
+def _finder_candidate_queries(requirement):
+    queries = []
+    location = str(requirement.get("location") or "").strip()
+    if location:
+        queries.append(location)
+
+    probe = {
+        "clean_location": location,
+        "clean_property_type": requirement.get("property_type"),
+        "clean_transaction": requirement.get("transaction"),
+    }
+    for alt in _alternative_markets(probe, limit=8):
+        if alt and alt not in queries:
+            queries.append(alt)
+
+    # Property type query is a secondary recovery path when location text is
+    # absent from a row but the structured type is useful.
+    ptype = str(requirement.get("property_type") or "").strip()
+    if ptype and ptype not in queries:
+        queries.append(ptype.replace("_", " "))
+
+    return queries[:10]
+
+
+def _find_properties(core, requirement, top_n=20):
+    # Pull candidates from exact location first, then alternatives. This is
+    # more accurate than only looking at the latest global 500/1000 rows.
+    candidates = []
+    seen = set()
+    detected = None
+    source = "none"
+
+    queries = _finder_candidate_queries(requirement)
+    for q in queries:
+        src, stored, det = get_rows(core, q, 1200)
+        source, detected = src, det
+        for item in stored:
+            key = str(item.get("wa_property_id") or item.get("id"))
+            if key not in seen:
+                seen.add(key)
+                candidates.append(item)
+
+    # If requirement has little structure, include a bounded recent recovery
+    # pool rather than returning nothing.
+    if len(candidates) < 200:
+        src, stored, det = get_rows(core, "", 2000)
+        source, detected = src, det
+        for item in stored:
+            key = str(item.get("wa_property_id") or item.get("id"))
+            if key not in seen:
+                seen.add(key)
+                candidates.append(item)
+
+    visible = _visible_entities(candidates)
+    clean, purity_stats = _clean_visible_rows(visible, 60)
+
+    scored = [_score_property_match(requirement, row) for row in clean]
+    useful = [x for x in scored if x.get("match_band") != "REJECT"]
+    useful.sort(
+        key=lambda x: (
+            0 if x["match_band"] == "EXACT" else
+            1 if x["match_band"] == "STRONG" else
+            2 if x["match_band"] == "ALTERNATIVE" else 3,
+            -float(x.get("match_score") or 0),
+            -float(x.get("priority_score") or 0),
+        )
+    )
+
+    exact = [x for x in useful if x["match_band"] == "EXACT"]
+    strong = [x for x in useful if x["match_band"] == "STRONG"]
+    alternative = [x for x in useful if x["match_band"] == "ALTERNATIVE"]
+    review = [x for x in useful if x["match_band"] == "REVIEW"]
+
+    return {
+        "status": "OK",
+        "version": VERSION,
+        "engine": "ACCURACY_FIRST_EXPLAINABLE_PROPERTY_FINDER",
+        "source": source,
+        "requirement": requirement,
+        "candidate_queries": queries,
+        "candidates_scanned": len(candidates),
+        "clean_candidates": len(clean),
+        "purity_stats": purity_stats,
+        "summary": {
+            "EXACT": len(exact),
+            "STRONG": len(strong),
+            "ALTERNATIVE": len(alternative),
+            "REVIEW": len(review),
+        },
+        "results": useful[:max(1, min(int(top_n or 20), 100))],
+        "counts": detected or {},
+    }
+
+
+def _finder_result_public(x):
+    # Keep all matching intelligence but make the JSON concise enough for UI.
+    return {
+        "id": x.get("visible_entity_id") or x.get("wa_property_id") or x.get("id"),
+        "match_band": x.get("match_band"),
+        "match_score": x.get("match_score"),
+        "location_match_class": x.get("location_match_class"),
+        "location": x.get("clean_location") or x.get("location") or x.get("locality"),
+        "property_type": x.get("clean_property_type") or x.get("property_type"),
+        "transaction": x.get("clean_transaction") or x.get("transaction_type"),
+        "area_min_sqft": x.get("clean_area_min_sqft") or x.get("available_area_sqft") or x.get("area_sqft"),
+        "area_max_sqft": x.get("clean_area_max_sqft"),
+        "rent_inr": x.get("rent_inr"),
+        "sale_price_inr": x.get("sale_price_inr"),
+        "availability": x.get("availability"),
+        "owner_name": x.get("owner_name"),
+        "owner_phone": x.get("owner_phone"),
+        "broker_name": x.get("broker_name"),
+        "broker_phone": x.get("broker_phone"),
+        "sender_name": x.get("sender_name"),
+        "sender_phone": x.get("sender_phone"),
+        "last_seen": x.get("last_seen") or x.get("first_seen"),
+        "match_reasons": x.get("match_reasons"),
+        "hard_reject_reasons": x.get("hard_reject_reasons"),
+        "match_components": x.get("match_components"),
+        "raw_text": x.get("visible_entity_text") or x.get("raw_text"),
+    }
+
+
 def register(wrapped):
     app = wrapped.app
     core = wrapped.core
@@ -796,6 +1224,8 @@ def register(wrapped):
         "/api/live-feed-purity/sample",
         "/api/live-feed-purity/debug",
         "/api/live-feed-purity/market-suggestions",
+        "/api/property-finder/search",
+        "/property-finder",
     }
 
     app.router.routes[:] = [
@@ -913,6 +1343,146 @@ def register(wrapped):
             "alternatives": _alternative_markets(probe),
         }
 
+    def property_finder_search(request: Request):
+        qp = request.query_params
+        requirement = {
+            "location": str(qp.get("location") or "").strip(),
+            "property_type": str(qp.get("property_type") or "").strip().upper().replace(" ", "_"),
+            "transaction": str(qp.get("transaction") or "").strip().upper(),
+            "min_area_sqft": _finder_float(qp.get("min_area_sqft")),
+            "max_area_sqft": _finder_float(qp.get("max_area_sqft")),
+            "min_budget": _finder_float(qp.get("min_budget")),
+            "max_budget": _finder_float(qp.get("max_budget")),
+        }
+        try:
+            top_n = int(qp.get("top_n") or 20)
+        except Exception:
+            top_n = 20
+
+        if not any([
+            requirement["location"],
+            requirement["property_type"],
+            requirement["transaction"],
+            requirement["min_area_sqft"],
+            requirement["max_area_sqft"],
+            requirement["min_budget"],
+            requirement["max_budget"],
+        ]):
+            return {
+                "status": "ERROR",
+                "version": VERSION,
+                "error": "Provide at least one requirement field.",
+            }
+
+        result = _find_properties(core, requirement, top_n)
+        result["results"] = [_finder_result_public(x) for x in result["results"]]
+        return result
+
+    def property_finder_page(request: Request):
+        qp = request.query_params
+        has_search = any(qp.get(k) for k in [
+            "location","property_type","transaction","min_area_sqft",
+            "max_area_sqft","min_budget","max_budget"
+        ])
+        result = None
+        if has_search:
+            requirement = {
+                "location": str(qp.get("location") or "").strip(),
+                "property_type": str(qp.get("property_type") or "").strip().upper().replace(" ", "_"),
+                "transaction": str(qp.get("transaction") or "").strip().upper(),
+                "min_area_sqft": _finder_float(qp.get("min_area_sqft")),
+                "max_area_sqft": _finder_float(qp.get("max_area_sqft")),
+                "min_budget": _finder_float(qp.get("min_budget")),
+                "max_budget": _finder_float(qp.get("max_budget")),
+            }
+            result = _find_properties(core, requirement, 30)
+
+        rows_html = ""
+        summary_html = ""
+        if result:
+            summary = result["summary"]
+            summary_html = (
+                f"<div class='summary'>"
+                f"<b>EXACT {summary['EXACT']}</b> · "
+                f"<b>STRONG {summary['STRONG']}</b> · "
+                f"<b>ALTERNATIVE {summary['ALTERNATIVE']}</b> · "
+                f"REVIEW {summary['REVIEW']} · "
+                f"scanned {result['candidates_scanned']} candidates"
+                f"</div>"
+            )
+            for x in result["results"]:
+                contact = " | ".join(str(v) for v in [
+                    x.get("owner_name"), x.get("owner_phone"),
+                    x.get("broker_name"), x.get("broker_phone"),
+                    x.get("sender_name"), x.get("sender_phone"),
+                ] if v)
+                price = x.get("rent_inr") if _finder_tx(result["requirement"].get("transaction")) == "LEASE" else x.get("sale_price_inr")
+                rows_html += f"""
+                <tr>
+                  <td><b>{_esc(x.get('match_band'))}</b><br>{_esc(x.get('match_score'))}/100</td>
+                  <td>{_esc(x.get('clean_location') or x.get('location') or x.get('locality') or '—')}</td>
+                  <td>{_esc(x.get('clean_property_type') or x.get('property_type') or '—')}</td>
+                  <td>{_esc(x.get('clean_transaction') or x.get('transaction_type') or '—')}</td>
+                  <td>{_esc(x.get('clean_area_min_sqft') or x.get('available_area_sqft') or x.get('area_sqft') or '—')}</td>
+                  <td>{_esc(price or '—')}</td>
+                  <td>{_esc(' · '.join(x.get('match_reasons') or []))}</td>
+                  <td>{_esc(contact or '—')}</td>
+                  <td style='min-width:360px;white-space:pre-wrap'>{_esc(x.get('visible_entity_text') or x.get('raw_text') or '—')}</td>
+                </tr>
+                """
+
+        if result and not rows_html:
+            rows_html = "<tr><td colspan='9'>No safe match found. The engine refused to promote mismatched properties.</td></tr>"
+
+        return HTMLResponse(f"""<!doctype html>
+        <html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>
+        <title>AI Property Finder</title>
+        <style>
+        body{{font-family:Arial;margin:0;background:#f6f2ec;color:#2b241f}}
+        header{{background:#40352d;color:#fff;padding:22px}}
+        main{{max-width:1700px;margin:auto;padding:18px}}
+        .card{{background:#fff;border:1px solid #ded3c7;border-radius:12px;padding:16px;margin-bottom:14px}}
+        .grid{{display:grid;grid-template-columns:repeat(4,minmax(160px,1fr));gap:10px}}
+        label{{font-size:12px;font-weight:700}}
+        input,select{{width:100%;box-sizing:border-box;padding:10px;border:1px solid #c7b8aa;border-radius:7px;margin-top:4px}}
+        button{{padding:11px 18px;background:#4e4034;color:#fff;border:0;border-radius:7px;font-weight:700}}
+        table{{width:100%;border-collapse:collapse;background:#fff}}
+        th,td{{padding:9px;border-bottom:1px solid #ece5df;text-align:left;vertical-align:top;font-size:12px}}
+        th{{background:#eee5dc;position:sticky;top:0}}
+        .summary{{padding:12px;background:#edf5ef;border-radius:8px;margin-top:12px}}
+        .note{{font-size:12px;color:#655b53}}
+        @media(max-width:900px){{.grid{{grid-template-columns:1fr 1fr}}}}
+        </style></head>
+        <body><header><h2 style='margin:0'>AI Property Finder</h2>
+        <div>Accuracy-first matching · exact market before alternatives · explainable score</div></header>
+        <main>
+        <div class='card'>
+        <form>
+          <div class='grid'>
+            <label>Location<input name='location' value='{_esc(qp.get("location") or "")}' placeholder='e.g. Saket'></label>
+            <label>Property Type<input name='property_type' value='{_esc(qp.get("property_type") or "")}' placeholder='e.g. RESTAURANT'></label>
+            <label>Transaction<select name='transaction'>
+              <option value=''>Any</option>
+              <option value='LEASE' {'selected' if qp.get("transaction")=="LEASE" else ''}>Lease</option>
+              <option value='SALE' {'selected' if qp.get("transaction")=="SALE" else ''}>Sale</option>
+            </select></label>
+            <label>Min Area sqft<input name='min_area_sqft' value='{_esc(qp.get("min_area_sqft") or "")}' type='number'></label>
+            <label>Max Area sqft<input name='max_area_sqft' value='{_esc(qp.get("max_area_sqft") or "")}' type='number'></label>
+            <label>Min Budget / Rent<input name='min_budget' value='{_esc(qp.get("min_budget") or "")}' type='number'></label>
+            <label>Max Budget / Rent<input name='max_budget' value='{_esc(qp.get("max_budget") or "")}' type='number'></label>
+          </div>
+          <p><button>Find Best Properties</button></p>
+        </form>
+        <div class='note'>Score = Location 30 + Type 20 + Transaction 15 + Area 15 + Budget 10 + Data Confidence 10. Hard commercial mismatches are rejected.</div>
+        {summary_html}
+        </div>
+        <div class='card' style='overflow:auto'>
+        <table><thead><tr>
+        <th>AI Match</th><th>Location</th><th>Type</th><th>Transaction</th><th>Area</th><th>Price/Rent</th><th>Why matched</th><th>Contact</th><th>Property</th>
+        </tr></thead><tbody>{rows_html}</tbody></table>
+        </div>
+        </main></body></html>""")
+
     def feed(request: Request):
         q = str(request.query_params.get("q") or "").strip()
         try:
@@ -1029,6 +1599,8 @@ def register(wrapped):
     app.add_api_route("/api/live-feed-purity/sample", sample, methods=["GET"])
     app.add_api_route("/api/live-feed-purity/debug", debug, methods=["GET"])
     app.add_api_route("/api/live-feed-purity/market-suggestions", market_suggestions, methods=["GET"])
+    app.add_api_route("/api/property-finder/search", property_finder_search, methods=["GET"])
+    app.add_api_route("/property-finder", property_finder_page, methods=["GET"])
     app.add_api_route("/whatsapp-live/feed", feed, methods=["GET"])
 
     return {"status": "REGISTERED", "version": VERSION}
