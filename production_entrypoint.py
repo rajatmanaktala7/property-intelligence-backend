@@ -357,6 +357,18 @@ def _load_core():
                 "error": f"{type(exc).__name__}: {exc}"
             }
 
+        # Optional Property Brain + Enrichment registration. Fail-safe by design.
+        try:
+            import alliance_optional_property_modules as optional_property_modules
+            optional_result = optional_property_modules.register(wrapped)
+            stabilization = dict(stabilization or {})
+            stabilization["optional_property_modules"] = optional_result
+            print("[optional-property-modules]", optional_result)
+        except Exception as exc:
+            stabilization = dict(stabilization or {})
+            stabilization["optional_property_modules"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","fail_safe":True}
+            print("[optional-property-modules] warning:", type(exc).__name__, str(exc))
+
         CORE_APP = wrapped.app
         BOOT["core_loaded"] = True
         BOOT["state"] = "READY" if stabilization.get("registered") else "DEGRADED"
