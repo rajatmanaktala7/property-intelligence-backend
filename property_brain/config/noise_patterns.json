@@ -1,0 +1,18 @@
+{
+  "contains": [
+    "good morning",
+    "good evening",
+    "good night",
+    "regards",
+    "thank you",
+    "subscribe",
+    "join our group",
+    "happy birthday",
+    "congratulations"
+  ],
+  "regex": [
+    "^\\s*https?://\\S+\\s*$",
+    "^\\s*forwarded\\s*$",
+    "^\\s*[\ud83d\ude4f\ud83d\udc4d\ud83d\udc4c]+\\s*$"
+  ]
+}

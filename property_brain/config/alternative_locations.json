@@ -1,0 +1,34 @@
+{
+  "Saket": [
+    "Malviya Nagar",
+    "Hauz Khas",
+    "Panchsheel Park",
+    "Mehrauli"
+  ],
+  "Kalkaji": [
+    "Nehru Place",
+    "CR Park",
+    "Greater Kailash 1"
+  ],
+  "DLF Phase 1": [
+    "DLF Phase 2",
+    "DLF Phase 4",
+    "Sushant Lok 1"
+  ],
+  "DLF Phase 4": [
+    "DLF Phase 1",
+    "DLF Phase 2",
+    "Sushant Lok 1"
+  ],
+  "Siolim": [
+    "Assagao",
+    "Vagator",
+    "Anjuna"
+  ],
+  "Panaji": [
+    "Dona Paula",
+    "Miramar",
+    "Caranzalem",
+    "Porvorim"
+  ]
+}

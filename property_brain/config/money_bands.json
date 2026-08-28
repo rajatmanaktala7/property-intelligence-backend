@@ -1,0 +1,8 @@
+{
+  "default": {
+    "residential_monthly_rent_max": 2000000,
+    "commercial_monthly_rent_max": 10000000,
+    "residential_sale_min": 1000000,
+    "commercial_sale_min": 1000000
+  }
+}
