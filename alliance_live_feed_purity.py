@@ -8,8 +8,8 @@ from sqlalchemy import text
 from starlette.middleware.base import BaseHTTPMiddleware
 import alliance_live_feed_purity_legacy36 as _legacy
 
-VERSION = "5.8-WHATSAPP-PROPERTY-PURITY-GATE"
-OWNER = "ALLIANCE_V58_WHATSAPP_PROPERTY_PURITY_GATE"
+VERSION = "6.0-WHATSAPP-LOCATION-FIRST-GATE"
+OWNER = "ALLIANCE_V60_WHATSAPP_LOCATION_FIRST_GATE"
 
 LOCATION_ALIASES = {
     "KALKAJI":["KALKAJI"],
@@ -339,11 +339,57 @@ def build_clean_description(item):
         if any(w in n for w in words) and label not in parts:parts.append(label)
     return ' · '.join(parts[:7]) or compact_description(raw,180)
 
+
+def _parent_context(item):
+    raw=str(item.get("raw_text") or "")
+    desc=str(item.get("description") or "")
+    parent={}
+    loc=canonical_location(raw,desc,item.get("location"))
+    if loc and loc.lower()!="unknown": parent["location"]=loc
+    tv=tx(raw)
+    if tv!="UNKNOWN": parent["transaction"]=tv
+    pv=ptype(raw)
+    if pv!="Property": parent["property_type"]=pv
+    for k in ("contact_name","contact_number","source","captured_on","verification"):
+        v=item.get(k)
+        if v not in (None,"","Unknown","—"): parent[k]=v
+    return parent
+
+def _inherit_parent_context(child,parent):
+    out=dict(child)
+    for k,v in parent.items():
+        if out.get(k) in (None,"","Unknown","—","Property","UNKNOWN"): out[k]=v
+    return out
+
+def _valid_location_value(value):
+    v=str(value or "").strip()
+    if not v or v.lower() in {"unknown","none","na","n/a","-","—"}: return False
+    nv=norm(v)
+    if any(x in nv for x in ("PROPERTY PROPOSAL","PROPERTY GROUP","REAL ESTATE AGENT","WESTERN LINE PROPERTY")): return False
+    return True
+
+def _location_first_status(item):
+    if not _has_specific_property_identity(item): return "REJECT_FRAGMENT"
+    if not _valid_location_value(item.get("location")): return "HOLDING_LOCATION_REQUIRED"
+    return "CLEAN"
+
+def _apply_location_first_gate(rows):
+    clean=[]; holding=[]; rejected=[]
+    for item in rows:
+        x=dict(item); status=_location_first_status(x)
+        x["property_purity_status"]=status; x["matcher_eligible"]=(status=="CLEAN")
+        if status=="CLEAN": clean.append(x)
+        elif status=="HOLDING_LOCATION_REQUIRED":
+            x["holding_reason"]="Location could not be confidently recovered from property or parent message"; holding.append(x)
+        else:
+            x["holding_reason"]="Not a meaningful independent property entity"; rejected.append(x)
+    return clean,holding,rejected
+
 def split_multi_property(item):
     """Non-destructive read-side splitter for obvious bundled listings."""
     description=str(item.get('description') or '').strip()
     raw_text=str(item.get('raw_text') or '').strip()
-    # V5.8: do not re-split the same parent message for every already-split master row.
+    parent=_parent_context(item)
     raw=description if description and norm(description) not in GENERIC_BAD else (raw_text or description)
     # Numbered/emoji list rows or repeated line items with rent/price.
     lines=[re.sub(r"\s+"," ",x).strip() for x in raw.splitlines() if re.sub(r"\s+"," ",x).strip()]
@@ -366,7 +412,9 @@ def split_multi_property(item):
         if len(candidate_lines)>=3:
             chunks=candidate_lines
     if len(chunks)<2:
-        x=dict(item);x['clean_description']=build_clean_description(x);return [x]
+        x=_inherit_parent_context(dict(item),parent)
+        x['clean_description']=build_clean_description(x)
+        return [x]
 
     out=[]
     for idx,ch in enumerate(chunks,1):
@@ -379,6 +427,7 @@ def split_multi_property(item):
         child['area']=_area_from_text(ch) or item.get('area')
         pv=_price_from_text(ch,child.get('transaction'))
         if pv is not None:child['price']=pv
+        child=_inherit_parent_context(child,parent)
         child['clean_description']=build_clean_description(child)
         child['display_child_index']=idx
         out.append(child)
@@ -508,7 +557,9 @@ def properties(q="", include_deleted=False, limit=2500):
                 child["commercial_terms_reason"]=term_reason
                 out.append(child)
 
-    return _dedupe_clean_properties(out)
+    deduped=_dedupe_clean_properties(out)
+    clean,holding,rejected=_apply_location_first_gate(deduped)
+    return clean
 
 def _parse_message_ts(value):
     if not value: return None
@@ -920,7 +971,7 @@ def register(wrapped):
             "single_matcher":"/deal-match-ai-v60",
             "requirement_row_matcher_buttons":True,
             "old_match_section_redirect":True,"compact_table":False,"uniform_result_theme":True,"technical_ids_hidden":True,"description_expanded":True,"meaningful_inventory_gate":True,"multi_property_reconstruction":True,"clean_description_primary":True,
-            "source_preserved":True,"matcher_accuracy_layer":"V6.1","property_purity_gate":True,"fragment_filter":True,"read_side_dedupe":True,"commercial_terms_validator":True,
+            "source_preserved":True,"matcher_accuracy_layer":"V6.1","property_purity_gate":True,"fragment_filter":True,"read_side_dedupe":True,"commercial_terms_validator":True,"parent_context_inheritance":True,"location_first_gate":True,"unknown_location_excluded":True,"matcher_requires_location":True,
         }
 
     return {"status":"REGISTERED","version":VERSION,"owner":OWNER,"legacy":legacy_result}
