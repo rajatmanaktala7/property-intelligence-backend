@@ -8,8 +8,8 @@ from sqlalchemy import text
 from starlette.middleware.base import BaseHTTPMiddleware
 import alliance_live_feed_purity_legacy36 as _legacy
 
-VERSION = "6.2-WHATSAPP-COMMERCIAL-ASSET-IDENTITY-GATE"
-OWNER = "ALLIANCE_V62_WHATSAPP_COMMERCIAL_ASSET_IDENTITY_GATE"
+VERSION = "6.1-WHATSAPP-USABLE-PROPERTY-PURITY"
+OWNER = "ALLIANCE_V61_WHATSAPP_USABLE_PROPERTY_PURITY"
 
 LOCATION_ALIASES = {
     "KALKAJI":["KALKAJI"],
@@ -412,46 +412,6 @@ def _has_usable_property_detail(item):
             return True
     return False
 
-
-COMMERCIAL_ASSET_WORDS = (
-    "SHOP","SHOWROOM","OFFICE","RESTAURANT","CAFE","BANQUET","WAREHOUSE","GODOWN",
-    "SCO","BOOTH","KIOSK","INDUSTRIAL","HOTEL","GUEST HOUSE","LOUNGE",
-    "COMMERCIAL FLOOR","RETAIL SPACE","OFFICE SPACE","SHOP CUM OFFICE"
-)
-
-def _has_commercial_asset_identity(item):
-    """
-    Commercial rows need an actual asset identity, not only:
-    location + Commercial + rent/price/contact/security-deposit.
-    """
-    textv = norm(_combined_property_text(item))
-
-    if any(norm(word) in textv for word in COMMERCIAL_ASSET_WORDS):
-        return True
-
-    # Strong structured identity can substitute for subtype words.
-    for k in ("area","area_sqft","available_area_sqft","project_name","building_name",
-              "address","floor","frontage","plot_area"):
-        v = str(item.get(k) or "").strip()
-        if v and v.lower() not in {"unknown","none","property","-","—","0"}:
-            return True
-
-    return False
-
-def _commercial_asset_identity_status(item):
-    fam = str(item.get("property_type") or "").strip().lower()
-    if fam != "commercial":
-        return True, ""
-
-    if _has_commercial_asset_identity(item):
-        return True, ""
-
-    return False, (
-        "Commercial property has no usable asset identity "
-        "(shop/showroom/office/restaurant/warehouse/etc. or area/building/floor/frontage)"
-    )
-
-
 def _commercial_term_contamination(item):
     desc = str(item.get("description") or "")
     raw = str(item.get("raw_text") or "")
@@ -479,13 +439,11 @@ def _usable_property_status(item):
     has_location = _valid_location_value(item.get("location"))
     typed = str(item.get("property_type") or "").strip() not in {"","Property","Unknown","UNKNOWN"}
 
-    commercial_ok, commercial_reason = _commercial_asset_identity_status(item)
-    if has_location and not commercial_ok:
-        return "HOLDING_PROPERTY_DETAILS_REQUIRED", commercial_reason
-
+    # Known location + generic Residential/Commercial is a holding record, never clean.
     if has_location and typed and not has_detail:
         return "HOLDING_PROPERTY_DETAILS_REQUIRED", "Location is known but usable property details are missing"
 
+    # A genuine-looking property with details but no location must be held.
     if not has_location and has_detail:
         return "HOLDING_LOCATION_REQUIRED", "Location could not be confidently recovered"
 
@@ -1119,7 +1077,7 @@ def register(wrapped):
             "single_matcher":"/deal-match-ai-v60",
             "requirement_row_matcher_buttons":True,
             "old_match_section_redirect":True,"compact_table":False,"uniform_result_theme":True,"technical_ids_hidden":True,"description_expanded":True,"meaningful_inventory_gate":True,"multi_property_reconstruction":True,"clean_description_primary":True,
-            "source_preserved":True,"matcher_accuracy_layer":"V6.1","property_purity_gate":True,"fragment_filter":True,"read_side_dedupe":True,"commercial_terms_validator":True,"parent_context_inheritance":True,"location_first_gate":True,"unknown_location_excluded":True,"matcher_requires_location":True,"usable_property_gate":True,"commercial_term_contamination_gate":True,"generic_location_property_excluded":True,"incomplete_property_matcher_disabled":True,"commercial_asset_identity_required":True,
+            "source_preserved":True,"matcher_accuracy_layer":"V6.1","property_purity_gate":True,"fragment_filter":True,"read_side_dedupe":True,"commercial_terms_validator":True,"parent_context_inheritance":True,"location_first_gate":True,"unknown_location_excluded":True,"matcher_requires_location":True,"usable_property_gate":True,"commercial_term_contamination_gate":True,"generic_location_property_excluded":True,"incomplete_property_matcher_disabled":True,
         }
 
     return {"status":"REGISTERED","version":VERSION,"owner":OWNER,"legacy":legacy_result}
