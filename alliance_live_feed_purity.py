@@ -8,8 +8,8 @@ from sqlalchemy import text
 from starlette.middleware.base import BaseHTTPMiddleware
 import alliance_live_feed_purity_legacy36 as _legacy
 
-VERSION = "6.1-WHATSAPP-USABLE-PROPERTY-PURITY"
-OWNER = "ALLIANCE_V61_WHATSAPP_USABLE_PROPERTY_PURITY"
+VERSION = "6.1.1-WHATSAPP-COMMERCIAL-DESCRIPTION-GATE"
+OWNER = "ALLIANCE_V611_WHATSAPP_COMMERCIAL_DESCRIPTION_GATE"
 
 LOCATION_ALIASES = {
     "KALKAJI":["KALKAJI"],
@@ -228,6 +228,21 @@ def meaningful_property(item):
 
     if not _has_specific_property_identity(item):
         return False
+
+    # V6.1.1: Commercial inventory must identify an actual commercial asset.
+    # Location + "Commercial" + rent/price/contact is not a usable property.
+    if str(fam).strip().lower() == "commercial":
+        commercial_asset_words = (
+            "SHOP","SHOWROOM","OFFICE","RESTAURANT","CAFE","BANQUET",
+            "WAREHOUSE","GODOWN","SCO","BOOTH","KIOSK","INDUSTRIAL",
+            "HOTEL","GUEST HOUSE","LOUNGE","RETAIL SPACE","OFFICE SPACE"
+        )
+        has_commercial_asset = any(x in n for x in commercial_asset_words)
+        has_strong_structure = bool(
+            area and area not in {"-", "0", "None", "Unknown"}
+        )
+        if not (has_commercial_asset or has_strong_structure):
+            return False
 
     return anchors >= 2
 
@@ -1076,7 +1091,7 @@ def register(wrapped):
             "multiple_phone_numbers":True,
             "single_matcher":"/deal-match-ai-v60",
             "requirement_row_matcher_buttons":True,
-            "old_match_section_redirect":True,"compact_table":False,"uniform_result_theme":True,"technical_ids_hidden":True,"description_expanded":True,"meaningful_inventory_gate":True,"multi_property_reconstruction":True,"clean_description_primary":True,
+            "old_match_section_redirect":True,"compact_table":False,"uniform_result_theme":True,"technical_ids_hidden":True,"description_expanded":True,"meaningful_inventory_gate":True,"commercial_description_gate":True,"multi_property_reconstruction":True,"clean_description_primary":True,
             "source_preserved":True,"matcher_accuracy_layer":"V6.1","property_purity_gate":True,"fragment_filter":True,"read_side_dedupe":True,"commercial_terms_validator":True,"parent_context_inheritance":True,"location_first_gate":True,"unknown_location_excluded":True,"matcher_requires_location":True,"usable_property_gate":True,"commercial_term_contamination_gate":True,"generic_location_property_excluded":True,"incomplete_property_matcher_disabled":True,
         }
 
