@@ -1,729 +1,134 @@
 from __future__ import annotations
-
-import hashlib
-import os
-import re
-import uuid
-
+import hashlib, os, re, uuid
 from fastapi import APIRouter, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import create_engine, text
-
 import alliance_v41b_whatsapp_splitter as base
 
-VERSION = "4.4.1-INCREMENTAL-LIVE-WHATSAPP-MASTER"
-LIVE_GENERATION_ID = uuid.uuid5(
-    uuid.NAMESPACE_URL,
-    "alliance://pi_whatsapp_property_master/live-v1",
-)
-
+VERSION="4.4.3-PHASE4.1-PURITY-INCREMENTAL-MASTER"
+LIVE_GENERATION_ID=uuid.uuid5(uuid.NAMESPACE_URL,"alliance://pi_whatsapp_property_master/live-v1")
 
 def _db_url(u):
-    u = (u or "").strip()
-    if u.startswith("postgres://"):
-        return u.replace("postgres://", "postgresql+psycopg://", 1)
-    if u.startswith("postgresql://"):
-        return u.replace("postgresql://", "postgresql+psycopg://", 1)
+    u=(u or "").strip()
+    if u.startswith("postgres://"):return u.replace("postgres://","postgresql+psycopg://",1)
+    if u.startswith("postgresql://"):return u.replace("postgresql://","postgresql+psycopg://",1)
     return u
-
-
 def _wa_engine():
-    u = os.getenv("WHATSAPP_DATABASE_URL", "").strip()
-    return create_engine(
-        _db_url(u),
-        pool_pre_ping=True,
-        pool_recycle=300,
-        connect_args={"connect_timeout": 5},
-    ) if u else None
-
-
-def _norm(v):
-    return re.sub(r"\s+", " ", re.sub(r"[^A-Z0-9]+", " ", str(v or "").upper())).strip()
-
-
-def _normalize_locality(v):
-    s = _norm(v)
-    replacements = {
-        "DLFPHASE1": "DLF PHASE 1",
-        "DLFPHASE2": "DLF PHASE 2",
-        "DLFPHASE4": "DLF PHASE 4",
-        "SHUSHANTLOK1": "SHUSHANT LOK 1",
-        "SUSHANTLOK1": "SUSHANT LOK 1",
-        "DLF PHASE I": "DLF PHASE 1",
-        "DLF PHASE II": "DLF PHASE 2",
-        "DLF PHASE IV": "DLF PHASE 4",
-    }
-    compact = s.replace(" ", "")
-    if compact in replacements:
-        return replacements[compact]
-    if s in replacements:
-        return replacements[s]
-    return s.title() if s else ""
-
-
-def _normalize_area(area):
-    s = str(area or "").strip()
-    if not s:
-        return ""
-    m = re.search(r"(?i)(\d+(?:\.\d+)?)\s*(sq\.?\s*yds?|sqyds?|syds|yards|yds)", s)
-    if m:
-        return f"{int(float(m.group(1)))} sq yd"
-    m = re.search(r"(?i)(\d+(?:\.\d+)?)\s*(sq\.?\s*ft|sqft|sft)", s)
-    if m:
-        return f"{int(float(m.group(1)))} sqft"
-    return re.sub(r"\s+", " ", s).strip()
-
-
-def _normalize_config(v):
-    raw = str(v or "").upper()
-    had_plus = "+" in raw
-    had_servant = "SERVANT" in raw or " SER" in (" " + raw)
-    s = _norm(raw).replace("SERVANT", "SER")
-    s = re.sub(r"\b(\d+(?:/\d+)?)\s*BHK\b", r"\1 BHK", s)
-    s = re.sub(r"\s+", " ", s).strip()
-    if re.search(r"\b\d+(?:/\d+)?\s+BHK\s+SER\b", s) and (had_plus or had_servant):
-        s = re.sub(r"(\b\d+(?:/\d+)?\s+BHK)\s+SER\b", r"\1 + SER", s)
-    return s
-
-
-def _furnishing(raw):
-    up = _norm(raw)
-    if "FULLY FURNISHED" in up:
-        return "Fully Furnished"
-    if "SEMI FURNISHED" in up:
-        return "Semi Furnished"
-    if "FURNISHED" in up:
-        return "Furnished"
-    return ""
-
-
-def _money_label(v, txn):
-    if v in (None, ""):
-        return ""
-    try:
-        n = float(v)
-    except Exception:
-        return str(v)
-    if n >= 10_000_000:
-        return f"₹{n / 10_000_000:.2f} Cr"
-    if n >= 100_000:
-        return f"₹{n / 100_000:.2f} Lakh" + ("/month" if txn == "Rent" else "")
-    return f"₹{n:,.0f}" + ("/month" if txn == "Rent" else "")
-
-
-def _canonical_key(txn, locality, area, config, furnishing, price, floor):
-    parts = [
-        txn,
-        _normalize_locality(locality),
-        _normalize_area(area),
-        _normalize_config(config),
-        furnishing or "",
-        floor or "",
-        str(round(float(price), 2)) if price not in (None, "") else "",
-    ]
+    u=os.getenv("WHATSAPP_DATABASE_URL","").strip()
+    return create_engine(_db_url(u),pool_pre_ping=True,pool_recycle=300,connect_args={"connect_timeout":5}) if u else None
+def _norm(v):return re.sub(r"\s+"," ",re.sub(r"[^A-Z0-9]+"," ",str(v or "").upper())).strip()
+def _canonical_key(txn,locality,area,config,furnishing,price,floor):
+    # Price intentionally excluded from identity.
+    parts=[txn,locality,area,config,furnishing or "",floor or ""]
     return hashlib.sha256("|".join(_norm(x) for x in parts).encode()).hexdigest()
-
-
-def _phone_list(*vals):
-    out = []
-    for v in vals:
-        for p in re.findall(r"(?<!\d)(?:\+?91[\s-]?)?([6-9]\d{9})(?!\d)", str(v or "")):
-            if p not in out:
-                out.append(p)
-    return out
-
-
-def _contact_label(name, phones):
-    name = str(name or "").strip()
-    if name and phones:
-        return name + " · " + " | ".join(phones)
-    if phones:
-        return " | ".join(phones)
-    return name
-
-
+def _phone_list(*vals):return base.purity.phones(*vals)
 def _specific(rec):
-    locality = _norm(rec.get("project_name") or rec.get("locality"))
-    if not locality:
-        return False
-    if any(x in locality for x in ["NEW FLOORS IN RESALE", "INVENTORY FOR SALE", "4 5 6 BHK KOTHI"]):
-        return False
-    if not rec.get("area_value"):
-        return False
-    if rec.get("transaction_type") not in ("Sale", "Rent"):
-        return False
-    if rec.get("transaction_type") == "Sale" and not rec.get("price_value"):
-        return False
-    if rec.get("transaction_type") == "Rent" and not rec.get("rent_value"):
-        return False
-    return True
-
-
-def _to_master_row(rec, parent_raw):
-    txn = rec.get("transaction_type")
-    locality = _normalize_locality(
-        rec.get("project_name") or rec.get("locality") or rec.get("city") or ""
-    )
-    area = ""
-    if rec.get("area_value") not in (None, ""):
-        try:
-            v = str(int(float(rec.get("area_value"))))
-        except Exception:
-            v = str(rec.get("area_value"))
-        area = _normalize_area((v + " " + str(rec.get("area_unit") or "")).strip())
-
-    config = _normalize_config(rec.get("configuration") or rec.get("property_type") or "")
-    furnishing = _furnishing(parent_raw)
-    floor = rec.get("floor") or ""
-    price_num = rec.get("price_value") if txn == "Sale" else rec.get("rent_value")
-    price = _money_label(price_num, txn)
-    phones = _phone_list(rec.get("broker_phone"), parent_raw)
-    broker_name = str(rec.get("broker_name") or "").strip()
-
-    details = [
-        locality,
-        config,
-        area,
-        furnishing,
-        floor,
-        ("Sale " + price if txn == "Sale" and price else None),
-        ("Rent " + price if txn == "Rent" and price else None),
-    ]
-    raw_up = _norm(parent_raw)
-    for token, label in [
-        ("LIFT", "Lift"),
-        ("STILT", "Stilt Parking"),
-        ("MAINT", "Maintenance Extra"),
-        ("RENOVATED", "Renovated"),
-        ("PARKING", "Parking"),
-        ("TERRACE", "Terrace"),
-        ("CORNER", "Corner"),
-        ("FRONT FACING", "Front Facing"),
-        ("DOUBLE HEIGHT", "Double Height"),
-    ]:
-        if token in raw_up and label not in details:
-            details.append(label)
-
-    description = " | ".join(x for x in details if x)
-    key = _canonical_key(txn, locality, area, config, furnishing, price_num, floor)
-    return {
-        "canonical_key": key,
-        "record_id": "WA-" + key[:10].upper(),
-        "lead_type": txn.upper() if txn else "",
-        "description": description,
-        "area": area,
-        "configuration_details": config,
-        "price": price,
-        "contact_name_number": _contact_label(broker_name, phones),
-        "phone_numbers": " | ".join(phones),
-        "contact_name": broker_name,
-        "source": rec.get("source_group") or "WhatsApp Group",
-        "captured_on": rec.get("captured_on"),
-        "verification": "Unverified",
-        "raw_message": parent_raw,
-        "furnishing": furnishing,
-        "floor": floor,
-        "price_numeric": price_num,
-    }
-
-
+    loc=_norm(rec.get("project_name") or rec.get("locality"))
+    if not loc or loc in base.purity.CITY_ONLY:return False
+    if rec.get("review_hold"):return False
+    return rec.get("transaction_type") in {"Sale","Rent"} and bool(rec.get("area_value")) and bool(rec.get("area_unit"))
+def _money_label(v,txn):
+    if v in (None,""):return ""
+    n=float(v)
+    if n>=10_000_000:return f"₹{n/10_000_000:.2f} Cr"
+    if n>=100_000:return f"₹{n/100_000:.2f} Lakh"+("/month" if txn=="Rent" else "")
+    return f"₹{n:,.0f}"+("/month" if txn=="Rent" else "")
+def _to_master_row(rec,parent):
+    txn=rec["transaction_type"];loc=str(rec.get("project_name") or rec.get("locality") or "").strip()
+    area=f"{float(rec['area_value']):g} {rec['area_unit']}" if rec.get("area_value") else ""
+    cfg=str(rec.get("configuration") or rec.get("property_type") or "")
+    price_num=rec.get("price_value") if txn=="Sale" else rec.get("rent_value");price=_money_label(price_num,txn)
+    furn="";fl=rec.get("floor") or "";ph=_phone_list(rec.get("broker_phone"),parent);name=str(rec.get("broker_name") or "")
+    key=_canonical_key(txn,loc,area,cfg,furn,price_num,fl)
+    return {"canonical_key":key,"record_id":"WA-"+key[:10].upper(),"lead_type":txn.upper(),"description":" | ".join(x for x in [loc,cfg,area,("Sale "+price if txn=="Sale" and price else None),("Rent "+price if txn=="Rent" and price else None)] if x),
+            "area":area,"configuration_details":cfg,"price":price,"contact_name_number":(name+" · " if name and ph else "")+" | ".join(ph),
+            "phone_numbers":" | ".join(ph),"contact_name":name,"source":rec.get("source_group") or "WhatsApp Group","captured_on":rec.get("captured_on"),
+            "verification":"Unverified","raw_message":parent,"furnishing":furn,"floor":fl}
 def _ensure(engine):
     with engine.begin() as c:
-        c.execute(text("""
-        CREATE TABLE IF NOT EXISTS pi_whatsapp_property_master_generation(
-          id BIGSERIAL PRIMARY KEY,
-          generation_id UUID UNIQUE NOT NULL,
-          started_at TIMESTAMPTZ DEFAULT NOW(),
-          completed_at TIMESTAMPTZ,
-          raw_messages INTEGER DEFAULT 0,
-          bursts INTEGER DEFAULT 0,
-          extracted_children INTEGER DEFAULT 0,
-          canonical_rows INTEGER DEFAULT 0,
-          requirements_filtered INTEGER DEFAULT 0,
-          duplicates_merged INTEGER DEFAULT 0,
-          skipped_non_specific INTEGER DEFAULT 0,
-          status TEXT DEFAULT 'RUNNING'
-        )"""))
-        c.execute(text("""
-        CREATE TABLE IF NOT EXISTS pi_whatsapp_property_master(
-          id BIGSERIAL PRIMARY KEY,
-          generation_id UUID NOT NULL,
-          canonical_key TEXT NOT NULL,
-          record_id TEXT NOT NULL,
-          lead_type TEXT,
-          description TEXT,
-          area TEXT,
-          configuration_details TEXT,
-          price TEXT,
-          contact_name_number TEXT,
-          contact_name TEXT,
-          phone_numbers TEXT,
-          source TEXT,
-          source_count INTEGER DEFAULT 1,
-          all_contacts TEXT,
-          all_sources TEXT,
-          captured_on TIMESTAMPTZ,
-          verification TEXT DEFAULT 'Unverified',
-          raw_message TEXT,
-          furnishing TEXT,
-          floor TEXT,
-          created_at TIMESTAMPTZ DEFAULT NOW(),
-          UNIQUE(generation_id,canonical_key)
-        )"""))
-        c.execute(text("""
-          INSERT INTO pi_whatsapp_property_master_generation(
-            generation_id,status,started_at,completed_at
-          ) VALUES(:g,'COMPLETED',NOW(),NOW())
-          ON CONFLICT(generation_id) DO NOTHING
-        """), {"g": LIVE_GENERATION_ID})
-
-
-def _serialize(rows):
-    out = []
-    for r in rows:
-        d = dict(r)
-        for k, v in list(d.items()):
-            if isinstance(v, uuid.UUID):
-                d[k] = str(v)
-            elif hasattr(v, "isoformat"):
-                d[k] = v.isoformat()
-        out.append(d)
-    return out
-
-
-def _split_pipe(v):
-    return {x.strip() for x in str(v or "").split("|") if x.strip()}
-
-
-def _split_names(v):
-    return {x.strip() for x in str(v or "").split("/") if x.strip()}
-
-
+        c.execute(text("""CREATE TABLE IF NOT EXISTS pi_whatsapp_property_master_generation(
+          id BIGSERIAL PRIMARY KEY,generation_id UUID UNIQUE NOT NULL,started_at TIMESTAMPTZ DEFAULT NOW(),completed_at TIMESTAMPTZ,
+          raw_messages INTEGER DEFAULT 0,bursts INTEGER DEFAULT 0,extracted_children INTEGER DEFAULT 0,canonical_rows INTEGER DEFAULT 0,
+          requirements_filtered INTEGER DEFAULT 0,duplicates_merged INTEGER DEFAULT 0,skipped_non_specific INTEGER DEFAULT 0,status TEXT DEFAULT 'RUNNING')"""))
+        c.execute(text("""CREATE TABLE IF NOT EXISTS pi_whatsapp_property_master(
+          id BIGSERIAL PRIMARY KEY,generation_id UUID NOT NULL,canonical_key TEXT NOT NULL,record_id TEXT NOT NULL,lead_type TEXT,
+          description TEXT,area TEXT,configuration_details TEXT,price TEXT,contact_name_number TEXT,contact_name TEXT,phone_numbers TEXT,
+          source TEXT,source_count INTEGER DEFAULT 1,all_contacts TEXT,all_sources TEXT,captured_on TIMESTAMPTZ,
+          verification TEXT DEFAULT 'Unverified',raw_message TEXT,furnishing TEXT,floor TEXT,created_at TIMESTAMPTZ DEFAULT NOW(),
+          UNIQUE(generation_id,canonical_key))"""))
+        c.execute(text("""INSERT INTO pi_whatsapp_property_master_generation(generation_id,status,started_at,completed_at)
+          VALUES(:g,'COMPLETED',NOW(),NOW()) ON CONFLICT(generation_id) DO NOTHING"""),{"g":LIVE_GENERATION_ID})
 def _build_canonical(rows):
-    bursts = base.group_message_bursts(rows, 180)
-    canonical = {}
-    requirements = 0
-    children_total = 0
-    skipped = 0
-
+    bursts=base.group_message_bursts(rows,180);canonical={};reqs=0;children=0;skipped=0;review=0
     for burst in bursts:
-        parent = "\n".join(
-            str(x.get("raw_text") or "")
-            for x in burst["rows"]
-            if str(x.get("raw_text") or "").strip()
-        )
-        if not parent.strip():
-            continue
-        if base.classify_listing_vs_requirement(parent) == "REQUIREMENT":
-            requirements += 1
-            continue
-
-        meta = burst["rows"][-1]
-        base_children = base.split_multi_listing(parent)
-        children = []
-        for b in base_children:
-            children.extend(base.expand_specific_rent_variants(b))
-        children_total += len(children)
-
-        for child in children:
-            rec = base.normalize_listing(child, parent, meta)
-            if not rec or not _specific(rec):
-                skipped += 1
-                continue
-            rec["source_group"] = meta.get("group_name")
-            rec["captured_on"] = meta.get("created_at")
-            row = _to_master_row(rec, parent)
-            key = row["canonical_key"]
-            phones = set(_phone_list(row["phone_numbers"]))
-            source = row["source"]
-            contact_name = row["contact_name"]
-
-            if key not in canonical:
-                row["phones"] = phones
-                row["sources"] = set([source] if source else [])
-                row["contact_names"] = set([contact_name] if contact_name else [])
-                canonical[key] = row
+        parent="\n".join(str(x.get("raw_text") or "") for x in burst["rows"] if str(x.get("raw_text") or "").strip())
+        if not parent.strip():continue
+        cls=base.purity.classify_text(parent)
+        if cls=="REQUIREMENT":reqs+=1;continue
+        if cls in {"NOISE","SERVICE_AD"}:skipped+=1;continue
+        meta=burst["rows"][-1]
+        for child in base.split_multi_listing(parent):
+            children+=1;rec=base.normalize_listing(child,parent,meta)
+            if not rec:skipped+=1;continue
+            if rec.get("review_hold"):review+=1;continue
+            if not _specific(rec):skipped+=1;continue
+            rec["source_group"]=meta.get("group_name");rec["captured_on"]=meta.get("created_at");row=_to_master_row(rec,parent);k=row["canonical_key"]
+            if k not in canonical:
+                row["phones"]=set(_phone_list(row["phone_numbers"]));row["sources"]=set([row["source"]] if row["source"] else []);row["names"]=set([row["contact_name"]] if row["contact_name"] else []);canonical[k]=row
             else:
-                x = canonical[key]
-                x["phones"].update(phones)
-                if source:
-                    x["sources"].add(source)
-                if contact_name:
-                    x["contact_names"].add(contact_name)
-                if len(row["description"]) > len(x["description"]):
-                    x["description"] = row["description"]
-                    x["raw_message"] = row["raw_message"]
-                if row.get("captured_on") and (
-                    not x.get("captured_on") or row["captured_on"] > x["captured_on"]
-                ):
-                    x["captured_on"] = row["captured_on"]
-
-    return canonical, {
-        "raw_messages": len(rows),
-        "bursts": len(bursts),
-        "extracted_children": children_total,
-        "canonical_rows": len(canonical),
-        "requirements_filtered": requirements,
-        "duplicates_merged": max(children_total - len(canonical) - skipped, 0),
-        "skipped_non_specific": skipped,
-    }
-
-
-def _merge_and_upsert(engine, canonical):
-    inserted = 0
-    updated = 0
+                x=canonical[k];x["phones"].update(_phone_list(row["phone_numbers"]));x["sources"].add(row["source"]);x["names"].add(row["contact_name"])
+                if row.get("captured_on") and (not x.get("captured_on") or row["captured_on"]>=x["captured_on"]):
+                    x["captured_on"]=row["captured_on"];x["description"]=row["description"];x["price"]=row["price"];x["raw_message"]=row["raw_message"]
+    return canonical,{"raw_messages":len(rows),"bursts":len(bursts),"extracted_children":children,"canonical_rows":len(canonical),
+                      "requirements_filtered":reqs,"duplicates_merged":max(children-len(canonical)-skipped-review,0),
+                      "skipped_non_specific":skipped,"review_held":review}
+def _merge_and_upsert(engine,canonical):
+    ins=upd=0
     with engine.begin() as c:
-        for key, row in canonical.items():
-            old = c.execute(text("""
-              SELECT description,contact_name,phone_numbers,source,all_sources,
-                     captured_on,verification,raw_message
-              FROM pi_whatsapp_property_master
-              WHERE generation_id=:g AND canonical_key=:k
-              FOR UPDATE
-            """), {"g": LIVE_GENERATION_ID, "k": key}).mappings().first()
-
-            names = set(row["contact_names"])
-            phones = set(row["phones"])
-            sources = set(row["sources"])
-            verification = row["verification"]
-            description = row["description"]
-            raw_message = row["raw_message"]
-            captured_on = row["captured_on"]
-
-            if old:
-                names.update(_split_names(old.get("contact_name")))
-                phones.update(_split_pipe(old.get("phone_numbers")))
-                sources.update(_split_pipe(old.get("source")))
-                sources.update(_split_pipe(old.get("all_sources")))
-                old_verification = str(old.get("verification") or "").strip()
-                if old_verification and old_verification.lower() != "unverified":
-                    verification = old_verification
-                if len(str(old.get("description") or "")) > len(str(description or "")):
-                    description = old.get("description")
-                    raw_message = old.get("raw_message")
-                if old.get("captured_on") and (
-                    not captured_on or old["captured_on"] > captured_on
-                ):
-                    captured_on = old["captured_on"]
-
-            names = sorted(x for x in names if x)
-            phones = sorted(x for x in phones if x)
-            sources = sorted(x for x in sources if x)
-            if names and phones:
-                contact_label = (names[0] if len(names) == 1 else " / ".join(names)) + " · " + " | ".join(phones)
-            elif phones:
-                contact_label = " | ".join(phones)
-            else:
-                contact_label = " / ".join(names)
-
-            params = {
-                "g": LIVE_GENERATION_ID,
-                "canonical_key": key,
-                "record_id": row["record_id"],
-                "lead_type": row["lead_type"],
-                "description": description,
-                "area": row["area"],
-                "configuration_details": row["configuration_details"],
-                "price": row["price"],
-                "contact_name_number": contact_label,
-                "contact_name": " / ".join(names),
-                "phone_numbers": " | ".join(phones),
-                "source": " | ".join(sources),
-                "source_count": max(len(sources), 1 if sources else 0),
-                "all_contacts": contact_label,
-                "all_sources": " | ".join(sources),
-                "captured_on": captured_on,
-                "verification": verification,
-                "raw_message": raw_message,
-                "furnishing": row["furnishing"],
-                "floor": row["floor"],
-            }
-
-            c.execute(text("""
-              INSERT INTO pi_whatsapp_property_master(
-                generation_id,canonical_key,record_id,lead_type,description,area,
-                configuration_details,price,contact_name_number,contact_name,phone_numbers,
-                source,source_count,all_contacts,all_sources,captured_on,verification,
-                raw_message,furnishing,floor)
-              VALUES(
-                :g,:canonical_key,:record_id,:lead_type,:description,:area,
-                :configuration_details,:price,:contact_name_number,:contact_name,:phone_numbers,
-                :source,:source_count,:all_contacts,:all_sources,:captured_on,:verification,
-                :raw_message,:furnishing,:floor)
-              ON CONFLICT(generation_id,canonical_key) DO UPDATE SET
-                record_id=EXCLUDED.record_id,
-                lead_type=EXCLUDED.lead_type,
-                description=EXCLUDED.description,
-                area=EXCLUDED.area,
-                configuration_details=EXCLUDED.configuration_details,
-                price=EXCLUDED.price,
-                contact_name_number=EXCLUDED.contact_name_number,
-                contact_name=EXCLUDED.contact_name,
-                phone_numbers=EXCLUDED.phone_numbers,
-                source=EXCLUDED.source,
-                source_count=EXCLUDED.source_count,
-                all_contacts=EXCLUDED.all_contacts,
-                all_sources=EXCLUDED.all_sources,
-                captured_on=EXCLUDED.captured_on,
-                verification=EXCLUDED.verification,
-                raw_message=EXCLUDED.raw_message,
-                furnishing=EXCLUDED.furnishing,
-                floor=EXCLUDED.floor
-            """), params)
-            if old:
-                updated += 1
-            else:
-                inserted += 1
-    return inserted, updated
-
-
-def _update_live_generation(engine, stats):
-    with engine.begin() as c:
-        c.execute(text("""
-          UPDATE pi_whatsapp_property_master_generation
-          SET completed_at=NOW(),
-              raw_messages=:raw,
-              bursts=:bursts,
-              extracted_children=:children,
-              canonical_rows=(
-                SELECT COUNT(*) FROM pi_whatsapp_property_master
-                WHERE generation_id=:g
-              ),
-              requirements_filtered=:req,
-              duplicates_merged=:dup,
-              skipped_non_specific=:skip,
-              status='COMPLETED'
-          WHERE generation_id=:g
-        """), {
-            "raw": stats["raw_messages"],
-            "bursts": stats["bursts"],
-            "children": stats["extracted_children"],
-            "req": stats["requirements_filtered"],
-            "dup": stats["duplicates_merged"],
-            "skip": stats["skipped_non_specific"],
-            "g": LIVE_GENERATION_ID,
-        })
-
-
+        for k,r in canonical.items():
+            old=c.execute(text("SELECT verification FROM pi_whatsapp_property_master WHERE generation_id=:g AND canonical_key=:k FOR UPDATE"),{"g":LIVE_GENERATION_ID,"k":k}).mappings().first()
+            ver=str(old.get("verification") if old else r["verification"] or "Unverified")
+            ph=sorted(x for x in r["phones"] if x);src=sorted(x for x in r["sources"] if x);names=sorted(x for x in r["names"] if x)
+            label=((" / ".join(names)+" · ") if names and ph else "")+(" | ".join(ph) if ph else " / ".join(names))
+            p={"g":LIVE_GENERATION_ID,"k":k,"rid":r["record_id"],"lt":r["lead_type"],"d":r["description"],"a":r["area"],"cfg":r["configuration_details"],"pr":r["price"],
+               "cl":label,"cn":" / ".join(names),"ph":" | ".join(ph),"src":" | ".join(src),"sc":max(len(src),1 if src else 0),"ac":label,"asrc":" | ".join(src),
+               "cap":r["captured_on"],"ver":ver,"raw":r["raw_message"],"f":r["furnishing"],"fl":r["floor"]}
+            c.execute(text("""INSERT INTO pi_whatsapp_property_master(generation_id,canonical_key,record_id,lead_type,description,area,configuration_details,price,
+              contact_name_number,contact_name,phone_numbers,source,source_count,all_contacts,all_sources,captured_on,verification,raw_message,furnishing,floor)
+              VALUES(:g,:k,:rid,:lt,:d,:a,:cfg,:pr,:cl,:cn,:ph,:src,:sc,:ac,:asrc,:cap,:ver,:raw,:f,:fl)
+              ON CONFLICT(generation_id,canonical_key) DO UPDATE SET lead_type=EXCLUDED.lead_type,description=EXCLUDED.description,area=EXCLUDED.area,
+              configuration_details=EXCLUDED.configuration_details,price=EXCLUDED.price,contact_name_number=EXCLUDED.contact_name_number,contact_name=EXCLUDED.contact_name,
+              phone_numbers=EXCLUDED.phone_numbers,source=EXCLUDED.source,source_count=EXCLUDED.source_count,all_contacts=EXCLUDED.all_contacts,all_sources=EXCLUDED.all_sources,
+              captured_on=EXCLUDED.captured_on,verification=EXCLUDED.verification,raw_message=EXCLUDED.raw_message,furnishing=EXCLUDED.furnishing,floor=EXCLUDED.floor"""),p)
+            if old:upd+=1
+            else:ins+=1
+    return ins,upd
+def _update_live_generation(engine,s):
+    with engine.begin() as c:c.execute(text("""UPDATE pi_whatsapp_property_master_generation SET completed_at=NOW(),raw_messages=:raw,bursts=:b,extracted_children=:ch,
+      canonical_rows=(SELECT COUNT(*) FROM pi_whatsapp_property_master WHERE generation_id=:g),requirements_filtered=:r,duplicates_merged=:d,skipped_non_specific=:sk,status='COMPLETED'
+      WHERE generation_id=:g"""),{"raw":s["raw_messages"],"b":s["bursts"],"ch":s["extracted_children"],"r":s["requirements_filtered"],"d":s["duplicates_merged"],"sk":s["skipped_non_specific"],"g":LIVE_GENERATION_ID})
 def register(core):
-    app = core.app
-    engine = core.engine
-    need_login = core.need_login
-    page_role_or_redirect = core.page_role_or_redirect
-    router = APIRouter()
-
+    app=core.app;engine=core.engine;need_login=core.need_login;router=APIRouter()
     @router.get("/api/v44/status")
-    def status(req: Request):
-        need_login(req)
-        return {
-            "version": VERSION,
-            "status": "OK",
-            "startup_db_work": False,
-            "database": "/whatsapp-property-master-v44",
-            "generation_mode": "FIXED_LIVE_GENERATION",
-            "live_generation_id": str(LIVE_GENERATION_ID),
-            "update_mode": "INCREMENTAL_BY_WA_MESSAGE_ID",
-            "duplicate_strategy": "UPSERT_BY_CANONICAL_KEY",
-            "historical_generations_preserved": True,
-            "source_data_deleted": False,
-            "auto_refresh_enabled": True,
-        }
-
-    @router.post("/api/v44/setup")
-    def setup(req: Request):
-        need_login(req)
+    def status(req:Request):
+        need_login(req);return {"version":VERSION,"status":"OK","generation_mode":"FIXED_LIVE_GENERATION","update_mode":"INCREMENTAL_BY_WA_MESSAGE_ID",
+          "duplicate_strategy":"IDENTITY_UPSERT_PRICE_EXCLUDED","review_hold_enabled":True,"source_data_deleted":False}
+    def fetch_incremental(after_id=0,upto_id=None,limit=5000):
+        w=_wa_engine()
+        if w is None:raise HTTPException(503,"WHATSAPP_DATABASE_URL not configured")
+        p={"a":max(int(after_id or 0),0),"l":int(limit)};end=""
+        if upto_id is not None:p["u"]=int(upto_id);end="AND m.id<=:u"
+        with w.connect() as c:return c.execute(text(f"""SELECT m.message_id,m.raw_text,m.created_at,m.sender_name,m.sender_phone,m.source_id,s.group_name,m.id AS wa_id
+          FROM wa_messages m LEFT JOIN wa_sources s ON s.source_id=m.source_id WHERE m.id>:a {end} ORDER BY m.id ASC LIMIT :l"""),p).mappings().all()
+    def fetch_latest(limit=5000):
+        w=_wa_engine()
+        if w is None:raise HTTPException(503,"WHATSAPP_DATABASE_URL not configured")
+        with w.connect() as c:return c.execute(text("""SELECT * FROM (SELECT m.message_id,m.raw_text,m.created_at,m.sender_name,m.sender_phone,m.source_id,s.group_name,m.id AS wa_id
+          FROM wa_messages m LEFT JOIN wa_sources s ON s.source_id=m.source_id ORDER BY m.id DESC LIMIT :l)x ORDER BY wa_id ASC"""),{"l":int(limit)}).mappings().all()
+    def apply_rows(rows,mode):
         _ensure(engine)
-        return {"version": VERSION, "status": "READY", "live_generation_id": str(LIVE_GENERATION_ID)}
-
-    def _fetch_incremental(after_id=0, upto_id=None, limit=5000):
-        w = _wa_engine()
-        if w is None:
-            raise HTTPException(503, "WHATSAPP_DATABASE_URL not configured")
-        params = {"after_id": max(int(after_id or 0), 0), "lim": int(limit)}
-        end_sql = ""
-        if upto_id is not None:
-            params["upto_id"] = int(upto_id)
-            end_sql = "AND m.id <= :upto_id"
-        with w.connect() as c:
-            return c.execute(text(f"""
-              SELECT m.message_id,m.raw_text,m.created_at,m.sender_name,m.sender_phone,
-                     m.source_id,s.group_name,m.id AS wa_id
-              FROM wa_messages m
-              LEFT JOIN wa_sources s ON s.source_id=m.source_id
-              WHERE m.id > :after_id {end_sql}
-              ORDER BY m.id ASC
-              LIMIT :lim
-            """), params).mappings().all()
-
-    def _fetch_latest(limit=5000):
-        w = _wa_engine()
-        if w is None:
-            raise HTTPException(503, "WHATSAPP_DATABASE_URL not configured")
-        with w.connect() as c:
-            return c.execute(text("""
-              SELECT * FROM (
-                SELECT m.message_id,m.raw_text,m.created_at,m.sender_name,m.sender_phone,
-                       m.source_id,s.group_name,m.id AS wa_id
-                FROM wa_messages m
-                LEFT JOIN wa_sources s ON s.source_id=m.source_id
-                ORDER BY m.id DESC
-                LIMIT :lim
-              ) latest
-              ORDER BY wa_id ASC
-            """), {"lim": int(limit)}).mappings().all()
-
-    def _apply_rows(rows, mode):
-        _ensure(engine)
-        if not rows:
-            return {
-                "status": "UP_TO_DATE",
-                "version": VERSION,
-                "mode": mode,
-                "live_generation_id": str(LIVE_GENERATION_ID),
-                "raw_messages": 0,
-                "processed_to_id": None,
-                "inserted": 0,
-                "updated": 0,
-            }
-        canonical, stats = _build_canonical(rows)
-        inserted, updated = _merge_and_upsert(engine, canonical)
-        _update_live_generation(engine, stats)
-        processed_to_id = max(int(x["wa_id"]) for x in rows)
-        with engine.connect() as c:
-            live_rows = int(c.execute(text("""
-              SELECT COUNT(*) FROM pi_whatsapp_property_master
-              WHERE generation_id=:g
-            """), {"g": LIVE_GENERATION_ID}).scalar() or 0)
-        return {
-            "status": "OK",
-            "version": VERSION,
-            "mode": mode,
-            "live_generation_id": str(LIVE_GENERATION_ID),
-            **stats,
-            "inserted": inserted,
-            "updated": updated,
-            "live_canonical_rows": live_rows,
-            "processed_to_id": processed_to_id,
-        }
-
-    def _sync_impl(after_id=0, upto_id=None, limit=5000):
-        return _apply_rows(_fetch_incremental(after_id, upto_id, limit), "INCREMENTAL")
-
-    def _rebuild_impl(limit=5000):
-        return _apply_rows(_fetch_latest(limit), "RECONCILE_LATEST")
-
-    core._v44_sync_whatsapp_master = _sync_impl
-    core._v44_rebuild_whatsapp_master = _rebuild_impl
-
-    @router.post("/api/v44/whatsapp/rebuild")
-    def rebuild_route(req: Request, limit: int = Query(5000, ge=1, le=10000)):
-        need_login(req)
-        return _rebuild_impl(limit)
-
-    @router.get("/api/v44/whatsapp/rows")
-    def rows(req: Request, q: str = "", limit: int = Query(1000, ge=1, le=3000)):
-        need_login(req)
-        _ensure(engine)
-        p = {"lim": limit, "g": LIVE_GENERATION_ID}
-        where = ""
-        if q.strip():
-            where = """AND (
-              COALESCE(description,'') ILIKE :q OR
-              COALESCE(configuration_details,'') ILIKE :q OR
-              COALESCE(contact_name_number,'') ILIKE :q OR
-              COALESCE(phone_numbers,'') ILIKE :q OR
-              COALESCE(source,'') ILIKE :q
-            )"""
-            p["q"] = "%" + q.strip() + "%"
-        with engine.connect() as c:
-            rr = c.execute(text(f"""
-              SELECT record_id,lead_type,description,area,configuration_details,price,
-                     contact_name_number,source,captured_on,verification,source_count
-              FROM pi_whatsapp_property_master
-              WHERE generation_id=:g {where}
-              ORDER BY captured_on DESC NULLS LAST,id DESC
-              LIMIT :lim
-            """), p).mappings().all()
-        return {"status": "OK", "generation_id": str(LIVE_GENERATION_ID), "count": len(rr), "rows": _serialize(rr)}
-
-    @router.get("/api/v44/whatsapp/dedupe-status")
-    def dedupe_status(req: Request):
-        need_login(req)
-        _ensure(engine)
-        with engine.connect() as c:
-            stats = c.execute(text("""
-              SELECT raw_messages,bursts,extracted_children,canonical_rows,
-                     requirements_filtered,duplicates_merged,skipped_non_specific,
-                     started_at,completed_at,status
-              FROM pi_whatsapp_property_master_generation
-              WHERE generation_id=:g
-            """), {"g": LIVE_GENERATION_ID}).mappings().one()
-        d = dict(stats)
-        for k, v in list(d.items()):
-            if hasattr(v, "isoformat"):
-                d[k] = v.isoformat()
-        return {"status": "OK", "generation_id": str(LIVE_GENERATION_ID), **d}
-
-    @router.get("/whatsapp-property-master-v44", response_class=HTMLResponse)
-    def page(req: Request):
-        if not page_role_or_redirect(req):
-            return RedirectResponse("/login", 303)
-        return HTMLResponse(PAGE)
-
-    app.include_router(router)
-    return router
-
-
-PAGE = r"""<!doctype html>
-<html>
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>WhatsApp Property Master V4.4</title>
-<style>
-body{margin:0;font-family:Arial;background:#efe4d2;color:#2d261f}
-header{background:#5d4937;color:#fff;padding:16px 20px}
-.wrap{max-width:1700px;margin:auto;padding:18px}
-.card{background:#fffdf9;border:1px solid #dccdbb;border-radius:14px;padding:16px;margin-bottom:14px}
-.toolbar{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0}
-.btn,button{padding:9px 12px;border:0;border-radius:8px;background:#6c543f;color:#fff;font-weight:800;text-decoration:none;cursor:pointer}
-input{padding:9px;border:1px solid #d8c8b4;border-radius:8px;min-width:360px}
-.tablewrap{overflow:auto;max-height:74vh;border:1px solid #ddcfbd;border-radius:10px}
-table{width:100%;border-collapse:collapse;min-width:1500px;background:#fff}
-th,td{padding:10px;border-bottom:1px solid #eee0ce;text-align:left;font-size:12px;vertical-align:top}
-th{background:#f7ecdf;position:sticky;top:0}
-.description{max-width:560px;white-space:normal;line-height:1.45}
-.contact{font-weight:800;min-width:220px}
-.badge{display:inline-block;background:#e8dccd;padding:4px 8px;border-radius:999px;font-weight:800}
-</style>
-</head>
-<body>
-<header><b>WhatsApp Property Master</b> · V4.4 Incremental Canonical Database</header>
-<div class="wrap">
-<div class="card"><div class="toolbar">
-<a class="btn" href="/workspace">← Dashboard</a>
-<a class="btn" href="/whatsapp-live">WhatsApp Live</a>
-<a class="btn" href="/newspaper-database-v42">Newspaper Database</a>
-<a class="btn" href="/api/v44/whatsapp/dedupe-status" target="_blank">Dedupe Status</a>
-</div></div>
-<div class="card">
-<div class="toolbar">
-<input id="q" placeholder="Search description, area, configuration, contact, phone or source">
-<button onclick="load()">Search</button>
-<button onclick="rebuild()">Reconcile Latest WhatsApp</button>
-</div>
-<div id="summary"></div>
-<div class="tablewrap"><table><thead><tr>
-<th>Record ID</th><th>Type</th><th>Description</th><th>Area</th><th>Configuration</th>
-<th>Price / Rent</th><th>Contact Name / Number</th><th>Source</th><th>Captured On</th>
-<th>Verification</th><th>Sources Merged</th>
-</tr></thead><tbody id="rows"></tbody></table></div>
-</div></div>
-<script>
-const E=v=>String(v??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
-async function J(u,o={}){let r=await fetch(u,{credentials:'include',...o});let t=await r.text();let d;try{d=JSON.parse(t)}catch(e){d={detail:t}}if(!r.ok)throw Error(d.detail||t);return d}
-async function load(){let d=await J('/api/v44/whatsapp/rows?q='+encodeURIComponent(q.value||'')+'&limit=1500');summary.textContent=(d.count||0)+' live canonical properties';rows.innerHTML=(d.rows||[]).map(x=>`<tr><td>${E(x.record_id)}</td><td><span class="badge">${E(x.lead_type)}</span></td><td class="description"><b>${E(x.description)}</b></td><td>${E(x.area)}</td><td>${E(x.configuration_details)}</td><td><b>${E(x.price)}</b></td><td class="contact">${E(x.contact_name_number)}</td><td>${E(x.source)}</td><td>${E(x.captured_on)}</td><td>${E(x.verification)}</td><td>${E(x.source_count)}</td></tr>`).join('')||'<tr><td colspan="11">No live records yet.</td></tr>'}
-async function rebuild(){let d=await J('/api/v44/whatsapp/rebuild?limit=5000',{method:'POST'});alert(JSON.stringify(d,null,2));load()}
-load();
-</script>
-</body></html>"""
+        if not rows:return {"status":"UP_TO_DATE","version":VERSION,"mode":mode,"processed_to_id":None,"inserted":0,"updated":0}
+        can,stats=_build_canonical(rows);i,u=_merge_and_upsert(engine,can);_update_live_generation(engine,stats)
+        return {"status":"OK","version":VERSION,"mode":mode,**stats,"inserted":i,"updated":u,"processed_to_id":max(int(x["wa_id"]) for x in rows)}
+    core._v44_sync_whatsapp_master=lambda after_id=0,upto_id=None,limit=5000:apply_rows(fetch_incremental(after_id,upto_id,limit),"INCREMENTAL")
+    core._v44_rebuild_whatsapp_master=lambda limit=5000:apply_rows(fetch_latest(limit),"RECONCILE_LATEST")
+    app.include_router(router);return router
