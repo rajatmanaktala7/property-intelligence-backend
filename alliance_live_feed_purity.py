@@ -8,7 +8,7 @@ from sqlalchemy import text
 from starlette.middleware.base import BaseHTTPMiddleware
 import alliance_live_feed_purity_legacy36 as _legacy
 
-VERSION = "6.1.1-WHATSAPP-COMMERCIAL-DESCRIPTION-GATE"
+VERSION = "6.1.2-WHATSAPP-CLEAN-AVAILABILITY-GATE"
 OWNER = "ALLIANCE_V611_WHATSAPP_COMMERCIAL_DESCRIPTION_GATE"
 
 LOCATION_ALIASES = {
@@ -163,18 +163,41 @@ def _has_specific_property_identity(item):
     return strong or has_area or (has_loc and typed and has_price)
 
 def _money_review(item):
-    txv=str(item.get("transaction") or "").upper()
-    raw=str(item.get("description") or item.get("raw_text") or "")
-    try: value=float(str(item.get("price") or "").replace(",","").strip())
-    except Exception: value=None
-    if value is None or value<=0: return "UNKNOWN","Commercial term not stated"
-    if txv=="RENT":
-        if re.search(r"(?i)(?:per\s*sq|/\s*sq|psf|sq\.?\s*ft\s*(?:pm|per month))",raw):
-            return "NEEDS_REVIEW","Rent appears to be a per-square-foot rate"
-        if value<5000: return "NEEDS_REVIEW","Stored rent is unusually low; may be per-square-foot or missing unit"
-        if value>=100000000: return "NEEDS_REVIEW","Stored monthly rent is unusually high; verify unit and amount"
-    if txv=="SALE" and value<100000: return "NEEDS_REVIEW","Stored sale price is unusually low; verify unit and amount"
-    return "OK",""
+    txv = str(item.get("transaction") or "").upper()
+    fam = str(item.get("property_type") or "").strip().lower()
+    raw = str(item.get("description") or item.get("raw_text") or "")
+
+    try:
+        value = float(str(item.get("price") or "").replace(",", "").strip())
+    except Exception:
+        value = None
+
+    if value is None or value <= 0:
+        return "UNKNOWN", "Commercial term not stated"
+
+    if txv == "RENT":
+        if re.search(
+            r"(?i)(?:per\s*sq|/\s*sq|psf|sq\.?\s*ft\s*(?:pm|per month))",
+            raw
+        ):
+            return "NEEDS_REVIEW", "Rent appears to be a per-square-foot rate"
+
+        if value < 5000:
+            return "NEEDS_REVIEW", "Stored rent is unusually low; verify unit and amount"
+
+        # Residential ?45L/?70L monthly rent fragments are almost certainly
+        # unit/extraction errors. Keep them in raw audit, not Availability.
+        if fam == "residential" and value >= 2500000:
+            return "NEEDS_REVIEW", "Residential monthly rent is unusually high; verify amount/unit"
+
+        # Broad safety ceiling for all monthly-rent records.
+        if value >= 10000000:
+            return "NEEDS_REVIEW", "Stored monthly rent is unusually high; verify amount/unit"
+
+    if txv == "SALE" and value < 100000:
+        return "NEEDS_REVIEW", "Stored sale price is unusually low; verify unit and amount"
+
+    return "OK", ""
 
 def _purity_key(item):
     desc=norm(item.get("clean_description") or item.get("description") or "")
@@ -678,8 +701,17 @@ def properties(q="", include_deleted=False, limit=2500):
                 child["commercial_terms_reason"]=term_reason
                 out.append(child)
 
-    deduped=_dedupe_clean_properties(out)
-    clean,holding,rejected=_apply_location_first_gate(deduped)
+    deduped = _dedupe_clean_properties(out)
+    clean, holding, rejected = _apply_location_first_gate(deduped)
+
+    # Production Availability is CLEAN ONLY.
+    # NEEDS_REVIEW and UNKNOWN monetary records remain preserved in source/raw audit
+    # but must never clutter the team Availability dashboard.
+    clean = [
+        item for item in clean
+        if item.get("commercial_terms_status") == "OK"
+    ]
+
     return clean
 
 def _parse_message_ts(value):
