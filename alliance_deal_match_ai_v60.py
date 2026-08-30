@@ -8,10 +8,11 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy import text
 
 import alliance_phase5_canonical_matcher as phase5
+import alliance_whatsapp_first_match_v1 as whatsapp_first
 
-VERSION = "6.1.1-PHASE5-RESULT-TABLE-COMPAT"
+VERSION = "6.2.0-WHATSAPP-FIRST-MATCHER"
 ROUTE = "/deal-match-ai-v60"
-ENGINE_VERSION = phase5.VERSION
+ENGINE_VERSION = whatsapp_first.VERSION
 
 # This file intentionally keeps the existing public route and API names.
 # Matching is delegated to the separately validated Phase 5 canonical engine.
@@ -47,7 +48,7 @@ def run_match(core, requirement_text: str, mode: str = "SMART",
     if mode not in {"SMART", "STRICT", "EXPANSION"}:
         mode = "SMART"
 
-    result = phase5.run_match(
+    result = whatsapp_first.run_match(
         core.engine,
         requirement_text=requirement_text,
         min_score=float(min_score),
@@ -298,7 +299,7 @@ def register(core):
             "status": "OK",
             "version": VERSION,
             "engine_version": ENGINE_VERSION,
-            "matching_model": "PHASE5_CANONICAL_ELIGIBILITY_FIRST",
+            "matching_model": "WHATSAPP_FIRST_STAGED_MATCHING",
             "sources": counts,
             "candidate_count": len(deduped),
             "contacts_exposed": False,
