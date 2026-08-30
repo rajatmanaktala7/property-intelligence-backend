@@ -9,7 +9,7 @@ from sqlalchemy import text
 
 import alliance_phase5_canonical_matcher as phase5
 
-VERSION = "6.1.0-PHASE5-CANONICAL-LIVE-ADAPTER"
+VERSION = "6.1.1-PHASE5-RESULT-TABLE-COMPAT"
 ROUTE = "/deal-match-ai-v60"
 ENGINE_VERSION = phase5.VERSION
 
@@ -191,6 +191,19 @@ def _table(rows, empty_message: str):
 {''.join(trs)}
 </table></div>"""
 
+
+
+def _result_table(rows, empty_message="No matching properties found.", *args, **kwargs):
+    """
+    Backward-compatible renderer.
+
+    Older Alliance matcher/dashboard modules call `_result_table`.
+    V6.1 renamed the implementation to `_table`.
+
+    Keep both public helper names so older registered routes and
+    middleware cannot break /deal-match-ai-v60.
+    """
+    return _table(rows or [], empty_message)
 
 def render_results(core, q: str, mode: str, min_score: float):
     res = run_match(core, q, mode, min_score, 100)
