@@ -8,7 +8,7 @@ from sqlalchemy import text
 from starlette.middleware.base import BaseHTTPMiddleware
 import alliance_live_feed_purity_legacy36 as _legacy
 
-VERSION = "6.1.2-WHATSAPP-CLEAN-AVAILABILITY-GATE"
+VERSION = "6.1.3-WHATSAPP-CLEAN-BUNDLE-GATE"
 OWNER = "ALLIANCE_V611_WHATSAPP_COMMERCIAL_DESCRIPTION_GATE"
 
 LOCATION_ALIASES = {
@@ -597,6 +597,58 @@ def _latest_generation(engine):
     except Exception:
         return None
 
+
+
+def _dashboard_bundle_gate(rows):
+    """
+    Dashboard safety gate.
+
+    One source WhatsApp record may contain several possible properties.
+    If the parser has split one source record into multiple children,
+    do not guess which child is a real independent property.
+
+    Preserve the source data in the backend/raw audit, but hide the
+    ambiguous bundle from production Availability.
+    """
+    grouped = {}
+
+    for item in rows:
+        rid = str(item.get("record_id") or "").strip()
+
+        if not rid:
+            rid = "__NO_ID__" + str(id(item))
+
+        grouped.setdefault(rid, []).append(item)
+
+    visible = []
+
+    for rid, group in grouped.items():
+
+        split_children = [
+            item
+            for item in group
+            if item.get("display_child_index") not in (None, "", 0)
+        ]
+
+        # Multiple rows created from one WhatsApp source message are
+        # considered ambiguous until manually verified.
+        if len(group) > 1 and split_children:
+            for item in group:
+                item["property_purity_status"] = (
+                    "HOLDING_BUNDLED_MESSAGE_REVIEW"
+                )
+                item["matcher_eligible"] = False
+                item["holding_reason"] = (
+                    "Multiple possible properties were extracted from "
+                    "one WhatsApp message. Kept in backend for review."
+                )
+
+            continue
+
+        visible.extend(group)
+
+    return visible
+
 def properties(q="", include_deleted=False, limit=2500):
     engine = _engine()
     if engine is None: return []
@@ -711,6 +763,11 @@ def properties(q="", include_deleted=False, limit=2500):
         item for item in clean
         if item.get("commercial_terms_status") == "OK"
     ]
+
+    # Final production-dashboard purity gate.
+    # Ambiguous properties split from one bundled WhatsApp message
+    # stay in backend/raw audit but never clutter Availability.
+    clean = _dashboard_bundle_gate(clean)
 
     return clean
 
