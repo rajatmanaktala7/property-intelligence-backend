@@ -9,7 +9,7 @@ from fastapi import APIRouter, Request, Query, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy import text
 
-VERSION = "6.0.0-PHASE6-VERIFICATION-WORKFLOW"
+VERSION = "6.0.1-PHASE6-VERIFICATION-WORKFLOW"
 ROUTE = "/verification-phase6"
 
 VALID_ACTIONS = {"VERIFY_AVAILABLE", "NOT_AVAILABLE", "VERIFY_LATER", "SAVE_CORRECTION"}
@@ -280,7 +280,7 @@ def _apply_pi(engine, record_id: str, action: str, actor: str, payload: dict):
                     final_send_eligible=FALSE,
                     verification_required_before_final_send=TRUE,
                     availability_verification_status='UNVERIFIED',
-                    canonical_review_reasons='["TEAM_CORRECTED_PHASE6"]'::jsonb,
+                    canonical_review_reasons='["TEAM_CORRECTED_PHASE6"]',
                     verification_notes=:notes,
                     verification_contacted_at=NOW(),
                     updated_at=NOW()
