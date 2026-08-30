@@ -1,6 +1,6 @@
 """Fail-safe optional property module registration."""
 
-VERSION = "1.5.0-OPTIONAL-PROPERTY-MODULES-AUTOMATION"
+VERSION = "1.6.0-OPTIONAL-PROPERTY-MODULES-AI-FRONTEND"
 
 
 def _route_exists(app, path):
@@ -78,7 +78,8 @@ def register(wrapped):
             "error": f"{type(exc).__name__}: {exc}",
         }
 
-    # Commercial Intelligence remains additive and fail-safe.
+    # Commercial Intelligence AI frontend: preserves the raw discovery backend
+    # but exposes only refined, de-duplicated, commercially useful opportunities.
     try:
         if _route_exists(app, "/commercial-intelligence"):
             result["commercial_intelligence"] = {
@@ -87,7 +88,7 @@ def register(wrapped):
                 "error": None,
             }
         else:
-            import alliance_commercial_intelligence_network as commercial
+            import alliance_commercial_intelligence_ai as commercial
             commercial_result = commercial.register(core)
             result["commercial_intelligence"] = {
                 **commercial_result,
