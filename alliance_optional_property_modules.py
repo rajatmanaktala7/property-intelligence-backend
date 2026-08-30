@@ -1,6 +1,6 @@
 """Fail-safe optional property module registration."""
 
-VERSION = "1.4.0-OPTIONAL-PROPERTY-MODULES"
+VERSION = "1.5.0-OPTIONAL-PROPERTY-MODULES-AUTOMATION"
 
 
 def _route_exists(app, path):
@@ -25,6 +25,7 @@ def register(wrapped):
         "matcher_v61": {"status": "NOT_RUN", "error": None},
         "dashboard_cleanliness": {"status": "NOT_RUN", "error": None},
         "commercial_intelligence": {"status": "NOT_RUN", "error": None},
+        "commercial_intelligence_automation": {"status": "NOT_RUN", "error": None},
         "fail_safe": True,
     }
 
@@ -77,9 +78,7 @@ def register(wrapped):
             "error": f"{type(exc).__name__}: {exc}",
         }
 
-    # Alliance Commercial Intelligence Network is intentionally additive and
-    # fail-safe. If this optional module fails, the existing Alliance workspace
-    # continues to load normally.
+    # Commercial Intelligence remains additive and fail-safe.
     try:
         if _route_exists(app, "/commercial-intelligence"):
             result["commercial_intelligence"] = {
@@ -99,6 +98,31 @@ def register(wrapped):
             "status": "ERROR",
             "error": f"{type(exc).__name__}: {exc}",
             "route": "/commercial-intelligence",
+            "fail_safe": True,
+        }
+
+    # Autonomous runner is deliberately registered AFTER the database-backed
+    # Commercial Intelligence module. A scheduler failure cannot prevent the
+    # rest of the Alliance application from booting.
+    try:
+        if _route_exists(app, "/api/commercial-intelligence/automation-status"):
+            result["commercial_intelligence_automation"] = {
+                "status": "ALREADY_REGISTERED",
+                "route": "/api/commercial-intelligence/automation-status",
+                "error": None,
+            }
+        else:
+            import alliance_commercial_intelligence_scheduler as scheduler
+            scheduler_result = scheduler.register(core)
+            result["commercial_intelligence_automation"] = {
+                **scheduler_result,
+                "error": None,
+            }
+    except Exception as exc:
+        result["commercial_intelligence_automation"] = {
+            "status": "ERROR",
+            "error": f"{type(exc).__name__}: {exc}",
+            "route": "/api/commercial-intelligence/automation-status",
             "fail_safe": True,
         }
 
