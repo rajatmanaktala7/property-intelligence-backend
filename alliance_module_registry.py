@@ -1,14 +1,14 @@
-
 from __future__ import annotations
 import importlib
 from datetime import datetime, timezone
 
-MODULE_VERSION="3.8-STABLE-MODULE-REGISTRY"
+MODULE_VERSION="3.8.1-PHASE6-VERIFICATION-REGISTRY"
 
 MODULES = [
     ("newspaper_v83", "newspaper_upload_v83"),
     ("source_aware_matcher", "alliance_v38_source_aware_matcher"),
     ("clean_entity_v382b", "alliance_v382b_clean_entity_databases"),
+    ("phase6_verification", "alliance_phase6_verification_workflow"),
 ]
 
 STATE = {}
@@ -16,10 +16,11 @@ STATE = {}
 def register_optional(core, key, module_name):
     try:
         mod=importlib.import_module(module_name)
-        mod.register(core)
+        result=mod.register(core)
         STATE[key]={
             "status":"HEALTHY",
             "module":module_name,
+            "result":result,
             "error":None,
             "registered_at":datetime.now(timezone.utc).isoformat(),
         }
