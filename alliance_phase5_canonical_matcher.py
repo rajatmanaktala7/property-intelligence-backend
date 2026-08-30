@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy import create_engine, text
 
-VERSION = "5.0.2-PHASE5-CANONICAL-MATCHER"
+VERSION = "5.0.3-PHASE5-SAFE-PAYLOAD-SCRUB"
 LIVE_WA_GENERATION_FALLBACK = "159d9eab-5be5-5313-9af5-8f9913522087"
 
 # Phase 5 rules:
@@ -185,6 +185,35 @@ def _select_available(engine, table: str, wanted: List[str], where: str = "", pa
     p["lim"] = int(limit)
     with engine.connect() as c:
         return [dict(r) for r in c.execute(text(sql), p).mappings().all()]
+
+
+def sanitize_public_payload(value):
+    """
+    Recursively remove phone numbers and email addresses from every
+    user-visible matcher field without changing matching logic.
+    """
+    if isinstance(value, dict):
+        return {
+            k: sanitize_public_payload(v)
+            for k, v in value.items()
+        }
+
+    if isinstance(value, list):
+        return [
+            sanitize_public_payload(v)
+            for v in value
+        ]
+
+    if isinstance(value, tuple):
+        return tuple(
+            sanitize_public_payload(v)
+            for v in value
+        )
+
+    if isinstance(value, str):
+        return sanitize_text(value)
+
+    return value
 
 def canonical_location(*vals: Any) -> Optional[str]:
     blob = norm(" ".join(str(v or "") for v in vals))
@@ -800,10 +829,16 @@ def run_match(engine, requirement_text: str, min_score: float = 70.0, limit: int
         "alternatives": alternatives[:limit],
         "rejected_sample": rejected[:100],
     }
-    # Final safety invariant: output payload must not leak phone numbers or emails.
+    # Scrub every public string before enforcing the final contact-leak invariant.
+    # This prevents legitimate matcher requests from crashing simply because
+    # a requirement/source text contained contact information.
+    result = sanitize_public_payload(result)
+
+    # Final safety invariant stays active.
     payload = repr(result)
     if PHONE_RE.search(payload) or EMAIL_RE.search(payload):
         raise RuntimeError("CONTACT_LEAK_GUARD_TRIGGERED")
+
     return result
 
 def self_test() -> Dict[str, bool]:
