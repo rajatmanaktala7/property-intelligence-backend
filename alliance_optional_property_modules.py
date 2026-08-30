@@ -1,6 +1,6 @@
-﻿"""Fail-safe optional property module registration."""
+"""Fail-safe optional property module registration."""
 
-VERSION = "1.3.0-OPTIONAL-PROPERTY-MODULES"
+VERSION = "1.4.0-OPTIONAL-PROPERTY-MODULES"
 
 
 def _route_exists(app, path):
@@ -20,108 +20,86 @@ def register(wrapped):
 
     result = {
         "version": VERSION,
-        "property_brain": {
-            "status": "NOT_RUN",
-            "error": None
-        },
-        "property_enrichment": {
-            "status": "NOT_RUN",
-            "error": None
-        },
-        "matcher_v61": {
-            "status": "NOT_RUN",
-            "error": None
-        },
-        "dashboard_cleanliness": {
-            "status": "NOT_RUN",
-            "error": None
-        },
-        "fail_safe": True
+        "property_brain": {"status": "NOT_RUN", "error": None},
+        "property_enrichment": {"status": "NOT_RUN", "error": None},
+        "matcher_v61": {"status": "NOT_RUN", "error": None},
+        "dashboard_cleanliness": {"status": "NOT_RUN", "error": None},
+        "commercial_intelligence": {"status": "NOT_RUN", "error": None},
+        "fail_safe": True,
     }
 
     try:
-
-        if _route_exists(
-            app,
-            "/property-brain/status"
-        ):
-            result["property_brain"]["status"] = (
-                "ALREADY_REGISTERED"
-            )
-
+        if _route_exists(app, "/property-brain/status"):
+            result["property_brain"]["status"] = "ALREADY_REGISTERED"
         else:
             import alliance_property_brain_v1 as module
             module.register(core)
-
-            result["property_brain"]["status"] = (
-                "REGISTERED"
-            )
-
+            result["property_brain"]["status"] = "REGISTERED"
     except Exception as exc:
         result["property_brain"] = {
             "status": "ERROR",
-            "error": f"{type(exc).__name__}: {exc}"
+            "error": f"{type(exc).__name__}: {exc}",
         }
 
-
     try:
-
-        if _route_exists(
-            app,
-            "/property-brain/enrichment/batch/{limit}"
-        ):
-            result["property_enrichment"]["status"] = (
-                "ALREADY_REGISTERED"
-            )
-
+        if _route_exists(app, "/property-brain/enrichment/batch/{limit}"):
+            result["property_enrichment"]["status"] = "ALREADY_REGISTERED"
         else:
             import alliance_property_enrichment_v1 as module
             module.register(core)
-
-            result["property_enrichment"]["status"] = (
-                "REGISTERED"
-            )
-
+            result["property_enrichment"]["status"] = "REGISTERED"
     except Exception as exc:
         result["property_enrichment"] = {
             "status": "ERROR",
-            "error": f"{type(exc).__name__}: {exc}"
+            "error": f"{type(exc).__name__}: {exc}",
         }
-
 
     try:
         import alliance_matcher_preferences_v61 as matcher
-
         matcher_result = matcher.register(core)
-
         result["matcher_v61"] = {
-            "status": matcher_result.get(
-                "status",
-                "REGISTERED"
-            ),
+            "status": matcher_result.get("status", "REGISTERED"),
             "version": matcher_result.get("version"),
-            "error": None
+            "error": None,
         }
-
     except Exception as exc:
         result["matcher_v61"] = {
             "status": "ERROR",
-            "error": f"{type(exc).__name__}: {exc}"
+            "error": f"{type(exc).__name__}: {exc}",
         }
-
 
     try:
         import alliance_dashboard_cleanliness_v1 as clean
-
-        result["dashboard_cleanliness"] = (
-            clean.register(wrapped)
-        )
-
+        result["dashboard_cleanliness"] = clean.register(wrapped)
     except Exception as exc:
         result["dashboard_cleanliness"] = {
             "status": "ERROR",
-            "error": f"{type(exc).__name__}: {exc}"
+            "error": f"{type(exc).__name__}: {exc}",
         }
 
+    # Alliance Commercial Intelligence Network is intentionally additive and
+    # fail-safe. If this optional module fails, the existing Alliance workspace
+    # continues to load normally.
+    try:
+        if _route_exists(app, "/commercial-intelligence"):
+            result["commercial_intelligence"] = {
+                "status": "ALREADY_REGISTERED",
+                "route": "/commercial-intelligence",
+                "error": None,
+            }
+        else:
+            import alliance_commercial_intelligence_network as commercial
+            commercial_result = commercial.register(core)
+            result["commercial_intelligence"] = {
+                **commercial_result,
+                "error": None,
+            }
+    except Exception as exc:
+        result["commercial_intelligence"] = {
+            "status": "ERROR",
+            "error": f"{type(exc).__name__}: {exc}",
+            "route": "/commercial-intelligence",
+            "fail_safe": True,
+        }
 
     return result
