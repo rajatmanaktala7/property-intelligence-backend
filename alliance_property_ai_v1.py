@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 import os
@@ -9,7 +9,7 @@ from fastapi import Query
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
-VERSION = "2.0.0-PHASE2-PROPERTY-AI"
+VERSION = "2.0.1-PHASE2-ASSET-IDENTITY-FIX"
 
 PROPERTY_SIGNALS = (
     "PLOT", "LAND", "VILLA", "APARTMENT", "FLAT", "OFFICE", "SHOP",
@@ -171,10 +171,16 @@ def _transaction(raw: str, current: Optional[str]) -> tuple[Optional[str], Optio
 
 
 def _property_family(raw: str, current: Optional[str]) -> tuple[Optional[str], Optional[str]]:
-    if current:
-        return current, current
-
     n = _norm(raw)
+
+    # Asset identity takes priority over intended use.
+    # Example: "Plot ... good for single luxury villa" is LAND,
+    # while luxury villa is captured separately as suitable_use.
+    if any(x in n for x in (
+        "PLOT", "LAND", "ACRE", "FARM LAND",
+        "RESIDENTIAL PLOT", "COMMERCIAL PLOT"
+    )):
+        return "LAND", "explicit land / plot asset signal"
 
     if any(x in n for x in (
         "OFFICE", "SHOP", "SHOWROOM", "RETAIL", "COMMERCIAL",
@@ -183,15 +189,16 @@ def _property_family(raw: str, current: Optional[str]) -> tuple[Optional[str], O
         return "COMMERCIAL", "commercial property signal"
 
     if any(x in n for x in (
-        "BHK", "FLAT", "APARTMENT", "VILLA",
-        "KOTHI", "PENTHOUSE", "RESIDENTIAL"
+        "BHK", "FLAT", "APARTMENT", "BUILT VILLA",
+        "READY VILLA", "KOTHI", "PENTHOUSE", "RESIDENTIAL"
     )):
-        return "RESIDENTIAL", "residential property signal"
+        return "RESIDENTIAL", "residential built-property signal"
 
-    if any(x in n for x in (
-        "PLOT", "LAND", "ACRE", "FARMHOUSE"
-    )):
-        return "LAND", "land property signal"
+    if current:
+        return current, current
+
+    if "VILLA" in n:
+        return "RESIDENTIAL", "villa property signal"
 
     return None, None
 
