@@ -1,6 +1,6 @@
 ﻿"""Fail-safe optional property module registration."""
 
-VERSION = "1.17.0-OPTIONAL-PROPERTY-MODULES-LOCALITY-CLASSIFICATION-V252"
+VERSION = "1.18.0-OPTIONAL-PROPERTY-MODULES-LOCATION-EVIDENCE-V253"
 
 
 def _route_exists(app, path):
@@ -668,6 +668,32 @@ def register(wrapped):
             "status": "ERROR",
             "error": f"{type(exc).__name__}: {exc}",
             "route": "/api/v7/property-ai/locality-classification-v252/status",
+            "fail_safe": True,
+        }
+
+    # PHASE 2.5.3 - deterministic location evidence resolver
+    try:
+        if _route_exists(
+            app,
+            "/api/v7/property-ai/location-evidence-v253/status",
+        ):
+            result["location_evidence_v253"] = {
+                "status": "ALREADY_REGISTERED",
+                "route": "/api/v7/property-ai/location-evidence-v253/status",
+                "error": None,
+            }
+        else:
+            import alliance_property_location_evidence_v253 as location_v253
+            location_result = location_v253.register(core)
+            result["location_evidence_v253"] = {
+                **location_result,
+                "error": None,
+            }
+    except Exception as exc:
+        result["location_evidence_v253"] = {
+            "status": "ERROR",
+            "error": f"{type(exc).__name__}: {exc}",
+            "route": "/api/v7/property-ai/location-evidence-v253/status",
             "fail_safe": True,
         }
     return result
