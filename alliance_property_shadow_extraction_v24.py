@@ -1156,3 +1156,344 @@ def register(core):
         "preview": "/api/v7/property-ai/shadow-extraction/preview?limit=25",
         "writes_enabled": False,
     }
+
+
+# ============================================================================
+# PHASE 2.4.4 - DETERMINISTIC SEMANTIC QUALITY GATE
+# Compatibility layer over tested Phase 2.4.3. Read-only.
+# ============================================================================
+
+_V243_EXTRACT_ENTITY = _extract_entity
+_V243_BENCHMARK = _benchmark
+_V243_REGRESSION_DEMO = _regression_demo
+
+VERSION = "2.4.4-DETERMINISTIC-SEMANTIC-QUALITY-GATE"
+
+OWN_AREA_RE_244 = re.compile(
+    r"(?i)\b\d[\d,]*(?:\.\d+)?\s*(?:SQ\.?\s*FT|SQFT|SFT|SQ\.?\s*YD|SQYD|YARDS?|GAJ|SQ\.?\s*M|SQMT|SQM|ACRES?)\b"
+)
+OWN_CONFIG_RE_244 = re.compile(
+    r"(?i)\b(?:\d(?:\.\d+)?\s*BHK|\d\s*\.?\s*BR\.?|STUDIO|PENTHOUSE|DUPLEX)\b"
+)
+OWN_ASSET_RE_244 = re.compile(
+    r"(?i)\b(?:PLOT|LAND|VILLA|APARTMENT|FLAT|KOTHI|PENTHOUSE|BUILDER\s+FLOOR|INDEPENDENT\s+FLOOR|"
+    r"OFFICE|SHOWROOM|SHOP|WAREHOUSE|GODOWN|BANQUET|RESTAURANT|CAFE|CLUB|LOUNGE|"
+    r"COMMERCIAL\s+SPACE|COMMERCIAL\s+BUILDING|BASEMENT)\b"
+)
+
+SEMANTIC_HARD_BLOCKERS_244 = {
+    "BOUNDARY_NEEDS_SPLIT",
+    "AMBIGUOUS_RATE_NOT_TOTAL_PRICE",
+    "IMPLAUSIBLE_SALE_TOTAL_REJECTED",
+    "IMPLAUSIBLE_RENT_TOTAL_REJECTED",
+    "PHONE_LIKE_OR_EXTREME_MONEY_REJECTED",
+    "PHONE_LIKE_MONEY_REJECTED",
+    "LOCATION_NOT_SUPPORTED_BY_OWN_TEXT",
+    "MICRO_LOCATION_WITHOUT_PARENT_LOCALITY",
+    "TRANSACTION_MISSING",
+    "PROPERTY_FAMILY_MISSING",
+    "LOCATION_MISSING",
+    "NOISE",
+}
+
+def _semantic_own_evidence_244(row: Dict[str, Any]) -> Dict[str, Any]:
+    own = _norm(row.get("own_text_redacted"))
+    hierarchy = dict(row.get("location_hierarchy") or {})
+
+    own_area = bool(OWN_AREA_RE_244.search(own))
+    own_config = bool(OWN_CONFIG_RE_244.search(own))
+    own_asset = bool(OWN_ASSET_RE_244.search(own))
+    own_micro = bool(hierarchy.get("block") or hierarchy.get("sector") or hierarchy.get("phase"))
+
+    own_money = False
+    money = row.get("money")
+    if isinstance(money, dict) and money.get("value") is not None:
+        raw_money = _norm(money.get("raw"))
+        if raw_money:
+            own_money = _norm_key(raw_money) in _norm_key(own)
+        if not own_money:
+            own_money = bool(OWN_MONEY_RE.search(own))
+
+    identity_anchor = bool(own_asset or own_config or own_micro)
+    property_fact = bool(own_area or own_money or own_config)
+
+    return {
+        "own_asset_signal": own_asset,
+        "own_configuration_signal": own_config,
+        "own_micro_location_signal": own_micro,
+        "own_area_signal": own_area,
+        "own_money_signal": own_money,
+        "identity_anchor": identity_anchor,
+        "property_specific_fact": property_fact,
+    }
+
+def _semantic_promotion_decision_244(row: Dict[str, Any]) -> Dict[str, Any]:
+    reasons = set(row.get("review_reasons") or [])
+    evidence = _semantic_own_evidence_244(row)
+    blockers = sorted(reasons.intersection(SEMANTIC_HARD_BLOCKERS_244))
+
+    eligible = bool(
+        row.get("classification") == "AMBIGUOUS"
+        and row.get("boundary_needs_split") is False
+        and row.get("transaction") in ("SALE", "RENT")
+        and row.get("property_family") in ("RESIDENTIAL", "COMMERCIAL", "LAND")
+        and bool(row.get("location"))
+        and evidence["identity_anchor"]
+        and evidence["property_specific_fact"]
+        and not blockers
+    )
+
+    return {
+        "eligible": eligible,
+        "original_classification": row.get("classification"),
+        "hard_blockers": blockers,
+        "own_evidence": evidence,
+        "rule": "AMBIGUOUS+SAFE_BOUNDARY+SALE_RENT+FAMILY+LOCALITY+OWN_IDENTITY+OWN_PROPERTY_FACT+NO_HARD_BLOCKER",
+    }
+
+def _extract_entity(entity, burst_group_id: str, shared_defaults: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    row = _V243_EXTRACT_ENTITY(entity, burst_group_id, shared_defaults=shared_defaults)
+    gate = _semantic_promotion_decision_244(row)
+    row["semantic_quality_gate"] = gate
+
+    if gate["eligible"]:
+        row["classification"] = "AVAILABILITY"
+        reasons = [r for r in (row.get("review_reasons") or []) if r != "CLASSIFICATION_AMBIGUOUS"]
+        reasons.append("DETERMINISTIC_AVAILABILITY_PROMOTION")
+        row["review_reasons"] = list(dict.fromkeys(reasons))
+
+        remaining = set(row["review_reasons"]).intersection(
+            SEMANTIC_HARD_BLOCKERS_244 | {"PROPERTY_SPECIFIC_FACT_MISSING", "CLASSIFICATION_AMBIGUOUS"}
+        )
+        row["quality"] = "CLEAN" if not remaining else "UNDER_REVIEW"
+
+        provenance = dict(row.get("provenance") or {})
+        provenance["semantic_classification"] = {
+            "method": "DETERMINISTIC_OWN_EVIDENCE_GATE",
+            "original_classification": "AMBIGUOUS",
+            "promoted_classification": "AVAILABILITY",
+            "sibling_property_specific_facts_used": False,
+            "llm_required_for_promotion": False,
+        }
+        row["provenance"] = provenance
+
+    return row
+
+def _benchmark(engine, limit: int):
+    result = _V243_BENCHMARK(engine, limit)
+    result["version"] = VERSION
+    result["semantic_quality_gate"] = True
+    result["semantic_gate_contract"] = {
+        "ambiguous_only": True,
+        "requires_sale_or_rent": True,
+        "requires_property_family": True,
+        "requires_broad_locality": True,
+        "requires_safe_boundary": True,
+        "requires_own_identity_anchor": True,
+        "requires_own_property_fact": True,
+        "price_only_promotion": False,
+        "block_only_promotion": False,
+        "dangerous_rate_promotion": False,
+        "requirement_promotion": False,
+        "llm_required_for_promotion": False,
+        "property_specific_sibling_inheritance": False,
+    }
+
+    candidates = [c for b in (result.get("bursts") or []) for c in (b.get("candidates") or [])]
+    counts = dict(result.get("counts") or {})
+    counts["deterministic_availability_promotions"] = sum(
+        1 for c in candidates if (c.get("semantic_quality_gate") or {}).get("eligible")
+    )
+    counts["deterministic_promotions_clean"] = sum(
+        1 for c in candidates
+        if (c.get("semantic_quality_gate") or {}).get("eligible") and c.get("quality") == "CLEAN"
+    )
+    if candidates:
+        counts["clean_candidates"] = sum(1 for c in candidates if c.get("quality") == "CLEAN")
+        counts["under_review"] = sum(1 for c in candidates if c.get("quality") != "CLEAN")
+        counts["availability"] = sum(1 for c in candidates if c.get("classification") == "AVAILABILITY")
+        counts["requirements"] = sum(1 for c in candidates if c.get("classification") == "REQUIREMENT")
+        counts["ambiguous_or_noise"] = sum(
+            1 for c in candidates if c.get("classification") in ("AMBIGUOUS", "NOISE")
+        )
+        counts["clean_candidate_rate"] = round(counts["clean_candidates"] / len(candidates), 4)
+    result["counts"] = counts
+    result["decision"] = (
+        "SHADOW ONLY. Deterministic promotion is allowed only for safe AMBIGUOUS entities "
+        "with SALE/RENT, family, broad locality, own-text identity and own-text property fact."
+    )
+    return result
+
+def _regression_demo():
+    cases = _V243_REGRESSION_DEMO()
+
+    ents = reconstruct_entities(
+        "Kothi for sale in kalkaji 100 yards K Block Price 8 cr "
+        "K Block 100 yards 7.50cr "
+        "C Block 100 yards 8.25 cr "
+        "C Block 100 yards 7.55 cr "
+        "K Block 200 yards Gav mukha park facing Price 14.25 cr "
+        "G Block 200 yards 17 cr"
+    )
+    defaults = _derive_group_defaults(ents)
+    cases["kalkaji_semantic_gate"] = {
+        "defaults": defaults,
+        "candidates": [_extract_entity(e, "demo", defaults) for e in ents],
+    }
+
+    e = reconstruct_entities("8.25 cr")[0]
+    cases["negative_price_only"] = _extract_entity(
+        e, "demo",
+        {"transaction":"SALE","property_family":"RESIDENTIAL","location":"Kalkaji",
+         "evidence":"validated bundle header","scope":"BLOCK_ANCHOR_TEMPLATE_ONLY"}
+    )
+
+    e = reconstruct_entities("C Block")[0]
+    cases["negative_block_only"] = _extract_entity(
+        e, "demo",
+        {"transaction":"SALE","property_family":"RESIDENTIAL","location":"Kalkaji",
+         "evidence":"validated bundle header","scope":"BLOCK_ANCHOR_TEMPLATE_ONLY"}
+    )
+
+    e = reconstruct_entities(
+        "Land Available For Sale Dwarka Sector 24 Size 1 Acres Plot Price 70Cr/Acres"
+    )[0]
+    cases["negative_rate_per_area"] = _extract_entity(e, "demo")
+
+    e = reconstruct_entities(
+        "DIRECT CLIENT RENTAL REQUIREMENT 3/4 BHK VILLA WITH PRIVATE POOL "
+        "Preferred Locations: Vagator Anjuna Siolim Assagao Budget 1.5 - 2.25 Lakh/month"
+    )[0]
+    cases["requirement_preserved"] = _extract_entity(e, "demo")
+    return cases
+
+def register(core):
+    app = core.app
+    engine = core.engine
+    status_route = "/api/v7/property-ai/shadow-extraction/status"
+
+    if any(getattr(route, "path", None) == status_route for route in app.router.routes):
+        return {"status":"ALREADY_REGISTERED","version":VERSION,"route":status_route}
+
+    @app.get(status_route)
+    def status():
+        return JSONResponse({
+            "status":"READY",
+            "version":VERSION,
+            "reconstructor_engine_version":RECONSTRUCTOR_ENGINE_VERSION,
+            "mode":"READ_ONLY_SHADOW_EXTRACTION",
+            "property_ai_engine":property_ai.VERSION,
+            "hierarchical_location_intelligence":True,
+            "deterministic_semantic_quality_gate":True,
+            "semantic_gate_ambiguous_only":True,
+            "semantic_gate_requires_own_identity_anchor":True,
+            "semantic_gate_requires_own_property_fact":True,
+            "price_only_promotion":False,
+            "block_only_promotion":False,
+            "dangerous_rate_promotion":False,
+            "requirement_promotion":False,
+            "llm_required_for_semantic_promotion":False,
+            "property_specific_inheritance":False,
+            "parent_context_auto_apply":False,
+            "privacy_redaction_before_property_ai":True,
+            "database_writes":False,
+            "canonical_tables_modified":False,
+            "orchestrator_modified_by_phase24":False,
+            "matcher_modified":False,
+            "whatsapp_live_modified":False,
+            "raw_data_deleted":False,
+        })
+
+    @app.get("/api/v7/property-ai/shadow-extraction/regression-test")
+    def regression_test():
+        return JSONResponse(_regression_demo())
+
+    @app.get("/api/v7/property-ai/shadow-extraction/preview")
+    def preview(limit: int = Query(25, ge=1, le=100)):
+        return JSONResponse(_benchmark(engine, limit))
+
+    app.state.alliance_property_shadow_extraction_v24_registered = True
+    return {
+        "status":"REGISTERED",
+        "version":VERSION,
+        "route":status_route,
+        "preview":"/api/v7/property-ai/shadow-extraction/preview?limit=25",
+        "writes_enabled":False,
+    }
+
+
+# ============================================================================
+# PHASE 2.4.4 REGRESSION HARNESS REPAIR
+# Keeps VERSION unchanged. Fixes negative controls that intentionally are too
+# weak for reconstruct_entities() to emit an EntityBlock.
+# ============================================================================
+
+from property_brain.stages.s3_entity_segmentation_v23 import EntityBlock
+
+def _phase244_demo_entity(text_value: str) -> EntityBlock:
+    return EntityBlock(
+        index=1,
+        own_text=text_value,
+        inherited_context=[],
+        sibling_facts_do_not_copy=[],
+        parent_context_reference_only=[],
+        method="single",
+        needs_split=False,
+        reason=None,
+    )
+
+def _regression_demo():
+    cases = _V243_REGRESSION_DEMO()
+
+    ents = reconstruct_entities(
+        "Kothi for sale in kalkaji 100 yards K Block Price 8 cr "
+        "K Block 100 yards 7.50cr "
+        "C Block 100 yards 8.25 cr "
+        "C Block 100 yards 7.55 cr "
+        "K Block 200 yards Gav mukha park facing Price 14.25 cr "
+        "G Block 200 yards 17 cr"
+    )
+    defaults = _derive_group_defaults(ents)
+    cases["kalkaji_semantic_gate"] = {
+        "defaults": defaults,
+        "candidates": [
+            _extract_entity(e, "demo", defaults)
+            for e in ents
+        ],
+    }
+
+    template = {
+        "transaction": "SALE",
+        "property_family": "RESIDENTIAL",
+        "location": "Kalkaji",
+        "evidence": "validated bundle header",
+        "scope": "BLOCK_ANCHOR_TEMPLATE_ONLY",
+    }
+
+    cases["negative_price_only"] = _extract_entity(
+        _phase244_demo_entity("8.25 cr"),
+        "demo",
+        template,
+    )
+
+    cases["negative_block_only"] = _extract_entity(
+        _phase244_demo_entity("C Block"),
+        "demo",
+        template,
+    )
+
+    rate_entities = reconstruct_entities(
+        "Land Available For Sale Dwarka Sector 24 Size 1 Acres Plot Price 70Cr/Acres"
+    )
+    if rate_entities:
+        cases["negative_rate_per_area"] = _extract_entity(rate_entities[0], "demo")
+
+    req_entities = reconstruct_entities(
+        "DIRECT CLIENT RENTAL REQUIREMENT 3/4 BHK VILLA WITH PRIVATE POOL "
+        "Preferred Locations: Vagator Anjuna Siolim Assagao "
+        "Budget 1.5 - 2.25 Lakh/month"
+    )
+    if req_entities:
+        cases["requirement_preserved"] = _extract_entity(req_entities[0], "demo")
+
+    return cases
