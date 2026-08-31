@@ -1,6 +1,6 @@
 ﻿"""Fail-safe optional property module registration."""
 
-VERSION = "1.21.0-OPTIONAL-PROPERTY-MODULES-HEADER-SCOPE-V254C"
+VERSION = "1.22.1-OPTIONAL-PROPERTY-MODULES-HIERARCHICAL-PARSER-V255A"
 
 
 def _route_exists(app, path):
@@ -772,6 +772,32 @@ def register(wrapped):
             "status": "ERROR",
             "error": f"{type(exc).__name__}: {exc}",
             "route": "/api/v7/property-ai/header-scope-v254c/status",
+            "fail_safe": True,
+        }
+
+    # PHASE 2.5.5 - hierarchical property scope parser preview
+    try:
+        if _route_exists(
+            app,
+            "/api/v7/property-ai/hierarchical-parser-v255/status",
+        ):
+            result["hierarchical_parser_v255"] = {
+                "status": "ALREADY_REGISTERED",
+                "route": "/api/v7/property-ai/hierarchical-parser-v255/status",
+                "error": None,
+            }
+        else:
+            import alliance_property_hierarchical_parser_v255 as hierarchical_parser_v255
+            v255_result = hierarchical_parser_v255.register(core)
+            result["hierarchical_parser_v255"] = {
+                **v255_result,
+                "error": None,
+            }
+    except Exception as exc:
+        result["hierarchical_parser_v255"] = {
+            "status": "ERROR",
+            "error": f"{type(exc).__name__}: {exc}",
+            "route": "/api/v7/property-ai/hierarchical-parser-v255/status",
             "fail_safe": True,
         }
     return result
