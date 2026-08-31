@@ -1,6 +1,6 @@
 ﻿"""Fail-safe optional property module registration."""
 
-VERSION = "1.23.0-OPTIONAL-PROPERTY-MODULES-PARENT-LOCATION-V255B"
+VERSION = "1.24.0-OPTIONAL-PROPERTY-MODULES-LOCATION-BOUNDARY-DIAGNOSTIC-V255C"
 
 
 def _route_exists(app, path):
@@ -824,6 +824,32 @@ def register(wrapped):
             "status": "ERROR",
             "error": f"{type(exc).__name__}: {exc}",
             "route": "/api/v7/property-ai/parent-location-v255b/status",
+            "fail_safe": True,
+        }
+
+    # PHASE 2.5.5C - remaining location and boundary diagnostic
+    try:
+        if _route_exists(
+            app,
+            "/api/v7/property-ai/location-boundary-diagnostic-v255c/status",
+        ):
+            result["location_boundary_diagnostic_v255c"] = {
+                "status": "ALREADY_REGISTERED",
+                "route": "/api/v7/property-ai/location-boundary-diagnostic-v255c/status",
+                "error": None,
+            }
+        else:
+            import alliance_property_location_boundary_diagnostic_v255c as location_boundary_diagnostic_v255c
+            v255c_result = location_boundary_diagnostic_v255c.register(core)
+            result["location_boundary_diagnostic_v255c"] = {
+                **v255c_result,
+                "error": None,
+            }
+    except Exception as exc:
+        result["location_boundary_diagnostic_v255c"] = {
+            "status": "ERROR",
+            "error": f"{type(exc).__name__}: {exc}",
+            "route": "/api/v7/property-ai/location-boundary-diagnostic-v255c/status",
             "fail_safe": True,
         }
     return result
