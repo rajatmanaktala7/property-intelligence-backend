@@ -1,6 +1,6 @@
 """Fail-safe optional property module registration."""
 
-VERSION = "1.9.0-OPTIONAL-PROPERTY-MODULES-CONTEXT-RESCUE"
+VERSION = "1.10.0-OPTIONAL-PROPERTY-MODULES-BUNDLE-RECONSTRUCTOR"
 
 
 def _route_exists(app, path):
@@ -62,6 +62,11 @@ def register(wrapped):
         },
 
         "context_rescue": {
+            "status": "NOT_RUN",
+            "error": None,
+        },
+
+        "bundle_reconstructor": {
             "status": "NOT_RUN",
             "error": None,
         },
@@ -462,6 +467,26 @@ def register(wrapped):
 
             "fail_safe":
                 True,
+        }
+
+
+    try:
+        if _route_exists(app, "/api/v7/property-ai/bundle-reconstructor/status"):
+            result["bundle_reconstructor"] = {
+                "status": "ALREADY_REGISTERED",
+                "route": "/api/v7/property-ai/bundle-reconstructor/status",
+                "error": None,
+            }
+        else:
+            import alliance_property_bundle_reconstructor_v23 as bundle
+            bundle_result = bundle.register(core)
+            result["bundle_reconstructor"] = {**bundle_result, "error": None}
+    except Exception as exc:
+        result["bundle_reconstructor"] = {
+            "status": "ERROR",
+            "error": f"{type(exc).__name__}: {exc}",
+            "route": "/api/v7/property-ai/bundle-reconstructor/status",
+            "fail_safe": True,
         }
 
     return result
