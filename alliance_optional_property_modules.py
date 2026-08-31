@@ -1,6 +1,6 @@
 ﻿"""Fail-safe optional property module registration."""
 
-VERSION = "1.18.0-OPTIONAL-PROPERTY-MODULES-LOCATION-EVIDENCE-V253"
+VERSION = "1.19.0-OPTIONAL-PROPERTY-MODULES-LOCATION-DIAGNOSTIC-V253A"
 
 
 def _route_exists(app, path):
@@ -694,6 +694,32 @@ def register(wrapped):
             "status": "ERROR",
             "error": f"{type(exc).__name__}: {exc}",
             "route": "/api/v7/property-ai/location-evidence-v253/status",
+            "fail_safe": True,
+        }
+
+    # PHASE 2.5.3A - unresolved location diagnostic
+    try:
+        if _route_exists(
+            app,
+            "/api/v7/property-ai/location-diagnostic-v253a/status",
+        ):
+            result["location_diagnostic_v253a"] = {
+                "status": "ALREADY_REGISTERED",
+                "route": "/api/v7/property-ai/location-diagnostic-v253a/status",
+                "error": None,
+            }
+        else:
+            import alliance_property_location_diagnostic_v253a as location_diag_v253a
+            diag_result = location_diag_v253a.register(core)
+            result["location_diagnostic_v253a"] = {
+                **diag_result,
+                "error": None,
+            }
+    except Exception as exc:
+        result["location_diagnostic_v253a"] = {
+            "status": "ERROR",
+            "error": f"{type(exc).__name__}: {exc}",
+            "route": "/api/v7/property-ai/location-diagnostic-v253a/status",
             "fail_safe": True,
         }
     return result
