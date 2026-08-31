@@ -11,7 +11,7 @@ from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 
 
-VERSION = "3.2-STABILITY-FLOOD-SHIELD"
+VERSION = "3.3-EMERGENCY-EVENT-LOOP-SHIELD"
 
 BOOT = {
     "state": "STARTING",
@@ -547,102 +547,40 @@ class HealthFirstDispatcher:
                 gate.release()
 
     async def _serve_ingest(self, scope: dict[str, Any], receive, send):
-        if CORE_APP is None or not BOOT["core_loaded"]:
-            await health_app(scope, receive, send)
-            return
-
-        if not _rate_allowed("ingest", INGEST_MIN_INTERVAL_SECONDS):
-            RUNTIME["rejected_ingest_requests"] += 1
-            await self._send_busy(
-                scope,
-                receive,
-                send,
-                "WhatsApp ingest throttled. Retry shortly.",
-                retry_after="1",
-            )
-            return
-
-        gate = _get_ingest_gate()
-        acquired = False
-
-        try:
-            try:
-                await asyncio.wait_for(
-                    gate.acquire(),
-                    timeout=INGEST_GATE_WAIT_SECONDS,
-                )
-                acquired = True
-            except asyncio.TimeoutError:
-                RUNTIME["rejected_ingest_requests"] += 1
-                await self._send_busy(
-                    scope,
-                    receive,
-                    send,
-                    "WhatsApp ingest capacity reached. Retry shortly.",
-                    retry_after="1",
-                )
-                return
-
-            RUNTIME["active_ingest_requests"] += 1
-            RUNTIME["accepted_ingest_requests"] += 1
-            await CORE_APP(scope, receive, send)
-
-        finally:
-            if acquired:
-                RUNTIME["active_ingest_requests"] = max(
-                    0,
-                    RUNTIME["active_ingest_requests"] - 1,
-                )
-                gate.release()
+        # EMERGENCY STABILITY MODE:
+        # Do not allow WhatsApp ingest to enter the core ASGI app at all.
+        # A previously admitted ingest request can execute blocking synchronous
+        # work inside async middleware and freeze the shared Uvicorn event loop,
+        # which also freezes /healthz and /runtime-status.
+        RUNTIME["rejected_ingest_requests"] += 1
+        response = PlainTextResponse(
+            "WhatsApp ingest temporarily paused for production stability.",
+            status_code=503,
+            headers={
+                "Retry-After": "30",
+                "Cache-Control": "no-store",
+            },
+        )
+        await response(scope, receive, send)
 
     async def _serve_freshness(self, scope: dict[str, Any], receive, send):
-        if CORE_APP is None or not BOOT["core_loaded"]:
-            await health_app(scope, receive, send)
-            return
-
-        if not _rate_allowed("freshness", FRESHNESS_MIN_INTERVAL_SECONDS):
-            RUNTIME["rejected_freshness_requests"] += 1
-            await self._send_busy(
-                scope,
-                receive,
-                send,
-                "Freshness polling throttled. Retry shortly.",
-                retry_after="2",
-            )
-            return
-
-        gate = _get_freshness_gate()
-        acquired = False
-
-        try:
-            try:
-                await asyncio.wait_for(
-                    gate.acquire(),
-                    timeout=FRESHNESS_GATE_WAIT_SECONDS,
-                )
-                acquired = True
-            except asyncio.TimeoutError:
-                RUNTIME["rejected_freshness_requests"] += 1
-                await self._send_busy(
-                    scope,
-                    receive,
-                    send,
-                    "Freshness check already running.",
-                    retry_after="2",
-                )
-                return
-
-            RUNTIME["active_freshness_requests"] += 1
-            RUNTIME["accepted_freshness_requests"] += 1
-            await CORE_APP(scope, receive, send)
-
-        finally:
-            if acquired:
-                RUNTIME["active_freshness_requests"] = max(
-                    0,
-                    RUNTIME["active_freshness_requests"] - 1,
-                )
-                gate.release()
+        # EMERGENCY STABILITY MODE:
+        # Dashboard freshness polling is non-essential. Keep it outside the core
+        # until the blocking middleware/request path is refactored.
+        RUNTIME["rejected_freshness_requests"] += 1
+        response = JSONResponse(
+            status_code=503,
+            content={
+                "status": "PAUSED",
+                "reason": "production_stability",
+                "retry_after_seconds": 30,
+            },
+            headers={
+                "Retry-After": "30",
+                "Cache-Control": "no-store",
+            },
+        )
+        await response(scope, receive, send)
 
     async def __call__(self, scope: dict[str, Any], receive, send):
         scope_type = scope.get("type")
