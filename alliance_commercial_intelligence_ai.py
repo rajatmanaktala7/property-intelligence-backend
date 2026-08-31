@@ -9,8 +9,9 @@ from urllib.parse import urlparse
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import text
+import alliance_government_commercial_sources_v1 as govsrc
 
-VERSION = "4.0.1-COMMERCIAL-ASSET-PURITY-NONBLOCKING"
+VERSION = "5.0.0-GOV-SOURCES-STRICT-CITY"
 
 TARGET_CITIES = [
     "Delhi", "Gurugram", "Noida", "Greater Noida", "Ghaziabad", "Faridabad",
@@ -368,34 +369,7 @@ def _research_mall(engine, code):
         c.execute(text("UPDATE aci_intel_assets SET last_researched_at=NOW(),updated_at=NOW() WHERE asset_code=:a"),{"a":code})
 
 def _research_gov(engine, code):
-    with engine.connect() as c: asset=c.execute(text("SELECT * FROM aci_intel_assets WHERE asset_code=:a"),{"a":code}).mappings().first()
-    if not asset: return
-    name,city,auth=_clean(asset.get("asset_name")),_clean(asset.get("city")),_clean(asset.get("developer_or_authority"))
-    rows,_=_search([f'"{name}" {auth} {city} commercial space tender lease',f'"{name}" {auth} {city} area reserve rent EMD tender',f'"{name}" {auth} {city} contact phone commercial leasing',f'"{name}" {city} nearby restaurants retail brands offices metro',f'"{name}" {city} footfall catchment commercial potential'],True)
-    with engine.begin() as c:
-        available=False
-        for row in rows[:70]:
-            title,snippet,url=_clean(row.get("title")),_clean(row.get("snippet")),_clean(row.get("url")); blob=f"{title} {snippet}"
-            if not title or _is_noise(url,title,snippet): continue
-            _save_evidence(c,code,"GOV_PREMISES_RESEARCH",row); av=_availability(blob)
-            if av=="REPORTED_AVAILABLE" or any(x in blob.lower() for x in ["tender","auction","licensing","allotment"]):
-                available=True; c.execute(text("INSERT INTO aci_intel_vacancies(asset_code,availability_status,area_text,floor_text,rent_text,permitted_use,source_url,confidence,last_verified_at) VALUES(:a,'REPORTED_AVAILABLE',:ar,:fl,:r,'Subject to official authority/tender terms',:u,75,NOW())"),{"a":code,"ar":_area(blob),"fl":_floor(blob),"r":_rent(blob),"u":url})
-            ph,em=_phone(blob),_email(blob)
-            if (ph or em) and any(x in blob.lower() for x in ["contact","commercial","leasing","tender","estate","property"]):
-                c.execute(text('''INSERT INTO aci_intel_contacts(asset_code,phone,email,company_name,source_url,confidence,last_verified_at)
-                  SELECT :a,:p,:e,:co,:u,70,NOW() WHERE NOT EXISTS(SELECT 1 FROM aci_intel_contacts WHERE asset_code=:a AND COALESCE(phone,'')=COALESCE(:p,'') AND COALESCE(email,'')=COALESCE(:e,''))'''),{"a":code,"p":ph,"e":em,"co":auth,"u":url})
-        transit=any(x in (auth+" "+name).lower() for x in ["dmrc","metro","rail","station","rlda","ireps"]); airport=any(x in (auth+" "+name).lower() for x in ["airport","aai"])
-        rank=[("QSR",90),("Coffee & Bakery",88),("Pharmacy & Wellness",80),("Services",76),("Grocery",70)] if transit else [("Coffee & Bakery",90),("QSR",88),("Casual Dining",82),("Fashion",72),("Services",70)] if airport else [("QSR",82),("Coffee & Bakery",80),("Services",76),("Pharmacy & Wellness",74),("Fashion",68)]
-        for cat,base in rank:
-            for brand in BRAND_CATALOG.get(cat,[])[:4]:
-                reason=f"{brand} is a candidate because {cat} matches the inferred premises/catchment. Actual fit depends on unit size, frontage, permitted use, terms, footfall and brand expansion approval."
-                c.execute(text('''INSERT INTO aci_intel_recommendations(asset_code,brand_name,category,fit_score,reason,evidence_basis)
-                  VALUES(:a,:b,:c,:f,:r,'PREMISES_TYPE + PUBLIC_WEB + CATCHMENT_SIGNALS') ON CONFLICT(asset_code,brand_name) DO UPDATE SET category=EXCLUDED.category,fit_score=EXCLUDED.fit_score,reason=EXCLUDED.reason,evidence_basis=EXCLUDED.evidence_basis,updated_at=NOW()'''),{"a":code,"b":brand,"c":cat,"f":base,"r":reason})
-        nc=c.execute(text("SELECT COUNT(*) FROM aci_intel_contacts WHERE asset_code=:a"),{"a":code}).scalar() or 0
-        summary=f"{auth or 'Institutional'} premises. Strongest inferred scope: {rank[0][0]}; secondary: {rank[1][0]}. Availability, rent, footfall and permitted use remain unverified unless official evidence supports them."
-        c.execute(text('''INSERT INTO aci_intel_scope(asset_code,opportunity_score,strongest_scope,secondary_scope,weak_scope,catchment_summary,competition_summary,vacancy_summary,contact_summary,ai_summary,confidence,last_researched_at)
-          VALUES(:a,82,:s,:ss,'Premium concepts without catchment proof',:ca,:co,:v,:ct,:sm,70,NOW()) ON CONFLICT(asset_code) DO UPDATE SET opportunity_score=EXCLUDED.opportunity_score,strongest_scope=EXCLUDED.strongest_scope,secondary_scope=EXCLUDED.secondary_scope,weak_scope=EXCLUDED.weak_scope,catchment_summary=EXCLUDED.catchment_summary,competition_summary=EXCLUDED.competition_summary,vacancy_summary=EXCLUDED.vacancy_summary,contact_summary=EXCLUDED.contact_summary,ai_summary=EXCLUDED.ai_summary,confidence=EXCLUDED.confidence,last_researched_at=NOW(),updated_at=NOW()'''),{"a":code,"s":rank[0][0],"ss":rank[1][0],"ca":"Public catchment signals collected; verify exact entrance, pedestrian flow, offices/residential and operating hours.","co":"Nearby competition inferred from public research; exact radius-level census remains verification work.","v":"Reported available / tender opportunity." if available else "No current availability verified.","ct":f"{nc} public authority/leasing contact signal(s) found.","sm":summary})
-        c.execute(text("UPDATE aci_intel_assets SET last_researched_at=NOW(),updated_at=NOW() WHERE asset_code=:a"),{"a":code})
+    return govsrc.research_government_asset(engine, code, _search)
 
 def _research_asset(engine, code):
     with engine.connect() as c: cls=c.execute(text("SELECT asset_class FROM aci_intel_assets WHERE asset_code=:a"),{"a":code}).scalar()
@@ -443,20 +417,7 @@ def _load(engine,view,city):
     return rows[:180]
 
 def _render(engine,view,city,message):
-    cards=[]
-    for r in _load(engine,view,city):
-        brands,recs,vac,contacts=_detail(engine,r["asset_code"]); score=int(r.get("opportunity_score") or 0)
-        bhtml="".join(f'<span class="brand"><b>{_esc(x["brand_name"])}</b><small>{_esc(x.get("category"))} · {int(x.get("performance_score") or 0)}/100</small></span>' for x in brands[:16]) or '<span class="muted">Brand census not researched yet.</span>'
-        rec_html="".join(f'<div class="rec"><b>{_esc(x["brand_name"])}</b><span>{int(x["fit_score"])}/100</span><small>{_esc(x["category"])}</small><p>{_esc(x["reason"])}</p></div>' for x in recs[:8]) or '<div class="muted">Run research to create brand-fit recommendations.</div>'
-        if vac:
-            v=vac[0]; vacancy=" · ".join(_esc(x) for x in [v.get("availability_status"),v.get("area_text"),v.get("floor_text")] if x); vacancy+=(f' · <a href="{_esc(v.get("source_url"))}" target="_blank">reference</a>' if v.get("source_url") else "")
-        else: vacancy="No verified space availability found."
-        contact_html="".join(f'<div><b>{_esc(x.get("contact_name") or x.get("company_name") or "Public contact")}</b> {_esc(x.get("designation"))}<br>{_esc(x.get("phone"))} {_esc(x.get("email"))} ' + (f'<a href="{_esc(x.get("source_url"))}" target="_blank">source</a>' if x.get("source_url") else "") + '</div>' for x in contacts[:4]) or "No leasing/business contact verified yet."
-        kind="Mall & Brand Intelligence" if r["asset_class"]=="MALL" else "Government / Institutional Premises"
-        source_btn=f'<a class="sourcebtn" href="{_esc(r.get("source_url"))}" target="_blank">Open source</a>' if r.get("source_url") else ""
-        cards.append(f'''<article class="asset"><div class="head"><div><div class="kind">{kind}</div><h2>{_esc(r["asset_name"])}</h2><div class="muted">{_esc(r.get("city"))} · {_esc(r.get("location"))} · {_esc(r.get("developer_or_authority"))}</div></div><div class="score">{score}<small>/100</small></div></div><div class="grid"><section><h3>Scope</h3><p><b>Strongest:</b> {_esc(r.get("strongest_scope") or "Needs research")}<br><b>Secondary:</b> {_esc(r.get("secondary_scope") or "Needs research")}<br><b>Weak / saturated:</b> {_esc(r.get("weak_scope") or "Unknown")}</p><p>{_esc(r.get("ai_summary") or "Run research for source-backed commercial scope analysis.")}</p></section><section><h3>Space availability</h3><p>{vacancy}</p></section><section><h3>Leasing / authority contacts</h3>{contact_html}</section></div><h3>{"Brands present / publicly reported" if r["asset_class"]=="MALL" else "Premises intelligence"}</h3><div class="brands">{bhtml}</div><h3>Potential brands not currently identified here</h3><div class="recommendations">{rec_html}</div><div class="actions"><form method="post" action="/commercial-intelligence/research/{_esc(r["asset_code"])}"><button>Research this asset</button></form>{source_btn}</div></article>''')
-    notice=f'<div class="notice">{_esc(message)}</div>' if message else ""
-    return f'''<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Mall & Premises Intelligence</title><style>*{{box-sizing:border-box}}body{{margin:0;background:#f4f7fb;color:#152238;font-family:Arial,sans-serif}}header{{background:#0c2032;color:white;padding:18px 24px}}.wrap{{max-width:1500px;margin:auto;padding:20px}}.toolbar{{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:18px}}a,button{{cursor:pointer}}.tab,.sourcebtn,button{{border:0;border-radius:9px;padding:10px 14px;text-decoration:none;background:#e8eef5;color:#18324a;font-weight:700}}button{{background:#0d6efd;color:white}}.asset{{background:white;border:1px solid #dfe6ee;border-radius:16px;padding:20px;margin:16px 0;box-shadow:0 3px 12px #0000000b}}.head{{display:flex;justify-content:space-between;gap:15px}}h2{{margin:4px 0 6px}}h3{{margin:16px 0 8px}}.kind{{font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:#58728a}}.muted{{color:#6d7d8b}}.score{{font-size:28px;font-weight:800;background:#e9f7ef;color:#0c6a3d;border-radius:14px;padding:12px;min-width:88px;text-align:center}}.score small{{font-size:11px;display:block}}.grid{{display:grid;grid-template-columns:1.4fr 1fr 1fr;gap:12px}}section{{background:#f8fafc;border-radius:12px;padding:12px}}.brands{{display:flex;gap:8px;flex-wrap:wrap}}.brand{{background:#eef4fb;padding:8px 10px;border-radius:10px}}.brand small{{display:block;color:#6b7d8f;margin-top:3px}}.recommendations{{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}}.rec{{border:1px solid #dfe6ee;border-radius:12px;padding:10px}}.rec>span{{float:right;font-weight:800;color:#0c6a3d}}.rec small{{display:block;color:#63788b;margin-top:4px}}.rec p{{font-size:12px;color:#526473}}.actions{{display:flex;gap:10px;margin-top:14px}}.notice{{padding:12px;border-radius:10px;background:#e9f8f1;color:#075c3e;margin-bottom:12px}}input{{padding:10px;border:1px solid #ccd8e3;border-radius:8px}}@media(max-width:900px){{.grid,.recommendations{{grid-template-columns:1fr}}}}</style></head><body><header><a id="commercial-back-dashboard" class="tab" href="/team-dashboard-v376" style="float:right;background:white;color:#0c2032;margin:0 0 10px 16px">Back to Main Dashboard</a><h1>Mall & Premises Intelligence AI</h1><div>Mall brand census, performance signals, vacancies, leasing contacts, premises scope and brand-fit opportunities.</div></header><div class="wrap">{notice}<div class="toolbar"><a class="tab" href="/team-dashboard-v376">Main Dashboard</a><a class="tab" href="/workspace">Working Space</a><a class="tab" href="/commercial-intelligence?view=ALL">All</a><a class="tab" href="/commercial-intelligence?view=MALLS">Malls</a><a class="tab" href="/commercial-intelligence?view=GOV">DMRC / Government</a><a class="tab" href="/commercial-intelligence?view=RESEARCH">Needs Research</a><form method="get" action="/commercial-intelligence"><input type="hidden" name="view" value="{_esc(view)}"><input name="city" value="{_esc(city)}" placeholder="City / micro-market"><button>Filter</button></form><form method="post" action="/commercial-intelligence/research-all"><button>Research All Malls & Premises</button></form></div>{''.join(cards) or '<div class="asset"><h2>No intelligence yet</h2><p>Use Research All Malls & Premises to build the first working set.</p></div>'}</div></body></html>'''
+    return govsrc.render_commercial(engine, view, city, message)
 
 def register(core):
     engine,app=core.engine,core.app; router=APIRouter(); ensure_schema(engine)
@@ -484,6 +445,27 @@ def register(core):
             brands=c.execute(text("SELECT COUNT(*) FROM aci_intel_brands")).scalar() or 0; recs=c.execute(text("SELECT COUNT(*) FROM aci_intel_recommendations")).scalar() or 0; contacts=c.execute(text("SELECT COUNT(*) FROM aci_intel_contacts")).scalar() or 0; vac=c.execute(text("SELECT COUNT(*) FROM aci_intel_vacancies")).scalar() or 0
             run=c.execute(text("SELECT * FROM aci_intel_runs ORDER BY started_at DESC LIMIT 1")).mappings().first()
         return {"version":VERSION,**dict(counts or {}),"brands_observed":brands,"brand_recommendations":recs,"public_contacts":contacts,"vacancy_signals":vac,"last_run":dict(run) if run else None,"truth_policy":{"brand_presence":"PUBLICLY_REPORTED until verified","brand_performance":"public-signal score, not audited sales","availability":"reported/verified evidence only","contacts":"public business contacts with source provenance","recommendations":"AI recommendations, not confirmed brand requirements"}}
+    @router.post("/commercial-intelligence/government-sync")
+    def government_sync(req:Request, bg:BackgroundTasks):
+        role=_page_role(core,req)
+        if not role:
+            login=getattr(core,"login_page",None)
+            if callable(login): return login(req)
+            return RedirectResponse("/login",303)
+        govsrc.ensure_schema(engine)
+        bg.add_task(govsrc.sync_government_sources, engine, _search)
+        return RedirectResponse("/commercial-intelligence?view=GOV",303)
+
+    @router.get("/api/commercial-intelligence/government-source-status")
+    def government_source_status(req:Request):
+        role=_page_role(core,req)
+        if not role: raise HTTPException(401,"Login required")
+        govsrc.ensure_schema(engine)
+        with engine.connect() as c:
+            docs=[dict(x) for x in c.execute(text("SELECT authority,source_type,source_url,document_status,fetch_status,fetched_at,notes FROM aci_gov_source_documents ORDER BY fetched_at DESC LIMIT 100")).mappings().all()]
+            devs=[dict(x) for x in c.execute(text("SELECT authority,developer_name,COUNT(*) property_count,STRING_AGG(DISTINCT COALESCE(phone,''),', ') phones FROM aci_gov_developer_portfolio GROUP BY authority,developer_name ORDER BY COUNT(*) DESC,developer_name LIMIT 100")).mappings().all()]
+        return {"version":govsrc.VERSION,"documents":docs,"developers":devs}
+
     app.include_router(router)
     try:
         import alliance_commercial_intelligence_network as network
