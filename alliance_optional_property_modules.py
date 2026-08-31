@@ -1,6 +1,6 @@
 ﻿"""Fail-safe optional property module registration."""
 
-VERSION = "1.29.0-OPTIONAL-PROPERTY-MODULES-EVIDENCE-GRAMMAR-V257B"
+VERSION = "1.30.0-OPTIONAL-PROPERTY-MODULES-OFFERS-TUTOR-V258"
 
 
 def _route_exists(app, path):
@@ -980,6 +980,32 @@ def register(wrapped):
             "status": "ERROR",
             "error": f"{type(exc).__name__}: {exc}",
             "route": "/api/v7/property-ai/evidence-grammar-v257b/status",
+            "fail_safe": True,
+        }
+
+    # PHASE 2.5.8A - property + offers + tutor foundation
+    try:
+        if _route_exists(
+            app,
+            "/api/v7/property-ai/property-offers-tutor-v258/status",
+        ):
+            result["property_offers_tutor_v258"] = {
+                "status": "ALREADY_REGISTERED",
+                "route": "/api/v7/property-ai/property-offers-tutor-v258/status",
+                "error": None,
+            }
+        else:
+            import alliance_property_offers_tutor_v258 as offers_tutor_v258
+            v258_result = offers_tutor_v258.register(core)
+            result["property_offers_tutor_v258"] = {
+                **v258_result,
+                "error": None,
+            }
+    except Exception as exc:
+        result["property_offers_tutor_v258"] = {
+            "status": "ERROR",
+            "error": f"{type(exc).__name__}: {exc}",
+            "route": "/api/v7/property-ai/property-offers-tutor-v258/status",
             "fail_safe": True,
         }
     return result
