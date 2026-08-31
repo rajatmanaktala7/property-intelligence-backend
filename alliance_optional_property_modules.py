@@ -1,6 +1,6 @@
-"""Fail-safe optional property module registration."""
+﻿"""Fail-safe optional property module registration."""
 
-VERSION = "1.11.0-OPTIONAL-PROPERTY-MODULES-SHADOW-EXTRACTION"
+VERSION = "1.12.0-OPTIONAL-PROPERTY-MODULES-CONTEXT-RECOVERY-V245"
 
 
 def _route_exists(app, path):
@@ -512,6 +512,32 @@ def register(wrapped):
             "status": "ERROR",
             "error": f"{type(exc).__name__}: {exc}",
             "route": "/api/v7/property-ai/shadow-extraction/status",
+            "fail_safe": True,
+        }
+
+    # PHASE 2.4.5 - deterministic context recovery shadow module
+    try:
+        if _route_exists(
+            app,
+            "/api/v7/property-ai/context-recovery-v245/status",
+        ):
+            result["context_recovery_v245"] = {
+                "status": "ALREADY_REGISTERED",
+                "route": "/api/v7/property-ai/context-recovery-v245/status",
+                "error": None,
+            }
+        else:
+            import alliance_property_context_recovery_v245 as context_v245
+            context_v245_result = context_v245.register(core)
+            result["context_recovery_v245"] = {
+                **context_v245_result,
+                "error": None,
+            }
+    except Exception as exc:
+        result["context_recovery_v245"] = {
+            "status": "ERROR",
+            "error": f"{type(exc).__name__}: {exc}",
+            "route": "/api/v7/property-ai/context-recovery-v245/status",
             "fail_safe": True,
         }
     return result
