@@ -1,6 +1,6 @@
 ﻿"""Fail-safe optional property module registration."""
 
-VERSION = "1.20.0-OPTIONAL-PROPERTY-MODULES-RECORD-COHESION-V254"
+VERSION = "1.20.2-OPTIONAL-PROPERTY-MODULES-RECORD-COHESION-V254B"
 
 
 def _route_exists(app, path):

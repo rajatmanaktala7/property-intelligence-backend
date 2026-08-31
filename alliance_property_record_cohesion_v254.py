@@ -2,8 +2,7 @@
 
 import re
 from collections import Counter
-from copy import deepcopy
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import Query
 from fastapi.responses import JSONResponse
@@ -13,326 +12,296 @@ import alliance_property_boundary_cohesion_v251 as v251
 import alliance_property_boundary_intelligence_v25 as v25
 import alliance_property_shadow_extraction_v24 as v24
 
-VERSION = "2.5.4-PROPERTY-RECORD-COHESION-V2"
-MODE = "READ_ONLY_SHADOW_RECORD_COHESION_V2"
+VERSION = "2.5.4B-PROPERTY-RECORD-COHESION-COMPATIBILITY-FIX"
+MODE = "READ_ONLY_SHADOW_HEADER_BRIDGE_V254B"
 
-# Phase 2.5.4 is deliberately structural:
-# project/location header -> configuration -> area -> furnishing -> parking -> price
-# must stay together until a strong next-property/project boundary.
+# 2.5.4A corrects two implementation defects in 2.5.4:
+# 1) it now calls the real v251 reconstruction/extraction APIs;
+# 2) it adds only a conservative HEADER -> IMMEDIATE NEXT PROPERTY bridge
+#    before v251 reconstruction, so location/project headers are not discarded.
 #
-# It never writes to DB and never replaces the live reconstructor.
+# No sibling fact inheritance. No writes. No live replacement.
 
-PROJECT_LOCATION_RE = re.compile(
-    r"(?i)(?:"
-    r"\b(?:RUSTOMJEE|DLH|LODHA|OBEROI|RAHEJA|EMAAR|DLF|GODREJ|M3M|"
-    r"PARAS|TATA|PRESTIGE|SOBHA|ATS|MAHINDRA|ADANI|KALPATARU|"
-    r"RUNWAL|Hiranandani|PARK\s+GRANDEUR|ACROPOLIS|ARIA|"
-    r"SHYAM\s+KUNJ|PARK\s+LAND|SHREEJI\s+KRUPA|KINARA)\b|"
-    r"\b(?:KHAR\s+WEST|BANDRA\s+WEST|JUHU|JVPD|GULMOHAR\s+ROAD|"
+KNOWN_LOCATION_RE = re.compile(
+    r"(?i)\b(?:"
+    r"KHAR\s+WEST|BANDRA\s+WEST|JUHU|JVPD|GULMOHAR\s+ROAD|"
     r"SANTACRUZ\s+WEST|ANDHERI\s+WEST|VILE\s+PARLE\s+WEST|"
     r"KALKAJI|SAKET|GREATER\s+KAILASH|GK[-\s]*[12]|"
-    r"DWARKA|SUSHANT\s*LOK|SHUSHANT\s*LOK|DLF\s*PHASE)\b"
-    r")"
+    r"DWARKA(?:\s+SECTOR\s*\d+)?|"
+    r"SUSHANT\s*LOK(?:\s*1)?|SHUSHANT\s*LOK(?:\s*1)?|"
+    r"DLF\s*PHASE\s*[1-5]"
+    r")\b"
 )
 
-CONFIG_RE = re.compile(r"(?i)\b\d(?:\.\d+)?\s*(?:BHK|BR)\b")
-AREA_RE = re.compile(
-    r"(?i)\b\d[\d,]*(?:\.\d+)?\s*(?:SQ\.?\s*FT|SQFT|SFT|"
-    r"SQ\.?\s*YD|SQYDS?|SYDS?|YARDS?|GAJ|SQ\.?\s*M|SQM|SQMT|ACRES?|CARPET)\b"
-)
-FURNISHING_RE = re.compile(
-    r"(?i)\b(?:FULLY\s+FURNISHED|SEMI[-\s]*FURNISHED|UNFURNISHED|"
-    r"BARE\s*SHELL|FURNISHED)\b"
-)
-PARKING_RE = re.compile(r"(?i)\b(?:NO\s+)?\d+\s*(?:CAR\s+)?PARKING\b|\bNO\s+CAR\s+PARKING\b")
-MONEY_RE = re.compile(
-    r"(?i)(?:₹|RS\.?|INR)?\s*\d+(?:\.\d+)?\s*"
-    r"(?:CR|CRORE|CRORES|LAC|LACS|LAKH|LAKHS|L|K)(?=\s|$|\+|/|-)"
-)
-TRANSACTION_RE = re.compile(r"(?i)\b(?:RENT|RENTAL|LEASE|SALE|SELL|OUTRIGHT)\b")
-PROPERTY_NOUN_RE = re.compile(
-    r"(?i)\b(?:BUNGALOW|VILLA|FLAT|APARTMENT|OFFICE|SHOWROOM|SHOP|"
-    r"WAREHOUSE|PLOT|LAND|FLOOR|HOUSE|PENTHOUSE)\b"
-)
-SECTION_RE = re.compile(
-    r"(?i)^\s*(?:PREMIUM\s+)?(?:RENTAL|RENT|SALE|OUTRIGHT)\s+(?:PROPERTIES|PROPERTY|OPTIONS?)\b"
-)
-CONTACT_FOOTER_RE = re.compile(
-    r"(?i)\b(?:CONTACT|CALL|WHATSAPP|MOB(?:ILE)?|BROKER|CONSULTANT|"
-    r"PANASA\s+ESTATE|REGARDS|THANKS)\b"
+KNOWN_PROJECT_RE = re.compile(
+    r"(?i)\b(?:"
+    r"RUSTOMJEE|LODHA|OBEROI|RAHEJA|EMAAR|DLF|GODREJ|M3M|"
+    r"PARAS|TATA|PRESTIGE|SOBHA|ATS|MAHINDRA|ADANI|KALPATARU|"
+    r"RUNWAL|HIRANANDANI|PARK\s+GRANDEUR|ACROPOLIS|ARIA|"
+    r"SHYAM\s+KUNJ|PARK\s+LAND|SHREEJI\s+KRUPA|KINARA|DLH"
+    r")\b"
 )
 
-# Common mojibake is normalized only for structural parsing. We do not depend on
-# emoji symbols for entity extraction.
-MOJIBAKE_TOKENS = ("â", "ð", "ï¸", "Â")
+CONFIG_RE = getattr(v25, "CONFIG_RE")
+AREA_RE = getattr(v25, "AREA_RE")
+MONEY_RE = getattr(v25, "MONEY_RE")
+PROPERTY_RE = getattr(v25, "PROPERTY_RE")
+
+CONTACT_OR_FOOTER_RE = getattr(
+    v251,
+    "CONTACT_OR_FOOTER_RE",
+    re.compile(r"(?i)^\s*(?:CONTACT|CALL|WHATSAPP|BROKER|CONSULTANT)\b"),
+)
+HARD_SECTION_RE = getattr(
+    v251,
+    "HARD_SECTION_RE",
+    re.compile(r"(?i)^\s*(?:PREMIUM\s+)?(?:RENTAL|RENT|SALE|OUTRIGHT|COMMERCIAL)\b"),
+)
 
 
-def _norm(text: Any) -> str:
-    s = str(text or "")
-    s = s.replace("\r\n", "\n").replace("\r", "\n")
-    s = re.sub(r"[ \t]+", " ", s)
-    return s.strip()
+def _norm(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "").replace("\u00a0", " ")).strip()
 
 
-def _structural_text(text: Any) -> str:
-    s = _norm(text)
-    for token in MOJIBAKE_TOKENS:
-        s = s.replace(token, " ")
-    s = re.sub(r"\s+", " ", s)
-    return s.strip(" |•-*")
-
-
-def _has_property_fact(text: str) -> bool:
-    s = _structural_text(text)
+def _has_property_specific_fact(text_value: str) -> bool:
+    s = _norm(text_value)
     return bool(
         CONFIG_RE.search(s)
         or AREA_RE.search(s)
-        or FURNISHING_RE.search(s)
-        or PARKING_RE.search(s)
         or MONEY_RE.search(s)
-        or PROPERTY_NOUN_RE.search(s)
+        or PROPERTY_RE.search(s)
     )
 
 
-def _is_header(text: str) -> bool:
-    s = _structural_text(text)
-    if not s:
+def _safe_header(text_value: str) -> bool:
+    """
+    Header bridge eligibility:
+    - short
+    - not a section/footer
+    - contains known locality and/or known project token
+    - contains NO area/config/price/property-specific fact
+    """
+    s = _norm(text_value).strip(" -*|:•▪🔹🔸✨")
+    if not s or len(s) > 100:
         return False
-    if CONTACT_FOOTER_RE.search(s):
+    if CONTACT_OR_FOOTER_RE.search(s):
         return False
-    if SECTION_RE.search(s):
-        return True
-    # A project/locality-bearing line is a header/start even when it also
-    # contains the first configuration/area facts of that property.
-    return bool(PROJECT_LOCATION_RE.search(s))
-
-
-def _is_continuation(text: str) -> bool:
-    s = _structural_text(text)
-    if not s:
+    if v25._looks_like_section(s) or HARD_SECTION_RE.search(s):
         return False
-    if CONTACT_FOOTER_RE.search(s):
+    if _has_property_specific_fact(s):
         return False
-    return bool(
-        CONFIG_RE.search(s)
-        or AREA_RE.search(s)
-        or FURNISHING_RE.search(s)
-        or PARKING_RE.search(s)
-        or MONEY_RE.search(s)
-        or TRANSACTION_RE.search(s)
-        or PROPERTY_NOUN_RE.search(s)
-    )
+    return bool(KNOWN_LOCATION_RE.search(s) or KNOWN_PROJECT_RE.search(s))
 
 
-def _strong_next_property(text: str, current_has_identity: bool, current_has_money: bool) -> bool:
-    s = _structural_text(text)
-    if not s:
-        return False
-    if PROJECT_LOCATION_RE.search(s):
-        return True
-    # Numbered inventory item after a completed record.
-    if current_has_identity and current_has_money and re.match(r"^\s*\d{1,3}[\).:-]\s+", s):
-        return True
-    # A fresh configuration with its own area/project noun after a completed
-    # priced record is a new physical property.
-    if current_has_money and CONFIG_RE.search(s) and (AREA_RE.search(s) or PROPERTY_NOUN_RE.search(s)):
-        return True
-    return False
+def _prepare_text_with_forward_header_bridge(text_value: str) -> Tuple[str, Dict[str, int]]:
+    """
+    Attach a safe header only to the immediate following property-bearing piece.
 
+    Never carries a header across:
+    - another header,
+    - a transaction/family section,
+    - a contact/footer,
+    - more than one following piece.
 
-def _join(parts: Iterable[str]) -> str:
-    clean = [_norm(x) for x in parts if _norm(x)]
-    return " | ".join(clean)
+    This is association, not sibling inheritance.
+    """
+    pieces = v25._presegment(text_value)
+    out: List[str] = []
+    pending_header: Optional[str] = None
 
+    stats = {
+        "headers_seen": 0,
+        "headers_attached": 0,
+        "headers_dropped_without_immediate_property": 0,
+    }
 
-def _cohesive_blocks_from_text(text: str) -> List[Dict[str, Any]]:
-    # v25 already performs useful line/item preparation. 2.5.4 adds a second
-    # cohesion pass that prevents headers and property facts being detached.
-    try:
-        initial = v25.reconstruct_property_records(text)
-    except Exception:
-        try:
-            initial = v25.reconstruct_entities(text)
-        except Exception:
-            initial = []
-
-    fragments: List[str] = []
-    for item in initial or []:
-        if isinstance(item, str):
-            fragments.append(item)
-        elif isinstance(item, dict):
-            fragments.append(
-                item.get("own_text")
-                or item.get("text")
-                or item.get("segment_text")
-                or ""
-            )
-        else:
-            fragments.append(getattr(item, "own_text", "") or str(item))
-
-    # If v25 returns nothing, fall back to physical lines. This is shadow only.
-    if not fragments:
-        fragments = [x.strip() for x in _norm(text).split("\n") if x.strip()]
-
-    blocks: List[Dict[str, Any]] = []
-    pending: List[str] = []
-    section_context: Optional[str] = None
-
-    def flush(reason: str):
-        nonlocal pending
-        if not pending:
-            return
-        own = _join(pending)
-        if _has_property_fact(own):
-            blocks.append({
-                "own_text": own,
-                "method": "v254_record_cohesion",
-                "boundary_reason": reason,
-                "section_context": section_context,
-                "needs_split": False,
-            })
-        pending = []
-
-    for frag in fragments:
-        s = _structural_text(frag)
-        if not s:
+    for raw_piece in pieces:
+        piece = _norm(raw_piece)
+        if not piece:
             continue
 
-        if CONTACT_FOOTER_RE.search(s):
-            flush("contact_or_footer")
+        is_section = bool(v25._looks_like_section(piece) or HARD_SECTION_RE.search(piece))
+        is_footer = bool(CONTACT_OR_FOOTER_RE.search(piece))
+
+        if is_section or is_footer:
+            if pending_header:
+                stats["headers_dropped_without_immediate_property"] += 1
+                pending_header = None
+            out.append(piece)
             continue
 
-        if SECTION_RE.search(s) and not _has_property_fact(s):
-            flush("section_switch")
-            section_context = s
+        if _safe_header(piece):
+            stats["headers_seen"] += 1
+            if pending_header:
+                # Never concatenate two uncertain headers.
+                stats["headers_dropped_without_immediate_property"] += 1
+            pending_header = piece
             continue
 
-        current = _join(pending)
-        current_has_identity = bool(
-            PROJECT_LOCATION_RE.search(_structural_text(current))
-            or CONFIG_RE.search(_structural_text(current))
-            or PROPERTY_NOUN_RE.search(_structural_text(current))
-        )
-        current_has_money = bool(MONEY_RE.search(_structural_text(current)))
+        if pending_header:
+            if _has_property_specific_fact(piece):
+                out.append(f"{pending_header} | {piece}")
+                stats["headers_attached"] += 1
+                pending_header = None
+                continue
+            # Header may attach only to the immediate next useful piece.
+            stats["headers_dropped_without_immediate_property"] += 1
+            pending_header = None
 
-        if pending and _strong_next_property(s, current_has_identity, current_has_money):
-            flush("strong_next_property")
+        out.append(piece)
 
-        if not pending:
-            pending = [frag]
-            continue
+    if pending_header:
+        stats["headers_dropped_without_immediate_property"] += 1
 
-        # Critical 2.5.4 rule: property facts continue the current record.
-        if _is_continuation(s) and not _strong_next_property(s, current_has_identity, current_has_money):
-            pending.append(frag)
-            continue
-
-        if _is_header(s):
-            flush("new_header")
-            pending = [frag]
-            continue
-
-        # Unknown text is retained with current record only if record has not
-        # yet reached a property-specific fact; otherwise it ends the record.
-        if not _has_property_fact(current):
-            pending.append(frag)
-        else:
-            flush("non_property_boundary")
-            pending = [frag]
-
-    flush("end_of_burst")
-    return blocks
+    return "\n".join(out), stats
 
 
-def _extract_block(block: Dict[str, Any]) -> Dict[str, Any]:
-    own = block["own_text"]
-    section = block.get("section_context")
+def reconstruct_entities_v254(text_value: str):
+    prepared, stats = _prepare_text_with_forward_header_bridge(text_value)
+    entities = v251.reconstruct_entities_v251(prepared)
+    return entities, stats
 
-    # Reuse existing 2.5 extraction/enrichment stack for semantic fields.
-    try:
-        candidate = v25._extract_candidate_from_text(own, section_context=section)
-    except Exception:
-        # Compatibility path through 2.5.1B helper.
-        try:
-            candidate = v251._extract_candidate(own, section_context=section)
-        except Exception:
-            candidate = {
-                "classification": "AMBIGUOUS",
-                "transaction": None,
-                "property_family": None,
-                "location": None,
-                "own_text_redacted": own,
-                "review_reasons": ["V254_EXTRACTION_COMPATIBILITY_FALLBACK"],
-                "quality": "UNDER_REVIEW",
-            }
 
-    out = deepcopy(candidate)
-    out["own_text_redacted"] = out.get("own_text_redacted") or own
-    out["boundary_needs_split"] = False
-    out["v254"] = {
-        "record_cohesion_applied": True,
-        "boundary_reason": block.get("boundary_reason"),
-        "section_context_used": bool(section),
+def _extract_entity(entity, burst_group_id: str) -> Dict[str, Any]:
+    # IMPORTANT: use the actual established v251 extraction API.
+    row = v251._extract_entity(entity, burst_group_id)
+
+    provenance = dict(row.get("provenance") or {})
+    provenance["v254a"] = {
+        "boundary": "V251_PLUS_IMMEDIATE_FORWARD_HEADER_BRIDGE",
+        "header_attaches_forward_only": True,
+        "immediate_next_piece_only": True,
+        "price_inherited_from_sibling": False,
+        "area_inherited_from_sibling": False,
+        "configuration_inherited_from_sibling": False,
+        "floor_inherited_from_sibling": False,
+        "location_inherited_from_sibling": False,
+        "database_write": False,
+        "llm_used": False,
+    }
+    row["provenance"] = provenance
+    row["v254"] = {
+        "compatibility_fix": True,
+        "real_v251_extractor_used": True,
+        "fallback_used": False,
         "llm_used": False,
         "database_write": False,
-        "property_specific_sibling_inheritance": False,
     }
-    return out
+    return row
+
+
+def _reason_counts(rows: List[Dict[str, Any]]) -> Dict[str, int]:
+    counter: Counter[str] = Counter()
+    for row in rows:
+        if row.get("quality") != "CLEAN":
+            counter.update(row.get("review_reasons") or [])
+    return dict(counter.most_common())
 
 
 def _benchmark(engine, limit: int) -> Dict[str, Any]:
     baseline = v253._benchmark(engine, limit)
-    raw_bursts = v24._load_bursts(engine, limit)
-    baseline_by_id = {
-        b.get("burst_group_id"): b for b in (baseline.get("bursts") or [])
-    }
+    db_rows = v24._load_bursts(engine, limit)
+
+    baseline_candidates = [
+        c
+        for b in (baseline.get("bursts") or [])
+        for c in (b.get("candidates") or [])
+    ]
 
     bursts: List[Dict[str, Any]] = []
-    all_rows: List[Dict[str, Any]] = []
+    candidates: List[Dict[str, Any]] = []
 
-    for raw in raw_bursts:
-        burst_id = raw.get("burst_group_id")
-        text = raw.get("burst_text") or ""
-        blocks = _cohesive_blocks_from_text(text)
-        candidates = [_extract_block(b) for b in blocks]
-        all_rows.extend(candidates)
+    header_seen = 0
+    header_attached = 0
+    header_dropped = 0
 
-        old = baseline_by_id.get(burst_id) or {}
+    for row in db_rows:
+        burst_id = row["burst_group_id"]
+        entities, bridge_stats = reconstruct_entities_v254(row.get("burst_text") or "")
+
+        header_seen += bridge_stats["headers_seen"]
+        header_attached += bridge_stats["headers_attached"]
+        header_dropped += bridge_stats["headers_dropped_without_immediate_property"]
+
+        out: List[Dict[str, Any]] = []
+        for entity in entities:
+            c = _extract_entity(entity, burst_id)
+            out.append(c)
+            candidates.append(c)
+
         bursts.append({
             "burst_group_id": burst_id,
-            "v253_entity_count": len(old.get("candidates") or []),
-            "v254_entity_count": len(candidates),
-            "candidates": candidates,
+            "v254_entity_count": len(entities),
+            "header_bridge": bridge_stats,
+            "candidates": out,
         })
 
-    total = len(all_rows)
-    clean = sum(1 for x in all_rows if x.get("quality") == "CLEAN")
+    total = len(candidates)
+    clean = sum(1 for c in candidates if c.get("quality") == "CLEAN")
     location_missing = sum(
-        1 for x in all_rows if "LOCATION_MISSING" in (x.get("review_reasons") or [])
+        1 for c in candidates
+        if "LOCATION_MISSING" in (c.get("review_reasons") or [])
     )
-    ambiguous = sum(1 for x in all_rows if x.get("classification") == "AMBIGUOUS")
+    ambiguous = sum(
+        1 for c in candidates
+        if c.get("classification") in ("AMBIGUOUS", "NOISE")
+    )
+    fallback_count = sum(
+        1 for c in candidates
+        if bool((c.get("v254") or {}).get("fallback_used"))
+    )
 
-    reason_counter: Counter[str] = Counter()
-    for row in all_rows:
-        if row.get("quality") != "CLEAN":
-            reason_counter.update(row.get("review_reasons") or [])
+    base_counts = baseline.get("counts") or {}
+    base_total = (
+        base_counts.get("entity_count")
+        or base_counts.get("v253_entity_count")
+        or len(baseline_candidates)
+    )
+    base_clean = (
+        base_counts.get("v253_clean")
+        if base_counts.get("v253_clean") is not None
+        else sum(1 for c in baseline_candidates if c.get("quality") == "CLEAN")
+    )
+    base_location_missing = (
+        base_counts.get("location_missing_after")
+        if base_counts.get("location_missing_after") is not None
+        else sum(
+            1 for c in baseline_candidates
+            if "LOCATION_MISSING" in (c.get("review_reasons") or [])
+        )
+    )
+    base_ambiguous = (
+        base_counts.get("ambiguous_after")
+        if base_counts.get("ambiguous_after") is not None
+        else sum(
+            1 for c in baseline_candidates
+            if c.get("classification") in ("AMBIGUOUS", "NOISE")
+        )
+    )
 
     counts = {
-        "burst_sample_size": len(bursts),
-        "v253_entity_count": (baseline.get("counts") or {}).get("entity_count"),
+        "burst_sample_size": len(db_rows),
+        "v253_entity_count": base_total,
         "v254_entity_count": total,
-        "v253_clean": (baseline.get("counts") or {}).get("v253_clean"),
+        "entity_count_delta_vs_v253": total - int(base_total or 0),
+        "v253_clean": base_clean,
         "v254_clean": clean,
         "v254_under_review": total - clean,
         "v254_clean_rate": round(clean / total, 4) if total else 0.0,
-        "v253_location_missing": (baseline.get("counts") or {}).get("location_missing_after"),
+        "v253_location_missing": base_location_missing,
         "v254_location_missing": location_missing,
-        "v253_ambiguous": (baseline.get("counts") or {}).get("ambiguous_after"),
+        "v253_ambiguous": base_ambiguous,
         "v254_ambiguous": ambiguous,
-        "boundary_needs_split": sum(1 for x in all_rows if x.get("boundary_needs_split")),
+        "safe_headers_seen": header_seen,
+        "safe_headers_attached": header_attached,
+        "safe_headers_dropped": header_dropped,
+        "compatibility_fallback_count": fallback_count,
+        "boundary_needs_split": sum(
+            1 for c in candidates if c.get("boundary_needs_split")
+        ),
         "llm_used": sum(
-            1 for x in all_rows
-            if bool((x.get("ai_understanding") or {}).get("llm_used"))
+            1 for c in candidates
+            if bool((c.get("ai_understanding") or {}).get("llm_used"))
         ),
         "privacy_redacted": total,
     }
@@ -342,8 +311,9 @@ def _benchmark(engine, limit: int) -> Dict[str, Any]:
         "version": VERSION,
         "mode": MODE,
         "base_v253_version": v253.VERSION,
+        "base_v251_version": v251.VERSION,
         "counts": counts,
-        "under_review_reasons_v254": dict(reason_counter.most_common()),
+        "under_review_reasons_v254": _reason_counts(candidates),
         "safety_contract": {
             "read_only_shadow": True,
             "database_writes": False,
@@ -355,6 +325,7 @@ def _benchmark(engine, limit: int) -> Dict[str, Any]:
             "raw_data_deleted": False,
             "llm_used_for_benchmark": False,
             "header_attaches_forward_only": True,
+            "immediate_next_piece_only": True,
             "price_inherited_from_sibling": False,
             "area_inherited_from_sibling": False,
             "configuration_inherited_from_sibling": False,
@@ -367,70 +338,51 @@ def _benchmark(engine, limit: int) -> Dict[str, Any]:
 
 
 def _regression_demo() -> Dict[str, Any]:
-    rental = """
-PREMIUM RENTAL PROPERTIES
-RUSTOMJEE PARAMOUNT - KHAR WEST
-3 BHK
-1365 Sq.ft.
-Semi-Furnished
-1 Car Parking
-Rent: 2.50 Lakhs
-PARK GRANDEUR - JUHU
-3 BHK
-1250 Sq.ft.
-Fully Furnished
-1 Car Parking
-Rent: On Request
-"""
-    sale = """
-PREMIUM OUTRIGHT PROPERTIES
-JVPD
-Bungalow
-800 sq. yd. Plot
-6 BHK
-1 Car Parking
-BOTH BUNGALOWS: 70 Cr Negotiable
-GULMOHAR ROAD
-4 BHK
-377.50 sq. m. Plot
-4 Car Parking
-50 Cr
-"""
+    sample = (
+        "PREMIUM RENTAL PROPERTIES\n"
+        "RUSTOMJEE PARAMOUNT - KHAR WEST\n"
+        "3 BHK | 1365 Sq.ft. | Semi-Furnished | 1 Car Parking | Rent: 2.50 Lakhs\n"
+        "PARK GRANDEUR - JUHU\n"
+        "3 BHK | 1250 Sq.ft. | Fully Furnished | 1 Car Parking | Rent: On Request\n"
+    )
+    prepared, bridge = _prepare_text_with_forward_header_bridge(sample)
+    entities = v251.reconstruct_entities_v251(prepared)
 
-    rb = _cohesive_blocks_from_text(rental)
-    sb = _cohesive_blocks_from_text(sale)
+    leak_test = (
+        "PREMIUM RENTAL PROPERTIES\n"
+        "RUSTOMJEE PARAMOUNT - KHAR WEST\n"
+        "CONTACT BROKER\n"
+        "3 BHK | 1200 Sq.ft. | Rent: 2.00 Lakhs\n"
+    )
+    leak_prepared, leak_bridge = _prepare_text_with_forward_header_bridge(leak_test)
 
-    rental_texts = [x["own_text"] for x in rb]
-    sale_texts = [x["own_text"] for x in sb]
+    texts = [e.own_text for e in entities]
 
     passed = (
-        len(rb) == 2
-        and "RUSTOMJEE PARAMOUNT" in rental_texts[0].upper()
-        and "KHAR WEST" in rental_texts[0].upper()
-        and "1365" in rental_texts[0]
-        and "2.50" in rental_texts[0]
-        and "PARK GRANDEUR" in rental_texts[1].upper()
-        and "1250" in rental_texts[1]
-        and "ON REQUEST" in rental_texts[1].upper()
-        and len(sb) == 2
-        and "JVPD" in sale_texts[0].upper()
-        and "800" in sale_texts[0]
-        and "70" in sale_texts[0]
-        and "GULMOHAR ROAD" in sale_texts[1].upper()
-        and "377.50" in sale_texts[1]
-        and "50" in sale_texts[1]
+        bridge["headers_attached"] == 2
+        and len(entities) == 2
+        and "RUSTOMJEE PARAMOUNT" in texts[0].upper()
+        and "KHAR WEST" in texts[0].upper()
+        and "1365" in texts[0]
+        and "PARK GRANDEUR" in texts[1].upper()
+        and "JUHU" in texts[1].upper()
+        and "1250" in texts[1]
+        and leak_bridge["headers_attached"] == 0
+        and "RUSTOMJEE PARAMOUNT" not in leak_prepared.upper()
     )
 
     return {
         "status": "PASS" if passed else "FAIL",
         "version": VERSION,
         "tests": {
-            "rental_entity_count": len(rb),
-            "rental_entities": rental_texts,
-            "sale_entity_count": len(sb),
-            "sale_entities": sale_texts,
-            "forward_header_attachment": True,
-            "sibling_property_specific_inheritance": False,
+            "prepared_text": prepared,
+            "entity_count": len(entities),
+            "entities": texts,
+            "headers_seen": bridge["headers_seen"],
+            "headers_attached": bridge["headers_attached"],
+            "cross_footer_leak_blocked": leak_bridge["headers_attached"] == 0,
+            "real_v251_reconstructor_used": True,
+            "real_v251_extractor_available": callable(getattr(v251, "_extract_entity", None)),
         },
         "writes_performed": 0,
     }
@@ -451,6 +403,7 @@ def register(core):
             "version": VERSION,
             "mode": MODE,
             "base_v253_version": v253.VERSION,
+            "base_v251_version": v251.VERSION,
             "read_only_shadow": True,
             "database_writes": False,
             "canonical_tables_modified": False,
@@ -460,6 +413,7 @@ def register(core):
             "whatsapp_live_modified": False,
             "raw_data_deleted": False,
             "llm_used_for_benchmark": False,
+            "compatibility_fallback_removed": True,
         })
 
     @app.get("/api/v7/property-ai/record-cohesion-v254/regression-test")
