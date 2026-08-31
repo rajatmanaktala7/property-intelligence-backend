@@ -7238,7 +7238,7 @@ def _v4_page(role):
 <div class="group">COMMAND</div><button class="nav active" data-page="command">▣ Command Centre</button><button class="nav" data-page="activity">◎ AI Activity</button><button class="nav" data-page="bots">⚡ Bot Control Room</button>
 <div class="group">PROPERTY</div><button class="nav" data-page="property">⌂ Add Property + Matcher</button><a class="nav" href="/property-database">▦ Full Property Database</a><a class="nav" href="/data-quality">✓ Data Quality / Organizer</a><a class="nav" href="/data-recovery">↻ Intelligent Recovery V5</a><a class="nav" href="/master-data-cleaner">◆ Master Data Cleaner V7</a><a class="nav" href="/smart-master-data">★ Smart Master Data V8</a><a class="nav" href="/property-reconstruction">✦ Property Reconstruction V9</a><a class="nav" href="/capture-intelligence">◉ Camera / Newspaper / Handwritten V10</a><a class="nav" href="/retail-requirements">▤ Retail Requirement Leads</a><button class="nav" data-page="owners">● Owners Database</button><button class="nav" data-page="brokers">● Brokers Database</button><a class="nav" href="/legacy-workspace">Original Upload Workspace</a><a class="nav" href="/database-page">Original Database</a>
 <div class="group">LEAD INTELLIGENCE</div><a class="nav" href="/commercial-intelligence">Commercial Intelligence</a><button class="nav" data-page="hospitality">◆ Hospitality</button><button class="nav" data-page="retail">◈ Retail Expansion</button><button class="nav" data-page="contacts">✉ Marketing Contacts</button><button class="nav" data-page="demand">⌕ Requirement Discovery</button>
-</aside><main class="main"><header class="top"><div><b>Unified Delhi NCR Deal Intelligence</b><div class="sub">Organized database + AI bots + matching</div></div><div>{badge} · <a href="/logout">Logout</a></div></header><div class="content">
+</aside><main class="main"><header class="top"><div><b>Unified Delhi NCR Deal Intelligence</b><div class="sub">Organized database + AI bots + matching</div></div><div>{badge} · <a id="workspace-commercial-button" class="btn" href="/commercial-intelligence" style="margin-right:10px">Commercial Intelligence</a><a href="/logout">Logout</a></div></header><div class="content">
 
 <section class="page active" id="command"><h1 class="title">Command Centre</h1><div class="sub">One view across supply, demand, owners, brokers, hospitality, retail and commercial intelligence.</div>
 <div class="kpis"><div class="kpi"><span>PROPERTIES</span><b data-k="properties">0</b></div><div class="kpi"><span>REQUIREMENTS</span><b data-k="requirements">0</b></div><div class="kpi"><span>MATCHES</span><b data-k="matches">0</b></div><div class="kpi"><span>HOSPITALITY CONTACTS</span><b data-k="hospitality_contacts">0</b></div><div class="kpi"><span>DEMAND SIGNALS</span><b data-k="demand_signals">0</b></div></div>
@@ -7354,7 +7354,7 @@ textarea{{min-height:90px}}.full{{grid-column:1/-1}}
 <body>
 <header>
 <div><b>AI Deal Intelligence OS</b><br><small>Add Property Manually</small></div>
-<div>{role.upper()} · <a href="/workspace">Dashboard</a> · <a href="/logout">Logout</a></div>
+<div>{role.upper()} · <a href="/workspace">Dashboard</a> · <a id="workspace-commercial-button" class="btn" href="/commercial-intelligence" style="margin-right:10px">Commercial Intelligence</a><a href="/logout">Logout</a></div>
 </header>
 <div class="wrap">
 <h1>Add Property Manually</h1>
@@ -10143,7 +10143,7 @@ header{background:var(--nav);color:#fff;padding:18px 24px;display:flex;justify-c
 <body>
 <header>
   <div class="brand"><b>AI Deal Intelligence OS</b><small>Property · Requirements · AI Leads · Contacts · Goa</small></div>
-  <div class="toplinks"><span id="role">TEAM</span><a href="/logout">Logout</a></div>
+  <div class="toplinks"><span id="role">TEAM</span><a id="workspace-commercial-button" class="btn" href="/commercial-intelligence" style="margin-right:10px">Commercial Intelligence</a><a href="/logout">Logout</a></div>
 </header>
 
 <div class="wrap">
