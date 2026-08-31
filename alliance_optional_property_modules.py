@@ -1,6 +1,6 @@
 ﻿"""Fail-safe optional property module registration."""
 
-VERSION = "1.26.0-OPTIONAL-PROPERTY-MODULES-PROJECT-LOCATION-V256A"
+VERSION = "1.27.0-OPTIONAL-PROPERTY-MODULES-REMAINING-DIAGNOSTIC-V256B"
 
 
 def _route_exists(app, path):
@@ -902,6 +902,32 @@ def register(wrapped):
             "status": "ERROR",
             "error": f"{type(exc).__name__}: {exc}",
             "route": "/api/v7/property-ai/project-location-v256a/status",
+            "fail_safe": True,
+        }
+
+    # PHASE 2.5.6B - remaining record diagnostic
+    try:
+        if _route_exists(
+            app,
+            "/api/v7/property-ai/remaining-diagnostic-v256b/status",
+        ):
+            result["remaining_diagnostic_v256b"] = {
+                "status": "ALREADY_REGISTERED",
+                "route": "/api/v7/property-ai/remaining-diagnostic-v256b/status",
+                "error": None,
+            }
+        else:
+            import alliance_property_remaining_diagnostic_v256b as remaining_v256b
+            v256b_result = remaining_v256b.register(core)
+            result["remaining_diagnostic_v256b"] = {
+                **v256b_result,
+                "error": None,
+            }
+    except Exception as exc:
+        result["remaining_diagnostic_v256b"] = {
+            "status": "ERROR",
+            "error": f"{type(exc).__name__}: {exc}",
+            "route": "/api/v7/property-ai/remaining-diagnostic-v256b/status",
             "fail_safe": True,
         }
     return result
