@@ -368,7 +368,7 @@ def register(core):
         role=_page_role(core,req)
         if not role:
             login=getattr(core,"login_page",None)
-            if callable(login): return HTMLResponse(login(req))
+            if callable(login): return login(req)
             raise HTTPException(401,"Login required")
         return HTMLResponse(_render(engine,_clean(view).upper(),_clean(city),_clean(message)))
     @router.post("/commercial-intelligence/research-all")
