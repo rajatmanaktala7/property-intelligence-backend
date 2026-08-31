@@ -1,6 +1,6 @@
 ﻿"""Fail-safe optional property module registration."""
 
-VERSION = "1.22.1-OPTIONAL-PROPERTY-MODULES-HIERARCHICAL-PARSER-V255A"
+VERSION = "1.23.0-OPTIONAL-PROPERTY-MODULES-PARENT-LOCATION-V255B"
 
 
 def _route_exists(app, path):
@@ -798,6 +798,32 @@ def register(wrapped):
             "status": "ERROR",
             "error": f"{type(exc).__name__}: {exc}",
             "route": "/api/v7/property-ai/hierarchical-parser-v255/status",
+            "fail_safe": True,
+        }
+
+    # PHASE 2.5.5B - deterministic parent location evidence applier
+    try:
+        if _route_exists(
+            app,
+            "/api/v7/property-ai/parent-location-v255b/status",
+        ):
+            result["parent_location_v255b"] = {
+                "status": "ALREADY_REGISTERED",
+                "route": "/api/v7/property-ai/parent-location-v255b/status",
+                "error": None,
+            }
+        else:
+            import alliance_property_parent_location_v255b as parent_location_v255b
+            v255b_result = parent_location_v255b.register(core)
+            result["parent_location_v255b"] = {
+                **v255b_result,
+                "error": None,
+            }
+    except Exception as exc:
+        result["parent_location_v255b"] = {
+            "status": "ERROR",
+            "error": f"{type(exc).__name__}: {exc}",
+            "route": "/api/v7/property-ai/parent-location-v255b/status",
             "fail_safe": True,
         }
     return result
