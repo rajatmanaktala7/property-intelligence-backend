@@ -1,6 +1,6 @@
 ﻿"""Fail-safe optional property module registration."""
 
-VERSION = "1.14.0-OPTIONAL-PROPERTY-MODULES-CONTEXT-INTELLIGENCE-V246"
+VERSION = "1.15.0-OPTIONAL-PROPERTY-MODULES-BOUNDARY-INTELLIGENCE-V25"
 
 
 def _route_exists(app, path):
@@ -592,6 +592,33 @@ def register(wrapped):
             "route": "/api/v7/property-ai/context-intelligence-v246/status",
             "fail_safe": True,
         }
+
+    # PHASE 2.5 - property boundary + own-text intelligence
+    try:
+        if _route_exists(
+            app,
+            "/api/v7/property-ai/boundary-intelligence-v25/status",
+        ):
+            result["boundary_intelligence_v25"] = {
+                "status": "ALREADY_REGISTERED",
+                "route": "/api/v7/property-ai/boundary-intelligence-v25/status",
+                "error": None,
+            }
+        else:
+            import alliance_property_boundary_intelligence_v25 as boundary_v25
+            boundary_result = boundary_v25.register(core)
+            result["boundary_intelligence_v25"] = {
+                **boundary_result,
+                "error": None,
+            }
+    except Exception as exc:
+        result["boundary_intelligence_v25"] = {
+            "status": "ERROR",
+            "error": f"{type(exc).__name__}: {exc}",
+            "route": "/api/v7/property-ai/boundary-intelligence-v25/status",
+            "fail_safe": True,
+        }
     return result
+
 
 
