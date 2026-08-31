@@ -1,6 +1,6 @@
-﻿"""Fail-safe optional property module registration."""
+"""Fail-safe optional property module registration."""
 
-VERSION = "1.7.0-OPTIONAL-PROPERTY-MODULES-V7-FOUNDATION"
+VERSION = "1.8.0-OPTIONAL-PROPERTY-MODULES-PROPERTY-AI"
 
 
 def _route_exists(app, path):
@@ -27,6 +27,7 @@ def register(wrapped):
         "commercial_intelligence": {"status": "NOT_RUN", "error": None},
         "commercial_intelligence_automation": {"status": "NOT_RUN", "error": None},
         "v7_foundation": {"status": "NOT_RUN", "error": None},
+        "property_ai": {"status": "NOT_RUN", "error": None},
         "fail_safe": True,
     }
 
