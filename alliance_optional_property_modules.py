@@ -1,6 +1,6 @@
-"""Fail-safe optional property module registration."""
+﻿"""Fail-safe optional property module registration."""
 
-VERSION = "1.6.0-OPTIONAL-PROPERTY-MODULES-AI-FRONTEND"
+VERSION = "1.7.0-OPTIONAL-PROPERTY-MODULES-V7-FOUNDATION"
 
 
 def _route_exists(app, path):
@@ -26,6 +26,7 @@ def register(wrapped):
         "dashboard_cleanliness": {"status": "NOT_RUN", "error": None},
         "commercial_intelligence": {"status": "NOT_RUN", "error": None},
         "commercial_intelligence_automation": {"status": "NOT_RUN", "error": None},
+        "v7_foundation": {"status": "NOT_RUN", "error": None},
         "fail_safe": True,
     }
 
@@ -78,8 +79,6 @@ def register(wrapped):
             "error": f"{type(exc).__name__}: {exc}",
         }
 
-    # Commercial Intelligence AI frontend: preserves the raw discovery backend
-    # but exposes only refined, de-duplicated, commercially useful opportunities.
     try:
         if _route_exists(app, "/commercial-intelligence"):
             result["commercial_intelligence"] = {
@@ -102,9 +101,6 @@ def register(wrapped):
             "fail_safe": True,
         }
 
-    # Autonomous runner is deliberately registered AFTER the database-backed
-    # Commercial Intelligence module. A scheduler failure cannot prevent the
-    # rest of the Alliance application from booting.
     try:
         if _route_exists(app, "/api/commercial-intelligence/automation-status"):
             result["commercial_intelligence_automation"] = {
@@ -124,6 +120,28 @@ def register(wrapped):
             "status": "ERROR",
             "error": f"{type(exc).__name__}: {exc}",
             "route": "/api/commercial-intelligence/automation-status",
+            "fail_safe": True,
+        }
+
+    try:
+        if _route_exists(app, "/v7/foundation"):
+            result["v7_foundation"] = {
+                "status": "ALREADY_REGISTERED",
+                "route": "/v7/foundation",
+                "error": None,
+            }
+        else:
+            import alliance_v7_foundation as v7
+            v7_result = v7.register(core)
+            result["v7_foundation"] = {
+                **v7_result,
+                "error": None,
+            }
+    except Exception as exc:
+        result["v7_foundation"] = {
+            "status": "ERROR",
+            "error": f"{type(exc).__name__}: {exc}",
+            "route": "/v7/foundation",
             "fail_safe": True,
         }
 
