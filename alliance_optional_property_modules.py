@@ -1,6 +1,6 @@
 ﻿"""Fail-safe optional property module registration."""
 
-VERSION = "1.31.0-OPTIONAL-PROPERTY-MODULES-CONTROLLED-WRITER-V259"
+VERSION = "1.32.1-OPTIONAL-PROPERTY-MODULES-ACADEMY-V260B"
 
 
 def _route_exists(app, path):
@@ -1032,6 +1032,25 @@ def register(wrapped):
             "status": "ERROR",
             "error": f"{type(exc).__name__}: {exc}",
             "route": "/api/v7/property-ai/controlled-writer-v259/status",
+            "fail_safe": True,
+        }
+
+    # V260 Alliance AI Academy + V259B write safety
+    try:
+        if _route_exists(app, "/api/v7/property-ai/academy-v260/status"):
+            result["academy_v260"] = {
+                "status": "ALREADY_REGISTERED",
+                "route": "/api/v7/property-ai/academy-v260/status",
+                "error": None,
+            }
+        else:
+            import alliance_ai_academy_v260 as academy_v260
+            result["academy_v260"] = {**academy_v260.register(core), "error": None}
+    except Exception as exc:
+        result["academy_v260"] = {
+            "status": "ERROR",
+            "error": f"{type(exc).__name__}: {exc}",
+            "route": "/api/v7/property-ai/academy-v260/status",
             "fail_safe": True,
         }
     return result
