@@ -581,12 +581,17 @@ tbody tr:hover{
 
 <section id="home"><div class="split">
 <div class="card"><h2>Team Daily Operations</h2>
+<div id="commercial-intelligence-main-card" class="card">
+  <h3>Commercial Intelligence</h3>
+  <p>Research malls, commercial projects and government/institutional premises. Review brands present or announced, space availability, leasing contacts and AI brand-fit opportunities.</p>
+  <a class="btn primary" href="/commercial-intelligence">Open Commercial Intelligence</a>
+</div>
 <div class="template-grid">
   <div class="template-card"><div><h3>Manual Property Database</h3><p>View the complete manual inventory with property details, contacts, photos, videos, brochures, View and Edit actions.</p></div><div class="template-actions"><a class="btn green" href="/manual-property-database">Open Database</a></div></div>
   <div class="template-card"><div><h3>Add Delhi NCR Property</h3><p>Add a new Delhi NCR property with flexible area, owner/broker information, verification and multiple media uploads.</p></div><div class="template-actions"><a class="btn primary" href="/manual-property-final-exec?division=DELHI_NCR">Add Property</a></div></div>
   <div class="template-card"><div><h3>Add Goa Property</h3><p>Add Goa inventory with the same structured manual entry workflow and media support.</p></div><div class="template-actions"><a class="btn" href="/manual-property-final-exec?division=GOA">Add Goa Property</a></div></div>
   <div class="template-card"><div><h3>Requirements Centre</h3><p>Open the exact Delhi NCR Requirements Centre with codes, companies, locations, area, verification and matching workflow.</p></div><div class="template-actions"><a class="btn primary" href="/requirements-center-v176?division=DELHI_NCR">Open Requirements</a></div></div>
-  <div class="template-card"><div><h3>WhatsApp Live</h3><p>Check approved numbers, groups, latest posts, new inventory, new requirements and live capture status.</p></div><div class="template-actions"><a class="btn purple" href="/whatsapp-live">Open WhatsApp</a></div></div>
+  <div class="template-card"><div><h3>WhatsApp Live</h3><p>Check approved numbers, groups, latest posts, new inventory, new requirements and live capture status.</p></div><div class="template-actions"><a href="/commercial-intelligence">Commercial Intelligence</a><a class="btn purple" href="/whatsapp-live">Open WhatsApp</a></div></div>
   <div class="template-card"><div><h3>Newspaper Live</h3><p>Upload a newspaper picture, let AI Vision extract property records, then search and verify the live database.</p></div><div class="template-actions"><a class="btn green" href="/newspaper">Upload Picture</a></div></div>
   <div class="template-card"><div><h3>Magazine Database</h3><p>Search the existing magazine master database and import or activate additional magazine records.</p></div><div class="template-actions"><a class="btn" href="/magazine-master-import">Open Magazine</a></div></div>
   <div class="template-card"><div><h3>Hospitality Database</h3><p>View restaurants, cafes, lounges, clubs, banquets, hotels and guest houses with contact details and verification.</p></div><div class="template-actions"><a class="btn green" href="/hospitality-results-final">Open Hospitality</a></div></div>
@@ -595,7 +600,7 @@ tbody tr:hover{
   <div class="template-card"><div><h3>Property Matcher</h3><p>Match a selected requirement against available inventory and keep the source visible for every result.</p></div><div class="template-actions"><a class="btn primary" href="/matcher-final?division=DELHI_NCR">Open Matcher</a></div></div>
   <div class="template-card"><div><h3>Live Property Pipeline</h3><p>See the V2.6 → V2.9.5 flowchart and the current stage for each active requirement.</p></div><div class="template-actions"><button class="btn purple" onclick="tab('pipeline',document.querySelector('.tabs button[onclick*=pipeline]'))">Open Pipeline</button></div></div>
 </div></div>
-<div class="card"><h2>WhatsApp Connection</h2><div id="wastatus">Checking…</div><div class="toolbar"><a class="btn purple" href="/whatsapp-live">Open Live Feed</a><a class="btn green" href="/whatsapp-live/sources">Add / Manage Numbers & Groups</a></div><div class="small">Add the mobile account first, then add/activate each WhatsApp group under that number.</div></div></div>
+<div class="card"><h2>WhatsApp Connection</h2><div id="wastatus">Checking…</div><div class="toolbar"><a href="/commercial-intelligence">Commercial Intelligence</a><a class="btn purple" href="/whatsapp-live">Open Live Feed</a><a class="btn green" href="/whatsapp-live/sources">Add / Manage Numbers & Groups</a></div><div class="small">Add the mobile account first, then add/activate each WhatsApp group under that number.</div></div></div>
 <div class="card"><h2>AI Bots</h2><div class="toolbar"><button class="btn purple" onclick="runBot('/api/v4/hospitality-bot/start','Hospitality')">▶ Run Hospitality Bot</button><a class="btn" href="/hospitality-results-final">Hospitality Results</a><button class="btn purple" onclick="runBot('/api/v4/retail-bot/start','Retail')">▶ Run Retail Bot</button><a class="btn" href="/bot-reliability">Bot Reliability</a></div><div id="botmsg" class="message">Ready.</div></div></section>
 
 
@@ -633,7 +638,7 @@ tbody tr:hover{
 </div>
 </section>
 
-<section id="whatsapp" class="hidden"><div class="card"><h2>WhatsApp Live Status</h2><div id="wadetail">Checking…</div><div class="toolbar"><a class="btn purple" href="/whatsapp-live">Open Full WhatsApp Dashboard</a><a class="btn green" href="/whatsapp-live/sources">Add / Manage Numbers & Groups</a></div></div></section>
+<section id="whatsapp" class="hidden"><div class="card"><h2>WhatsApp Live Status</h2><div id="wadetail">Checking…</div><div class="toolbar"><a href="/commercial-intelligence">Commercial Intelligence</a><a class="btn purple" href="/whatsapp-live">Open Full WhatsApp Dashboard</a><a class="btn green" href="/whatsapp-live/sources">Add / Manage Numbers & Groups</a></div></div></section>
 
 
 <section id="wacapture" class="hidden"><div class="card">

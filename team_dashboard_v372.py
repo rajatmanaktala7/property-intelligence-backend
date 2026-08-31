@@ -508,8 +508,13 @@ tbody tr:hover{
 <a class="btn" href="/matcher-final?division=DELHI_NCR">Matcher</a><a class="btn" href="/property-discovery">Property Search</a></div>
 
 <section id="home"><div class="split">
-<div class="card"><h2>Team Daily Operations</h2><div class="toolbar"><a class="btn green" href="/manual-property-database">Manual Property Database</a><a class="btn primary" href="/manual-property-final-exec?division=DELHI_NCR">Add Delhi NCR Property</a><a class="btn" href="/manual-property-final-exec?division=GOA">Add Goa Property</a><a class="btn purple" href="/whatsapp-live">Open WhatsApp Live</a><a class="btn" href="/newspaper">Upload Newspaper Picture</a></div></div>
-<div class="card"><h2>WhatsApp Connection</h2><div id="wastatus">Checking…</div><div class="toolbar"><a class="btn purple" href="/whatsapp-live">Open Live Feed</a><a class="btn green" href="/whatsapp-live/sources">Add / Manage Numbers & Groups</a></div><div class="small">Add the mobile account first, then add/activate each WhatsApp group under that number.</div></div></div>
+<div class="card"><h2>Team Daily Operations</h2>
+<div id="commercial-intelligence-main-card" class="card">
+  <h3>Commercial Intelligence</h3>
+  <p>Research malls, commercial projects and government/institutional premises. Review brands present or announced, space availability, leasing contacts and AI brand-fit opportunities.</p>
+  <a class="btn primary" href="/commercial-intelligence">Open Commercial Intelligence</a>
+</div><div class="toolbar"><a class="btn green" href="/manual-property-database">Manual Property Database</a><a class="btn primary" href="/manual-property-final-exec?division=DELHI_NCR">Add Delhi NCR Property</a><a class="btn" href="/manual-property-final-exec?division=GOA">Add Goa Property</a><a href="/commercial-intelligence">Commercial Intelligence</a><a class="btn purple" href="/whatsapp-live">Open WhatsApp Live</a><a class="btn" href="/newspaper">Upload Newspaper Picture</a></div></div>
+<div class="card"><h2>WhatsApp Connection</h2><div id="wastatus">Checking…</div><div class="toolbar"><a href="/commercial-intelligence">Commercial Intelligence</a><a class="btn purple" href="/whatsapp-live">Open Live Feed</a><a class="btn green" href="/whatsapp-live/sources">Add / Manage Numbers & Groups</a></div><div class="small">Add the mobile account first, then add/activate each WhatsApp group under that number.</div></div></div>
 <div class="card"><h2>AI Bots</h2><div class="toolbar"><button class="btn purple" onclick="runBot('/api/v4/hospitality-bot/start','Hospitality')">▶ Run Hospitality Bot</button><a class="btn" href="/hospitality-results-final">Hospitality Results</a><button class="btn purple" onclick="runBot('/api/v4/retail-bot/start','Retail')">▶ Run Retail Bot</button><a class="btn" href="/bot-reliability">Bot Reliability</a></div><div id="botmsg" class="message">Ready.</div></div></section>
 
 
@@ -547,7 +552,7 @@ tbody tr:hover{
 </div>
 </section>
 
-<section id="whatsapp" class="hidden"><div class="card"><h2>WhatsApp Live Status</h2><div id="wadetail">Checking…</div><div class="toolbar"><a class="btn purple" href="/whatsapp-live">Open Full WhatsApp Dashboard</a><a class="btn green" href="/whatsapp-live/sources">Add / Manage Numbers & Groups</a></div></div></section>
+<section id="whatsapp" class="hidden"><div class="card"><h2>WhatsApp Live Status</h2><div id="wadetail">Checking…</div><div class="toolbar"><a href="/commercial-intelligence">Commercial Intelligence</a><a class="btn purple" href="/whatsapp-live">Open Full WhatsApp Dashboard</a><a class="btn green" href="/whatsapp-live/sources">Add / Manage Numbers & Groups</a></div></div></section>
 
 <section id="newspaper" class="hidden"><div class="card"><h2>Newspaper Live Database</h2><div class="message">Picture upload only. Manual newspaper entry has been removed from this dashboard.</div><div class="toolbar"><input id="nq" placeholder="Search newspaper database"><button class="btn primary" onclick="newspaper()">Search</button><a class="btn green" href="/newspaper">📷 Upload Newspaper Picture</a></div><div id="ncount" class="small"></div><div class="tablewrap"><table><thead><tr><th>ID</th><th>Type</th><th>Locality</th><th>Area</th><th>Configuration</th><th>Price</th><th>Agency</th><th>Contact</th><th>Phone</th><th>Verification</th><th>Team</th></tr></thead><tbody id="nrows"></tbody></table></div></div></section>
 
