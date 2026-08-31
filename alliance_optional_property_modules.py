@@ -1,6 +1,6 @@
 ﻿"""Fail-safe optional property module registration."""
 
-VERSION = "1.25.0-OPTIONAL-PROPERTY-MODULES-PROJECT-HEADER-INVENTORY-V255D"
+VERSION = "1.26.0-OPTIONAL-PROPERTY-MODULES-PROJECT-LOCATION-V256A"
 
 
 def _route_exists(app, path):
@@ -876,6 +876,32 @@ def register(wrapped):
             "status": "ERROR",
             "error": f"{type(exc).__name__}: {exc}",
             "route": "/api/v7/property-ai/project-header-inventory-v255d/status",
+            "fail_safe": True,
+        }
+
+    # PHASE 2.5.6A - evidence-backed project location resolver
+    try:
+        if _route_exists(
+            app,
+            "/api/v7/property-ai/project-location-v256a/status",
+        ):
+            result["project_location_v256a"] = {
+                "status": "ALREADY_REGISTERED",
+                "route": "/api/v7/property-ai/project-location-v256a/status",
+                "error": None,
+            }
+        else:
+            import alliance_property_project_location_v256a as project_location_v256a
+            v256a_result = project_location_v256a.register(core)
+            result["project_location_v256a"] = {
+                **v256a_result,
+                "error": None,
+            }
+    except Exception as exc:
+        result["project_location_v256a"] = {
+            "status": "ERROR",
+            "error": f"{type(exc).__name__}: {exc}",
+            "route": "/api/v7/property-ai/project-location-v256a/status",
             "fail_safe": True,
         }
     return result
