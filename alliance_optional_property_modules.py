@@ -1,6 +1,6 @@
 """Fail-safe optional property module registration."""
 
-VERSION = "1.10.0-OPTIONAL-PROPERTY-MODULES-BUNDLE-RECONSTRUCTOR"
+VERSION = "1.11.0-OPTIONAL-PROPERTY-MODULES-SHADOW-EXTRACTION"
 
 
 def _route_exists(app, path):
@@ -489,4 +489,29 @@ def register(wrapped):
             "fail_safe": True,
         }
 
+
+    try:
+        if _route_exists(
+            app,
+            "/api/v7/property-ai/shadow-extraction/status",
+        ):
+            result["shadow_extraction_v24"] = {
+                "status": "ALREADY_REGISTERED",
+                "route": "/api/v7/property-ai/shadow-extraction/status",
+                "error": None,
+            }
+        else:
+            import alliance_property_shadow_extraction_v24 as shadow_v24
+            shadow_result = shadow_v24.register(core)
+            result["shadow_extraction_v24"] = {
+                **shadow_result,
+                "error": None,
+            }
+    except Exception as exc:
+        result["shadow_extraction_v24"] = {
+            "status": "ERROR",
+            "error": f"{type(exc).__name__}: {exc}",
+            "route": "/api/v7/property-ai/shadow-extraction/status",
+            "fail_safe": True,
+        }
     return result
