@@ -1,6 +1,6 @@
 ﻿"""Fail-safe optional property module registration."""
 
-VERSION = "1.12.0-OPTIONAL-PROPERTY-MODULES-CONTEXT-RECOVERY-V245"
+VERSION = "1.13.0-OPTIONAL-PROPERTY-MODULES-BENCHMARK-STABILIZER-V245A"
 
 
 def _route_exists(app, path):
@@ -540,4 +540,31 @@ def register(wrapped):
             "route": "/api/v7/property-ai/context-recovery-v245/status",
             "fail_safe": True,
         }
+
+    # PHASE 2.4.5A - deterministic benchmark stabilizer
+    try:
+        if _route_exists(
+            app,
+            "/api/v7/property-ai/benchmark-stabilizer-v245a/status",
+        ):
+            result["benchmark_stabilizer_v245a"] = {
+                "status": "ALREADY_REGISTERED",
+                "route": "/api/v7/property-ai/benchmark-stabilizer-v245a/status",
+                "error": None,
+            }
+        else:
+            import alliance_property_benchmark_stabilizer_v245a as stabilizer_v245a
+            stabilizer_result = stabilizer_v245a.register(core)
+            result["benchmark_stabilizer_v245a"] = {
+                **stabilizer_result,
+                "error": None,
+            }
+    except Exception as exc:
+        result["benchmark_stabilizer_v245a"] = {
+            "status": "ERROR",
+            "error": f"{type(exc).__name__}: {exc}",
+            "route": "/api/v7/property-ai/benchmark-stabilizer-v245a/status",
+            "fail_safe": True,
+        }
     return result
+
