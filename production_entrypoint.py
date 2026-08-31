@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import time
 import traceback
 from datetime import datetime, timezone
 from typing import Any
@@ -9,6 +10,8 @@ from typing import Any
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 
+
+VERSION = "3.2-STABILITY-FLOOD-SHIELD"
 
 BOOT = {
     "state": "STARTING",
@@ -31,22 +34,40 @@ LATE_REGISTRATION = {
 # -----------------------------------------------------------------------------
 # PRODUCTION STABILITY GUARD
 #
-# Why this exists:
-# - The Alliance application contains many synchronous/database-backed routes.
-# - FastAPI executes sync routes in a threadpool.
-# - If too many slow/stuck sync requests arrive together, the threadpool can be
-#   exhausted and a sync /healthz route can also stop responding.
+# Main problem fixed here:
+# - /whatsapp-live/api/ingest can be hit in bursts.
+# - /api/team-dashboard-v376/freshness can be polled too aggressively.
+# - Those requests must never consume every core request slot.
 #
-# Fix:
-# - Health-shell handlers are fully async and bypass the core app.
-# - Core request concurrency is bounded so browser tabs cannot flood the core.
-# - If the core gate is saturated, new core requests get a fast 503 instead of
-#   silently piling up and making the whole service appear dead.
+# Design:
+# - health/diagnostics bypass the Alliance core completely
+# - normal application requests use their own bounded gate
+# - WhatsApp ingest uses a separate tiny gate + rate shield
+# - freshness polling uses a separate tiny gate + rate shield
+# - rejected flood traffic never enters the core/database
+# - no data is deleted or mutated by the shield
 # -----------------------------------------------------------------------------
 
-MAX_CORE_REQUESTS = 12
-CORE_GATE_WAIT_SECONDS = 2.5
+MAX_CORE_REQUESTS = 8
+CORE_GATE_WAIT_SECONDS = 1.5
+
+INGEST_MAX_CONCURRENT = 2
+INGEST_MIN_INTERVAL_SECONDS = 0.15
+INGEST_GATE_WAIT_SECONDS = 0.05
+
+FRESHNESS_MAX_CONCURRENT = 1
+FRESHNESS_MIN_INTERVAL_SECONDS = 1.0
+FRESHNESS_GATE_WAIT_SECONDS = 0.05
+
 _CORE_GATE: asyncio.Semaphore | None = None
+_INGEST_GATE: asyncio.Semaphore | None = None
+_FRESHNESS_GATE: asyncio.Semaphore | None = None
+
+_RATE_LOCK = threading.Lock()
+_LAST_ALLOWED = {
+    "ingest": 0.0,
+    "freshness": 0.0,
+}
 
 RUNTIME = {
     "active_core_requests": 0,
@@ -56,6 +77,14 @@ RUNTIME = {
     "last_core_path": None,
     "last_core_started_at": None,
     "last_core_completed_at": None,
+
+    "active_ingest_requests": 0,
+    "accepted_ingest_requests": 0,
+    "rejected_ingest_requests": 0,
+
+    "active_freshness_requests": 0,
+    "accepted_freshness_requests": 0,
+    "rejected_freshness_requests": 0,
 }
 
 
@@ -70,15 +99,37 @@ def _get_core_gate() -> asyncio.Semaphore:
     return _CORE_GATE
 
 
+def _get_ingest_gate() -> asyncio.Semaphore:
+    global _INGEST_GATE
+    if _INGEST_GATE is None:
+        _INGEST_GATE = asyncio.Semaphore(INGEST_MAX_CONCURRENT)
+    return _INGEST_GATE
+
+
+def _get_freshness_gate() -> asyncio.Semaphore:
+    global _FRESHNESS_GATE
+    if _FRESHNESS_GATE is None:
+        _FRESHNESS_GATE = asyncio.Semaphore(FRESHNESS_MAX_CONCURRENT)
+    return _FRESHNESS_GATE
+
+
+def _rate_allowed(bucket: str, min_interval: float) -> bool:
+    now = time.monotonic()
+    with _RATE_LOCK:
+        last = float(_LAST_ALLOWED.get(bucket, 0.0) or 0.0)
+        if now - last < min_interval:
+            return False
+        _LAST_ALLOWED[bucket] = now
+        return True
+
+
 # -----------------------------------------------------------------------------
 # HEALTH SHELL
-# Created BEFORE importing the full Alliance app so Railway can always receive
-# health/diagnostic responses independently of the main application.
 # -----------------------------------------------------------------------------
 
 health_app = FastAPI(
     title="Alliance Health Shell",
-    version="3.1-HEALTH-FIRST-STABLE",
+    version=VERSION,
 )
 
 
@@ -88,9 +139,12 @@ async def healthz():
         "status": "ok",
         "service": "alliance-property-intelligence",
         "health_shell": True,
+        "version": VERSION,
         "boot_state": BOOT["state"],
         "core_loaded": BOOT["core_loaded"],
         "active_core_requests": RUNTIME["active_core_requests"],
+        "active_ingest_requests": RUNTIME["active_ingest_requests"],
+        "active_freshness_requests": RUNTIME["active_freshness_requests"],
         "timestamp_utc": _utcnow(),
     }
 
@@ -101,6 +155,7 @@ async def readyz():
         status_code=200 if BOOT["core_loaded"] else 503,
         content={
             "status": "ready" if BOOT["core_loaded"] else "starting",
+            "version": VERSION,
             "boot_state": BOOT["state"],
             "core_loaded": BOOT["core_loaded"],
             "error": BOOT["error"],
@@ -113,6 +168,7 @@ async def readyz():
 async def boot_status():
     return {
         "service": "Alliance AI Deal Intelligence OS",
+        "version": VERSION,
         **BOOT,
         "runtime": dict(RUNTIME),
         "max_core_requests": MAX_CORE_REQUESTS,
@@ -124,10 +180,15 @@ async def boot_status():
 async def runtime_status():
     return {
         "status": "OK",
+        "version": VERSION,
         "boot_state": BOOT["state"],
         "core_loaded": BOOT["core_loaded"],
         "max_core_requests": MAX_CORE_REQUESTS,
         "core_gate_wait_seconds": CORE_GATE_WAIT_SECONDS,
+        "ingest_max_concurrent": INGEST_MAX_CONCURRENT,
+        "ingest_min_interval_seconds": INGEST_MIN_INTERVAL_SECONDS,
+        "freshness_max_concurrent": FRESHNESS_MAX_CONCURRENT,
+        "freshness_min_interval_seconds": FRESHNESS_MIN_INTERVAL_SECONDS,
         **RUNTIME,
         "timestamp_utc": _utcnow(),
     }
@@ -191,10 +252,12 @@ async def core_route_status():
         "/api/live-bootstrap-status",
         "/whatsapp-live",
         "/whatsapp-live/feed",
+        "/commercial-intelligence",
     ]
     present = {w: any(x["path"] == w for x in routes) for w in wanted}
     return {
         "status": "OK",
+        "version": VERSION,
         "boot_state": BOOT.get("state"),
         "core_loaded": BOOT.get("core_loaded"),
         "core_app_present": CORE_APP is not None,
@@ -220,6 +283,7 @@ async def shell_live_bootstrap_status():
     return {
         "status": "OK" if BOOT.get("core_loaded") else "STARTING",
         "served_by": "production_entrypoint health shell",
+        "version": VERSION,
         "late_registration": LATE_REGISTRATION,
         "boot_state": BOOT.get("state"),
         "core_loaded": BOOT.get("core_loaded"),
@@ -229,6 +293,7 @@ async def shell_live_bootstrap_status():
         "v451_properties_registered": "/api/v451/live/properties" in routes,
         "whatsapp_live_registered": "/whatsapp-live" in routes,
         "whatsapp_feed_registered": "/whatsapp-live/feed" in routes,
+        "commercial_intelligence_registered": "/commercial-intelligence" in routes,
         "core_bootstrap_route_registered": routes.count("/api/live-bootstrap-status") > 0,
         "route_count": len(routes),
         "runtime": dict(RUNTIME),
@@ -259,7 +324,6 @@ def _late_register_intelligence(wrapped):
             results["v383"] = {"status": "ALREADY_REGISTERED", "error": None}
         else:
             import alliance_v383_database_foundation as v383
-
             v383.register(core)
             results["v383"] = {
                 "status": "REGISTERED" if route_exists("/api/v383/status") else "NO_ROUTE",
@@ -276,7 +340,6 @@ def _late_register_intelligence(wrapped):
             results["v46"] = {"status": "ALREADY_REGISTERED", "error": None}
         else:
             import alliance_v46_unified_intelligence as v46
-
             v46.register(core)
             results["v46"] = {
                 "status": "REGISTERED" if route_exists("/api/v46/status") else "NO_ROUTE",
@@ -293,7 +356,6 @@ def _late_register_intelligence(wrapped):
             results["v451"] = {"status": "ALREADY_REGISTERED", "error": None}
         else:
             import alliance_v45_live_whatsapp_takeover as v451
-
             v451.register(core)
             results["v451"] = {
                 "status": "REGISTERED"
@@ -336,17 +398,13 @@ def _load_core():
 
     try:
         import newspaper_wrapper as wrapped
-
         import alliance_production_surface as production_surface
 
         stabilization = production_surface.register(wrapped)
 
         import alliance_live_feed_purity as live_feed_purity
-
         live_feed_purity.register(wrapped)
 
-        # Safe late-registration check. It does not duplicate routes; each module
-        # is registered only when its expected route is genuinely absent.
         try:
             late = _late_register_intelligence(wrapped)
             stabilization = dict(stabilization or {})
@@ -357,7 +415,6 @@ def _load_core():
                 "error": f"{type(exc).__name__}: {exc}"
             }
 
-        # Optional Property Brain + Enrichment registration. Fail-safe by design.
         try:
             import alliance_optional_property_modules as optional_property_modules
             optional_result = optional_property_modules.register(wrapped)
@@ -366,8 +423,16 @@ def _load_core():
             print("[optional-property-modules]", optional_result)
         except Exception as exc:
             stabilization = dict(stabilization or {})
-            stabilization["optional_property_modules"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","fail_safe":True}
-            print("[optional-property-modules] warning:", type(exc).__name__, str(exc))
+            stabilization["optional_property_modules"] = {
+                "status": "ERROR",
+                "error": f"{type(exc).__name__}: {exc}",
+                "fail_safe": True,
+            }
+            print(
+                "[optional-property-modules] warning:",
+                type(exc).__name__,
+                str(exc),
+            )
 
         CORE_APP = wrapped.app
         BOOT["core_loaded"] = True
@@ -402,9 +467,9 @@ class HealthFirstDispatcher:
     """
     Stable ASGI dispatcher.
 
-    Health/diagnostic endpoints always bypass the full Alliance application.
-    Core HTTP requests are concurrency-bounded to prevent multiple browser tabs
-    or slow DB routes from exhausting the sync worker pool.
+    Health paths bypass the core.
+    Normal routes, ingest traffic and freshness polling are isolated from one
+    another so one noisy subsystem cannot starve the entire application.
     """
 
     HEALTH_PATHS = {
@@ -415,6 +480,25 @@ class HealthFirstDispatcher:
         "/core-route-status",
         "/api/live-bootstrap-status",
     }
+
+    INGEST_PATHS = {
+        "/whatsapp-live/api/ingest",
+    }
+
+    FRESHNESS_PATHS = {
+        "/api/team-dashboard-v376/freshness",
+    }
+
+    async def _send_busy(self, scope, receive, send, message, retry_after="3"):
+        response = PlainTextResponse(
+            message,
+            status_code=429,
+            headers={
+                "Retry-After": retry_after,
+                "Cache-Control": "no-store",
+            },
+        )
+        await response(scope, receive, send)
 
     async def _serve_core(self, scope: dict[str, Any], receive, send):
         if CORE_APP is None or not BOOT["core_loaded"]:
@@ -427,7 +511,10 @@ class HealthFirstDispatcher:
 
         try:
             try:
-                await asyncio.wait_for(gate.acquire(), timeout=CORE_GATE_WAIT_SECONDS)
+                await asyncio.wait_for(
+                    gate.acquire(),
+                    timeout=CORE_GATE_WAIT_SECONDS,
+                )
                 acquired = True
             except asyncio.TimeoutError:
                 RUNTIME["rejected_core_requests"] += 1
@@ -452,10 +539,109 @@ class HealthFirstDispatcher:
         finally:
             if acquired:
                 RUNTIME["active_core_requests"] = max(
-                    0, RUNTIME["active_core_requests"] - 1
+                    0,
+                    RUNTIME["active_core_requests"] - 1,
                 )
                 RUNTIME["completed_core_requests"] += 1
                 RUNTIME["last_core_completed_at"] = _utcnow()
+                gate.release()
+
+    async def _serve_ingest(self, scope: dict[str, Any], receive, send):
+        if CORE_APP is None or not BOOT["core_loaded"]:
+            await health_app(scope, receive, send)
+            return
+
+        if not _rate_allowed("ingest", INGEST_MIN_INTERVAL_SECONDS):
+            RUNTIME["rejected_ingest_requests"] += 1
+            await self._send_busy(
+                scope,
+                receive,
+                send,
+                "WhatsApp ingest throttled. Retry shortly.",
+                retry_after="1",
+            )
+            return
+
+        gate = _get_ingest_gate()
+        acquired = False
+
+        try:
+            try:
+                await asyncio.wait_for(
+                    gate.acquire(),
+                    timeout=INGEST_GATE_WAIT_SECONDS,
+                )
+                acquired = True
+            except asyncio.TimeoutError:
+                RUNTIME["rejected_ingest_requests"] += 1
+                await self._send_busy(
+                    scope,
+                    receive,
+                    send,
+                    "WhatsApp ingest capacity reached. Retry shortly.",
+                    retry_after="1",
+                )
+                return
+
+            RUNTIME["active_ingest_requests"] += 1
+            RUNTIME["accepted_ingest_requests"] += 1
+            await CORE_APP(scope, receive, send)
+
+        finally:
+            if acquired:
+                RUNTIME["active_ingest_requests"] = max(
+                    0,
+                    RUNTIME["active_ingest_requests"] - 1,
+                )
+                gate.release()
+
+    async def _serve_freshness(self, scope: dict[str, Any], receive, send):
+        if CORE_APP is None or not BOOT["core_loaded"]:
+            await health_app(scope, receive, send)
+            return
+
+        if not _rate_allowed("freshness", FRESHNESS_MIN_INTERVAL_SECONDS):
+            RUNTIME["rejected_freshness_requests"] += 1
+            await self._send_busy(
+                scope,
+                receive,
+                send,
+                "Freshness polling throttled. Retry shortly.",
+                retry_after="2",
+            )
+            return
+
+        gate = _get_freshness_gate()
+        acquired = False
+
+        try:
+            try:
+                await asyncio.wait_for(
+                    gate.acquire(),
+                    timeout=FRESHNESS_GATE_WAIT_SECONDS,
+                )
+                acquired = True
+            except asyncio.TimeoutError:
+                RUNTIME["rejected_freshness_requests"] += 1
+                await self._send_busy(
+                    scope,
+                    receive,
+                    send,
+                    "Freshness check already running.",
+                    retry_after="2",
+                )
+                return
+
+            RUNTIME["active_freshness_requests"] += 1
+            RUNTIME["accepted_freshness_requests"] += 1
+            await CORE_APP(scope, receive, send)
+
+        finally:
+            if acquired:
+                RUNTIME["active_freshness_requests"] = max(
+                    0,
+                    RUNTIME["active_freshness_requests"] - 1,
+                )
                 gate.release()
 
     async def __call__(self, scope: dict[str, Any], receive, send):
@@ -466,7 +652,6 @@ class HealthFirstDispatcher:
             return
 
         if scope_type == "lifespan":
-            # Uvicorn lifecycle belongs to the tiny health shell.
             await health_app(scope, receive, send)
             return
 
@@ -477,11 +662,18 @@ class HealthFirstDispatcher:
             return
 
         if scope_type == "websocket":
-            # Do not semaphore-gate long-lived websocket sessions.
             if BOOT["core_loaded"] and CORE_APP is not None:
                 await CORE_APP(scope, receive, send)
             else:
                 await health_app(scope, receive, send)
+            return
+
+        if path in self.INGEST_PATHS:
+            await self._serve_ingest(scope, receive, send)
+            return
+
+        if path in self.FRESHNESS_PATHS:
+            await self._serve_freshness(scope, receive, send)
             return
 
         await self._serve_core(scope, receive, send)
