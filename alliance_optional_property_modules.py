@@ -1,6 +1,6 @@
 ﻿"""Fail-safe optional property module registration."""
 
-VERSION = "1.16.0-OPTIONAL-PROPERTY-MODULES-BOUNDARY-COHESION-V251"
+VERSION = "1.17.0-OPTIONAL-PROPERTY-MODULES-LOCALITY-CLASSIFICATION-V252"
 
 
 def _route_exists(app, path):
@@ -644,8 +644,31 @@ def register(wrapped):
             "route": "/api/v7/property-ai/boundary-cohesion-v251/status",
             "fail_safe": True,
         }
+
+    # PHASE 2.5.2 - deterministic locality + classification recovery
+    try:
+        if _route_exists(
+            app,
+            "/api/v7/property-ai/locality-classification-v252/status",
+        ):
+            result["locality_classification_v252"] = {
+                "status": "ALREADY_REGISTERED",
+                "route": "/api/v7/property-ai/locality-classification-v252/status",
+                "error": None,
+            }
+        else:
+            import alliance_property_locality_classification_v252 as locality_v252
+            locality_result = locality_v252.register(core)
+            result["locality_classification_v252"] = {
+                **locality_result,
+                "error": None,
+            }
+    except Exception as exc:
+        result["locality_classification_v252"] = {
+            "status": "ERROR",
+            "error": f"{type(exc).__name__}: {exc}",
+            "route": "/api/v7/property-ai/locality-classification-v252/status",
+            "fail_safe": True,
+        }
     return result
-
-
-
 
