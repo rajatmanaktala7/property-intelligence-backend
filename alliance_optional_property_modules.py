@@ -1,6 +1,6 @@
 ﻿"""Fail-safe optional property module registration."""
 
-VERSION = "1.33.0-OPTIONAL-PROPERTY-MODULES-TOPPER-V261"
+VERSION = "1.34.0-OPTIONAL-PROPERTY-MODULES-TOPPER-V261B"
 
 
 def _route_exists(app, path):
@@ -1070,6 +1070,25 @@ def register(wrapped):
             "status": "ERROR",
             "error": f"{type(exc).__name__}: {exc}",
             "route": "/api/v7/property-ai/topper-v261/status",
+            "fail_safe": True,
+        }
+
+    # V261B Real-World Topper Coach
+    try:
+        if _route_exists(app, "/api/v7/property-ai/topper-v261b/status"):
+            result["topper_v261b"] = {
+                "status": "ALREADY_REGISTERED",
+                "route": "/api/v7/property-ai/topper-v261b/status",
+                "error": None,
+            }
+        else:
+            import alliance_real_topper_coach_v261b as topper_v261b
+            result["topper_v261b"] = {**topper_v261b.register(core), "error": None}
+    except Exception as exc:
+        result["topper_v261b"] = {
+            "status": "ERROR",
+            "error": f"{type(exc).__name__}: {exc}",
+            "route": "/api/v7/property-ai/topper-v261b/status",
             "fail_safe": True,
         }
     return result
