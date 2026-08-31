@@ -1,6 +1,6 @@
 ﻿"""Fail-safe optional property module registration."""
 
-VERSION = "1.28.0-OPTIONAL-PROPERTY-MODULES-RECORD-INTEGRITY-V257A"
+VERSION = "1.29.0-OPTIONAL-PROPERTY-MODULES-EVIDENCE-GRAMMAR-V257B"
 
 
 def _route_exists(app, path):
@@ -954,6 +954,32 @@ def register(wrapped):
             "status": "ERROR",
             "error": f"{type(exc).__name__}: {exc}",
             "route": "/api/v7/property-ai/record-integrity-v257a/status",
+            "fail_safe": True,
+        }
+
+    # PHASE 2.5.7B - evidence grammar + intent direction fix
+    try:
+        if _route_exists(
+            app,
+            "/api/v7/property-ai/evidence-grammar-v257b/status",
+        ):
+            result["evidence_grammar_v257b"] = {
+                "status": "ALREADY_REGISTERED",
+                "route": "/api/v7/property-ai/evidence-grammar-v257b/status",
+                "error": None,
+            }
+        else:
+            import alliance_property_evidence_grammar_v257b as evidence_v257b
+            v257b_result = evidence_v257b.register(core)
+            result["evidence_grammar_v257b"] = {
+                **v257b_result,
+                "error": None,
+            }
+    except Exception as exc:
+        result["evidence_grammar_v257b"] = {
+            "status": "ERROR",
+            "error": f"{type(exc).__name__}: {exc}",
+            "route": "/api/v7/property-ai/evidence-grammar-v257b/status",
             "fail_safe": True,
         }
     return result
