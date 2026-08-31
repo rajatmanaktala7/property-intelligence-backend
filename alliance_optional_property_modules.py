@@ -1,6 +1,6 @@
 ﻿"""Fail-safe optional property module registration."""
 
-VERSION = "1.27.0-OPTIONAL-PROPERTY-MODULES-REMAINING-DIAGNOSTIC-V256B"
+VERSION = "1.28.0-OPTIONAL-PROPERTY-MODULES-RECORD-INTEGRITY-V257A"
 
 
 def _route_exists(app, path):
@@ -928,6 +928,32 @@ def register(wrapped):
             "status": "ERROR",
             "error": f"{type(exc).__name__}: {exc}",
             "route": "/api/v7/property-ai/remaining-diagnostic-v256b/status",
+            "fail_safe": True,
+        }
+
+    # PHASE 2.5.7A - property record integrity + classification shadow
+    try:
+        if _route_exists(
+            app,
+            "/api/v7/property-ai/record-integrity-v257a/status",
+        ):
+            result["record_integrity_v257a"] = {
+                "status": "ALREADY_REGISTERED",
+                "route": "/api/v7/property-ai/record-integrity-v257a/status",
+                "error": None,
+            }
+        else:
+            import alliance_property_record_integrity_v257a as record_v257a
+            v257a_result = record_v257a.register(core)
+            result["record_integrity_v257a"] = {
+                **v257a_result,
+                "error": None,
+            }
+    except Exception as exc:
+        result["record_integrity_v257a"] = {
+            "status": "ERROR",
+            "error": f"{type(exc).__name__}: {exc}",
+            "route": "/api/v7/property-ai/record-integrity-v257a/status",
             "fail_safe": True,
         }
     return result
