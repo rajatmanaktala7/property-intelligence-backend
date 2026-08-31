@@ -1,6 +1,6 @@
 ﻿"""Fail-safe optional property module registration."""
 
-VERSION = "1.24.0-OPTIONAL-PROPERTY-MODULES-LOCATION-BOUNDARY-DIAGNOSTIC-V255C"
+VERSION = "1.25.0-OPTIONAL-PROPERTY-MODULES-PROJECT-HEADER-INVENTORY-V255D"
 
 
 def _route_exists(app, path):
@@ -850,6 +850,32 @@ def register(wrapped):
             "status": "ERROR",
             "error": f"{type(exc).__name__}: {exc}",
             "route": "/api/v7/property-ai/location-boundary-diagnostic-v255c/status",
+            "fail_safe": True,
+        }
+
+    # PHASE 2.5.5D - project header inventory diagnostic
+    try:
+        if _route_exists(
+            app,
+            "/api/v7/property-ai/project-header-inventory-v255d/status",
+        ):
+            result["project_header_inventory_v255d"] = {
+                "status": "ALREADY_REGISTERED",
+                "route": "/api/v7/property-ai/project-header-inventory-v255d/status",
+                "error": None,
+            }
+        else:
+            import alliance_property_project_header_inventory_v255d as project_header_inventory_v255d
+            v255d_result = project_header_inventory_v255d.register(core)
+            result["project_header_inventory_v255d"] = {
+                **v255d_result,
+                "error": None,
+            }
+    except Exception as exc:
+        result["project_header_inventory_v255d"] = {
+            "status": "ERROR",
+            "error": f"{type(exc).__name__}: {exc}",
+            "route": "/api/v7/property-ai/project-header-inventory-v255d/status",
             "fail_safe": True,
         }
     return result
