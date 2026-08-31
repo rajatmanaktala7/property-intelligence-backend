@@ -1,6 +1,6 @@
 ﻿"""Fail-safe optional property module registration."""
 
-VERSION = "1.19.0-OPTIONAL-PROPERTY-MODULES-LOCATION-DIAGNOSTIC-V253A"
+VERSION = "1.20.0-OPTIONAL-PROPERTY-MODULES-RECORD-COHESION-V254"
 
 
 def _route_exists(app, path):
@@ -720,6 +720,32 @@ def register(wrapped):
             "status": "ERROR",
             "error": f"{type(exc).__name__}: {exc}",
             "route": "/api/v7/property-ai/location-diagnostic-v253a/status",
+            "fail_safe": True,
+        }
+
+    # PHASE 2.5.4 - property record cohesion v2
+    try:
+        if _route_exists(
+            app,
+            "/api/v7/property-ai/record-cohesion-v254/status",
+        ):
+            result["record_cohesion_v254"] = {
+                "status": "ALREADY_REGISTERED",
+                "route": "/api/v7/property-ai/record-cohesion-v254/status",
+                "error": None,
+            }
+        else:
+            import alliance_property_record_cohesion_v254 as record_v254
+            record_result = record_v254.register(core)
+            result["record_cohesion_v254"] = {
+                **record_result,
+                "error": None,
+            }
+    except Exception as exc:
+        result["record_cohesion_v254"] = {
+            "status": "ERROR",
+            "error": f"{type(exc).__name__}: {exc}",
+            "route": "/api/v7/property-ai/record-cohesion-v254/status",
             "fail_safe": True,
         }
     return result
