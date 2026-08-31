@@ -1,6 +1,6 @@
 ﻿"""Fail-safe optional property module registration."""
 
-VERSION = "1.13.0-OPTIONAL-PROPERTY-MODULES-BENCHMARK-STABILIZER-V245A"
+VERSION = "1.14.0-OPTIONAL-PROPERTY-MODULES-CONTEXT-INTELLIGENCE-V246"
 
 
 def _route_exists(app, path):
@@ -566,5 +566,32 @@ def register(wrapped):
             "route": "/api/v7/property-ai/benchmark-stabilizer-v245a/status",
             "fail_safe": True,
         }
+
+    # PHASE 2.4.6 - deterministic shared-context intelligence
+    try:
+        if _route_exists(
+            app,
+            "/api/v7/property-ai/context-intelligence-v246/status",
+        ):
+            result["context_intelligence_v246"] = {
+                "status": "ALREADY_REGISTERED",
+                "route": "/api/v7/property-ai/context-intelligence-v246/status",
+                "error": None,
+            }
+        else:
+            import alliance_property_context_intelligence_v246 as context_v246
+            context_result = context_v246.register(core)
+            result["context_intelligence_v246"] = {
+                **context_result,
+                "error": None,
+            }
+    except Exception as exc:
+        result["context_intelligence_v246"] = {
+            "status": "ERROR",
+            "error": f"{type(exc).__name__}: {exc}",
+            "route": "/api/v7/property-ai/context-intelligence-v246/status",
+            "fail_safe": True,
+        }
     return result
+
 
