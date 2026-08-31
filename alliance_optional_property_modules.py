@@ -1,6 +1,6 @@
 ﻿"""Fail-safe optional property module registration."""
 
-VERSION = "1.30.0-OPTIONAL-PROPERTY-MODULES-OFFERS-TUTOR-V258"
+VERSION = "1.31.0-OPTIONAL-PROPERTY-MODULES-CONTROLLED-WRITER-V259"
 
 
 def _route_exists(app, path):
@@ -1006,6 +1006,32 @@ def register(wrapped):
             "status": "ERROR",
             "error": f"{type(exc).__name__}: {exc}",
             "route": "/api/v7/property-ai/property-offers-tutor-v258/status",
+            "fail_safe": True,
+        }
+
+    # PHASE 2.5.9A - controlled property + offer write gate
+    try:
+        if _route_exists(
+            app,
+            "/api/v7/property-ai/controlled-writer-v259/status",
+        ):
+            result["controlled_writer_v259"] = {
+                "status": "ALREADY_REGISTERED",
+                "route": "/api/v7/property-ai/controlled-writer-v259/status",
+                "error": None,
+            }
+        else:
+            import alliance_property_controlled_writer_v259 as controlled_writer_v259
+            v259_result = controlled_writer_v259.register(core)
+            result["controlled_writer_v259"] = {
+                **v259_result,
+                "error": None,
+            }
+    except Exception as exc:
+        result["controlled_writer_v259"] = {
+            "status": "ERROR",
+            "error": f"{type(exc).__name__}: {exc}",
+            "route": "/api/v7/property-ai/controlled-writer-v259/status",
             "fail_safe": True,
         }
     return result
