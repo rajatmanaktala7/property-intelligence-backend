@@ -12,7 +12,7 @@ import alliance_property_shadow_extraction_v24 as v24
 import alliance_property_benchmark_stabilizer_v245a as stabilizer
 from property_brain.stages.s3_entity_segmentation_v23 import EntityBlock
 
-VERSION = "2.5.1-BOUNDARY-COHESION-FIX"
+VERSION = "2.5.1B-BOUNDARY-COHESION-TRANSACTION-VALUE-FIX"
 MODE = "READ_ONLY_SHADOW_BOUNDARY_COHESION"
 
 # Strong physical-property starts. These are OWN-TEXT anchors only.
@@ -42,10 +42,9 @@ CONTINUATION_FACT_RE = re.compile(
     r"\b(?:FURNISHED|SEMI[-\s]*FURNISHED|UNFURNISHED|BARE\s*SHELL)\b|"
     r"\b(?:MAINT|MAINTENANCE|CAR\s+PARKING|PARKING)\b|"
     r"\b(?:RENT|OUTRIGHT|SALE|LEASE)\b|"
-    r"(?:₹|RS\.?|INR)?\s*\d+(?:\.\d+)?\s*(?:CR|L|LAC|LAKH|K)\b"
+    r"(?:₹|RS\.?|INR)?\s*\d+(?:\.\d+)?\s*(?:CR|CRORE|CRORES|LAC|LACS|LAKH|LAKHS|L|K)(?=\s|$|\+|/|-)"
     r")"
 )
-
 CONTACT_OR_FOOTER_RE = re.compile(
     r"(?i)^\s*(?:FOR\s+SITE\s+VISITS|CONTACT|CALL|WHATSAPP|BROKER|CONSULTANT|"
     r"PANASA\s+ESTATE|PREMIUM\s+PROPERTIES)\b"
@@ -58,6 +57,15 @@ HARD_SECTION_RE = re.compile(
     r"FOR\s+SALE|FOR\s+RENT|COMMERCIAL)\b"
 )
 
+
+TRANSACTION_VALUE_CONTINUATION_RE = re.compile(
+    r"(?i)^\s*(?:"
+    r"RENT\s*[:=-]?\s*(?:₹|RS\.?|INR)?\s*\d+(?:\.\d+)?\s*(?:K|L|LAC|LACS|LAKH|LAKHS)"
+    r"|"
+    r"(?:₹|RS\.?|INR)?\s*\d+(?:\.\d+)?\s*(?:K|L|LAC|LACS|LAKH|LAKHS)"
+    r"\s*(?:\+\s*(?:MAINT|MAINTENANCE)|$)"
+    r")"
+)
 
 def _norm(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip()
@@ -152,6 +160,12 @@ def reconstruct_entities_v251(text_value: str) -> List[EntityBlock]:
     for piece in pieces:
         p = _norm(piece)
         if not p:
+            continue
+
+        # Important: a line such as "RENT 90K+MAINT" is a property fact,
+        # not a new RENT section heading, when an entity is already open.
+        if pending and TRANSACTION_VALUE_CONTINUATION_RE.search(p):
+            pending.append(p)
             continue
 
         if v25._looks_like_section(p) or HARD_SECTION_RE.search(p):
