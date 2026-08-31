@@ -1,6 +1,6 @@
 """Fail-safe optional property module registration."""
 
-VERSION = "1.8.0-OPTIONAL-PROPERTY-MODULES-PROPERTY-AI"
+VERSION = "1.8.1-OPTIONAL-PROPERTY-MODULES-PROPERTY-AI-REGISTERED"
 
 
 def _route_exists(app, path):
@@ -146,4 +146,26 @@ def register(wrapped):
             "fail_safe": True,
         }
 
+
+    try:
+        if _route_exists(app, "/api/v7/property-ai/status"):
+            result["property_ai"] = {
+                "status": "ALREADY_REGISTERED",
+                "route": "/api/v7/property-ai/status",
+                "error": None,
+            }
+        else:
+            import alliance_property_ai_v1 as property_ai
+            property_ai_result = property_ai.register(core)
+            result["property_ai"] = {
+                **property_ai_result,
+                "error": None,
+            }
+    except Exception as exc:
+        result["property_ai"] = {
+            "status": "ERROR",
+            "error": f"{type(exc).__name__}: {exc}",
+            "route": "/api/v7/property-ai/status",
+            "fail_safe": True,
+        }
     return result
