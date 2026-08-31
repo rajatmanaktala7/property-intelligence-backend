@@ -806,3 +806,353 @@ def register(core):
         "preview": "/api/v7/property-ai/shadow-extraction/preview?limit=25",
         "writes_enabled": False,
     }
+
+
+# ============================================================================
+# PHASE 2.4.3 - HIERARCHICAL LOCATION INTELLIGENCE
+# Appended as an exact compatibility layer over tested Phase 2.4.2.
+# No database writes. No matcher changes. No WhatsApp-live changes.
+# ============================================================================
+
+_V242_EXTRACT_ENTITY = _extract_entity
+_V242_REGRESSION_DEMO = _regression_demo
+
+VERSION = "2.4.3-HIERARCHICAL-LOCATION-INTELLIGENCE"
+
+BLOCK_RE_1 = re.compile(r"(?i)\b([A-Z])\s*BLOCK\b")
+BLOCK_RE_2 = re.compile(r"(?i)\bBLOCK\s*[-:]?\s*([A-Z])\b")
+SECTOR_RE = re.compile(r"(?i)\bSECTOR\s*[-:]?\s*(\d{1,3}[A-Z]?)\b")
+PHASE_RE = re.compile(r"(?i)\bPHASE\s*[-:]?\s*(\d{1,2}|[IVX]{1,5})\b")
+
+MICRO_ONLY_RE = re.compile(
+    r"(?i)^(?:[A-Z]\s*BLOCK|BLOCK\s*[A-Z]|SECTOR\s*\d{1,3}[A-Z]?|PHASE\s*(?:\d{1,2}|[IVX]{1,5}))$"
+)
+
+
+def _clean_block(text_value: str) -> Optional[str]:
+    m = BLOCK_RE_1.search(text_value) or BLOCK_RE_2.search(text_value)
+    return f"{m.group(1).upper()} Block" if m else None
+
+
+def _clean_sector(text_value: str) -> Optional[str]:
+    m = SECTOR_RE.search(text_value)
+    return f"Sector {m.group(1).upper()}" if m else None
+
+
+def _clean_phase(text_value: str) -> Optional[str]:
+    m = PHASE_RE.search(text_value)
+    return f"Phase {m.group(1).upper()}" if m else None
+
+
+def _broad_locality_from_text(text_value: str) -> Optional[str]:
+    # Alias-based locality is preferred.
+    hits = _location_alias_hits(text_value)
+    if hits:
+        return hits[0]
+
+    # Dwarka + sector is hierarchical: locality is Dwarka, sector is separate.
+    if re.search(r"(?i)\bDWARKA\b", text_value):
+        return "Dwarka"
+
+    return None
+
+
+def _hierarchical_location(
+    own_text: str,
+    current_location: Optional[str],
+    trusted_template_location: Optional[str] = None,
+    classification: Optional[str] = None,
+    acceptable_locations: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    """
+    Separate broad locality from micro-location.
+
+    Examples:
+      Kalkaji + K Block -> locality=Kalkaji, block=K Block,
+                           display_location=K Block, Kalkaji
+      Sector 12, Dwarka -> locality=Dwarka, sector=Sector 12,
+                           display_location=Sector 12, Dwarka
+
+    Requirements with multiple acceptable locations deliberately keep
+    canonical locality/display_location null.
+    """
+    own_text = _norm(own_text)
+    current = _norm(current_location)
+    trusted = _norm(trusted_template_location)
+
+    block = _clean_block(own_text)
+    sector = _clean_sector(own_text)
+    phase = _clean_phase(own_text)
+
+    multi_requirement = (
+        classification == "REQUIREMENT"
+        and len(acceptable_locations or []) > 1
+    )
+
+    if multi_requirement:
+        return {
+            "locality": None,
+            "sub_location": None,
+            "block": None,
+            "sector": None,
+            "phase": None,
+            "project": None,
+            "display_location": None,
+            "source": "MULTI_LOCATION_REQUIREMENT",
+            "confidence": 1.0,
+        }
+
+    locality = None
+    source = None
+    confidence = 0.0
+
+    # A validated block-anchor template is the highest-confidence broad locality
+    # for child rows. It must never supply the child's block/sector/phase.
+    if trusted:
+        locality = trusted
+        source = "FIELD_SCOPED_TEMPLATE_BROAD_LOCALITY"
+        confidence = 0.92
+    else:
+        own_broad = _broad_locality_from_text(own_text)
+        if own_broad:
+            locality = own_broad
+            source = "OWN_TEXT_BROAD_LOCALITY"
+            confidence = 0.96
+
+    # Current extractor location can still provide a broad locality if it is not
+    # merely a block/sector/phase token.
+    if not locality and current:
+        if not MICRO_ONLY_RE.match(current):
+            current_key = _norm_key(current)
+
+            # Normalize Dwarka sector expressions into hierarchy.
+            if "DWARKA" in current_key and "SECTOR" in current_key:
+                locality = "Dwarka"
+                source = "EXTRACTED_HIERARCHICAL_LOCATION"
+                confidence = 0.94
+            else:
+                locality = current
+                source = "EXTRACTED_BROAD_LOCATION"
+                confidence = 0.88
+
+    # If the extractor returned "K Block" but we have a trusted Kalkaji parent,
+    # keep K Block as micro-location and Kalkaji as locality.
+    sub_location = block or sector or phase
+
+    display_parts = []
+    if block:
+        display_parts.append(block)
+    elif sector:
+        display_parts.append(sector)
+    elif phase:
+        display_parts.append(phase)
+
+    if locality:
+        if not display_parts or _norm_key(display_parts[0]) != _norm_key(locality):
+            display_parts.append(locality)
+
+    display_location = ", ".join(display_parts) if display_parts else locality
+
+    return {
+        "locality": locality,
+        "sub_location": sub_location,
+        "block": block,
+        "sector": sector,
+        "phase": phase,
+        "project": None,
+        "display_location": display_location,
+        "source": source,
+        "confidence": confidence,
+    }
+
+
+def _extract_entity(
+    entity,
+    burst_group_id: str,
+    shared_defaults: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    row = _V242_EXTRACT_ENTITY(
+        entity,
+        burst_group_id,
+        shared_defaults=shared_defaults,
+    )
+
+    defaults = dict(shared_defaults or {})
+    hierarchy = _hierarchical_location(
+        own_text=row.get("own_text_redacted") or entity.own_text,
+        current_location=row.get("location"),
+        trusted_template_location=defaults.get("location"),
+        classification=row.get("classification"),
+        acceptable_locations=row.get("acceptable_locations") or [],
+    )
+
+    broad_locality = hierarchy.get("locality")
+    micro_only_without_parent = (
+        not broad_locality
+        and bool(
+            hierarchy.get("block")
+            or hierarchy.get("sector")
+            or hierarchy.get("phase")
+        )
+    )
+
+    reasons = list(row.get("review_reasons") or [])
+
+    if broad_locality:
+        # 2.4.3 rule: canonical shadow "location" is broad locality.
+        # Micro-location lives only in the hierarchy fields.
+        row["location"] = broad_locality
+
+        if (
+            defaults.get("location")
+            and _norm_key(broad_locality) == _norm_key(defaults.get("location"))
+        ):
+            if "LOCATION_SUPPORTED_BY_FIELD_SCOPED_TEMPLATE" not in reasons:
+                reasons.append("LOCATION_SUPPORTED_BY_FIELD_SCOPED_TEMPLATE")
+
+            ctx = dict(row.get("field_scoped_template_context") or {})
+            ctx["location"] = broad_locality
+            row["field_scoped_template_context"] = ctx
+
+    elif micro_only_without_parent:
+        row["location"] = None
+        if "MICRO_LOCATION_WITHOUT_PARENT_LOCALITY" not in reasons:
+            reasons.append("MICRO_LOCATION_WITHOUT_PARENT_LOCALITY")
+        row["quality"] = "UNDER_REVIEW"
+
+    row["location_hierarchy"] = hierarchy
+    row["display_location"] = hierarchy.get("display_location")
+    row["review_reasons"] = list(dict.fromkeys(reasons))
+
+    provenance = dict(row.get("provenance") or {})
+    provenance["location_hierarchy"] = {
+        "locality": (
+            "FIELD_SCOPED_TEMPLATE_BROAD_LOCALITY"
+            if defaults.get("location")
+            and broad_locality
+            and _norm_key(broad_locality) == _norm_key(defaults.get("location"))
+            else "OWN_OR_EXTRACTED_BROAD_LOCALITY"
+        ),
+        "block_sector_phase": "OWN_TEXT_ONLY",
+        "project": "NOT_INFERRED_IN_2_4_3",
+    }
+    row["provenance"] = provenance
+
+    return row
+
+
+def _regression_demo():
+    base = _V242_REGRESSION_DEMO()
+
+    # Re-run Kalkaji with the 2.4.3 hierarchy layer because the legacy demo
+    # captured 2.4.2 output before this compatibility layer.
+    ents = reconstruct_entities(
+        "Kothi for sale in kalkaji 100 yards K Block Price 8 cr "
+        "K Block 100 yards 7.50cr "
+        "C Block 100 yards 8.25 cr "
+        "G Block 200 yards 17 cr"
+    )
+    defaults = _derive_group_defaults(ents)
+
+    base["kalkaji_hierarchical"] = {
+        "defaults": defaults,
+        "candidates": [
+            _extract_entity(e, "demo", defaults)
+            for e in ents
+        ],
+    }
+
+    e = reconstruct_entities(
+        "PREMIUM COMMERCIAL BASEMENT AVAILABLE FOR RENT - SECTOR 12, DWARKA "
+        "3200 sq ft Carpet Area"
+    )[0]
+    base["dwarka_hierarchical"] = _extract_entity(e, "demo")
+
+    e = reconstruct_entities(
+        "EXCLUSIVE MANDATE FOR RENT | GK-2 Luxury 1st Floor Independent Floor "
+        "3 BHK Fully Furnished"
+    )[0]
+    base["gk2_hierarchical"] = _extract_entity(e, "demo")
+
+    return base
+
+
+def register(core):
+    app = core.app
+    engine = core.engine
+    status_route = "/api/v7/property-ai/shadow-extraction/status"
+
+    if any(getattr(route, "path", None) == status_route for route in app.router.routes):
+        return {
+            "status": "ALREADY_REGISTERED",
+            "version": VERSION,
+            "route": status_route,
+        }
+
+    @app.get(status_route)
+    def status():
+        return JSONResponse(
+            {
+                "status": "READY",
+                "version": VERSION,
+                "reconstructor_engine_version": RECONSTRUCTOR_ENGINE_VERSION,
+                "mode": "READ_ONLY_SHADOW_EXTRACTION",
+                "property_ai_engine": property_ai.VERSION,
+                "hierarchical_location_intelligence": True,
+                "canonical_shadow_location_is_broad_locality": True,
+                "block_sector_phase_separate": True,
+                "display_location_composed": True,
+                "micro_location_from_own_text_only": True,
+                "template_broad_locality_allowed": True,
+                "template_micro_location_inheritance": False,
+                "project_inference_enabled": False,
+                "privacy_redaction_before_property_ai": True,
+                "ambiguous_rate_guard": True,
+                "rate_per_area_guard": True,
+                "location_alias_equivalence_guard": True,
+                "dwarka_sector_resolver": True,
+                "asset_identity_over_intended_use": True,
+                "field_scoped_template_context": True,
+                "field_scoped_template_allowed": [
+                    "transaction",
+                    "property_family",
+                    "broad_location",
+                ],
+                "property_specific_inheritance": False,
+                "parent_context_auto_apply": False,
+                "database_writes": False,
+                "canonical_tables_modified": False,
+                "orchestrator_modified_by_phase24": False,
+                "matcher_modified": False,
+                "whatsapp_live_modified": False,
+                "raw_data_deleted": False,
+            }
+        )
+
+    @app.get("/api/v7/property-ai/shadow-extraction/regression-test")
+    def regression_test():
+        return JSONResponse(_regression_demo())
+
+    @app.get("/api/v7/property-ai/shadow-extraction/preview")
+    def preview(limit: int = Query(25, ge=1, le=100)):
+        result = _benchmark(engine, limit)
+        result["version"] = VERSION
+        result["hierarchical_location_intelligence"] = True
+        result["location_contract"] = {
+            "location": "BROAD_LOCALITY_ONLY",
+            "block": "OWN_TEXT_ONLY",
+            "sector": "OWN_TEXT_ONLY",
+            "phase": "OWN_TEXT_ONLY",
+            "display_location": "COMPOSED_FOR_HUMANS",
+        }
+        return JSONResponse(result)
+
+    app.state.alliance_property_shadow_extraction_v24_registered = True
+
+    return {
+        "status": "REGISTERED",
+        "version": VERSION,
+        "route": status_route,
+        "preview": "/api/v7/property-ai/shadow-extraction/preview?limit=25",
+        "writes_enabled": False,
+    }
