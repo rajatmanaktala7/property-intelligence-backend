@@ -1,6 +1,6 @@
 ﻿"""Fail-safe optional property module registration."""
 
-VERSION = "1.20.2-OPTIONAL-PROPERTY-MODULES-RECORD-COHESION-V254B"
+VERSION = "1.21.0-OPTIONAL-PROPERTY-MODULES-HEADER-SCOPE-V254C"
 
 
 def _route_exists(app, path):
@@ -748,5 +748,30 @@ def register(wrapped):
             "route": "/api/v7/property-ai/record-cohesion-v254/status",
             "fail_safe": True,
         }
-    return result
 
+    # PHASE 2.5.4C - property header scope diagnostic
+    try:
+        if _route_exists(
+            app,
+            "/api/v7/property-ai/header-scope-v254c/status",
+        ):
+            result["header_scope_v254c"] = {
+                "status": "ALREADY_REGISTERED",
+                "route": "/api/v7/property-ai/header-scope-v254c/status",
+                "error": None,
+            }
+        else:
+            import alliance_property_header_scope_v254c as header_scope_v254c
+            header_scope_result = header_scope_v254c.register(core)
+            result["header_scope_v254c"] = {
+                **header_scope_result,
+                "error": None,
+            }
+    except Exception as exc:
+        result["header_scope_v254c"] = {
+            "status": "ERROR",
+            "error": f"{type(exc).__name__}: {exc}",
+            "route": "/api/v7/property-ai/header-scope-v254c/status",
+            "fail_safe": True,
+        }
+    return result
