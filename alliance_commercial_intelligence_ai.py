@@ -10,7 +10,7 @@ from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import text
 
-VERSION = "3.0.0-MALL-BRAND-PREMISES-INTELLIGENCE"
+VERSION = "4.0.0-COMMERCIAL-ASSET-PURITY-ENGINE"
 
 TARGET_CITIES = [
     "Delhi", "Gurugram", "Noida", "Greater Noida", "Ghaziabad", "Faridabad",
@@ -21,8 +21,31 @@ TARGET_CITIES = [
 GOV_SOURCE_CODES = {"DMRC", "DDA", "NOIDA", "GNIDA", "YEIDA", "RLDA", "IREPS", "AAI", "CPPP", "MSTC", "RIICO"}
 NOISE_DOMAINS = {
     "indeed.com", "naukri.com", "apna.co", "glassdoor.com", "jooble.org",
-    "jobsora.com", "wikipedia.org", "wanderlog.com", "holidify.com", "tripadvisor.in",
+    "jobsora.com", "bebee.com", "glints.com", "6figr.com", "thejop.com",
+    "weekday.works", "iimjobs.com", "timesjobs.com", "shine.com", "foundit.in",
+    "monsterindia.com", "internshala.com", "freshersworld.com", "jobrapido.com",
+    "wikipedia.org", "wanderlog.com", "holidify.com", "tripadvisor.in",
+    "tripadvisor.com", "thrillophilia.com", "makemytrip.com", "goibibo.com",
 }
+
+NOISE_PHRASES = (
+    "job vacancy", "job vacancies", "jobs in ", "jobs at ", "hiring for", "is hiring",
+    "career guide", "career opportunity", "career opportunities", "apply now", "recruitment",
+    "salary", "salaries", "general manager", "mall manager", "centre head", "center head",
+    "leasing manager", "sales manager", "business development manager", "assistant manager",
+    "full time jobs", "part time jobs", "vacancies in", "resume", "walk-in interview",
+    "pgdm", "mba in retail", "retail management course", "scope of retail management",
+    "business school", "college admission", "course fees", "syllabus",
+    "tourism guide", "travel guide", "things to do", "places to visit", "best malls to visit",
+    "top malls in", "shopping guide", "travel india", "holiday package",
+)
+
+ASSET_TERMS = (" mall", "mall ", "shopping centre", "shopping center", "retail destination", "high street")
+ASSET_EVIDENCE_TERMS = (
+    "developer", "official", "stores", "store directory", "brands", "tenant", "tenants",
+    "retail mix", "opening", "opened", "launch", "inaugurat", "gla", "gross leasable",
+    "leasing", "lease", "shopping", "food court", "multiplex", "anchor", "project",
+)
 
 BRAND_CATALOG = {
     "Fashion": ["Zara", "H&M", "Uniqlo", "Marks & Spencer", "Lifestyle", "Shoppers Stop", "Westside", "Pantaloons", "Levi's", "Tommy Hilfiger", "Calvin Klein", "Rare Rabbit", "Allen Solly", "Van Heusen", "Louis Philippe", "Jack & Jones", "Only", "Vero Moda", "Forever New", "Superdry"],
@@ -87,6 +110,10 @@ CREATE INDEX IF NOT EXISTS idx_aci_intel_asset_class ON aci_intel_assets(asset_c
 CREATE INDEX IF NOT EXISTS idx_aci_intel_brand_asset ON aci_intel_brands(asset_code);
 CREATE INDEX IF NOT EXISTS idx_aci_intel_rec_asset ON aci_intel_recommendations(asset_code,fit_score DESC);
 CREATE INDEX IF NOT EXISTS idx_aci_intel_contact_asset ON aci_intel_contacts(asset_code);
+ALTER TABLE aci_intel_assets ADD COLUMN IF NOT EXISTS visibility_status TEXT DEFAULT 'ACTIVE';
+ALTER TABLE aci_intel_assets ADD COLUMN IF NOT EXISTS purity_score INTEGER DEFAULT 0;
+ALTER TABLE aci_intel_assets ADD COLUMN IF NOT EXISTS purity_reason TEXT;
+CREATE INDEX IF NOT EXISTS idx_aci_intel_visibility ON aci_intel_assets(visibility_status,asset_class,city);
 '''
 
 
@@ -123,13 +150,74 @@ def _extract_brands(blob):
 
 def _is_noise(url, title, snippet):
     dom = _domain(url)
-    if dom in NOISE_DOMAINS or any(dom.endswith("." + d) for d in NOISE_DOMAINS): return True
+    if dom in NOISE_DOMAINS or any(dom.endswith("." + d) for d in NOISE_DOMAINS):
+        return True
     low = f"{title} {snippet}".lower()
-    return any(x in low for x in ["job vacancy", "jobs in ", "career guide", "tourism guide", "things to do"])
+    if any(x in low for x in NOISE_PHRASES):
+        return True
+    if re.search(r"\b(job|jobs|hiring|recruiter|recruitment|salary|salaries|vacancy|vacancies)\b", low):
+        return True
+    if re.search(r"\b(manager|head|executive|associate)\b", low) and re.search(r"\b(job|hiring|salary|career|recruit)\b", low):
+        return True
+    return False
 
 def _looks_like_mall(title, snippet):
-    low = f"{title} {snippet}".lower()
-    return any(x in low for x in ["mall", "shopping centre", "shopping center", "retail destination", "high street"])
+    low = f" {_clean(title)} {_clean(snippet)} ".lower()
+    return any(x in low for x in ASSET_TERMS)
+
+def _extract_asset_name(title, city=""):
+    name = _clean(title)
+    # Remove common source/site suffixes while preserving the actual project name.
+    parts = re.split(r"\s+[|–—]\s+|\s+-\s+", name, maxsplit=1)
+    if len(parts) > 1 and _looks_like_mall(parts[0], ""):
+        name = parts[0]
+    name = re.sub(r"\s+(?:official website|stores|store directory|brands|timings|reviews|contact us)$", "", name, flags=re.I)
+    return _clean(name)[:240]
+
+def _mall_purity(url, title, snippet, city=""):
+    title, snippet = _clean(title), _clean(snippet)
+    if not title:
+        return False, 0, "missing title"
+    if _is_noise(url, title, snippet):
+        return False, 0, "job/education/travel/noise source"
+    if not _looks_like_mall(title, snippet):
+        return False, 0, "no identifiable mall/commercial asset"
+    low_title, low_all = title.lower(), f"{title} {snippet}".lower()
+    score = 0
+    # A genuine asset name normally contains a mall/high-street term in the title itself.
+    if _looks_like_mall(title, ""):
+        score += 45
+    else:
+        score += 15
+    if city and city.lower() in low_all:
+        score += 10
+    score += min(30, 6 * sum(1 for x in ASSET_EVIDENCE_TERMS if x in low_all))
+    if re.search(r"\b(?:manager|salary|jobs?|hiring|career|course|pgdm|mba|recruitment)\b", low_title):
+        score -= 80
+    # Generic listicles are evidence sources, not asset entities.
+    if re.search(r"\b(?:top|best|list of|largest|famous|popular)\s+\d*\s*(?:shopping )?malls?\b", low_title):
+        score -= 50
+    name = _extract_asset_name(title, city)
+    words = [w for w in re.findall(r"[a-z0-9]+", name.lower()) if w not in {"mall","shopping","centre","center","high","street",city.lower()}]
+    if len(words) >= 1:
+        score += 15
+    passed = score >= 55
+    return passed, max(0, min(100, score)), "verified asset-shaped result" if passed else "insufficient asset evidence"
+
+def _set_purity(c, code, score, reason, status="ACTIVE"):
+    c.execute(text("UPDATE aci_intel_assets SET visibility_status=:v,purity_score=:s,purity_reason=:r,updated_at=NOW() WHERE asset_code=:a"),
+              {"v":status,"s":int(score),"r":_clean(reason)[:500],"a":code})
+
+def _quarantine_existing_noise(engine):
+    # Non-destructive cleanup: raw discoveries and intelligence rows remain stored.
+    with engine.begin() as c:
+        rows=[dict(x) for x in c.execute(text("SELECT asset_code,asset_name,asset_class,city,source_url FROM aci_intel_assets")).mappings().all()]
+        for r in rows:
+            if r.get("asset_class") == "GOVERNMENT_PREMISES":
+                _set_purity(c,r["asset_code"],100,"government/institutional source class","ACTIVE")
+                continue
+            ok,score,reason=_mall_purity(r.get("source_url"),r.get("asset_name"),"",r.get("city") or "")
+            _set_purity(c,r["asset_code"],score,reason,"ACTIVE" if ok else "QUARANTINED")
 
 def _availability(blob):
     low = blob.lower()
@@ -188,9 +276,14 @@ def _seed_from_raw(engine):
             if not name: continue
             source = _clean(r.get("source_code")).upper()
             if source in GOV_SOURCE_CODES:
-                _upsert_asset(c,name,"GOVERNMENT_PREMISES",_clean(r.get("city")),_clean(r.get("location")),source,_clean(r.get("source_url")),_clean(r.get("source_provider")),_clean(r.get("lifecycle_status")) or "AVAILABLE",75)
-            elif _looks_like_mall(name,blob):
-                _upsert_asset(c,name,"MALL",_clean(r.get("city")),_clean(r.get("location")),_clean(r.get("developer_company") or r.get("related_company")),_clean(r.get("source_url")),_clean(r.get("source_provider")),_clean(r.get("lifecycle_status")) or "UNKNOWN",55)
+                code=_upsert_asset(c,name,"GOVERNMENT_PREMISES",_clean(r.get("city")),_clean(r.get("location")),source,_clean(r.get("source_url")),_clean(r.get("source_provider")),_clean(r.get("lifecycle_status")) or "AVAILABLE",75)
+                _set_purity(c,code,100,"government/institutional source class","ACTIVE")
+            else:
+                ok,score,reason=_mall_purity(_clean(r.get("source_url")),name,_clean(r.get("raw_text")),_clean(r.get("city")))
+                if ok:
+                    clean_name=_extract_asset_name(name,_clean(r.get("city")))
+                    code=_upsert_asset(c,clean_name,"MALL",_clean(r.get("city")),_clean(r.get("location")),_clean(r.get("developer_company") or r.get("related_company")),_clean(r.get("source_url")),_clean(r.get("source_provider")),_clean(r.get("lifecycle_status")) or "UNKNOWN",max(55,score))
+                    _set_purity(c,code,score,reason,"ACTIVE")
 
 def _discover_malls_city(engine, city):
     rows,_ = _search([f'shopping malls in {city} India official brands directory',f'new upcoming shopping mall {city} developer brands opening',f'largest malls {city} retail tenant mix leasing'],False)
@@ -198,9 +291,12 @@ def _discover_malls_city(engine, city):
     with engine.begin() as c:
         for row in rows[:50]:
             title,snippet,url=_clean(row.get("title")),_clean(row.get("snippet")),_clean(row.get("url"))
-            if not title or _is_noise(url,title,snippet) or not _looks_like_mall(title,snippet): continue
-            name=re.split(r"\s+[|–—-]\s+(?:stores|brands|timings|reviews|official|shopping|about|contact)\b",title,maxsplit=1,flags=re.I)[0][:240]
-            code=_upsert_asset(c,_clean(name),"MALL",city,url=url,provider=row.get("source_provider"),confidence=55)
+            ok,score,reason=_mall_purity(url,title,snippet,city)
+            if not ok:
+                continue
+            name=_extract_asset_name(title,city)
+            code=_upsert_asset(c,name,"MALL",city,url=url,provider=row.get("source_provider"),confidence=max(55,score))
+            _set_purity(c,code,score,reason,"ACTIVE")
             _save_evidence(c,code,"MALL_DISCOVERY",row); count+=1
     return count
 
@@ -315,7 +411,8 @@ def _run_full(engine):
         for city in TARGET_CITIES:
             try: found+=_discover_malls_city(engine,city)
             except Exception: errors+=1
-        with engine.connect() as c: assets=c.execute(text("SELECT asset_code FROM aci_intel_assets ORDER BY CASE WHEN last_researched_at IS NULL THEN 0 ELSE 1 END,updated_at DESC LIMIT 120")).scalars().all()
+        _quarantine_existing_noise(engine)
+        with engine.connect() as c: assets=c.execute(text("SELECT asset_code FROM aci_intel_assets WHERE COALESCE(visibility_status,'ACTIVE')='ACTIVE' ORDER BY CASE WHEN last_researched_at IS NULL THEN 0 ELSE 1 END,updated_at DESC LIMIT 120")).scalars().all()
         for code in assets:
             try: _research_asset(engine,code); researched+=1
             except Exception: errors+=1
@@ -337,7 +434,7 @@ def _detail(engine, code):
     return brands,recs,vac,contacts
 
 def _load(engine,view,city):
-    with engine.connect() as c: rows=[dict(x) for x in c.execute(text('''SELECT a.*,s.opportunity_score,s.strongest_scope,s.secondary_scope,s.weak_scope,s.vacancy_summary,s.contact_summary,s.ai_summary FROM aci_intel_assets a LEFT JOIN aci_intel_scope s ON s.asset_code=a.asset_code ORDER BY COALESCE(s.opportunity_score,0) DESC,a.updated_at DESC LIMIT 500''')).mappings().all()]
+    with engine.connect() as c: rows=[dict(x) for x in c.execute(text('''SELECT a.*,s.opportunity_score,s.strongest_scope,s.secondary_scope,s.weak_scope,s.vacancy_summary,s.contact_summary,s.ai_summary FROM aci_intel_assets a LEFT JOIN aci_intel_scope s ON s.asset_code=a.asset_code WHERE COALESCE(a.visibility_status,'ACTIVE')='ACTIVE' ORDER BY COALESCE(s.opportunity_score,0) DESC,a.purity_score DESC,a.updated_at DESC LIMIT 500''')).mappings().all()]
     if city:
         q=city.lower(); rows=[x for x in rows if q in _clean(x.get("city")).lower() or q in _clean(x.get("location")).lower()]
     if view=="MALLS": rows=[x for x in rows if x.get("asset_class")=="MALL"]
@@ -362,7 +459,7 @@ def _render(engine,view,city,message):
     return f'''<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Mall & Premises Intelligence</title><style>*{{box-sizing:border-box}}body{{margin:0;background:#f4f7fb;color:#152238;font-family:Arial,sans-serif}}header{{background:#0c2032;color:white;padding:18px 24px}}.wrap{{max-width:1500px;margin:auto;padding:20px}}.toolbar{{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:18px}}a,button{{cursor:pointer}}.tab,.sourcebtn,button{{border:0;border-radius:9px;padding:10px 14px;text-decoration:none;background:#e8eef5;color:#18324a;font-weight:700}}button{{background:#0d6efd;color:white}}.asset{{background:white;border:1px solid #dfe6ee;border-radius:16px;padding:20px;margin:16px 0;box-shadow:0 3px 12px #0000000b}}.head{{display:flex;justify-content:space-between;gap:15px}}h2{{margin:4px 0 6px}}h3{{margin:16px 0 8px}}.kind{{font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:#58728a}}.muted{{color:#6d7d8b}}.score{{font-size:28px;font-weight:800;background:#e9f7ef;color:#0c6a3d;border-radius:14px;padding:12px;min-width:88px;text-align:center}}.score small{{font-size:11px;display:block}}.grid{{display:grid;grid-template-columns:1.4fr 1fr 1fr;gap:12px}}section{{background:#f8fafc;border-radius:12px;padding:12px}}.brands{{display:flex;gap:8px;flex-wrap:wrap}}.brand{{background:#eef4fb;padding:8px 10px;border-radius:10px}}.brand small{{display:block;color:#6b7d8f;margin-top:3px}}.recommendations{{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}}.rec{{border:1px solid #dfe6ee;border-radius:12px;padding:10px}}.rec>span{{float:right;font-weight:800;color:#0c6a3d}}.rec small{{display:block;color:#63788b;margin-top:4px}}.rec p{{font-size:12px;color:#526473}}.actions{{display:flex;gap:10px;margin-top:14px}}.notice{{padding:12px;border-radius:10px;background:#e9f8f1;color:#075c3e;margin-bottom:12px}}input{{padding:10px;border:1px solid #ccd8e3;border-radius:8px}}@media(max-width:900px){{.grid,.recommendations{{grid-template-columns:1fr}}}}</style></head><body><header><h1>Mall & Premises Intelligence AI</h1><div>Mall brand census, performance signals, vacancies, leasing contacts, premises scope and brand-fit opportunities.</div></header><div class="wrap">{notice}<div class="toolbar"><a class="tab" href="/commercial-intelligence?view=ALL">All</a><a class="tab" href="/commercial-intelligence?view=MALLS">Malls</a><a class="tab" href="/commercial-intelligence?view=GOV">DMRC / Government</a><a class="tab" href="/commercial-intelligence?view=RESEARCH">Needs Research</a><form method="get" action="/commercial-intelligence"><input type="hidden" name="view" value="{_esc(view)}"><input name="city" value="{_esc(city)}" placeholder="City / micro-market"><button>Filter</button></form><form method="post" action="/commercial-intelligence/research-all"><button>Research All Malls & Premises</button></form></div>{''.join(cards) or '<div class="asset"><h2>No intelligence yet</h2><p>Use Research All Malls & Premises to build the first working set.</p></div>'}</div></body></html>'''
 
 def register(core):
-    engine,app=core.engine,core.app; router=APIRouter(); ensure_schema(engine); _seed_from_raw(engine)
+    engine,app=core.engine,core.app; router=APIRouter(); ensure_schema(engine); _seed_from_raw(engine); _quarantine_existing_noise(engine)
     @router.get("/commercial-intelligence",response_class=HTMLResponse)
     def dashboard(req:Request,view:str=Query("ALL"),city:str=Query(""),message:str=Query("")):
         role=_page_role(core,req)
@@ -383,7 +480,7 @@ def register(core):
     def status(req:Request):
         core.need_login(req)
         with engine.connect() as c:
-            counts=c.execute(text("SELECT COUNT(*) total_assets,COUNT(*) FILTER(WHERE asset_class='MALL') malls,COUNT(*) FILTER(WHERE asset_class='GOVERNMENT_PREMISES') government_premises,COUNT(*) FILTER(WHERE last_researched_at IS NOT NULL) researched FROM aci_intel_assets")).mappings().first()
+            counts=c.execute(text("SELECT COUNT(*) FILTER(WHERE COALESCE(visibility_status,'ACTIVE')='ACTIVE') total_assets,COUNT(*) FILTER(WHERE asset_class='MALL' AND COALESCE(visibility_status,'ACTIVE')='ACTIVE') malls,COUNT(*) FILTER(WHERE asset_class='GOVERNMENT_PREMISES' AND COALESCE(visibility_status,'ACTIVE')='ACTIVE') government_premises,COUNT(*) FILTER(WHERE last_researched_at IS NOT NULL AND COALESCE(visibility_status,'ACTIVE')='ACTIVE') researched,COUNT(*) FILTER(WHERE visibility_status='QUARANTINED') quarantined_noise FROM aci_intel_assets")).mappings().first()
             brands=c.execute(text("SELECT COUNT(*) FROM aci_intel_brands")).scalar() or 0; recs=c.execute(text("SELECT COUNT(*) FROM aci_intel_recommendations")).scalar() or 0; contacts=c.execute(text("SELECT COUNT(*) FROM aci_intel_contacts")).scalar() or 0; vac=c.execute(text("SELECT COUNT(*) FROM aci_intel_vacancies")).scalar() or 0
             run=c.execute(text("SELECT * FROM aci_intel_runs ORDER BY started_at DESC LIMIT 1")).mappings().first()
         return {"version":VERSION,**dict(counts or {}),"brands_observed":brands,"brand_recommendations":recs,"public_contacts":contacts,"vacancy_signals":vac,"last_run":dict(run) if run else None,"truth_policy":{"brand_presence":"PUBLICLY_REPORTED until verified","brand_performance":"public-signal score, not audited sales","availability":"reported/verified evidence only","contacts":"public business contacts with source provenance","recommendations":"AI recommendations, not confirmed brand requirements"}}
