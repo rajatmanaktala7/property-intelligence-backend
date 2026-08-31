@@ -1,6 +1,6 @@
 ﻿"""Fail-safe optional property module registration."""
 
-VERSION = "1.15.0-OPTIONAL-PROPERTY-MODULES-BOUNDARY-INTELLIGENCE-V25"
+VERSION = "1.16.0-OPTIONAL-PROPERTY-MODULES-BOUNDARY-COHESION-V251"
 
 
 def _route_exists(app, path):
@@ -618,7 +618,34 @@ def register(wrapped):
             "route": "/api/v7/property-ai/boundary-intelligence-v25/status",
             "fail_safe": True,
         }
+
+    # PHASE 2.5.1 - boundary cohesion fix
+    try:
+        if _route_exists(
+            app,
+            "/api/v7/property-ai/boundary-cohesion-v251/status",
+        ):
+            result["boundary_cohesion_v251"] = {
+                "status": "ALREADY_REGISTERED",
+                "route": "/api/v7/property-ai/boundary-cohesion-v251/status",
+                "error": None,
+            }
+        else:
+            import alliance_property_boundary_cohesion_v251 as boundary_v251
+            boundary_result = boundary_v251.register(core)
+            result["boundary_cohesion_v251"] = {
+                **boundary_result,
+                "error": None,
+            }
+    except Exception as exc:
+        result["boundary_cohesion_v251"] = {
+            "status": "ERROR",
+            "error": f"{type(exc).__name__}: {exc}",
+            "route": "/api/v7/property-ai/boundary-cohesion-v251/status",
+            "fail_safe": True,
+        }
     return result
+
 
 
 
