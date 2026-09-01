@@ -14,8 +14,8 @@ from fastapi import Body, HTTPException, Query
 from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy import text
 
-VERSION = "1.8.3-ALLIANCE-PROPERTY-BRAIN-FOUNDATION"
-MODE = "RETROACTIVE_SHARED_SOURCE_CONTACT_SPACED_PHONE_FIXED"
+VERSION = "1.9.0-ALLIANCE-PROPERTY-BRAIN-FOUNDATION"
+MODE = "WHATSAPP_SENDER_METADATA_CONTACT_FALLBACK"
 
 # ---------------------------------------------------------------------------
 # Safety
@@ -1960,6 +1960,233 @@ def _v18_merge_source_contacts(
     return p
 
 
+
+# ---------------------------------------------------------------------------
+# Foundation 1.9: WhatsApp sender metadata contact fallback
+# ---------------------------------------------------------------------------
+
+V19_WHATSAPP_SOURCE_RE = re.compile(r"(?:WHATSAPP|WA_)", re.I)
+
+V19_SENDER_PHONE_EXACT = {
+    "sender", "sender_phone", "sender_number", "sender_mobile", "sender_msisdn",
+    "from_number", "from_phone", "from_mobile", "author", "author_phone",
+    "author_number", "participant", "participant_phone", "participant_number",
+    "wa_id", "whatsapp_number", "whatsapp_phone",
+}
+
+V19_SENDER_NAME_EXACT = {
+    "sender_name", "author_name", "participant_name", "push_name",
+    "sender_display_name", "contact_name",
+}
+
+def _v19_phone_from_sender_value(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    raw = str(value).strip()
+    if not raw:
+        return None
+
+    digits = re.sub(r"\D", "", raw)
+
+    if len(digits) >= 12 and digits.startswith("91"):
+        candidate = digits[:12]
+        if candidate[2] in "6789":
+            return "+" + candidate
+
+    if len(digits) >= 10:
+        candidate = digits[-10:]
+        if candidate[0] in "6789":
+            return "+91" + candidate
+
+    return None
+
+def _v19_sender_phone_columns(column_names: List[str]) -> List[str]:
+    out: List[str] = []
+    for name in column_names:
+        low = str(name or "").lower()
+        if low in V19_SENDER_PHONE_EXACT:
+            out.append(name)
+            continue
+
+        sender_semantic = bool(
+            re.search(r"(?:^|_)(sender|from|author|participant)(?:_|$)", low)
+        )
+        phone_semantic = bool(
+            re.search(r"(phone|number|mobile|msisdn|jid|id)$", low)
+        )
+        if sender_semantic and phone_semantic:
+            out.append(name)
+
+    return out
+
+def _v19_sender_name_columns(column_names: List[str]) -> List[str]:
+    out: List[str] = []
+    for name in column_names:
+        low = str(name or "").lower()
+
+        if low in V19_SENDER_NAME_EXACT:
+            out.append(name)
+            continue
+
+        sender_semantic = bool(
+            re.search(r"(?:^|_)(sender|author|participant)(?:_|$)", low)
+        )
+        name_semantic = bool(re.search(r"(name|display)", low))
+
+        if sender_semantic and name_semantic:
+            out.append(name)
+
+    return out
+
+def _v19_whatsapp_sender_contact(
+    engine,
+    source_table: str,
+    source_raw_text: str,
+    source_metadata: Any,
+) -> Optional[Dict[str, Any]]:
+    table_name = str(source_table or "").strip()
+    raw = str(source_raw_text or "")
+
+    if not table_name or not raw:
+        return None
+
+    if not V19_WHATSAPP_SOURCE_RE.search(table_name):
+        return None
+
+    try:
+        column_info = _columns(engine, table_name)
+    except Exception:
+        return None
+
+    column_names = [str(c.get("column_name") or "") for c in column_info]
+    column_set = set(column_names)
+
+    metadata = _loads(source_metadata, {})
+    if not isinstance(metadata, dict):
+        metadata = {}
+
+    raw_column = str(metadata.get("source_column") or "").strip()
+
+    if raw_column not in column_set:
+        raw_column = next(
+            (
+                c
+                for c in (
+                    "raw_message",
+                    "raw_text",
+                    "message",
+                    "message_text",
+                    "body",
+                    "text",
+                )
+                if c in column_set
+            ),
+            "",
+        )
+
+    if not raw_column:
+        return None
+
+    phone_columns = _v19_sender_phone_columns(column_names)
+    if not phone_columns:
+        return None
+
+    name_columns = _v19_sender_name_columns(column_names)
+
+    select_columns: List[str] = []
+    for col in phone_columns + name_columns:
+        if col not in select_columns:
+            select_columns.append(col)
+
+    qt = _safe_identifier(table_name)
+    qr = _safe_identifier(raw_column)
+    qs = ", ".join(_safe_identifier(c) for c in select_columns)
+
+    sql = (
+        "SELECT " + qs + " "
+        "FROM " + qt + " "
+        "WHERE " + qr + "::text = :raw "
+        "LIMIT 20"
+    )
+
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(
+                text(sql),
+                {"raw": raw},
+            ).mappings().all()
+    except Exception:
+        return None
+
+    if not rows:
+        return None
+
+    phones = set()
+    names = set()
+
+    for row in rows:
+        for col in phone_columns:
+            phone = _v19_phone_from_sender_value(row.get(col))
+            if phone:
+                phones.add(phone)
+
+        for col in name_columns:
+            value = str(row.get(col) or "").strip()
+            if value:
+                names.add(value)
+
+    # Same text may have been posted by multiple people. Never guess.
+    if len(phones) != 1:
+        return None
+
+    phone = next(iter(phones))
+    sender_name = next(iter(names)) if len(names) == 1 else None
+
+    return {
+        "phone": phone,
+        "name": sender_name,
+        "company": None,
+        "role": "SOURCE_CONTACT",
+        "provenance": "WHATSAPP_SENDER",
+        "scope": "SOURCE_MESSAGE_SENDER",
+        "owner_status": "NOT_PROVEN",
+        "broker_status": "NOT_PROVEN",
+        "source_table": table_name,
+        "sender_metadata_columns": phone_columns,
+    }
+
+def _v19_merge_sender_fallback(
+    engine,
+    proposal: Dict[str, Any],
+    source_table: str,
+    source_raw_text: str,
+    source_metadata: Any,
+) -> Dict[str, Any]:
+    p = dict(proposal or {})
+
+    # Priority:
+    # 1. property/body contact
+    # 2. shared footer contact
+    # 3. WhatsApp sender metadata
+    if p.get("contacts"):
+        return p
+
+    sender = _v19_whatsapp_sender_contact(
+        engine,
+        source_table,
+        source_raw_text,
+        source_metadata,
+    )
+
+    if not sender:
+        return p
+
+    p["contacts"] = [sender]
+    p["sender_contact_fallback_used"] = True
+    p["sender_contact_is_owner"] = False
+    return p
+
+
 # ---------------------------------------------------------------------------
 # Foundation 1.6A: entity scope + inventory-group intelligence
 # ---------------------------------------------------------------------------
@@ -2748,6 +2975,7 @@ def next_span(engine, labeler_id: Optional[str] = None) -> Dict[str, Any]:
                     sp.lineage_metadata,
                     s.raw_text AS source_raw_text,
                     s.source_table,
+                    s.source_metadata,
                     s.sampling_bucket,
                     s.message_length
                 FROM alliance_gold_spans sp
@@ -2806,6 +3034,16 @@ def next_span(engine, labeler_id: Optional[str] = None) -> Dict[str, Any]:
     proposal = _v18_merge_source_contacts(
         proposal,
         str(out.get("source_raw_text") or ""),
+    )
+
+    # Foundation 1.9: only when the message itself has no contact,
+    # recover the actual WhatsApp sender as SOURCE_CONTACT.
+    proposal = _v19_merge_sender_fallback(
+        engine,
+        proposal,
+        str(out.get("source_table") or ""),
+        str(out.get("source_raw_text") or ""),
+        out.get("source_metadata"),
     )
 
     out["lineage_metadata"] = lineage
