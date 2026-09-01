@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import html
 import json
+import os
 import re
 import uuid
 from datetime import date, datetime, timezone
@@ -12,10 +13,10 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import Body, HTTPException, Query
 from fastapi.responses import HTMLResponse, JSONResponse
-from sqlalchemy import text
+from sqlalchemy import create_engine, text
 
-VERSION = "1.9.8-ALLIANCE-PROPERTY-BRAIN-FOUNDATION"
-MODE = "GOLD_SOURCE_COLUMN_AND_CONTACT_LINEAGE_FIXED"
+VERSION = "1.9.9-ALLIANCE-PROPERTY-BRAIN-FOUNDATION"
+MODE = "EXACT_CROSS_DB_WHATSAPP_LINEAGE"
 
 # ---------------------------------------------------------------------------
 # Safety
@@ -3419,6 +3420,142 @@ def backfill_upstream_sender_lineage(
 # Foundation 1.9G: live sender-contact recovery + contact-lineage diagnostic
 # ---------------------------------------------------------------------------
 
+def _v19i_normalize_db_url(value: str) -> str:
+    value = str(value or "").strip()
+    if value.startswith("postgres://"):
+        return value.replace("postgres://", "postgresql+psycopg://", 1)
+    if value.startswith("postgresql://"):
+        return value.replace("postgresql://", "postgresql+psycopg://", 1)
+    return value
+
+
+def _v19i_whatsapp_engine(primary_engine):
+    whatsapp_url = str(os.getenv("WHATSAPP_DATABASE_URL") or "").strip()
+    primary_url = str(os.getenv("DATABASE_URL") or "").strip()
+    if not whatsapp_url or whatsapp_url == primary_url:
+        return primary_engine, False
+    return create_engine(
+        _v19i_normalize_db_url(whatsapp_url),
+        pool_pre_ping=True,
+        pool_recycle=300,
+        connect_args={"connect_timeout": 10},
+    ), True
+
+
+def _v19i_exact_ai_whatsapp_purity_sender(engine, source: Dict[str, Any]) -> Dict[str, Any]:
+    result = {
+        "status": "UNRESOLVED",
+        "resolution_stage": "AI_WHATSAPP_PURITY_EXACT_CROSS_DB",
+        "candidate_count": 0,
+        "sender": None,
+        "read_only": True,
+    }
+    if str(source.get("source_table") or "") != "ai_whatsapp_purity":
+        result["status"] = "NOT_AI_WHATSAPP_PURITY"
+        return result
+
+    row_ref = str(source.get("source_row_ref") or "").strip()
+    raw_text = str(source.get("source_raw_text") or source.get("raw_text") or "")
+
+    with engine.connect() as conn:
+        purity_rows = []
+        if row_ref:
+            purity_rows = conn.execute(
+                text("SELECT listing_id::text AS listing_id, raw_text FROM ai_whatsapp_purity WHERE listing_id::text=:row_ref LIMIT 2"),
+                {"row_ref": row_ref},
+            ).mappings().all()
+        if not purity_rows and raw_text:
+            purity_rows = conn.execute(
+                text("SELECT listing_id::text AS listing_id, raw_text FROM ai_whatsapp_purity WHERE raw_text=:raw_text LIMIT 3"),
+                {"raw_text": raw_text},
+            ).mappings().all()
+
+    result["candidate_count"] = len(purity_rows)
+    if len(purity_rows) == 0:
+        result["status"] = "PURITY_ROW_NOT_FOUND"
+        return result
+    if len(purity_rows) > 1:
+        result["status"] = "AMBIGUOUS_PURITY_ROWS"
+        return result
+
+    listing_id = str(purity_rows[0].get("listing_id") or "").strip()
+    result["source_listing_id"] = listing_id
+    if not listing_id:
+        result["status"] = "PURITY_LISTING_ID_MISSING"
+        return result
+
+    wa_engine = None
+    dispose_wa = False
+    try:
+        wa_engine, dispose_wa = _v19i_whatsapp_engine(engine)
+        with wa_engine.connect() as conn:
+            has_listings = bool(conn.execute(text("SELECT to_regclass('wai_listings')")).scalar())
+            has_raw = bool(conn.execute(text("SELECT to_regclass('wai_raw_messages')")).scalar())
+            has_contacts = bool(conn.execute(text("SELECT to_regclass('wai_contacts')")).scalar())
+            if not has_listings:
+                result["status"] = "WAI_LISTINGS_NOT_FOUND"
+                return result
+
+            fields = ["l.id::text AS listing_id", "l.source_message_id::text AS source_message_id", "l.contact_id::text AS contact_id"]
+            joins = []
+            if has_raw:
+                fields += ["rm.sender_phone", "rm.sender_display_name"]
+                joins += ["LEFT JOIN wai_raw_messages rm ON rm.id=l.source_message_id"]
+            else:
+                fields += ["NULL::text AS sender_phone", "NULL::text AS sender_display_name"]
+            if has_contacts:
+                fields += ["ct.phone AS contact_phone", "ct.display_name AS contact_name", "ct.firm_name AS contact_firm"]
+                joins += ["LEFT JOIN wai_contacts ct ON ct.id=l.contact_id"]
+            else:
+                fields += ["NULL::text AS contact_phone", "NULL::text AS contact_name", "NULL::text AS contact_firm"]
+
+            sql = "SELECT " + ", ".join(fields) + " FROM wai_listings l " + " ".join(joins) + " WHERE l.id::text=:listing_id LIMIT 2"
+            rows = conn.execute(text(sql), {"listing_id": listing_id}).mappings().all()
+
+        result["candidate_count"] = len(rows)
+        if len(rows) == 0:
+            result["status"] = "WAI_LISTING_NOT_FOUND"
+            return result
+        if len(rows) > 1:
+            result["status"] = "AMBIGUOUS_WAI_LISTING"
+            return result
+
+        row = dict(rows[0])
+        sender_phone = _v19_phone_from_sender_value(row.get("sender_phone"))
+        if sender_phone:
+            result["status"] = "FOUND_UNIQUE_UPSTREAM_SENDER"
+            result["resolution_stage"] = "EXACT_WAI_LISTING_TO_RAW_MESSAGE"
+            result["sender"] = {
+                "phone": sender_phone, "name": row.get("sender_display_name"), "company": None,
+                "source_table": "wai_raw_messages", "match_method": "EXACT_SOURCE_MESSAGE_ID",
+                "match_column": "sender_phone", "provenance": "WHATSAPP_SENDER",
+            }
+            return result
+
+        contact_phone = _v19_phone_from_sender_value(row.get("contact_phone"))
+        if contact_phone:
+            result["status"] = "FOUND_UNIQUE_UPSTREAM_SENDER"
+            result["resolution_stage"] = "EXACT_WAI_LISTING_TO_CONTACT"
+            result["sender"] = {
+                "phone": contact_phone, "name": row.get("contact_name"), "company": row.get("contact_firm"),
+                "source_table": "wai_contacts", "match_method": "EXACT_CONTACT_ID",
+                "match_column": "phone", "provenance": "SOURCE_CONTACT",
+            }
+            return result
+
+        result["status"] = "EXACT_LINEAGE_HAS_NO_PHONE"
+        return result
+    except Exception as exc:
+        result["status"] = "CROSS_DB_LOOKUP_ERROR"
+        result["error_type"] = type(exc).__name__
+        result["error"] = str(exc)[:500]
+        return result
+    finally:
+        if dispose_wa and wa_engine is not None:
+            wa_engine.dispose()
+
+
+
 def _v19g_live_upstream_sender_contact(
     engine,
     proposal: Dict[str, Any],
@@ -3427,39 +3564,38 @@ def _v19g_live_upstream_sender_contact(
     p = dict(proposal or {})
     if p.get("contacts"):
         return p
-
-    resolution = resolve_upstream_sender_for_gold_source(
-        engine,
-        {
-            "source_message_id": source.get("source_message_id"),
-            "source_table": source.get("source_table"),
-            "source_row_ref": source.get("source_row_ref"),
-            "raw_text": source.get("source_raw_text") or source.get("raw_text"),
-            "source_metadata": source.get("source_metadata"),
-        },
-    )
+    payload = {
+        "source_message_id": source.get("source_message_id"),
+        "source_table": source.get("source_table"),
+        "source_row_ref": source.get("source_row_ref"),
+        "source_raw_text": source.get("source_raw_text"),
+        "raw_text": source.get("source_raw_text") or source.get("raw_text"),
+        "source_metadata": source.get("source_metadata"),
+    }
+    resolution = _v19i_exact_ai_whatsapp_purity_sender(engine, payload)
+    if resolution.get("status") != "FOUND_UNIQUE_UPSTREAM_SENDER":
+        generic = resolve_upstream_sender_for_gold_source(engine, payload)
+        if generic.get("status") == "FOUND_UNIQUE_UPSTREAM_SENDER" or resolution.get("status") == "NOT_AI_WHATSAPP_PURITY":
+            resolution = generic
 
     p["sender_lineage_status"] = resolution.get("status")
     p["sender_lineage_resolution_stage"] = resolution.get("resolution_stage")
     p["sender_lineage_candidate_count"] = resolution.get("candidate_count", 0)
-
     if resolution.get("status") != "FOUND_UNIQUE_UPSTREAM_SENDER":
-        if resolution.get("ambiguous_phones"):
-            p["sender_lineage_ambiguous"] = True
         return p
 
     sender = resolution.get("sender") or {}
     phone = _v19_phone_from_sender_value(sender.get("phone"))
     if not phone:
         return p
-
+    provenance = sender.get("provenance") or "WHATSAPP_SENDER"
     p["contacts"] = [{
         "phone": phone,
         "name": _v19c_clean_sender_name(sender.get("name")),
-        "company": None,
+        "company": sender.get("company"),
         "role": "SOURCE_CONTACT",
-        "provenance": "WHATSAPP_SENDER",
-        "scope": "SOURCE_MESSAGE_SENDER",
+        "provenance": provenance,
+        "scope": "SOURCE_MESSAGE_SENDER" if provenance == "WHATSAPP_SENDER" else "SOURCE_LISTING_CONTACT",
         "owner_status": "NOT_PROVEN",
         "broker_status": "NOT_PROVEN",
         "source_table": sender.get("source_table"),
@@ -3474,6 +3610,8 @@ def _v19g_live_upstream_sender_contact(
     return p
 
 
+
+
 def span_contact_lineage_diagnostic(engine, span_id: str) -> Dict[str, Any]:
     with engine.connect() as conn:
         row = conn.execute(
@@ -3482,43 +3620,37 @@ def span_contact_lineage_diagnostic(engine, span_id: str) -> Dict[str, Any]:
                 "s.raw_text AS source_raw_text, s.source_table, "
                 "s.source_metadata, s.source_row_ref "
                 "FROM alliance_gold_spans sp "
-                "JOIN alliance_gold_source_messages s "
-                "ON s.source_message_id=sp.source_message_id "
+                "JOIN alliance_gold_source_messages s ON s.source_message_id=sp.source_message_id "
                 "WHERE sp.span_id=:span_id"
             ),
             {"span_id": span_id},
         ).mappings().first()
-
     if not row:
         raise HTTPException(404, "Span not found")
 
     source = dict(row)
-    resolution = resolve_upstream_sender_for_gold_source(
-        engine,
-        {
-            "source_message_id": source.get("source_message_id"),
-            "source_table": source.get("source_table"),
-            "raw_text": source.get("source_raw_text"),
-            "source_metadata": source.get("source_metadata"),
-        },
-    )
-
-    return _json_safe({
-        "status": "PASS",
-        "version": VERSION,
-        "span_id": str(source.get("span_id")),
-        "source_message_id": str(source.get("source_message_id")),
+    payload = {
+        "source_message_id": source.get("source_message_id"),
         "source_table": source.get("source_table"),
         "source_row_ref": source.get("source_row_ref"),
-        "resolution": resolution,
-        "read_only": True,
-        "academy_writes": 0,
-        "human_labels_modified": 0,
-        "canonical_writes": 0,
-        "offer_writes": 0,
-        "matcher_writes": 0,
-        "whatsapp_live_writes": 0,
+        "source_raw_text": source.get("source_raw_text"),
+        "raw_text": source.get("source_raw_text"),
+        "source_metadata": source.get("source_metadata"),
+    }
+    resolution = _v19i_exact_ai_whatsapp_purity_sender(engine, payload)
+    if resolution.get("status") != "FOUND_UNIQUE_UPSTREAM_SENDER":
+        generic = resolve_upstream_sender_for_gold_source(engine, payload)
+        if generic.get("status") == "FOUND_UNIQUE_UPSTREAM_SENDER" or resolution.get("status") == "NOT_AI_WHATSAPP_PURITY":
+            resolution = generic
+
+    return _json_safe({
+        "status": "PASS", "version": VERSION, "span_id": str(source.get("span_id")),
+        "source_message_id": str(source.get("source_message_id")), "source_table": source.get("source_table"),
+        "source_row_ref": source.get("source_row_ref"), "resolution": resolution, "read_only": True,
+        "academy_writes": 0, "human_labels_modified": 0, "canonical_writes": 0,
+        "offer_writes": 0, "matcher_writes": 0, "whatsapp_live_writes": 0,
     })
+
 
 
 # ---------------------------------------------------------------------------
