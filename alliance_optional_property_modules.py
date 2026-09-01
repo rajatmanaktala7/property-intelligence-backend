@@ -1,6 +1,6 @@
 ﻿"""Fail-safe optional property module registration."""
 
-VERSION = "1.40.1-OPTIONAL-PROPERTY-MODULES-SCHEMA-SAMPLER-V263A"
+VERSION = "2.0.0-OPTIONAL-PROPERTY-MODULES-PROPERTY-BRAIN-FOUNDATION"
 
 
 def _route_exists(app, path):
@@ -1186,5 +1186,30 @@ def register(wrapped):
             "error":f"{type(exc).__name__}: {exc}",
             "route":"/api/v7/property-ai/mastery-v263a/status",
             "fail_safe":True
+        }
+
+    # Alliance Property Brain Foundation 1.0
+    # Evidence Span Engine + Human Gold Lab + Evaluation Dashboard.
+    # Academy-table writes only. Production property/offer/matcher/WhatsApp writes remain blocked.
+    try:
+        if _route_exists(app, "/api/property-brain-foundation/status"):
+            result["property_brain_foundation_v1"] = {
+                "status": "ALREADY_REGISTERED",
+                "route": "/api/property-brain-foundation/status",
+                "error": None,
+            }
+        else:
+            import alliance_property_brain_foundation_v1 as property_brain_foundation_v1
+            foundation_result = property_brain_foundation_v1.register(core)
+            result["property_brain_foundation_v1"] = {
+                **foundation_result,
+                "error": None,
+            }
+    except Exception as exc:
+        result["property_brain_foundation_v1"] = {
+            "status": "ERROR",
+            "error": f"{type(exc).__name__}: {exc}",
+            "route": "/api/property-brain-foundation/status",
+            "fail_safe": True,
         }
     return result
