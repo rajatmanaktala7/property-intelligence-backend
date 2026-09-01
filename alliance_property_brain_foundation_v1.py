@@ -14,8 +14,8 @@ from fastapi import Body, HTTPException, Query
 from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy import text
 
-VERSION = "1.2.1-ALLIANCE-PROPERTY-BRAIN-FOUNDATION"
-MODE = "TRUSTED_EVIDENCE_CURRICULUM_GOLD_LAB_RUNTIME_SAFE"
+VERSION = "1.2.2C-ALLIANCE-PROPERTY-BRAIN-FOUNDATION"
+MODE = "TRUSTED_EVIDENCE_CURRICULUM_GOLD_LAB_BOUNDARY_SAFE_C"
 
 # ---------------------------------------------------------------------------
 # Safety
@@ -853,6 +853,54 @@ def _looks_like_header(line: str) -> bool:
 def _strong_property_line(line: str) -> bool:
     return bool(PROPERTY_FACT_RE.search(line or ""))
 
+def _clean_anchor_text(line: str) -> str:
+    s = (line or "").strip()
+    # Remove any leading emoji / bullet / punctuation until the first
+    # alphanumeric character. This covers 💰 Rent, 🅿️ Parking, 🔑 Possession,
+    # as well as decorative project bullets such as ✨ DLH LEGACY.
+    s = re.sub(r"^[^A-Za-z0-9]+", "", s)
+    return s.strip()
+
+def _is_dependent_attribute_line(line: str) -> bool:
+    s = _clean_anchor_text(line)
+    return bool(re.match(
+        r"^(?:RENT|ASKING|DEMAND|PRICE|DEPOSIT|SECURITY|CAM|MAINTENANCE|"
+        r"POSSESSION|AVAILABLE|AVAILABILITY|PARKING|CAR\s+PARKING|"
+        r"FURNISHED|SEMI[\-\s]?FURNISHED|FULLY\s+FURNISHED|"
+        r"LOWER\s+FLOOR|UPPER\s+FLOOR|GROUND\s+FLOOR|FIRST\s+FLOOR|"
+        r"NOTICE|KITCHEN|AC\b)",
+        s,
+        re.I,
+    ))
+
+def _is_named_property_anchor(line: str) -> bool:
+    """
+    Detect short project/building/property heading lines such as:
+    '✨ DLH LEGACY', 'PARK GRANDEUR', 'RUSTOMJEE PARAMOUNT – KHAR WEST'.
+
+    Deliberately avoids using rent/price/parking/possession as boundaries.
+    """
+    s = _clean_anchor_text(line)
+    if not s or len(s) < 3 or len(s) > 90:
+        return False
+    if _is_dependent_attribute_line(s):
+        return False
+    if PHONE_RE.search(s):
+        return False
+    if AREA_RE.search(s) or MONEY_RE.search(s):
+        return False
+    if re.search(r"\b(?:BHK|SQFT|SQ\s*FT|SFT|YARDS?|ACRE|RENT|SALE|DEMAND|ASKING)\b", s, re.I):
+        return False
+
+    # Mostly title-like text. Allow location suffixes and digits in project names.
+    letters = [ch for ch in s if ch.isalpha()]
+    if not letters:
+        return False
+    upper_ratio = sum(1 for ch in letters if ch.isupper()) / len(letters)
+
+    # Project headings in the imported feeds are usually uppercase.
+    return upper_ratio >= 0.75 and len(s.split()) <= 12
+
 def propose_spans(raw: str) -> List[Dict[str, Any]]:
     """
     Conservative proposal engine.
@@ -874,16 +922,22 @@ def propose_spans(raw: str) -> List[Dict[str, Any]]:
             starts.append(start)
             continue
 
-        # A strong new property line after an already fact-rich block can
-        # indicate a new span. Keep this conservative to avoid oversplitting.
-        if i > 0 and _strong_property_line(s):
-            prev_window = "\n".join(x[2] for x in lines[max(0, i - 5):i])
-            if (
-                PROPERTY_FACT_RE.search(prev_window)
-                and re.search(r"\b(?:FOR SALE|FOR RENT|RENT|SALE|DEMAND|ASKING)\b", s, re.I)
-                and len(prev_window) >= 30
-            ):
+        # Dependent commercial/property attributes stay with the entity above.
+        if i > 0 and _is_dependent_attribute_line(s):
+            continue
+
+        # A short project/building heading starts a new span when the preceding
+        # block already contains property facts and the following lines contain
+        # property facts. This handles broker inventory dumps such as:
+        # DLH LEGACY ... Rent ... / DLH LEGACY ... Rent ...
+        if i > 0 and _is_named_property_anchor(s):
+            prev_window = "\n".join(x[2] for x in lines[max(0, i - 8):i])
+            next_window = "\n".join(x[2] for x in lines[i:min(len(lines), i + 6)])
+            prev_has_property_fact = bool(PROPERTY_FACT_RE.search(prev_window))
+            next_has_property_fact = bool(PROPERTY_FACT_RE.search(next_window))
+            if prev_has_property_fact and next_has_property_fact:
                 starts.append(start)
+                continue
 
     starts = sorted(set(starts))
     spans = []
@@ -1165,6 +1219,104 @@ def import_sources(
         "inserted_sources": inserted_sources,
         "inserted_proposed_spans": inserted_spans,
         "sampling_buckets": bucket_counts,
+        "academy_writes_only": True,
+        "canonical_writes": 0,
+        "offer_writes": 0,
+        "matcher_writes": 0,
+        "whatsapp_live_writes": 0,
+    }
+
+
+def repropose_unlabeled_gold(engine) -> Dict[str, Any]:
+    """
+    Rebuild proposals in Academy tables only.
+    Hard-blocked if any human Gold labels or relationship labels exist.
+    """
+    with engine.begin() as conn:
+        label_count = int(conn.execute(
+            text("SELECT count(*) FROM alliance_gold_span_labels WHERE active=TRUE")
+        ).scalar() or 0)
+        relationship_count = int(conn.execute(
+            text("SELECT count(*) FROM alliance_gold_relationship_labels WHERE active=TRUE")
+        ).scalar() or 0)
+
+        if label_count or relationship_count:
+            raise HTTPException(
+                409,
+                "Reproposal blocked because human Gold labels/relationships already exist."
+            )
+
+        sources = conn.execute(text(
+            """
+            SELECT source_message_id, raw_text
+            FROM alliance_gold_source_messages
+            ORDER BY created_at, source_message_id
+            """
+        )).mappings().all()
+
+        old_count = int(conn.execute(
+            text("SELECT count(*) FROM alliance_gold_spans")
+        ).scalar() or 0)
+
+        conn.execute(text("DELETE FROM alliance_gold_spans"))
+
+        new_count = 0
+        for source in sources:
+            source_id = str(source["source_message_id"])
+            raw = str(source["raw_text"] or "")
+            spans = propose_spans(raw)
+
+            conn.execute(
+                text(
+                    """
+                    UPDATE alliance_gold_source_messages
+                    SET proposed_span_count=:n,
+                        labeling_status='UNLABELED',
+                        updated_at=now()
+                    WHERE source_message_id=:sid
+                    """
+                ),
+                {"n": len(spans), "sid": source_id},
+            )
+
+            for span in spans:
+                conn.execute(
+                    text(
+                        """
+                        INSERT INTO alliance_gold_spans (
+                            span_id, source_message_id, span_order,
+                            proposed_start_offset, proposed_end_offset,
+                            proposed_text, proposal_method,
+                            proposal_confidence, boundary_status
+                        )
+                        VALUES (
+                            :span_id, :sid, :span_order,
+                            :start_offset, :end_offset,
+                            :proposed_text, 'DETERMINISTIC_V1_2_2',
+                            :proposal_confidence, 'PENDING'
+                        )
+                        """
+                    ),
+                    {
+                        "span_id": str(uuid.uuid4()),
+                        "sid": source_id,
+                        "span_order": span["span_order"],
+                        "start_offset": span["start_offset"],
+                        "end_offset": span["end_offset"],
+                        "proposed_text": span["text"],
+                        "proposal_confidence": span["proposal_confidence"],
+                    },
+                )
+                new_count += 1
+
+    return {
+        "status": "REPROPOSED",
+        "version": VERSION,
+        "source_messages_preserved": len(sources),
+        "old_proposed_spans": old_count,
+        "new_proposed_spans": new_count,
+        "human_labels_present": 0,
+        "relationship_labels_present": 0,
         "academy_writes_only": True,
         "canonical_writes": 0,
         "offer_writes": 0,
@@ -2082,6 +2234,49 @@ Rent 4 Lac
         safe_runtime_payload,
     )
 
+    rent_block = """✨ DLH LEGACY
+▪️ 3 BHK | 1250 Sq.ft.
+▪️ Semi-Furnished
+🅿️ 2 Car Parkings
+💰 Rent: ₹3.00 Lakhs
+
+✨ DLH LEGACY
+▪️ 3 BHK | 1350 Sq.ft.
+▪️ Fully Furnished
+🅿️ 2 Car Parkings
+💰 Rent: ₹4.00 Lakhs
+"""
+    rent_spans = propose_spans(rent_block)
+    check(
+        "TWO_DLH_PROPERTIES_SPLIT",
+        len(rent_spans) == 2,
+        [s["text"] for s in rent_spans],
+    )
+    check(
+        "FIRST_RENT_STAYS_WITH_FIRST_PROPERTY",
+        len(rent_spans) == 2 and "₹3.00 Lakhs" in rent_spans[0]["text"],
+        [s["text"] for s in rent_spans],
+    )
+    check(
+        "SECOND_RENT_STAYS_WITH_SECOND_PROPERTY",
+        len(rent_spans) == 2 and "₹4.00 Lakhs" in rent_spans[1]["text"],
+        [s["text"] for s in rent_spans],
+    )
+    check(
+        "RENT_LINE_NOT_PROPERTY_ANCHOR",
+        not _is_named_property_anchor("💰 Rent: ₹3.00 Lakhs")
+        and _is_dependent_attribute_line("💰 Rent: ₹3.00 Lakhs"),
+        {
+            "anchor": _is_named_property_anchor("💰 Rent: ₹3.00 Lakhs"),
+            "dependent": _is_dependent_attribute_line("💰 Rent: ₹3.00 Lakhs"),
+        },
+    )
+    check(
+        "PROJECT_HEADING_IS_PROPERTY_ANCHOR",
+        _is_named_property_anchor("✨ DLH LEGACY"),
+        _clean_anchor_text("✨ DLH LEGACY"),
+    )
+
     failed = [c for c in cases if not c["passed"]]
     return {
         "status": "PASS" if not failed else "FAIL",
@@ -2161,6 +2356,10 @@ def register(core):
         total_messages = int((payload or {}).get("total_messages") or 25)
         total_messages = max(1, min(total_messages, 100))
         return _json_response(import_curriculum(engine, total_messages))
+
+    @app.post("/api/property-brain-foundation/gold/repropose-unlabeled")
+    def repropose_unlabeled_route():
+        return _json_response(repropose_unlabeled_gold(engine))
 
     @app.post("/api/property-brain-foundation/sources/import")
     def sources_import(payload: Dict[str, Any] = Body(...)):
