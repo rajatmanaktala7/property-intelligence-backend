@@ -14,8 +14,8 @@ from fastapi import Body, HTTPException, Query
 from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy import text
 
-VERSION = "1.9.7-ALLIANCE-PROPERTY-BRAIN-FOUNDATION"
-MODE = "GOLD_SKIP_AND_LIVE_SENDER_CONTACT"
+VERSION = "1.9.8-ALLIANCE-PROPERTY-BRAIN-FOUNDATION"
+MODE = "GOLD_SOURCE_COLUMN_AND_CONTACT_LINEAGE_FIXED"
 
 # ---------------------------------------------------------------------------
 # Safety
@@ -3132,11 +3132,37 @@ def resolve_upstream_sender_for_gold_source(
     if not isinstance(metadata, dict):
         metadata = {}
 
-    source_column = str(metadata.get("source_column") or "raw_message")
+    # Foundation 1.9H: source_column metadata is not guaranteed to exist.
+    # ai_whatsapp_purity stores the evidence in raw_text, while older WhatsApp
+    # sources may use raw_message/message_text/message/body/text. Resolve the
+    # actual source evidence column from the live table schema before tracing
+    # sender lineage. This is read-only.
+    available_source_columns = [
+        c["column_name"] for c in _columns(engine, source_table)
+    ] if source_table else []
+    requested_source_column = str(metadata.get("source_column") or "").strip()
+    source_column_candidates = [
+        requested_source_column,
+        "raw_text",
+        "raw_message",
+        "message_text",
+        "message",
+        "body",
+        "text",
+    ]
+    source_column = next(
+        (
+            c for c in source_column_candidates
+            if c and c in available_source_columns
+        ),
+        requested_source_column or "raw_message",
+    )
     result: Dict[str, Any] = {
         "source_message_id": str(source.get("source_message_id") or ""),
         "source_table": source_table,
         "source_column": source_column,
+        "source_column_requested": requested_source_column or None,
+        "source_column_available": available_source_columns,
         "status": "UNRESOLVED",
         "sender": None,
         "source_row_status": None,
@@ -3407,6 +3433,7 @@ def _v19g_live_upstream_sender_contact(
         {
             "source_message_id": source.get("source_message_id"),
             "source_table": source.get("source_table"),
+            "source_row_ref": source.get("source_row_ref"),
             "raw_text": source.get("source_raw_text") or source.get("raw_text"),
             "source_metadata": source.get("source_metadata"),
         },
@@ -4527,6 +4554,7 @@ def next_span(
                     sp.lineage_metadata,
                     s.raw_text AS source_raw_text,
                     s.source_table,
+                    s.source_row_ref,
                     s.source_metadata,
                     s.sampling_bucket,
                     s.message_length
@@ -5017,9 +5045,12 @@ async function loadNext(){
   document.getElementById("span").innerText=current.proposed_text;
   document.getElementById("meta").innerText =
     `Source: ${current.source_table} | Bucket: ${current.sampling_bucket} | Length: ${current.message_length}`;
-  document.getElementById("spanMeta").innerText =
-    `Span ${current.span_order} | Proposal confidence: ${current.proposal_confidence}`;
   const p=current.proposal||{};
+  const senderStatus=p.sender_lineage_status||"NOT_CHECKED";
+  const senderStage=p.sender_lineage_resolution_stage||"";
+  const contactCount=(p.contacts||[]).length;
+  document.getElementById("spanMeta").innerText =
+    `Span ${current.span_order} | Span ID: ${current.span_id} | Source Message ID: ${current.source_message_id} | Proposal confidence: ${current.proposal_confidence} | Sender lineage: ${senderStatus}${senderStage ? " / "+senderStage : ""} | Contacts: ${contactCount}`;
   document.getElementById("contentType").value =
     ["PROPERTY_AVAILABILITY","INVENTORY_GROUP","REQUIREMENT","FRAGMENT"].includes(p.content_type_hint)
       ? p.content_type_hint : "FRAGMENT";
@@ -5576,6 +5607,18 @@ Hemant Lohia
         callable(_v19g_live_upstream_sender_contact)
         and callable(span_contact_lineage_diagnostic),
         "Read-only live upstream sender recovery + diagnostic.",
+    )
+    check(
+        "GOLD_SOURCE_COLUMN_DISCOVERY_PRESENT",
+        "source_column_candidates" in resolve_upstream_sender_for_gold_source.__code__.co_varnames,
+        "Sender lineage discovers raw_text/raw_message from actual source schema.",
+    )
+    check(
+        "GOLD_UI_LINEAGE_VISIBLE",
+        "Sender lineage:" in LAB_UI
+        and "Span ID:" in LAB_UI
+        and "Source Message ID:" in LAB_UI,
+        "Gold Lab exposes span/source IDs and sender-lineage status.",
     )
 
     failed = [c for c in cases if not c["passed"]]
