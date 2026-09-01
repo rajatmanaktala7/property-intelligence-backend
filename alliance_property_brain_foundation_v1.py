@@ -14,8 +14,8 @@ from fastapi import Body, HTTPException, Query
 from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy import text
 
-VERSION = "1.7.1-ALLIANCE-PROPERTY-BRAIN-FOUNDATION"
-MODE = "PERSISTENT_SOURCE_GROUNDED_SPLIT_CONTEXT_FIXED"
+VERSION = "1.8.3-ALLIANCE-PROPERTY-BRAIN-FOUNDATION"
+MODE = "RETROACTIVE_SHARED_SOURCE_CONTACT_SPACED_PHONE_FIXED"
 
 # ---------------------------------------------------------------------------
 # Safety
@@ -1842,6 +1842,124 @@ def _context_from_ranges(raw: str, ranges: List[Tuple[int, int]]) -> List[str]:
     return snippets
 
 
+
+# ---------------------------------------------------------------------------
+# Foundation 1.8D: retroactive shared source contact provenance
+# ---------------------------------------------------------------------------
+
+V18_FOOTER_SIGNAL_RE = re.compile(
+    r"\b(?:FOR\s+MORE\s+DETAILS|SITE\s+VISITS?|CONTACT|CALL|DM|QUERY)\b",
+    re.I,
+)
+
+V18_FOOTER_PHONE_RE = re.compile(
+    r"(?<!\d)(?:\+?91[\s\-]*)?[6-9](?:[\s\-]*\d){9}(?!\d)"
+)
+
+def _v18_normalize_phone(value: str) -> str:
+    digits = re.sub(r"\D", "", str(value or ""))
+    if len(digits) == 12 and digits.startswith("91"):
+        return "+" + digits
+    if len(digits) == 10:
+        return "+91" + digits
+    return str(value or "").strip()
+
+def _v18_shared_source_contacts(source_raw: str) -> List[Dict[str, Any]]:
+    raw = str(source_raw or "")
+    footer_start = None
+
+    for start, _end, line in _line_ranges(raw):
+        if V18_FOOTER_SIGNAL_RE.search(_boundary_clean_line(line)):
+            footer_start = start
+            break
+
+    if footer_start is None:
+        return []
+
+    footer = raw[footer_start:].strip()
+    phone_matches = list(V18_FOOTER_PHONE_RE.finditer(footer))
+    if not phone_matches:
+        return []
+
+    footer_lines = [re.sub(r"\s+", " ", x).strip() for x in footer.splitlines()]
+    footer_lines = [x for x in footer_lines if x]
+
+    result: List[Dict[str, Any]] = []
+    seen = set()
+
+    for match in phone_matches:
+        phone = _v18_normalize_phone(match.group(0))
+        if not phone or phone in seen:
+            continue
+        seen.add(phone)
+
+        phone_digits = re.sub(r"\D", "", match.group(0))
+        phone_line_index = None
+        for idx, line in enumerate(footer_lines):
+            if phone_digits and phone_digits in re.sub(r"\D", "", line):
+                phone_line_index = idx
+                break
+
+        name = None
+        company = None
+        if phone_line_index is not None:
+            candidates: List[str] = []
+            for line in footer_lines[max(0, phone_line_index - 4):phone_line_index]:
+                if V18_FOOTER_SIGNAL_RE.search(line):
+                    continue
+                if V18_FOOTER_PHONE_RE.search(line):
+                    continue
+                candidates.append(line)
+
+            if len(candidates) >= 2:
+                name = candidates[-2]
+                company = candidates[-1]
+            elif len(candidates) == 1:
+                company = candidates[-1]
+
+        result.append({
+            "phone": phone,
+            "name": name,
+            "company": company,
+            "role": "SOURCE_CONTACT",
+            "provenance": "MESSAGE_FOOTER",
+            "scope": "SHARED_SOURCE_MESSAGE",
+            "owner_status": "NOT_PROVEN",
+            "broker_status": "SOURCE_OR_BROKER_CONTEXT",
+            "evidence": footer,
+        })
+
+    return result
+
+def _v18_merge_source_contacts(
+    proposal: Dict[str, Any],
+    source_raw: str,
+) -> Dict[str, Any]:
+    p = dict(proposal or {})
+    shared = _v18_shared_source_contacts(source_raw)
+    if not shared:
+        return p
+
+    existing = list(p.get("contacts") or [])
+    known = {
+        re.sub(r"\D", "", str(x.get("phone") or ""))
+        for x in existing
+        if isinstance(x, dict)
+    }
+
+    for item in shared:
+        digits = re.sub(r"\D", "", str(item.get("phone") or ""))
+        if digits and digits not in known:
+            existing.append(dict(item))
+            known.add(digits)
+
+    p["contacts"] = existing
+    p["shared_source_contact_provenance"] = "MESSAGE_FOOTER"
+    p["shared_contact_is_owner"] = False
+    p["shared_source_contact_recovered_from_original_message"] = True
+    return p
+
+
 # ---------------------------------------------------------------------------
 # Foundation 1.6A: entity scope + inventory-group intelligence
 # ---------------------------------------------------------------------------
@@ -2682,6 +2800,13 @@ def next_span(engine, labeler_id: Optional[str] = None) -> Dict[str, Any]:
             proposal["context_provenance"]["locality_hint"] = "INHERITED_FROM_SOURCE_LOCALITY_HEADER"
         if inherited_locality:
             proposal["source_grounded_inherited_locality"] = inherited_locality
+
+    # Foundation 1.8D recovers shared footer contacts from the ORIGINAL
+    # source message, including child spans created before Foundation 1.8.
+    proposal = _v18_merge_source_contacts(
+        proposal,
+        str(out.get("source_raw_text") or ""),
+    )
 
     out["lineage_metadata"] = lineage
     out["proposal"] = proposal
