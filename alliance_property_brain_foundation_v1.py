@@ -1,4 +1,4 @@
-﻿
+
 from __future__ import annotations
 
 import hashlib
@@ -14,8 +14,8 @@ from fastapi import Body, HTTPException, Query
 from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy import text
 
-VERSION = "1.3.0-ALLIANCE-PROPERTY-BRAIN-FOUNDATION"
-MODE = "GOLD_PROPOSAL_ENGINE_SOURCE_GROUNDED_HUMAN_REVIEW"
+VERSION = "1.4.0-ALLIANCE-PROPERTY-BRAIN-FOUNDATION"
+MODE = "ATOMIC_SPAN_EDITOR_GOLD_LINEAGE_SAFE"
 
 # ---------------------------------------------------------------------------
 # Safety
@@ -296,9 +296,21 @@ CREATE TABLE IF NOT EXISTS alliance_gold_evaluation_runs (
 );
 """
 
+MIGRATIONS = [
+    "ALTER TABLE alliance_gold_spans ADD COLUMN IF NOT EXISTS parent_span_id UUID",
+    "ALTER TABLE alliance_gold_spans ADD COLUMN IF NOT EXISTS span_status TEXT NOT NULL DEFAULT 'ACTIVE'",
+    "ALTER TABLE alliance_gold_spans ADD COLUMN IF NOT EXISTS superseded_at TIMESTAMPTZ",
+    "ALTER TABLE alliance_gold_spans ADD COLUMN IF NOT EXISTS superseded_by JSONB NOT NULL DEFAULT '[]'::jsonb",
+    "ALTER TABLE alliance_gold_spans ADD COLUMN IF NOT EXISTS lineage_metadata JSONB NOT NULL DEFAULT '{}'::jsonb",
+    "CREATE INDEX IF NOT EXISTS idx_gold_spans_active_status ON alliance_gold_spans(span_status, boundary_status)",
+    "CREATE INDEX IF NOT EXISTS idx_gold_spans_parent ON alliance_gold_spans(parent_span_id)",
+]
+
 def install(engine) -> Dict[str, Any]:
     with engine.begin() as conn:
         for statement in [x.strip() for x in DDL.split(";") if x.strip()]:
+            conn.execute(text(statement))
+        for statement in MIGRATIONS:
             conn.execute(text(statement))
     return {
         "status": "INSTALLED",
@@ -1585,6 +1597,14 @@ def save_label(engine, span_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     tx = payload.get("transaction_type")
     tx = str(tx).upper() if tx else None
 
+    boundary_action = str(payload.get("boundary_action") or "CORRECT").upper()
+    if boundary_action in {"SPLIT", "MERGE"}:
+        raise HTTPException(
+            409,
+            "Foundation 1.4 uses real atomic boundary operations. "
+            "Use the Atomic Split or Merge endpoint instead of saving a cosmetic SPLIT/MERGE label."
+        )
+
     with engine.begin() as conn:
         span = conn.execute(
             text(
@@ -1753,6 +1773,363 @@ def save_relationship(engine, payload: Dict[str, Any]) -> Dict[str, Any]:
 
     return {"status": "SAVED", "academy_write_only": True}
 
+
+# ---------------------------------------------------------------------------
+# Foundation 1.4: real atomic span editing + lineage
+# ---------------------------------------------------------------------------
+
+ATOMIC_PROPERTY_HEADING_RE = re.compile(
+    r"\b(?:BUILDER\s+FLOOR|INDEPENDENT\s+FLOOR|FLAT|APARTMENT|VILLA|OFFICE|"
+    r"SHOP|SHOWROOM|PROPERTY|WAREHOUSE|GODOWN|PLOT|LAND)\b.*"
+    r"\b(?:AVAILABLE\s+FOR\s+(?:LEASE|RENT|SALE)|FOR\s+(?:LEASE|RENT|SALE))\b",
+    re.I,
+)
+ATOMIC_CONTEXT_START_RE = re.compile(
+    r"^(?:FOR\s+MORE\s+DETAILS\s+CONTACT(?:\s+US)?|PICTURES?\s+ON\s+CALL|"
+    r"FOR\s+SITE\s+VISITS?|CONTACT\s+OUR\s+TEAM|BROKER\s+DETAILS?)\b",
+    re.I,
+)
+
+def _boundary_clean_line(value: str) -> str:
+    s = html.unescape(str(value or "")).strip()
+    s = re.sub(r"^[^A-Za-z0-9]+", "", s)
+    s = re.sub(r"[^A-Za-z0-9)]+$", "", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+def _line_ranges(raw: str) -> List[Tuple[int, int, str]]:
+    out: List[Tuple[int, int, str]] = []
+    pos = 0
+    for line in (raw or "").splitlines(keepends=True):
+        start = pos
+        pos += len(line)
+        out.append((start, pos, line))
+    if pos < len(raw or ""):
+        out.append((pos, len(raw), raw[pos:]))
+    return out
+
+def _trim_atomic_block(raw: str, start: int, end: int) -> Tuple[int, int]:
+    block = raw[start:end]
+    lines = _line_ranges(block)
+    cut = len(block)
+    for i, (ls, _le, line) in enumerate(lines):
+        if i == 0:
+            continue
+        clean = _boundary_clean_line(line)
+        if ATOMIC_CONTEXT_START_RE.search(clean):
+            cut = ls
+            break
+    trimmed = block[:cut]
+    leading = len(trimmed) - len(trimmed.lstrip())
+    trailing_text = trimmed.rstrip()
+    return start + leading, start + len(trailing_text)
+
+def _context_from_ranges(raw: str, ranges: List[Tuple[int, int]]) -> List[str]:
+    if not ranges:
+        return [raw.strip()] if (raw or "").strip() else []
+    snippets: List[str] = []
+    cursor = 0
+    for start, end in sorted(ranges):
+        if start > cursor:
+            gap = raw[cursor:start].strip()
+            if gap:
+                snippets.append(gap)
+        cursor = max(cursor, end)
+    if cursor < len(raw):
+        gap = raw[cursor:].strip()
+        if gap:
+            snippets.append(gap)
+    return snippets
+
+def automatic_atomic_split(text_value: str) -> Dict[str, Any]:
+    raw = str(text_value or "")
+    lines = _line_ranges(raw)
+    heading_starts: List[int] = []
+    for start, _end, line in lines:
+        clean = _boundary_clean_line(line)
+        if ATOMIC_PROPERTY_HEADING_RE.search(clean):
+            heading_starts.append(start)
+    if len(heading_starts) < 2:
+        return {"status": "NO_AUTOMATIC_SPLIT", "children": [], "shared_context": [], "reason": "Fewer than two strong property headings were found."}
+
+    ranges: List[Tuple[int, int]] = []
+    children: List[Dict[str, Any]] = []
+    for idx, start in enumerate(heading_starts):
+        raw_end = heading_starts[idx + 1] if idx + 1 < len(heading_starts) else len(raw)
+        child_start, child_end = _trim_atomic_block(raw, start, raw_end)
+        if child_end <= child_start:
+            continue
+        child_text = raw[child_start:child_end].strip()
+        if not child_text:
+            continue
+        ranges.append((child_start, child_end))
+        children.append({
+            "child_order": len(children) + 1,
+            "start_offset": child_start,
+            "end_offset": child_end,
+            "text": child_text,
+            "proposal": propose_fields(child_text),
+        })
+    if len(children) < 2:
+        return {"status": "NO_AUTOMATIC_SPLIT", "children": [], "shared_context": [], "reason": "Strong headings were found but fewer than two safe child spans remained."}
+    return {"status": "PASS", "children": children, "shared_context": _context_from_ranges(raw, ranges), "human_confirmation_required": True}
+
+def split_preview(engine, span_id: str) -> Dict[str, Any]:
+    with engine.connect() as conn:
+        row = conn.execute(text('''
+            SELECT span_id, source_message_id, span_order,
+                   proposed_start_offset, proposed_end_offset,
+                   COALESCE(human_text, proposed_text) AS span_text,
+                   COALESCE(span_status, 'ACTIVE') AS span_status,
+                   boundary_status
+            FROM alliance_gold_spans
+            WHERE span_id=:span_id
+        '''), {"span_id": span_id}).mappings().first()
+    if not row:
+        raise HTTPException(404, "Span not found")
+    if str(row["span_status"]).upper() != "ACTIVE":
+        raise HTTPException(409, "Only ACTIVE spans can be split")
+    preview = automatic_atomic_split(str(row["span_text"] or ""))
+    return _json_safe({
+        "status": preview.get("status"), "version": VERSION, "span_id": span_id,
+        "children": preview.get("children") or [], "shared_context": preview.get("shared_context") or [],
+        "reason": preview.get("reason"), "human_confirmation_required": True,
+        "academy_write_only": True, "production_writes": False,
+    })
+
+def _locate_children(parent_text: str, children_payload: Any) -> Tuple[List[Dict[str, Any]], List[str]]:
+    if not isinstance(children_payload, list) or len(children_payload) < 2:
+        raise HTTPException(400, "At least two child spans are required")
+    children: List[str] = []
+    for item in children_payload:
+        value = item.get("text") if isinstance(item, dict) else item
+        value = str(value or "").strip()
+        if value:
+            children.append(value)
+    if len(children) < 2:
+        raise HTTPException(400, "At least two non-empty child spans are required")
+    located: List[Dict[str, Any]] = []
+    cursor = 0
+    ranges: List[Tuple[int, int]] = []
+    for idx, child in enumerate(children, start=1):
+        start = parent_text.find(child, cursor)
+        if start < 0:
+            raise HTTPException(400, f"Child {idx} is not an exact ordered substring of the parent span. Do not rewrite evidence while splitting; only cut the original text.")
+        end = start + len(child)
+        located.append({"child_order": idx, "start_offset": start, "end_offset": end, "text": child})
+        ranges.append((start, end))
+        cursor = end
+    return located, _context_from_ranges(parent_text, ranges)
+
+def _active_label_count(conn, span_ids: List[str]) -> int:
+    if not span_ids:
+        return 0
+    return int(conn.execute(text('''
+        SELECT count(*) FROM alliance_gold_span_labels
+        WHERE active=TRUE AND span_id = ANY(CAST(:ids AS uuid[]))
+    '''), {"ids": span_ids}).scalar() or 0)
+
+def _deactivate_lineage_dependencies(conn, span_ids: List[str]) -> None:
+    if not span_ids:
+        return
+    conn.execute(text('''
+        UPDATE alliance_gold_relationship_labels
+        SET active=FALSE
+        WHERE active=TRUE AND (
+            left_span_id = ANY(CAST(:ids AS uuid[]))
+            OR right_span_id = ANY(CAST(:ids AS uuid[]))
+        )
+    '''), {"ids": span_ids})
+
+def _renumber_active_replacement(conn, source_message_id: str, parent_order: int, replacement_ids: List[str], removed_ids: List[str]) -> None:
+    rows = conn.execute(text('''
+        SELECT span_id, span_order FROM alliance_gold_spans
+        WHERE source_message_id=:sid AND COALESCE(span_status, 'ACTIVE')='ACTIVE'
+        ORDER BY span_order, created_at, span_id
+    '''), {"sid": source_message_id}).mappings().all()
+    removed = set(removed_ids)
+    replacement = set(replacement_ids)
+    before = [str(r["span_id"]) for r in rows if str(r["span_id"]) not in removed and str(r["span_id"]) not in replacement and int(r["span_order"]) < int(parent_order)]
+    after = [str(r["span_id"]) for r in rows if str(r["span_id"]) not in removed and str(r["span_id"]) not in replacement and int(r["span_order"]) > int(parent_order)]
+    sequence = before + replacement_ids + after
+    conn.execute(text('''UPDATE alliance_gold_spans SET span_order = span_order + 1000000 WHERE source_message_id=:sid'''), {"sid": source_message_id})
+    for new_order, sid in enumerate(sequence, start=1):
+        conn.execute(text("UPDATE alliance_gold_spans SET span_order=:o WHERE span_id=:sid"), {"o": new_order, "sid": sid})
+
+def _refresh_source_after_boundary_edit(conn, source_message_id: str) -> None:
+    active_count = int(conn.execute(text('''
+        SELECT count(*) FROM alliance_gold_spans
+        WHERE source_message_id=:sid AND COALESCE(span_status, 'ACTIVE')='ACTIVE'
+    '''), {"sid": source_message_id}).scalar() or 0)
+    conn.execute(text('''
+        UPDATE alliance_gold_source_messages
+        SET proposed_span_count=:n,
+            labeling_status=CASE
+                WHEN NOT EXISTS (
+                    SELECT 1 FROM alliance_gold_spans sp
+                    WHERE sp.source_message_id=:sid
+                      AND COALESCE(sp.span_status, 'ACTIVE')='ACTIVE'
+                      AND sp.boundary_status <> 'LABELED'
+                ) THEN 'LABELED' ELSE 'IN_PROGRESS' END,
+            updated_at=now()
+        WHERE source_message_id=:sid
+    '''), {"n": active_count, "sid": source_message_id})
+
+def split_span(engine, span_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    labeler_id = str(payload.get("labeler_id") or "").strip()
+    if not labeler_id:
+        raise HTTPException(400, "labeler_id is required")
+    invalidate_existing = bool(payload.get("invalidate_existing_labels", False))
+    reason = str(payload.get("reason") or "").strip() or "Human atomic boundary split"
+    with engine.begin() as conn:
+        parent = conn.execute(text('''
+            SELECT span_id, source_message_id, span_order,
+                   proposed_start_offset, proposed_end_offset,
+                   COALESCE(human_text, proposed_text) AS span_text,
+                   COALESCE(span_status, 'ACTIVE') AS span_status,
+                   boundary_status
+            FROM alliance_gold_spans WHERE span_id=:span_id FOR UPDATE
+        '''), {"span_id": span_id}).mappings().first()
+        if not parent:
+            raise HTTPException(404, "Span not found")
+        if str(parent["span_status"]).upper() != "ACTIVE":
+            raise HTTPException(409, "Only ACTIVE spans can be split")
+        active_labels = _active_label_count(conn, [span_id])
+        if active_labels and not invalidate_existing:
+            raise HTTPException(409, "This span already has an active Gold label. Set invalidate_existing_labels=true only after explicit human correction.")
+        parent_text = str(parent["span_text"] or "")
+        located, shared_context = _locate_children(parent_text, payload.get("children"))
+        if active_labels:
+            conn.execute(text('''
+                UPDATE alliance_gold_span_labels
+                SET active=FALSE,
+                    notes=concat_ws(E'\\n', NULLIF(notes, ''), :audit_note),
+                    updated_at=now()
+                WHERE span_id=:span_id AND active=TRUE
+            '''), {"span_id": span_id, "audit_note": f"[Foundation 1.4 boundary invalidation by {labeler_id}] {reason}"})
+        _deactivate_lineage_dependencies(conn, [span_id])
+        max_order = int(conn.execute(text("SELECT COALESCE(max(span_order),0) FROM alliance_gold_spans WHERE source_message_id=:sid"), {"sid": str(parent["source_message_id"])}).scalar() or 0)
+        child_ids: List[str] = []
+        base_start = int(parent["proposed_start_offset"] or 0)
+        for idx, child in enumerate(located, start=1):
+            child_id = str(uuid.uuid4())
+            child_ids.append(child_id)
+            conn.execute(text('''
+                INSERT INTO alliance_gold_spans (
+                    span_id, source_message_id, span_order,
+                    proposed_start_offset, proposed_end_offset,
+                    proposed_text, proposal_method, proposal_confidence,
+                    parent_span_id, span_status, boundary_status, lineage_metadata
+                ) VALUES (
+                    :span_id, :source_message_id, :span_order,
+                    :start_offset, :end_offset,
+                    :proposed_text, 'HUMAN_ATOMIC_SPLIT_V1_4', 1.0,
+                    :parent_span_id, 'ACTIVE', 'PENDING', CAST(:lineage_metadata AS jsonb)
+                )
+            '''), {
+                "span_id": child_id, "source_message_id": str(parent["source_message_id"]),
+                "span_order": max_order + idx,
+                "start_offset": base_start + int(child["start_offset"]),
+                "end_offset": base_start + int(child["end_offset"]),
+                "proposed_text": child["text"], "parent_span_id": span_id,
+                "lineage_metadata": _json({"created_by": labeler_id, "operation": "SPLIT", "reason": reason, "parent_span_id": span_id}),
+            })
+        conn.execute(text('''
+            UPDATE alliance_gold_spans
+            SET span_status='SUPERSEDED', boundary_status='SUPERSEDED', boundary_action='SPLIT',
+                superseded_at=now(), superseded_by=CAST(:children AS jsonb),
+                lineage_metadata=COALESCE(lineage_metadata, '{}'::jsonb) || CAST(:meta AS jsonb),
+                updated_at=now()
+            WHERE span_id=:span_id
+        '''), {
+            "span_id": span_id, "children": _json(child_ids),
+            "meta": _json({"operation": "SPLIT", "labeler_id": labeler_id, "reason": reason, "shared_context": shared_context, "invalidated_active_labels": active_labels}),
+        })
+        _renumber_active_replacement(conn, str(parent["source_message_id"]), int(parent["span_order"]), child_ids, [span_id])
+        _refresh_source_after_boundary_edit(conn, str(parent["source_message_id"]))
+    return _json_safe({
+        "status": "SPLIT", "version": VERSION, "parent_span_id": span_id,
+        "child_span_ids": child_ids, "child_count": len(child_ids), "shared_context": shared_context,
+        "invalidated_active_labels": active_labels, "academy_write_only": True,
+        "canonical_writes": 0, "offer_writes": 0, "matcher_writes": 0, "whatsapp_live_writes": 0,
+    })
+
+def merge_with_next(engine, span_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    labeler_id = str(payload.get("labeler_id") or "").strip()
+    if not labeler_id:
+        raise HTTPException(400, "labeler_id is required")
+    invalidate_existing = bool(payload.get("invalidate_existing_labels", False))
+    reason = str(payload.get("reason") or "").strip() or "Human atomic boundary merge"
+    with engine.begin() as conn:
+        current = conn.execute(text('''
+            SELECT span_id, source_message_id, span_order, proposed_start_offset, proposed_end_offset,
+                   COALESCE(span_status, 'ACTIVE') AS span_status
+            FROM alliance_gold_spans WHERE span_id=:span_id FOR UPDATE
+        '''), {"span_id": span_id}).mappings().first()
+        if not current:
+            raise HTTPException(404, "Span not found")
+        if str(current["span_status"]).upper() != "ACTIVE":
+            raise HTTPException(409, "Only ACTIVE spans can be merged")
+        nxt = conn.execute(text('''
+            SELECT span_id, source_message_id, span_order, proposed_start_offset, proposed_end_offset
+            FROM alliance_gold_spans
+            WHERE source_message_id=:sid AND COALESCE(span_status, 'ACTIVE')='ACTIVE' AND span_order > :o
+            ORDER BY span_order LIMIT 1 FOR UPDATE
+        '''), {"sid": str(current["source_message_id"]), "o": int(current["span_order"])}).mappings().first()
+        if not nxt:
+            raise HTTPException(409, "There is no next ACTIVE span in this source message")
+        merge_ids = [span_id, str(nxt["span_id"])]
+        active_labels = _active_label_count(conn, merge_ids)
+        if active_labels and not invalidate_existing:
+            raise HTTPException(409, "One or both spans already have active Gold labels. Set invalidate_existing_labels=true only after explicit human correction.")
+        if active_labels:
+            conn.execute(text('''
+                UPDATE alliance_gold_span_labels
+                SET active=FALSE, notes=concat_ws(E'\\n', NULLIF(notes,''), :audit_note), updated_at=now()
+                WHERE span_id = ANY(CAST(:ids AS uuid[])) AND active=TRUE
+            '''), {"ids": merge_ids, "audit_note": f"[Foundation 1.4 merge invalidation by {labeler_id}] {reason}"})
+        source_raw = str(conn.execute(text("SELECT raw_text FROM alliance_gold_source_messages WHERE source_message_id=:sid"), {"sid": str(current["source_message_id"])}).scalar() or "")
+        start_offset = min(int(current["proposed_start_offset"]), int(nxt["proposed_start_offset"]))
+        end_offset = max(int(current["proposed_end_offset"]), int(nxt["proposed_end_offset"]))
+        merged_text = source_raw[start_offset:end_offset].strip()
+        if not merged_text:
+            raise HTTPException(409, "Could not reconstruct merged evidence from source message")
+        _deactivate_lineage_dependencies(conn, merge_ids)
+        max_order = int(conn.execute(text("SELECT COALESCE(max(span_order),0) FROM alliance_gold_spans WHERE source_message_id=:sid"), {"sid": str(current["source_message_id"])}).scalar() or 0)
+        merged_id = str(uuid.uuid4())
+        conn.execute(text('''
+            INSERT INTO alliance_gold_spans (
+                span_id, source_message_id, span_order, proposed_start_offset, proposed_end_offset,
+                proposed_text, proposal_method, proposal_confidence, parent_span_id,
+                span_status, boundary_status, lineage_metadata
+            ) VALUES (
+                :span_id, :sid, :span_order, :start_offset, :end_offset,
+                :proposed_text, 'HUMAN_ATOMIC_MERGE_V1_4', 1.0, NULL,
+                'ACTIVE', 'PENDING', CAST(:meta AS jsonb)
+            )
+        '''), {
+            "span_id": merged_id, "sid": str(current["source_message_id"]), "span_order": max_order + 1,
+            "start_offset": start_offset, "end_offset": end_offset, "proposed_text": merged_text,
+            "meta": _json({"created_by": labeler_id, "operation": "MERGE", "reason": reason, "merged_from": merge_ids}),
+        })
+        for old_id in merge_ids:
+            conn.execute(text('''
+                UPDATE alliance_gold_spans
+                SET span_status='SUPERSEDED', boundary_status='SUPERSEDED', boundary_action='MERGE',
+                    superseded_at=now(), superseded_by=CAST(:new_id AS jsonb),
+                    lineage_metadata=COALESCE(lineage_metadata, '{}'::jsonb) || CAST(:meta AS jsonb), updated_at=now()
+                WHERE span_id=:old_id
+            '''), {
+                "old_id": old_id, "new_id": _json([merged_id]),
+                "meta": _json({"operation": "MERGE", "labeler_id": labeler_id, "reason": reason, "merged_into": merged_id, "invalidated_active_labels": active_labels}),
+            })
+        _renumber_active_replacement(conn, str(current["source_message_id"]), int(current["span_order"]), [merged_id], merge_ids)
+        _refresh_source_after_boundary_edit(conn, str(current["source_message_id"]))
+    return _json_safe({
+        "status": "MERGED", "version": VERSION, "merged_span_id": merged_id,
+        "superseded_span_ids": merge_ids, "invalidated_active_labels": active_labels,
+        "academy_write_only": True, "canonical_writes": 0, "offer_writes": 0, "matcher_writes": 0, "whatsapp_live_writes": 0,
+    })
+
 # ---------------------------------------------------------------------------
 # Gold dataset / evaluation
 # ---------------------------------------------------------------------------
@@ -1764,8 +2141,8 @@ def progress(engine) -> Dict[str, Any]:
                 """
                 SELECT
                     (SELECT count(*) FROM alliance_gold_source_messages) AS source_messages,
-                    (SELECT count(*) FROM alliance_gold_spans) AS proposed_spans,
-                    (SELECT count(*) FROM alliance_gold_spans WHERE boundary_status='LABELED') AS labeled_spans,
+                    (SELECT count(*) FROM alliance_gold_spans WHERE COALESCE(span_status, 'ACTIVE')='ACTIVE') AS proposed_spans,
+                    (SELECT count(*) FROM alliance_gold_spans WHERE COALESCE(span_status, 'ACTIVE')='ACTIVE' AND boundary_status='LABELED') AS labeled_spans,
                     (SELECT count(*) FROM alliance_gold_span_labels WHERE active=TRUE) AS active_labels,
                     (SELECT count(*) FROM alliance_gold_relationship_labels WHERE active=TRUE) AS relationship_labels,
                     (SELECT count(*) FROM alliance_gold_span_labels WHERE active=TRUE AND adjudicated=TRUE) AS adjudicated_labels
@@ -1836,7 +2213,8 @@ def next_span(engine, labeler_id: Optional[str] = None) -> Dict[str, Any]:
                 FROM alliance_gold_spans sp
                 JOIN alliance_gold_source_messages s
                   ON s.source_message_id=sp.source_message_id
-                WHERE sp.boundary_status <> 'LABELED'
+                WHERE COALESCE(sp.span_status, 'ACTIVE')='ACTIVE'
+                  AND sp.boundary_status <> 'LABELED'
                 ORDER BY
                     CASE s.sampling_bucket
                         WHEN 'GIANT_DUMP' THEN 1
@@ -1932,6 +2310,7 @@ def export_gold(engine, limit: int = 1000) -> Dict[str, Any]:
                 JOIN alliance_gold_span_labels l
                   ON l.span_id=sp.span_id
                  AND l.active=TRUE
+                WHERE COALESCE(sp.span_status, 'ACTIVE')='ACTIVE'
                 ORDER BY sp.created_at, sp.span_order
                 LIMIT :limit
                 """
@@ -1987,7 +2366,8 @@ def boundary_baseline(engine, limit: int = 500) -> Dict[str, Any]:
                 LEFT JOIN alliance_gold_span_labels l
                   ON l.span_id=sp.span_id
                  AND l.active=TRUE
-                WHERE sp.boundary_status='LABELED'
+                WHERE COALESCE(sp.span_status, 'ACTIVE')='ACTIVE'
+                  AND sp.boundary_status='LABELED'
                 ORDER BY sp.updated_at
                 LIMIT :limit
                 """
@@ -2081,6 +2461,21 @@ button{border:0;border-radius:8px;padding:10px 14px;cursor:pointer;font-weight:7
 <h2>Proposed Evidence Span</h2>
 <div id="spanMeta" class="small"></div>
 <pre id="span">Loading...</pre>
+
+<div class="actions">
+<button class="secondary" type="button" onclick="prepareAtomicSplit()">Prepare Atomic Split</button>
+<button class="secondary" type="button" onclick="mergeWithNext()">Merge With Next Span</button>
+</div>
+<div id="splitPanel" style="display:none;margin-top:12px;border:1px solid #f59e0b;border-radius:8px;padding:12px;background:#fffbeb">
+<strong>Atomic Split Editor</strong>
+<div class="small" style="margin-top:4px">Each child must be an exact cut from the original evidence. Shared broker/contact context is preserved in lineage, not copied into every property.</div>
+<div id="splitChildren"></div>
+<div id="splitContext" class="small" style="margin-top:8px"></div>
+<div class="actions">
+<button class="primary" type="button" onclick="confirmAtomicSplit()">Confirm Real Split</button>
+<button class="secondary" type="button" onclick="cancelAtomicSplit()">Cancel Split</button>
+</div>
+</div>
 
 <label>Labeler ID</label>
 <input id="labeler" placeholder="Team member name">
@@ -2178,6 +2573,7 @@ button{border:0;border-radius:8px;padding:10px 14px;cursor:pointer;font-weight:7
 
 <script>
 let current=null;
+let splitDraft=[];
 
 function csvList(id){
   return document.getElementById(id).value.split(",").map(x=>x.trim()).filter(Boolean);
@@ -2210,6 +2606,9 @@ async function loadNext(){
       return;
     }
   current=d.span;
+  splitDraft=[];
+  document.getElementById("splitPanel").style.display="none";
+  document.getElementById("splitChildren").innerHTML="";
   document.getElementById("source").innerText=current.source_raw_text;
   document.getElementById("span").innerText=current.proposed_text;
   document.getElementById("meta").innerText =
@@ -2239,6 +2638,59 @@ async function loadNext(){
     document.getElementById("msg").innerText="ERROR: "+e.message;
   }
 }
+
+async function prepareAtomicSplit(){
+  try{
+    if(!current) throw new Error("No span loaded");
+    const r=await fetch(`/api/property-brain-foundation/span/${current.span_id}/split-preview`);
+    const d=await r.json();
+    if(!r.ok) throw new Error(d.detail||d.message||"Split preview failed");
+    if(d.status!=="PASS" || !d.children || d.children.length<2) throw new Error(d.reason||"No safe automatic atomic split found");
+    document.getElementById("boundary").value="SPLIT";
+    splitDraft=d.children.map(x=>x.text);
+    const host=document.getElementById("splitChildren");
+    host.innerHTML="";
+    splitDraft.forEach((txt,i)=>{
+      const label=document.createElement("label"); label.innerText=`Child ${i+1}`;
+      const ta=document.createElement("textarea"); ta.className="splitChild"; ta.value=txt; ta.style.minHeight="125px";
+      host.appendChild(label); host.appendChild(ta);
+    });
+    const ctx=(d.shared_context||[]).filter(Boolean);
+    document.getElementById("splitContext").innerText = ctx.length ? `Shared/context evidence preserved separately: ${ctx.join(" | ").slice(0,600)}` : "No shared context outside the child spans.";
+    document.getElementById("splitPanel").style.display="block";
+    document.getElementById("msg").innerText=`Prepared ${d.children.length} atomic child spans. Review them, then Confirm Real Split.`;
+  }catch(e){ document.getElementById("msg").innerText="ERROR: "+e.message; }
+}
+function cancelAtomicSplit(){
+  splitDraft=[]; document.getElementById("splitPanel").style.display="none"; document.getElementById("splitChildren").innerHTML="";
+  if(document.getElementById("boundary").value==="SPLIT") document.getElementById("boundary").value="CORRECT";
+}
+async function confirmAtomicSplit(){
+  try{
+    if(!current) throw new Error("No span loaded");
+    const labeler=document.getElementById("labeler").value.trim(); if(!labeler) throw new Error("Enter Labeler ID / team member name");
+    const children=[...document.querySelectorAll(".splitChild")].map(x=>x.value.trim()).filter(Boolean);
+    if(children.length<2) throw new Error("At least two child spans are required");
+    const payload={labeler_id:labeler,children:children,reason:document.getElementById("notes").value.trim()||"Human atomic split in Gold Lab",invalidate_existing_labels:false};
+    const r=await fetch(`/api/property-brain-foundation/span/${current.span_id}/split`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});
+    const d=await r.json(); if(!r.ok) throw new Error(d.detail||JSON.stringify(d));
+    document.getElementById("msg").innerText=`Real split complete: ${d.child_count} active child spans created. Parent preserved as SUPERSEDED.`;
+    cancelAtomicSplit(); await refreshProgress(); await loadNext();
+  }catch(e){ document.getElementById("msg").innerText="ERROR: "+e.message; }
+}
+async function mergeWithNext(){
+  try{
+    if(!current) throw new Error("No span loaded");
+    const labeler=document.getElementById("labeler").value.trim(); if(!labeler) throw new Error("Enter Labeler ID / team member name");
+    if(!window.confirm("Merge this ACTIVE span with the next ACTIVE span from the same source?")) return;
+    const payload={labeler_id:labeler,reason:document.getElementById("notes").value.trim()||"Human atomic merge in Gold Lab",invalidate_existing_labels:false};
+    const r=await fetch(`/api/property-brain-foundation/span/${current.span_id}/merge-next`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});
+    const d=await r.json(); if(!r.ok) throw new Error(d.detail||JSON.stringify(d));
+    document.getElementById("msg").innerText="Real merge complete. Original spans preserved as SUPERSEDED.";
+    await refreshProgress(); await loadNext();
+  }catch(e){ document.getElementById("msg").innerText="ERROR: "+e.message; }
+}
+
 async function quickSave(contentType){
   document.getElementById("contentType").value=contentType;
   document.getElementById("boundary").value="CORRECT";
@@ -2247,6 +2699,9 @@ async function quickSave(contentType){
 async function save(){
   try{
     if(!current) throw new Error("No span loaded");
+    const boundaryAction=document.getElementById("boundary").value;
+    if(boundaryAction==="SPLIT") throw new Error("Use Prepare Atomic Split → Confirm Real Split. SPLIT is no longer a cosmetic label.");
+    if(boundaryAction==="MERGE") throw new Error("Use Merge With Next Span. MERGE is no longer a cosmetic label.");
     const labeler=document.getElementById("labeler").value.trim();
     if(!labeler) throw new Error("Enter Labeler ID / team member name");
     const payload={
@@ -2634,6 +3089,47 @@ Rent 4 Lac
         "Project field loads from source-grounded proposal",
     )
 
+
+    three_property_message = """*Builder Floor Available For Lease In DLF Phase 2*
+
+Area - 316 Sqyds
+Floor - Second Floor
+Block - L Block
+Rental - 1.10 Plus Maintenance
+Facing - West Facing
+
+Well maintain and walking distance from MG Road and Metro.
+
+*For more details contact us:-*
+
+*Builder Floor Available For Lease In Sector 56*
+
+Size - 500 Sq.yds 4Bhk
+Floor - First Floor
+Facing - South Facing
+Rental - Market Price
+
+*Unused Floor With Two Car Parking Well Connected From Extension Road*
+
+*Builder Floor Available For Lease In Anantraj Sector 63A*
+
+Size - 179 Sq.yds
+Floor - Third Floor (3Bhk)
+Facing - North Facing
+Rental - 60k Per Month
+Semi Furnished With One Cover Car Parking
+
+*Pictures On Call*
+
+*Paramount Associates*
+Hemant Lohia
+9643582058"""
+    atomic = automatic_atomic_split(three_property_message)
+    check("ATOMIC_DLF_SECTOR56_ANANTRAJ_SPLIT_INTO_THREE", atomic.get("status") == "PASS" and len(atomic.get("children") or []) == 3 and "DLF Phase 2" in atomic["children"][0]["text"] and "Sector 56" in atomic["children"][1]["text"] and "Anantraj Sector 63A" in atomic["children"][2]["text"], atomic)
+    check("ATOMIC_SHARED_BROKER_CONTEXT_NOT_COPIED", atomic.get("status") == "PASS" and all("9643582058" not in c["text"] for c in atomic["children"]) and any("9643582058" in x for x in atomic.get("shared_context") or []), atomic.get("shared_context"))
+    check("ATOMIC_UI_REAL_SPLIT_PRESENT", "prepareAtomicSplit()" in LAB_UI and "confirmAtomicSplit()" in LAB_UI and "/split-preview" in LAB_UI, "Gold Lab real split controls")
+    check("ATOMIC_LINEAGE_SCHEMA_PRESENT", any("span_status" in x for x in MIGRATIONS) and any("parent_span_id" in x for x in MIGRATIONS) and any("superseded_by" in x for x in MIGRATIONS), MIGRATIONS)
+
     failed = [c for c in cases if not c["passed"]]
     return {
         "status": "PASS" if not failed else "FAIL",
@@ -2688,6 +3184,9 @@ def register(core):
             "evaluation_dashboard": "/property-brain-evaluation",
             "source_discovery": "/api/property-brain-foundation/sources/discover",
             "curriculum_plan": "/api/property-brain-foundation/sources/curriculum?total_messages=25",
+            "atomic_span_editor": True,
+            "atomic_split_endpoint": "/api/property-brain-foundation/span/{span_id}/split",
+            "atomic_merge_endpoint": "/api/property-brain-foundation/span/{span_id}/merge-next",
             "academy_tables": sorted(ACADEMY_TABLES),
             "production_write_permission": False,
             "canonical_writes": 0,
@@ -2763,6 +3262,18 @@ def register(core):
     @app.post("/api/property-brain-foundation/span/{span_id}/label")
     def label_span(span_id: str, payload: Dict[str, Any] = Body(...)):
         return _json_response(save_label(engine, span_id, payload))
+
+    @app.get("/api/property-brain-foundation/span/{span_id}/split-preview")
+    def split_span_preview_route(span_id: str):
+        return _json_response(split_preview(engine, span_id))
+
+    @app.post("/api/property-brain-foundation/span/{span_id}/split")
+    def split_span_route(span_id: str, payload: Dict[str, Any] = Body(...)):
+        return _json_response(split_span(engine, span_id, payload))
+
+    @app.post("/api/property-brain-foundation/span/{span_id}/merge-next")
+    def merge_span_next_route(span_id: str, payload: Dict[str, Any] = Body(...)):
+        return _json_response(merge_with_next(engine, span_id, payload))
 
     @app.post("/api/property-brain-foundation/relationship")
     def relationship(payload: Dict[str, Any] = Body(...)):
