@@ -14,8 +14,8 @@ from fastapi import Body, HTTPException, Query
 from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy import text
 
-VERSION = "1.6.1-ALLIANCE-PROPERTY-BRAIN-FOUNDATION"
-MODE = "ENTITY_BOUNDARY_INVENTORY_GROUP_INTELLIGENCE_FIXED"
+VERSION = "1.6.2-ALLIANCE-PROPERTY-BRAIN-FOUNDATION"
+MODE = "ENTITY_BOUNDARY_INVENTORY_GROUP_GOLD_UI_COMPLETE"
 
 # ---------------------------------------------------------------------------
 # Safety
@@ -2897,6 +2897,7 @@ button{border:0;border-radius:8px;padding:10px 14px;cursor:pointer;font-weight:7
 <label>Content type</label>
 <select id="contentType">
 <option>PROPERTY_AVAILABILITY</option>
+<option>INVENTORY_GROUP</option>
 <option>REQUIREMENT</option>
 <option>CONTACT_ONLY</option>
 <option>PROJECT_HEADER</option>
@@ -2950,6 +2951,7 @@ button{border:0;border-radius:8px;padding:10px 14px;cursor:pointer;font-weight:7
 
 <div class="actions">
 <button class="good" onclick="quickSave('PROPERTY_AVAILABILITY')">Correct Property</button>
+<button class="good" onclick="quickSave('INVENTORY_GROUP')">Correct Inventory Group</button>
 <button class="good" onclick="quickSave('REQUIREMENT')">Correct Requirement</button>
 <button class="secondary" onclick="quickSave('PROJECT_HEADER')">Project Header</button>
 <button class="secondary" onclick="quickSave('LOCALITY_HEADER')">Locality Header</button>
