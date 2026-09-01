@@ -14,8 +14,8 @@ from fastapi import Body, HTTPException, Query
 from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy import text
 
-VERSION = "1.9.0-ALLIANCE-PROPERTY-BRAIN-FOUNDATION"
-MODE = "WHATSAPP_SENDER_METADATA_CONTACT_FALLBACK"
+VERSION = "1.9.1-ALLIANCE-PROPERTY-BRAIN-FOUNDATION"
+MODE = "WHATSAPP_SENDER_ROW_LINEAGE_BACKFILL"
 
 # ---------------------------------------------------------------------------
 # Safety
@@ -1380,6 +1380,12 @@ def import_sources(
         for raw in raw_messages:
             fp = _fingerprint(raw)
             bucket = _bucket(raw)
+            source_row_ref, source_meta = _v19a_source_metadata(
+                engine,
+                table_name,
+                column_name,
+                raw,
+            )
             bucket_counts[bucket] = bucket_counts.get(bucket, 0) + 1
             spans = propose_spans(raw)
 
@@ -1407,7 +1413,7 @@ def import_sources(
                         sampling_bucket, message_length, proposed_span_count
                     )
                     VALUES (
-                        :source_message_id, :source_table, NULL,
+                        :source_message_id, :source_table, :source_row_ref,
                         :source_fingerprint, :raw_text,
                         CAST(:source_metadata AS jsonb),
                         :sampling_bucket, :message_length, :proposed_span_count
@@ -1417,9 +1423,10 @@ def import_sources(
                 {
                     "source_message_id": source_id,
                     "source_table": table_name,
+                    "source_row_ref": source_row_ref,
                     "source_fingerprint": fp,
                     "raw_text": raw,
-                    "source_metadata": _json({"source_column": column_name}),
+                    "source_metadata": _json(source_meta),
                     "sampling_bucket": bucket,
                     "message_length": len(raw),
                     "proposed_span_count": len(spans),
@@ -2185,6 +2192,357 @@ def _v19_merge_sender_fallback(
     p["sender_contact_fallback_used"] = True
     p["sender_contact_is_owner"] = False
     return p
+
+
+
+# ---------------------------------------------------------------------------
+# Foundation 1.9A: persistent WhatsApp source-row + sender lineage
+# ---------------------------------------------------------------------------
+
+V19A_ROW_ID_PRIORITY = (
+    "message_id",
+    "whatsapp_message_id",
+    "wa_message_id",
+    "id",
+    "row_id",
+    "record_id",
+    "uuid",
+    "source_id",
+    "event_id",
+)
+
+def _v19a_identifier_columns(column_names: List[str]) -> List[str]:
+    available = [str(c or "") for c in column_names]
+    lower_map = {c.lower(): c for c in available}
+    out: List[str] = []
+
+    for name in V19A_ROW_ID_PRIORITY:
+        if name in lower_map and lower_map[name] not in out:
+            out.append(lower_map[name])
+
+    for c in available:
+        low = c.lower()
+        if c in out:
+            continue
+        if low.endswith("_id") and not re.search(
+            r"(sender|owner|broker|contact|group|chat|user|participant)_id$",
+            low,
+        ):
+            out.append(c)
+
+    return out
+
+def _v19a_metadata_sender_contact(metadata: Any) -> Optional[Dict[str, Any]]:
+    meta = _loads(metadata, {})
+    if not isinstance(meta, dict):
+        return None
+
+    sender = meta.get("whatsapp_sender")
+    if not isinstance(sender, dict):
+        return None
+
+    phone = _v19_phone_from_sender_value(sender.get("phone"))
+    if not phone:
+        return None
+
+    return {
+        "phone": phone,
+        "name": str(sender.get("name") or "").strip() or None,
+        "company": None,
+        "role": "SOURCE_CONTACT",
+        "provenance": "WHATSAPP_SENDER",
+        "scope": "SOURCE_MESSAGE_SENDER",
+        "owner_status": "NOT_PROVEN",
+        "broker_status": "NOT_PROVEN",
+        "source_table": meta.get("source_table"),
+        "sender_metadata_columns": sender.get("columns") or [],
+        "source_row_ref": meta.get("source_row_ref"),
+        "lineage_status": meta.get("sender_lineage_status") or "PERSISTED",
+    }
+
+def _v19a_resolve_source_lineage(
+    engine,
+    table_name: str,
+    column_name: str,
+    raw_text: str,
+) -> Dict[str, Any]:
+    table_name = str(table_name or "").strip()
+    column_name = str(column_name or "").strip()
+    raw = str(raw_text or "")
+
+    result: Dict[str, Any] = {
+        "source_table": table_name,
+        "source_column": column_name,
+        "source_row_ref": None,
+        "sender_lineage_status": "NOT_APPLICABLE",
+        "whatsapp_sender": None,
+        "match_count": 0,
+    }
+
+    if not table_name or not column_name or not raw:
+        result["sender_lineage_status"] = "INSUFFICIENT_INPUT"
+        return result
+
+    if not V19_WHATSAPP_SOURCE_RE.search(table_name):
+        return result
+
+    try:
+        column_info = _columns(engine, table_name)
+    except Exception as exc:
+        result["sender_lineage_status"] = "SCHEMA_LOOKUP_FAILED"
+        result["lineage_error"] = f"{type(exc).__name__}: {exc}"
+        return result
+
+    column_names = [str(c.get("column_name") or "") for c in column_info]
+    if column_name not in set(column_names):
+        result["sender_lineage_status"] = "SOURCE_COLUMN_MISSING"
+        return result
+
+    phone_columns = _v19_sender_phone_columns(column_names)
+    name_columns = _v19_sender_name_columns(column_names)
+    id_columns = _v19a_identifier_columns(column_names)
+
+    select_columns: List[str] = []
+    for col in id_columns + phone_columns + name_columns:
+        if col not in select_columns:
+            select_columns.append(col)
+
+    if select_columns:
+        select_sql = ", ".join(_safe_identifier(c) for c in select_columns)
+    else:
+        select_sql = "1 AS _row_marker"
+
+    qt = _safe_identifier(table_name)
+    qc = _safe_identifier(column_name)
+    sql = (
+        "SELECT " + select_sql + " "
+        "FROM " + qt + " "
+        "WHERE " + qc + "::text = :raw "
+        "LIMIT 3"
+    )
+
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(text(sql), {"raw": raw}).mappings().all()
+    except Exception as exc:
+        result["sender_lineage_status"] = "SOURCE_LOOKUP_FAILED"
+        result["lineage_error"] = f"{type(exc).__name__}: {exc}"
+        return result
+
+    result["match_count"] = len(rows)
+
+    if len(rows) == 0:
+        result["sender_lineage_status"] = "SOURCE_ROW_NOT_FOUND"
+        return result
+
+    if len(rows) != 1:
+        result["sender_lineage_status"] = "AMBIGUOUS_SOURCE_ROWS"
+        return result
+
+    row = rows[0]
+
+    row_ref = None
+    row_ref_column = None
+    for col in id_columns:
+        value = row.get(col)
+        if value is not None and str(value).strip():
+            row_ref = str(value).strip()
+            row_ref_column = col
+            break
+
+    phones = set()
+    used_phone_columns = []
+    for col in phone_columns:
+        phone = _v19_phone_from_sender_value(row.get(col))
+        if phone:
+            phones.add(phone)
+            used_phone_columns.append(col)
+
+    names = set()
+    used_name_columns = []
+    for col in name_columns:
+        value = str(row.get(col) or "").strip()
+        if value:
+            names.add(value)
+            used_name_columns.append(col)
+
+    sender = None
+    if len(phones) == 1:
+        sender = {
+            "phone": next(iter(phones)),
+            "name": next(iter(names)) if len(names) == 1 else None,
+            "columns": sorted(set(used_phone_columns + used_name_columns)),
+            "role": "SOURCE_CONTACT",
+            "provenance": "WHATSAPP_SENDER",
+            "owner_status": "NOT_PROVEN",
+            "broker_status": "NOT_PROVEN",
+        }
+
+    result["source_row_ref"] = row_ref
+    result["source_row_ref_column"] = row_ref_column
+    result["whatsapp_sender"] = sender
+
+    if sender and row_ref:
+        result["sender_lineage_status"] = "RESOLVED_UNIQUE_ROW_AND_SENDER"
+    elif sender:
+        result["sender_lineage_status"] = "RESOLVED_UNIQUE_SENDER_NO_ROW_ID"
+    elif row_ref:
+        result["sender_lineage_status"] = "RESOLVED_UNIQUE_ROW_NO_SENDER"
+    else:
+        result["sender_lineage_status"] = "UNIQUE_ROW_NO_USABLE_LINEAGE"
+
+    return result
+
+def _v19a_source_metadata(
+    engine,
+    table_name: str,
+    column_name: str,
+    raw_text: str,
+) -> Tuple[Optional[str], Dict[str, Any]]:
+    lineage = _v19a_resolve_source_lineage(
+        engine,
+        table_name,
+        column_name,
+        raw_text,
+    )
+
+    metadata: Dict[str, Any] = {
+        "source_column": column_name,
+        "source_table": table_name,
+        "sender_lineage_status": lineage.get("sender_lineage_status"),
+        "source_row_ref": lineage.get("source_row_ref"),
+        "source_row_ref_column": lineage.get("source_row_ref_column"),
+        "source_match_count": lineage.get("match_count"),
+    }
+
+    if lineage.get("whatsapp_sender"):
+        metadata["whatsapp_sender"] = lineage["whatsapp_sender"]
+
+    if lineage.get("lineage_error"):
+        metadata["sender_lineage_error"] = lineage["lineage_error"]
+
+    return lineage.get("source_row_ref"), metadata
+
+def backfill_sender_lineage(engine, dry_run: bool = True) -> Dict[str, Any]:
+    with engine.connect() as conn:
+        sources = conn.execute(
+            text(
+                "SELECT source_message_id, source_table, source_row_ref, "
+                "raw_text, source_metadata "
+                "FROM alliance_gold_source_messages "
+                "WHERE source_table IS NOT NULL "
+                "AND source_table ~* '(whatsapp|wa_)' "
+                "ORDER BY created_at, source_message_id"
+            )
+        ).mappings().all()
+
+    results = []
+    counters = {
+        "examined": 0,
+        "resolved_sender": 0,
+        "resolved_row_ref": 0,
+        "ambiguous": 0,
+        "not_found": 0,
+        "no_sender": 0,
+        "would_update": 0,
+        "updated": 0,
+    }
+
+    for source in sources:
+        counters["examined"] += 1
+        current_meta = _loads(source.get("source_metadata"), {})
+        if not isinstance(current_meta, dict):
+            current_meta = {}
+
+        source_column = str(current_meta.get("source_column") or "").strip()
+        if not source_column:
+            source_column = "raw_message"
+
+        lineage = _v19a_resolve_source_lineage(
+            engine,
+            str(source.get("source_table") or ""),
+            source_column,
+            str(source.get("raw_text") or ""),
+        )
+
+        status = str(lineage.get("sender_lineage_status") or "")
+        if lineage.get("whatsapp_sender"):
+            counters["resolved_sender"] += 1
+        else:
+            counters["no_sender"] += 1
+
+        if lineage.get("source_row_ref"):
+            counters["resolved_row_ref"] += 1
+
+        if status == "AMBIGUOUS_SOURCE_ROWS":
+            counters["ambiguous"] += 1
+        if status == "SOURCE_ROW_NOT_FOUND":
+            counters["not_found"] += 1
+
+        merged = dict(current_meta)
+        merged.update({
+            "source_column": source_column,
+            "source_table": source.get("source_table"),
+            "sender_lineage_status": status,
+            "source_row_ref": lineage.get("source_row_ref"),
+            "source_row_ref_column": lineage.get("source_row_ref_column"),
+            "source_match_count": lineage.get("match_count"),
+        })
+
+        if lineage.get("whatsapp_sender"):
+            merged["whatsapp_sender"] = lineage["whatsapp_sender"]
+
+        row_ref = lineage.get("source_row_ref") or source.get("source_row_ref")
+
+        changed = (
+            str(source.get("source_row_ref") or "") != str(row_ref or "")
+            or _json_safe(current_meta) != _json_safe(merged)
+        )
+
+        if changed:
+            counters["would_update"] += 1
+
+        if changed and not dry_run:
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "UPDATE alliance_gold_source_messages "
+                        "SET source_row_ref=:source_row_ref, "
+                        "source_metadata=CAST(:source_metadata AS jsonb), "
+                        "updated_at=now() "
+                        "WHERE source_message_id=:source_message_id"
+                    ),
+                    {
+                        "source_row_ref": row_ref,
+                        "source_metadata": _json(merged),
+                        "source_message_id": str(source["source_message_id"]),
+                    },
+                )
+            counters["updated"] += 1
+
+        results.append({
+            "source_message_id": str(source["source_message_id"]),
+            "source_table": source.get("source_table"),
+            "status": status,
+            "source_row_ref": lineage.get("source_row_ref"),
+            "sender_phone": (lineage.get("whatsapp_sender") or {}).get("phone"),
+            "changed": changed,
+        })
+
+    return {
+        "status": "PASS",
+        "version": VERSION,
+        "dry_run": bool(dry_run),
+        **counters,
+        "items": results[:100],
+        "academy_writes_only": True,
+        "human_labels_modified": 0,
+        "spans_resplit": 0,
+        "canonical_writes": 0,
+        "offer_writes": 0,
+        "matcher_writes": 0,
+        "whatsapp_live_writes": 0,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -3035,6 +3393,17 @@ def next_span(engine, labeler_id: Optional[str] = None) -> Dict[str, Any]:
         proposal,
         str(out.get("source_raw_text") or ""),
     )
+
+    # Foundation 1.9A: persisted sender lineage has priority over
+    # rediscovery by raw message text.
+    if not proposal.get("contacts"):
+        persisted_sender = _v19a_metadata_sender_contact(
+            out.get("source_metadata")
+        )
+        if persisted_sender:
+            proposal["contacts"] = [persisted_sender]
+            proposal["sender_contact_fallback_used"] = True
+            proposal["sender_contact_is_owner"] = False
 
     # Foundation 1.9: only when the message itself has no contact,
     # recover the actual WhatsApp sender as SOURCE_CONTACT.
@@ -4038,6 +4407,11 @@ def register(core):
         total_messages = int((payload or {}).get("total_messages") or 25)
         total_messages = max(1, min(total_messages, 100))
         return _json_response(import_curriculum(engine, total_messages))
+
+    @app.post("/api/property-brain-foundation/sources/backfill-sender-lineage")
+    def sources_backfill_sender_lineage(payload: Dict[str, Any] = Body(default={})):
+        dry_run = bool((payload or {}).get("dry_run", True))
+        return _json_response(backfill_sender_lineage(engine, dry_run=dry_run))
 
     @app.post("/api/property-brain-foundation/gold/repropose-unlabeled")
     def repropose_unlabeled_route():
