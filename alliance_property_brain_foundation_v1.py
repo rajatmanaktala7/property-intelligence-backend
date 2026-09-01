@@ -14,8 +14,8 @@ from fastapi import Body, HTTPException, Query
 from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy import text
 
-VERSION = "1.9.1-ALLIANCE-PROPERTY-BRAIN-FOUNDATION"
-MODE = "WHATSAPP_SENDER_ROW_LINEAGE_BACKFILL"
+VERSION = "1.9.2-ALLIANCE-PROPERTY-BRAIN-FOUNDATION"
+MODE = "UPSTREAM_WHATSAPP_SENDER_LINEAGE_RESOLVER"
 
 # ---------------------------------------------------------------------------
 # Safety
@@ -2545,6 +2545,543 @@ def backfill_sender_lineage(engine, dry_run: bool = True) -> Dict[str, Any]:
     }
 
 
+
+# ---------------------------------------------------------------------------
+# Foundation 1.9B: upstream WhatsApp sender lineage resolver
+# ---------------------------------------------------------------------------
+
+V19B_UPSTREAM_TABLE_RE = re.compile(
+    r"(?:whatsapp|wa_|live_feed|message|event|inbox|chat)",
+    re.I,
+)
+
+V19B_RAW_TEXT_COLUMNS = (
+    "raw_message",
+    "raw_text",
+    "message",
+    "message_text",
+    "body",
+    "text",
+    "content",
+)
+
+def _v19b_candidate_tables(engine) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    for table_name in _tables(engine):
+        if table_name in ACADEMY_TABLES:
+            continue
+        if not V19B_UPSTREAM_TABLE_RE.search(table_name):
+            continue
+        try:
+            cols = [c["column_name"] for c in _columns(engine, table_name)]
+        except Exception:
+            continue
+        sender_cols = _v19_sender_phone_columns(cols)
+        if not sender_cols:
+            continue
+        out.append({
+            "table": table_name,
+            "sender_phone_columns": sender_cols,
+            "sender_name_columns": _v19_sender_name_columns(cols),
+            "row_id_columns": _v19a_identifier_columns(cols),
+            "raw_text_columns": [c for c in V19B_RAW_TEXT_COLUMNS if c in cols],
+            "column_count": len(cols),
+        })
+    return out
+
+def _v19b_fetch_unique_source_row(
+    engine,
+    source_table: str,
+    source_column: str,
+    raw_text: str,
+) -> Dict[str, Any]:
+    table_name = str(source_table or "").strip()
+    column_name = str(source_column or "").strip()
+    raw = str(raw_text or "")
+    result = {
+        "status": "UNRESOLVED",
+        "source_table": table_name,
+        "source_column": column_name,
+        "row": None,
+        "columns": [],
+        "match_count": 0,
+    }
+    if not table_name or not column_name or not raw:
+        result["status"] = "INSUFFICIENT_INPUT"
+        return result
+
+    columns = [c["column_name"] for c in _columns(engine, table_name)]
+    result["columns"] = columns
+    if column_name not in columns:
+        result["status"] = "SOURCE_COLUMN_MISSING"
+        return result
+
+    qt = _safe_identifier(table_name)
+    qc = _safe_identifier(column_name)
+    select_sql = ", ".join(_safe_identifier(c) for c in columns)
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text(
+                "SELECT " + select_sql + " FROM " + qt + " "
+                "WHERE " + qc + "::text = :raw LIMIT 3"
+            ),
+            {"raw": raw},
+        ).mappings().all()
+
+    result["match_count"] = len(rows)
+    if len(rows) == 0:
+        result["status"] = "SOURCE_ROW_NOT_FOUND"
+    elif len(rows) > 1:
+        result["status"] = "AMBIGUOUS_SOURCE_ROWS"
+    else:
+        result["status"] = "UNIQUE_SOURCE_ROW"
+        result["row"] = dict(rows[0])
+    return result
+
+def _v19b_id_values(row: Dict[str, Any], columns: List[str]) -> Dict[str, str]:
+    out = {}
+    for col in _v19a_identifier_columns(columns):
+        value = row.get(col)
+        if value is None:
+            continue
+        sval = str(value).strip()
+        if sval:
+            out[col] = sval
+    return out
+
+def _v19b_extract_sender_from_rows(
+    table_name: str,
+    rows: List[Dict[str, Any]],
+    phone_columns: List[str],
+    name_columns: List[str],
+    match_method: str,
+    match_column: Optional[str] = None,
+    match_value: Optional[str] = None,
+) -> Dict[str, Any]:
+    phones = set()
+    names = set()
+    used = set()
+
+    for row in rows:
+        for col in phone_columns:
+            phone = _v19_phone_from_sender_value(row.get(col))
+            if phone:
+                phones.add(phone)
+                used.add(col)
+        for col in name_columns:
+            value = str(row.get(col) or "").strip()
+            if value:
+                names.add(value)
+                used.add(col)
+
+    if len(phones) != 1:
+        return {
+            "status": "NO_UNIQUE_SENDER",
+            "phones_found": sorted(phones),
+            "row_count": len(rows),
+        }
+
+    return {
+        "status": "FOUND_UNIQUE_SENDER",
+        "phone": next(iter(phones)),
+        "name": next(iter(names)) if len(names) == 1 else None,
+        "source_table": table_name,
+        "columns": sorted(used),
+        "match_method": match_method,
+        "match_column": match_column,
+        "match_value": match_value,
+        "row_count": len(rows),
+    }
+
+def _v19b_match_upstream_by_shared_ids(
+    engine,
+    upstream: Dict[str, Any],
+    source_row: Dict[str, Any],
+    source_columns: List[str],
+) -> List[Dict[str, Any]]:
+    table_name = upstream["table"]
+    upstream_columns = [c["column_name"] for c in _columns(engine, table_name)]
+    source_ids = _v19b_id_values(source_row, source_columns)
+    candidates = []
+
+    for source_col, source_value in source_ids.items():
+        sl = source_col.lower()
+        targets = []
+        for target_col in upstream_columns:
+            tl = target_col.lower()
+            if tl == sl:
+                targets.append(target_col)
+            elif (
+                ("message" in sl and "message" in tl and tl.endswith("_id"))
+                or ("event" in sl and "event" in tl and tl.endswith("_id"))
+                or ("source" in sl and "source" in tl and tl.endswith("_id"))
+            ):
+                targets.append(target_col)
+
+        for target_col in targets:
+            select_cols = []
+            for c in (
+                upstream["sender_phone_columns"]
+                + upstream["sender_name_columns"]
+                + upstream["row_id_columns"]
+            ):
+                if c not in select_cols:
+                    select_cols.append(c)
+            if not select_cols:
+                continue
+
+            qt = _safe_identifier(table_name)
+            qc = _safe_identifier(target_col)
+            select_sql = ", ".join(_safe_identifier(c) for c in select_cols)
+
+            try:
+                with engine.connect() as conn:
+                    rows = conn.execute(
+                        text(
+                            "SELECT " + select_sql + " FROM " + qt + " "
+                            "WHERE " + qc + "::text = :value LIMIT 3"
+                        ),
+                        {"value": source_value},
+                    ).mappings().all()
+            except Exception:
+                continue
+
+            if len(rows) != 1:
+                continue
+
+            sender = _v19b_extract_sender_from_rows(
+                table_name,
+                [dict(rows[0])],
+                upstream["sender_phone_columns"],
+                upstream["sender_name_columns"],
+                "SHARED_ID",
+                target_col,
+                source_value,
+            )
+            if sender.get("status") == "FOUND_UNIQUE_SENDER":
+                candidates.append(sender)
+
+    return candidates
+
+def _v19b_match_upstream_by_raw_text(
+    engine,
+    upstream: Dict[str, Any],
+    raw_text: str,
+) -> List[Dict[str, Any]]:
+    table_name = upstream["table"]
+    candidates = []
+
+    for raw_col in upstream["raw_text_columns"]:
+        select_cols = []
+        for c in (
+            upstream["sender_phone_columns"]
+            + upstream["sender_name_columns"]
+            + upstream["row_id_columns"]
+        ):
+            if c not in select_cols:
+                select_cols.append(c)
+        if not select_cols:
+            continue
+
+        qt = _safe_identifier(table_name)
+        qc = _safe_identifier(raw_col)
+        select_sql = ", ".join(_safe_identifier(c) for c in select_cols)
+
+        try:
+            with engine.connect() as conn:
+                rows = conn.execute(
+                    text(
+                        "SELECT " + select_sql + " FROM " + qt + " "
+                        "WHERE " + qc + "::text = :raw LIMIT 3"
+                    ),
+                    {"raw": raw_text},
+                ).mappings().all()
+        except Exception:
+            continue
+
+        if len(rows) != 1:
+            continue
+
+        sender = _v19b_extract_sender_from_rows(
+            table_name,
+            [dict(rows[0])],
+            upstream["sender_phone_columns"],
+            upstream["sender_name_columns"],
+            "EXACT_RAW_TEXT",
+            raw_col,
+            None,
+        )
+        if sender.get("status") == "FOUND_UNIQUE_SENDER":
+            candidates.append(sender)
+
+    return candidates
+
+def _v19b_choose_unique_sender(candidates: List[Dict[str, Any]]) -> Dict[str, Any]:
+    if not candidates:
+        return {"status": "NO_UPSTREAM_SENDER_FOUND", "candidate_count": 0}
+
+    phones = sorted({c.get("phone") for c in candidates if c.get("phone")})
+    if len(phones) != 1:
+        return {
+            "status": "AMBIGUOUS_UPSTREAM_SENDERS",
+            "candidate_count": len(candidates),
+            "phones": phones,
+            "candidates": candidates[:20],
+        }
+
+    phone = phones[0]
+    preferred = sorted(
+        [c for c in candidates if c.get("phone") == phone],
+        key=lambda c: 0 if c.get("match_method") == "SHARED_ID" else 1,
+    )[0]
+    return {
+        "status": "FOUND_UNIQUE_UPSTREAM_SENDER",
+        "candidate_count": len(candidates),
+        "sender": preferred,
+        "all_supporting_paths": [
+            {
+                "source_table": c.get("source_table"),
+                "match_method": c.get("match_method"),
+                "match_column": c.get("match_column"),
+            }
+            for c in candidates if c.get("phone") == phone
+        ][:20],
+    }
+
+def resolve_upstream_sender_for_gold_source(
+    engine,
+    source: Dict[str, Any],
+    upstream_tables: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    source_table = str(source.get("source_table") or "")
+    raw_text = str(source.get("raw_text") or "")
+    metadata = _loads(source.get("source_metadata"), {})
+    if not isinstance(metadata, dict):
+        metadata = {}
+
+    source_column = str(metadata.get("source_column") or "raw_message")
+    result = {
+        "source_message_id": str(source.get("source_message_id") or ""),
+        "source_table": source_table,
+        "source_column": source_column,
+        "status": "UNRESOLVED",
+        "sender": None,
+        "source_row_status": None,
+    }
+
+    if not V19_WHATSAPP_SOURCE_RE.search(source_table):
+        result["status"] = "NON_WHATSAPP_SOURCE"
+        return result
+
+    source_row = _v19b_fetch_unique_source_row(
+        engine, source_table, source_column, raw_text
+    )
+    result["source_row_status"] = source_row.get("status")
+    result["source_match_count"] = source_row.get("match_count")
+
+    candidates = []
+    upstream_tables = upstream_tables or _v19b_candidate_tables(engine)
+
+    if source_row.get("status") == "UNIQUE_SOURCE_ROW":
+        for upstream in upstream_tables:
+            if upstream["table"] == source_table:
+                continue
+            candidates.extend(
+                _v19b_match_upstream_by_shared_ids(
+                    engine,
+                    upstream,
+                    source_row["row"],
+                    source_row["columns"],
+                )
+            )
+
+    if not candidates:
+        for upstream in upstream_tables:
+            if upstream["table"] == source_table:
+                continue
+            candidates.extend(
+                _v19b_match_upstream_by_raw_text(
+                    engine, upstream, raw_text
+                )
+            )
+
+    chosen = _v19b_choose_unique_sender(candidates)
+    result.update({
+        "status": chosen.get("status"),
+        "sender": chosen.get("sender"),
+        "candidate_count": chosen.get("candidate_count", 0),
+        "supporting_paths": chosen.get("all_supporting_paths", []),
+        "ambiguous_phones": chosen.get("phones", []),
+    })
+    return result
+
+def upstream_sender_lineage_diagnostic(engine) -> Dict[str, Any]:
+    candidates = _v19b_candidate_tables(engine)
+    with engine.connect() as conn:
+        sources = conn.execute(
+            text(
+                "SELECT source_message_id, source_table, source_row_ref, "
+                "raw_text, source_metadata "
+                "FROM alliance_gold_source_messages "
+                "WHERE source_table IS NOT NULL "
+                "AND source_table ~* '(whatsapp|wa_)' "
+                "ORDER BY created_at, source_message_id"
+            )
+        ).mappings().all()
+
+    items = []
+    resolved = ambiguous = unresolved = 0
+    for source in sources:
+        item = resolve_upstream_sender_for_gold_source(
+            engine, dict(source), candidates
+        )
+        if item["status"] == "FOUND_UNIQUE_UPSTREAM_SENDER":
+            resolved += 1
+        elif item["status"] == "AMBIGUOUS_UPSTREAM_SENDERS":
+            ambiguous += 1
+        else:
+            unresolved += 1
+        items.append(item)
+
+    return {
+        "status": "PASS",
+        "version": VERSION,
+        "mode": MODE,
+        "upstream_candidate_tables": candidates,
+        "gold_whatsapp_sources_examined": len(sources),
+        "resolved_unique_sender": resolved,
+        "ambiguous_sender": ambiguous,
+        "unresolved_sender": unresolved,
+        "items": items[:100],
+        "read_only": True,
+        "academy_writes": 0,
+        "canonical_writes": 0,
+        "offer_writes": 0,
+        "matcher_writes": 0,
+        "whatsapp_live_writes": 0,
+    }
+
+def backfill_upstream_sender_lineage(
+    engine,
+    dry_run: bool = True,
+) -> Dict[str, Any]:
+    candidates = _v19b_candidate_tables(engine)
+    with engine.connect() as conn:
+        sources = conn.execute(
+            text(
+                "SELECT source_message_id, source_table, source_row_ref, "
+                "raw_text, source_metadata "
+                "FROM alliance_gold_source_messages "
+                "WHERE source_table IS NOT NULL "
+                "AND source_table ~* '(whatsapp|wa_)' "
+                "ORDER BY created_at, source_message_id"
+            )
+        ).mappings().all()
+
+    items = []
+    resolved = ambiguous = unresolved = would_update = updated = 0
+
+    for source in sources:
+        source_dict = dict(source)
+        resolution = resolve_upstream_sender_for_gold_source(
+            engine, source_dict, candidates
+        )
+        status = resolution.get("status")
+
+        if status == "FOUND_UNIQUE_UPSTREAM_SENDER":
+            resolved += 1
+        elif status == "AMBIGUOUS_UPSTREAM_SENDERS":
+            ambiguous += 1
+        else:
+            unresolved += 1
+
+        changed = False
+
+        if status == "FOUND_UNIQUE_UPSTREAM_SENDER":
+            sender = resolution.get("sender") or {}
+            metadata = _loads(source_dict.get("source_metadata"), {})
+            if not isinstance(metadata, dict):
+                metadata = {}
+
+            new_sender = {
+                "phone": sender.get("phone"),
+                "name": sender.get("name"),
+                "columns": sender.get("columns") or [],
+                "role": "SOURCE_CONTACT",
+                "provenance": "WHATSAPP_SENDER",
+                "owner_status": "NOT_PROVEN",
+                "broker_status": "NOT_PROVEN",
+                "resolved_via": sender.get("match_method"),
+                "upstream_table": sender.get("source_table"),
+                "match_column": sender.get("match_column"),
+            }
+
+            merged = dict(metadata)
+            merged["whatsapp_sender"] = new_sender
+            merged["upstream_sender_lineage_status"] = status
+            merged["upstream_sender_supporting_paths"] = resolution.get(
+                "supporting_paths", []
+            )
+
+            changed = _json_safe(metadata) != _json_safe(merged)
+            if changed:
+                would_update += 1
+
+            if changed and not dry_run:
+                with engine.begin() as conn:
+                    conn.execute(
+                        text(
+                            "UPDATE alliance_gold_source_messages "
+                            "SET source_metadata=CAST(:source_metadata AS jsonb), "
+                            "updated_at=now() "
+                            "WHERE source_message_id=:source_message_id"
+                        ),
+                        {
+                            "source_metadata": _json(merged),
+                            "source_message_id": str(
+                                source_dict["source_message_id"]
+                            ),
+                        },
+                    )
+                updated += 1
+
+        items.append({
+            "source_message_id": str(source_dict["source_message_id"]),
+            "source_table": source_dict.get("source_table"),
+            "status": status,
+            "sender_phone": (
+                resolution.get("sender") or {}
+            ).get("phone"),
+            "upstream_table": (
+                resolution.get("sender") or {}
+            ).get("source_table"),
+            "match_method": (
+                resolution.get("sender") or {}
+            ).get("match_method"),
+            "changed": changed,
+        })
+
+    return {
+        "status": "PASS",
+        "version": VERSION,
+        "dry_run": bool(dry_run),
+        "examined": len(sources),
+        "resolved_unique_sender": resolved,
+        "ambiguous_sender": ambiguous,
+        "unresolved_sender": unresolved,
+        "would_update": would_update,
+        "updated": updated,
+        "items": items[:100],
+        "academy_writes_only": True,
+        "human_labels_modified": 0,
+        "spans_resplit": 0,
+        "canonical_writes": 0,
+        "offer_writes": 0,
+        "matcher_writes": 0,
+        "whatsapp_live_writes": 0,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Foundation 1.6A: entity scope + inventory-group intelligence
 # ---------------------------------------------------------------------------
@@ -4412,6 +4949,17 @@ def register(core):
     def sources_backfill_sender_lineage(payload: Dict[str, Any] = Body(default={})):
         dry_run = bool((payload or {}).get("dry_run", True))
         return _json_response(backfill_sender_lineage(engine, dry_run=dry_run))
+
+    @app.get("/api/property-brain-foundation/sources/upstream-sender-diagnostic")
+    def sources_upstream_sender_diagnostic():
+        return _json_response(upstream_sender_lineage_diagnostic(engine))
+
+    @app.post("/api/property-brain-foundation/sources/backfill-upstream-sender")
+    def sources_backfill_upstream_sender(payload: Dict[str, Any] = Body(default={})):
+        dry_run = bool((payload or {}).get("dry_run", True))
+        return _json_response(
+            backfill_upstream_sender_lineage(engine, dry_run=dry_run)
+        )
 
     @app.post("/api/property-brain-foundation/gold/repropose-unlabeled")
     def repropose_unlabeled_route():
