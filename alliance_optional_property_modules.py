@@ -1,6 +1,6 @@
 ﻿"""Fail-safe optional property module registration."""
 
-VERSION = "1.36.1-OPTIONAL-PROPERTY-MODULES-MASTERY-V262B1"
+VERSION = "1.37.0-OPTIONAL-PROPERTY-MODULES-EXCELLENCE-V262C"
 
 
 def _route_exists(app, path):
@@ -1120,4 +1120,15 @@ def register(wrapped):
             "route": "/api/v7/property-ai/mastery-v262b/status",
             "fail_safe": True,
         }
+
+    # V262C Excellence Relationship + Offer Mastery
+    try:
+        if _route_exists(app, "/api/v7/property-ai/mastery-v262c/status"):
+            result["mastery_v262c"] = {"status":"ALREADY_REGISTERED","route":"/api/v7/property-ai/mastery-v262c/status","error":None}
+        else:
+            import alliance_excellence_mastery_v262c as mastery_v262c
+            result["mastery_v262c"] = {**mastery_v262c.register(core), "error":None}
+    except Exception as exc:
+        result["mastery_v262c"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}",
+                                   "route":"/api/v7/property-ai/mastery-v262c/status","fail_safe":True}
     return result
