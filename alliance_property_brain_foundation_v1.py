@@ -15,8 +15,8 @@ from fastapi import Body, HTTPException, Query
 from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy import create_engine, text
 
-VERSION = "1.9.9-ALLIANCE-PROPERTY-BRAIN-FOUNDATION"
-MODE = "EXACT_CROSS_DB_WHATSAPP_LINEAGE"
+VERSION = "1.9.10-ALLIANCE-PROPERTY-BRAIN-FOUNDATION"
+MODE = "DOT_NUMBERED_BHK_ATOMIC_SPLIT_FIXED"
 
 # ---------------------------------------------------------------------------
 # Safety
@@ -3886,9 +3886,9 @@ def _v16_entity_group_split(raw: str) -> Optional[Dict[str, Any]]:
 # Foundation 1.9F: inline numbered atomic split support
 # ---------------------------------------------------------------------------
 
-V19F_INLINE_NUMBER_RE = re.compile(r"(?<![A-Za-z0-9])(?P<num>\d{1,2})\)\s*")
+V19F_INLINE_NUMBER_RE = re.compile(r"(?<![A-Za-z0-9])(?P<num>\d{1,2})(?:\)|\.(?=\s))\s*")
 V19F_CONTACT_TAIL_RE = re.compile(
-    r"\s+(?P<footer>(?:contact|call|for\s+details?|dm)\b.*)$",
+    r"\s+(?P<footer>[*_`]*(?:contact|call|for\s+details?|dm)\b.*)$",
     re.I | re.S,
 )
 
@@ -3902,10 +3902,14 @@ def _v19f_inline_numbered_split(text_value: str) -> Optional[Dict[str, Any]]:
     if numbers[0] != 1 or numbers != list(range(1, len(numbers) + 1)):
         return None
 
-    if not (
-        re.search(r"\b(?:PLOTS?|FLATS?|SHOPS?|OFFICES?|VILLAS?|FLOORS?)\b", raw, re.I)
+    # Numbered atomic inventory can be proven either by explicit property nouns
+    # OR compact configurations such as 1BHK / 2BHK / 3BHK.
+    has_property_signal = bool(
+        re.search(r"\b(?:PLOTS?|FLATS?|SHOPS?|OFFICES?|VILLAS?|FLOORS?|APARTMENTS?|BUNGALOWS?|HOUSES?)\b", raw, re.I)
+        or re.search(r"(?<!\d)\d+\s*BHK\b", raw, re.I)
         or PROPERTY_TYPE_RE.search(raw)
-    ):
+    )
+    if not has_property_signal:
         return None
 
     prefix = raw[:matches[0].start()].strip()
@@ -3929,6 +3933,10 @@ def _v19f_inline_numbered_split(text_value: str) -> Optional[Dict[str, Any]]:
         transaction_hint = "SALE"
     elif re.search(r"\bFOR\s+RENT\b", clean_prefix, re.I):
         transaction_hint = "RENT"
+    elif re.search(r"\b(?:RENTAL|RENT)\s+AVAILABLE\b", clean_prefix, re.I):
+        transaction_hint = "RENT"
+    elif re.search(r"\bSALE\s+AVAILABLE\b", clean_prefix, re.I):
+        transaction_hint = "SALE"
 
     children = []
     shared_context = [prefix] if prefix else []
@@ -3972,11 +3980,12 @@ def _v19f_inline_numbered_split(text_value: str) -> Optional[Dict[str, Any]]:
             "text": child_text,
             "proposal": proposal,
             "context": {
-                "boundary_strategy": "INLINE_NUMBERED_ATOMIC_V1_9F",
+                "boundary_strategy": "INLINE_NUMBERED_ATOMIC_V1_9J",
                 "context_is_source_grounded": bool(prefix),
                 "shared_preamble": prefix or None,
                 "inherited_transaction": transaction_hint,
                 "inherited_project": project_hint,
+                "number_marker_style": "DOT_OR_PAREN",
             },
         })
 
@@ -3987,7 +3996,7 @@ def _v19f_inline_numbered_split(text_value: str) -> Optional[Dict[str, Any]]:
         "status": "PASS",
         "children": children,
         "shared_context": [x for x in shared_context if x],
-        "boundary_strategy": "INLINE_NUMBERED_ATOMIC_V1_9F",
+        "boundary_strategy": "INLINE_NUMBERED_ATOMIC_V1_9J",
         "human_confirmation_required": True,
     }
 
