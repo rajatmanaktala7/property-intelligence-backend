@@ -14,8 +14,8 @@ from fastapi import Body, HTTPException, Query
 from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy import text
 
-VERSION = "1.2.3B-ALLIANCE-PROPERTY-BRAIN-FOUNDATION"
-MODE = "GOLD_LAB_COMPLETE_SEMANTIC_FIELDS_RUNTIME_SAFE_B"
+VERSION = "1.3.0-ALLIANCE-PROPERTY-BRAIN-FOUNDATION"
+MODE = "GOLD_PROPOSAL_ENGINE_SOURCE_GROUNDED_HUMAN_REVIEW"
 
 # ---------------------------------------------------------------------------
 # Safety
@@ -1001,7 +1001,182 @@ def propose_spans(raw: str) -> List[Dict[str, Any]]:
 # Candidate extraction for reviewer assistance only
 # ---------------------------------------------------------------------------
 
+AREA_FLEX_RE = re.compile(
+    r"(?P<value>\d+(?:\.\d+)?)\s*(?P<unit>"
+    r"SQ\.?\s*FT\.?|SQFT|SFT|SQ\.?\s*YD\.?|SQYD|SYD|SYDS|GAJ|YARDS?|"
+    r"SQ\.?\s*M\.?|SQM|SQ\.?\s*MT\.?|SQMT|ACRE|ACRES)\b",
+    re.I,
+)
+
+
+def _normalized_area_unit(unit: str) -> str:
+    u = re.sub(r"[\s.]+", "", (unit or "").upper())
+    aliases = {
+        "SQFT": "SQFT", "SFT": "SQFT",
+        "SQYD": "SQYD", "SYD": "SQYD", "SYDS": "SQYD",
+        "GAJ": "SQYD", "YARD": "SQYD", "YARDS": "SQYD",
+        "SQM": "SQM", "SQMT": "SQM",
+        "ACRE": "ACRE", "ACRES": "ACRE",
+    }
+    return aliases.get(u, u)
+
+
+def _money_unit(unit: str) -> str:
+    u = (unit or "").upper()
+    if u.startswith("CR"):
+        return "CRORE"
+    if u in {"L", "LAC", "LACS", "LAKH", "LAKHS"}:
+        return "LAKH"
+    return u
+
+
+def _money_normalized_inr(value: float, unit: str) -> Optional[float]:
+    u = _money_unit(unit)
+    if u == "CRORE":
+        return value * 10000000
+    if u == "LAKH":
+        return value * 100000
+    return None
+
+
+def _line_for_offset(text_value: str, offset: int) -> str:
+    start = text_value.rfind("\n", 0, offset) + 1
+    end = text_value.find("\n", offset)
+    if end < 0:
+        end = len(text_value)
+    return text_value[start:end].strip()
+
+
+def _title_parts(span_text: str) -> Dict[str, Optional[str]]:
+    lines = [x.strip() for x in (span_text or "").splitlines() if x.strip()]
+    if not lines:
+        return {"project_name": None, "locality": None}
+    raw_title = lines[0]
+    if not _is_named_property_anchor(raw_title):
+        return {"project_name": None, "locality": None}
+    title = _clean_anchor_text(raw_title)
+    parts = re.split(r"\s+[–—-]\s+", title, maxsplit=1)
+    if len(parts) == 2:
+        left, right = parts[0].strip(), parts[1].strip()
+        if re.search(
+            r"\b(?:WEST|EAST|NORTH|SOUTH|CENTRAL|SECTOR|PHASE|EXTENSION|EXTN)\b",
+            right,
+            re.I,
+        ):
+            return {"project_name": left or None, "locality": right or None}
+    return {"project_name": title or None, "locality": None}
+
+
+def _extract_property_fields(span_text: str, tx: str) -> Dict[str, Any]:
+    s = span_text or ""
+    fields: Dict[str, Any] = {}
+
+    config = re.search(r"\b(\d+(?:\.\d+)?)\s*BHK\b", s, re.I)
+    if config:
+        value = config.group(1)
+        if value.endswith(".0"):
+            value = value[:-2]
+        fields["configuration"] = f"{value} BHK"
+
+    if re.search(r"\bFULLY[\s-]*FURNISHED\b", s, re.I):
+        fields["furnishing"] = "FULLY_FURNISHED"
+    elif re.search(r"\bSEMI[\s-]*FURNISHED\b", s, re.I):
+        fields["furnishing"] = "SEMI_FURNISHED"
+    elif re.search(r"\bUNFURNISHED\b|\bBARE[\s-]*SHELL\b", s, re.I):
+        fields["furnishing"] = "UNFURNISHED"
+
+    if re.search(r"\bNO\s+CAR\s+PARKING\b|\bNO\s+PARKING\b", s, re.I):
+        fields["parking_count"] = 0
+    else:
+        parking = re.search(r"\b(\d+)\s+CAR\s+PARKINGS?\b", s, re.I)
+        if parking:
+            fields["parking_count"] = int(parking.group(1))
+
+    floor = re.search(
+        r"\b(LOWER\s+FLOOR|UPPER\s+FLOOR|GROUND\s+FLOOR|FIRST\s+FLOOR|"
+        r"SECOND\s+FLOOR|THIRD\s+FLOOR|HIGHER\s+FLOOR|MIDDLE\s+FLOOR)\b",
+        s,
+        re.I,
+    )
+    if floor:
+        fields["floor_description"] = floor.group(1).title()
+
+    view = re.search(
+        r"\b(GARDEN\s+FACING|SEA\s+FACING|PARK\s+FACING|ROAD\s+FACING|"
+        r"POOL\s+FACING|GREEN\s+FACING)\b",
+        s,
+        re.I,
+    )
+    if view:
+        fields["view"] = view.group(1).title()
+
+    for line in s.splitlines():
+        clean = _clean_anchor_text(line)
+        if re.search(r"\bKITCHEN\b", clean, re.I):
+            fields["kitchen_features"] = clean.strip()
+            break
+
+    if re.search(r"\bNEGOTIABLE\b", s, re.I):
+        fields["negotiable"] = True
+
+    if re.search(r"\bIMMEDIATE\s+POSSESSION\b", s, re.I):
+        fields["possession"] = "Immediate"
+    elif re.search(r"\bREADY\s+TO\s+MOVE\b", s, re.I):
+        fields["possession"] = "Ready to Move"
+
+    notice = re.search(
+        r"\b((?:ONE|TWO|THREE|\d+)\s+DAY[S]?\s+NOTICE(?:\s+WITH\s+PROFILE)?)\b",
+        s,
+        re.I,
+    )
+    if notice:
+        fields["inspection_notice"] = " ".join(word.capitalize() for word in notice.group(1).split())
+
+    if re.search(r"\bRENT\s*:\s*ON\s+REQUEST\b|\bRENT\s+ON\s+REQUEST\b", s, re.I):
+        fields["rent_on_request"] = True
+    if re.search(r"\bPRICE\s*:\s*ON\s+REQUEST\b|\bPRICE\s+ON\s+REQUEST\b", s, re.I):
+        fields["price_on_request"] = True
+
+    deposit_months = re.search(
+        r"\b(?:DEPOSIT|SECURITY(?:\s+DEPOSIT)?)\s*:\s*(\d+(?:\.\d+)?)\s*MONTHS?\b",
+        s,
+        re.I,
+    )
+    if deposit_months:
+        value = float(deposit_months.group(1))
+        fields["security_deposit_months"] = int(value) if value.is_integer() else value
+
+    return fields
+
+
+def _extract_requirement_fields(span_text: str, tx: str) -> Dict[str, Any]:
+    s = span_text or ""
+    if not (DEMAND_RE.search(s) and not AVAILABILITY_RE.search(s)):
+        return {}
+
+    fields: Dict[str, Any] = {}
+    config = re.search(r"\b(\d+(?:\.\d+)?)\s*BHK\b", s, re.I)
+    if config:
+        fields["configuration"] = f"{config.group(1)} BHK"
+
+    use = re.search(
+        r"\b(RESTAURANT|CAFE|BANQUET|CLINIC|HOSPITAL|SHOWROOM|SHOP|OFFICE|"
+        r"WAREHOUSE|GODOWN|HOTEL|GUEST\s+HOUSE|RETAIL)\b",
+        s,
+        re.I,
+    )
+    if use:
+        fields["intended_use"] = use.group(1).upper().replace(" ", "_")
+
+    fields["transaction_type"] = tx
+    return fields
+
+
 def propose_fields(span_text: str) -> Dict[str, Any]:
+    """
+    Foundation 1.3 source-grounded proposal engine.
+    Reviewer assistance only. Human judgment remains ground truth.
+    """
     s = span_text or ""
 
     if DEMAND_RE.search(s) and not AVAILABILITY_RE.search(s):
@@ -1011,22 +1186,25 @@ def propose_fields(span_text: str) -> Dict[str, Any]:
     else:
         content_hint = "FRAGMENT"
 
-    if re.search(r"\bFOR\s+SALE\b|\bSALE\b|\bDEMAND\b", s, re.I) and re.search(
-        r"\bFOR\s+RENT\b|\bRENT\b", s, re.I
-    ):
+    has_sale = bool(re.search(r"\bFOR\s+SALE\b|\bSALE\b", s, re.I))
+    has_rent = bool(re.search(r"\bFOR\s+RENT\b|\bRENT(?:AL)?\b", s, re.I))
+    if has_sale and has_rent:
         tx = "BOTH"
-    elif re.search(r"\bFOR\s+RENT\b|\bRENT(?:AL)?\b", s, re.I):
+    elif has_rent:
         tx = "RENT"
-    elif re.search(r"\bFOR\s+SALE\b|\bSALE\b|\bDEMAND\b", s, re.I):
+    elif has_sale:
         tx = "SALE"
     else:
         tx = "UNKNOWN"
 
+    title = _title_parts(s)
+
     areas = []
-    for m in AREA_RE.finditer(s):
+    for m in AREA_FLEX_RE.finditer(s):
+        raw_value = float(m.group("value"))
         areas.append({
-            "value": float(m.group("value")),
-            "unit": re.sub(r"\s+", "", m.group("unit").upper()),
+            "value": int(raw_value) if raw_value.is_integer() else raw_value,
+            "unit": _normalized_area_unit(m.group("unit")),
             "role": "UNKNOWN",
             "evidence": m.group(0),
         })
@@ -1034,24 +1212,78 @@ def propose_fields(span_text: str) -> Dict[str, Any]:
     money = []
     for m in MONEY_RE.finditer(s):
         raw_value = float(m.group("value"))
-        unit = m.group("unit").upper()
-        normalized = raw_value * (10000000 if unit.startswith("CR") else 100000)
-        money.append({
-            "value": normalized,
-            "raw_value": raw_value,
+        unit = _money_unit(m.group("unit"))
+        line = _line_for_offset(s, m.start())
+
+        if re.search(r"\bRENT\b", line, re.I):
+            role = "TOTAL_RENT"
+        elif re.search(r"\bDEPOSIT\b|\bSECURITY\b", line, re.I):
+            role = "SECURITY_DEPOSIT"
+        elif tx == "SALE" and re.search(r"\bPRICE\b|\bASKING\b|\bDEMAND\b|\bSALE\b", line, re.I):
+            role = "TOTAL_SALE_PRICE"
+        else:
+            role = "AMBIGUOUS"
+
+        value = int(raw_value) if raw_value.is_integer() else raw_value
+        item = {
+            "value": value,
             "unit": unit,
-            "role": "AMBIGUOUS",
+            "role": role,
             "evidence": m.group(0),
+        }
+        normalized = _money_normalized_inr(raw_value, unit)
+        if normalized is not None:
+            item["normalized_inr"] = int(normalized) if float(normalized).is_integer() else normalized
+        if role == "TOTAL_RENT" and re.search(r"\bNEGOTIABLE\b", line, re.I):
+            item["negotiable"] = True
+        money.append(item)
+
+    for dm in re.finditer(
+        r"\b(?:DEPOSIT|SECURITY(?:\s+DEPOSIT)?)\s*:\s*(\d+(?:\.\d+)?)\s*MONTHS?\b",
+        s,
+        re.I,
+    ):
+        value = float(dm.group(1))
+        money.append({
+            "value": int(value) if value.is_integer() else value,
+            "unit": "MONTHS",
+            "role": "SECURITY_DEPOSIT",
+            "evidence": dm.group(0),
         })
 
     contacts = [{"phone": m.group(0), "role": "UNKNOWN"} for m in PHONE_RE.finditer(s)]
 
+    property_fields = _extract_property_fields(s, tx) if content_hint == "PROPERTY_AVAILABILITY" else {}
+    requirement_fields = _extract_requirement_fields(s, tx) if content_hint == "REQUIREMENT" else {}
+
+    suitable_uses = []
+    use_match = re.search(
+        r"\b(RESTAURANT|CAFE|BANQUET|CLINIC|HOSPITAL|SHOWROOM|SHOP|OFFICE|"
+        r"WAREHOUSE|GODOWN|HOTEL|GUEST\s+HOUSE|RETAIL)\s+(?:SUITABLE|ALLOWED)\b",
+        s,
+        re.I,
+    )
+    if use_match:
+        suitable_uses.append(use_match.group(1).upper().replace(" ", "_"))
+
     return {
         "content_type_hint": content_hint,
         "transaction_type_hint": tx,
+        "project_name_hint": title.get("project_name"),
+        "city_hint": None,
+        "locality_hint": title.get("locality"),
+        "unit_identifier_hint": None,
+        "acceptable_locations": [],
+        "suitable_uses": suitable_uses,
         "areas": areas,
         "money_mentions": money,
         "contacts": contacts,
+        "property_fields": property_fields,
+        "requirement_fields": requirement_fields,
+        "field_confidence": {
+            "principle": "SOURCE_SUPPORTED_ONLY",
+            "human_review_required": True,
+        },
         "human_review_required": True,
     }
 
@@ -1989,6 +2221,12 @@ async function loadNext(){
     ["PROPERTY_AVAILABILITY","REQUIREMENT","FRAGMENT"].includes(p.content_type_hint)
       ? p.content_type_hint : "FRAGMENT";
   document.getElementById("transaction").value=p.transaction_type_hint||"UNKNOWN";
+  document.getElementById("city").value=p.city_hint||"";
+  document.getElementById("locality").value=p.locality_hint||"";
+  document.getElementById("project").value=p.project_name_hint||"";
+  document.getElementById("unit").value=p.unit_identifier_hint||"";
+  document.getElementById("locations").value=(p.acceptable_locations||[]).join(", ");
+  document.getElementById("uses").value=(p.suitable_uses||[]).join(", ");
   document.getElementById("areas").value=JSON.stringify(p.areas||[],null,2);
   document.getElementById("money").value=JSON.stringify(p.money_mentions||[],null,2);
   document.getElementById("contacts").value=JSON.stringify(p.contacts||[],null,2);
@@ -2312,6 +2550,90 @@ Rent 4 Lac
         "alliance_gold_span_labels.requirement_fields",
     )
 
+
+    mehran = """✨ MEHRAN
+▪️ 3 BHK | 1250 Sq.ft.
+▪️ Fully Furnished
+🅿️ 1 Car Parking
+💰 Rent: On Request"""
+    mehran_p = propose_fields(mehran)
+    check("GOLD_PROPOSAL_MEHRAN_PROJECT", mehran_p.get("project_name_hint") == "MEHRAN", mehran_p)
+    check("GOLD_PROPOSAL_MEHRAN_TRANSACTION", mehran_p.get("transaction_type_hint") == "RENT", mehran_p)
+    check(
+        "GOLD_PROPOSAL_MEHRAN_PROPERTY_FIELDS",
+        mehran_p.get("property_fields") == {
+            "configuration": "3 BHK",
+            "furnishing": "FULLY_FURNISHED",
+            "parking_count": 1,
+            "rent_on_request": True,
+        },
+        mehran_p.get("property_fields"),
+    )
+    check(
+        "GOLD_PROPOSAL_GENERIC_AREA_REMAINS_UNKNOWN",
+        len(mehran_p.get("areas") or []) == 1 and mehran_p["areas"][0].get("role") == "UNKNOWN",
+        mehran_p.get("areas"),
+    )
+
+    acropolis = """✨ ACROPOLIS
+▪️ 3 BHK | 1240 Sq.ft.
+▪️ Semi-Furnished
+🌿 Lower Floor | Garden Facing
+🅿️ 1 Car Parking
+▪️ Only Kitchen Cabinets & AC
+💰 Rent: ₹2.50 Lakhs Negotiable
+💰 Deposit: 3 Months
+🔑 Immediate Possession
+📋 One Day Notice with Profile"""
+    acro_p = propose_fields(acropolis)
+    acro_fields = acro_p.get("property_fields") or {}
+    check(
+        "GOLD_PROPOSAL_ACROPOLIS_PROPERTY_FIELDS",
+        acro_fields.get("configuration") == "3 BHK"
+        and acro_fields.get("furnishing") == "SEMI_FURNISHED"
+        and acro_fields.get("floor_description") == "Lower Floor"
+        and acro_fields.get("view") == "Garden Facing"
+        and acro_fields.get("parking_count") == 1
+        and acro_fields.get("negotiable") is True
+        and acro_fields.get("possession") == "Immediate"
+        and acro_fields.get("security_deposit_months") == 3,
+        acro_fields,
+    )
+    check(
+        "GOLD_PROPOSAL_ACROPOLIS_RENT_ROLE",
+        any(
+            x.get("role") == "TOTAL_RENT" and x.get("value") == 2.5 and x.get("unit") == "LAKH"
+            for x in acro_p.get("money_mentions") or []
+        ),
+        acro_p.get("money_mentions"),
+    )
+    check(
+        "GOLD_PROPOSAL_DEPOSIT_MONTHS_NO_RUPEE_INVENTION",
+        any(
+            x.get("role") == "SECURITY_DEPOSIT" and x.get("value") == 3 and x.get("unit") == "MONTHS"
+            for x in acro_p.get("money_mentions") or []
+        ),
+        acro_p.get("money_mentions"),
+    )
+
+    khar = propose_fields("""✨ RUSTOMJEE PARAMOUNT – KHAR WEST
+▪️ 3 BHK | 1365 Sq.ft.
+▪️ Semi-Furnished
+🅿️ 2 Car Parkings
+💰 Rent: ₹3.50 Lakhs""")
+    check(
+        "GOLD_PROPOSAL_EXPLICIT_LOCALITY_SUFFIX",
+        khar.get("project_name_hint") == "RUSTOMJEE PARAMOUNT"
+        and khar.get("locality_hint") == "KHAR WEST"
+        and khar.get("city_hint") is None,
+        khar,
+    )
+    check(
+        "GOLD_UI_PROJECT_PREFILL_PRESENT",
+        'document.getElementById("project").value=p.project_name_hint||"";' in LAB_UI,
+        "Project field loads from source-grounded proposal",
+    )
+
     failed = [c for c in cases if not c["passed"]]
     return {
         "status": "PASS" if not failed else "FAIL",
@@ -2416,6 +2738,22 @@ def register(core):
                 for s in propose_spans(raw)
             ],
             "human_review_required": True,
+        })
+
+    @app.post("/api/property-brain-foundation/proposal/preview")
+    def proposal_preview_route(payload: Dict[str, Any] = Body(...)):
+        raw = str(payload.get("text") or "").strip()
+        if not raw:
+            raise HTTPException(400, "text is required")
+        if len(raw) > 20000:
+            raise HTTPException(400, "text is too long for proposal preview")
+        return _json_response({
+            "status": "PASS",
+            "version": VERSION,
+            "mode": MODE,
+            "proposal": propose_fields(raw),
+            "academy_write_only": True,
+            "production_writes": False,
         })
 
     @app.get("/api/property-brain-foundation/next-span")
