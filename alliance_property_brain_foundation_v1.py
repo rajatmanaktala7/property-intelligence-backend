@@ -1,4 +1,5 @@
-﻿from __future__ import annotations
+﻿
+from __future__ import annotations
 
 import hashlib
 import html
@@ -12,8 +13,8 @@ from fastapi import Body, HTTPException, Query
 from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy import text
 
-VERSION = "1.0.0-ALLIANCE-PROPERTY-BRAIN-FOUNDATION"
-MODE = "EVIDENCE_SPAN_GOLD_LAB_HUMAN_GROUND_TRUTH"
+VERSION = "1.1.0-ALLIANCE-PROPERTY-BRAIN-FOUNDATION"
+MODE = "PROPERTY_AWARE_SOURCE_SELECTOR_EVIDENCE_SPAN_GOLD_LAB"
 
 # ---------------------------------------------------------------------------
 # Safety
@@ -294,13 +295,68 @@ def install(engine) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 TEXT_HINT_RE = re.compile(
-    r"(raw|message|text|description|content|body|remark|detail|property|lead)",
+    r"(raw|message|text|description|content|body|remark|detail|evidence|segment|entity)",
     re.I,
 )
 
-EXCLUDE_TABLE_RE = re.compile(
-    r"^(alliance_gold_|alliance_ai_|alliance_v|pb_corrections$|pb_feedback)",
+# Columns that can look "distinct" but are not usable property evidence.
+BAD_TEXT_COLUMN_RE = re.compile(
+    r"(?:^|_)(?:id|uuid|key|hash|status|error|exception|trace|verification|verified_by|"
+    r"property_id|record_id|generation_id|parent_message_id|identity_id|source_id)(?:$|_)",
     re.I,
+)
+
+BAD_TABLE_RE = re.compile(
+    r"^(alliance_gold_|alliance_ai_|alliance_v|pb_corrections$|pb_feedback|"
+    r"pi_scan_tiles$|pi_property_health$|pi_verification_log$)",
+    re.I,
+)
+
+PROPERTY_TYPE_RE = re.compile(
+    r"\b(?:BHK|FLAT|APARTMENT|FLOOR|VILLA|KOTHI|HOUSE|BUNGALOW|PLOT|LAND|"
+    r"SHOP|SHOWROOM|SCO|OFFICE|COMMERCIAL|WAREHOUSE|GODOWN|HOTEL|BANQUET|"
+    r"RESTAURANT|CAFE|CLINIC|HOSPITAL|FARMHOUSE|PENTHOUSE|STUDIO|RETAIL)\b",
+    re.I,
+)
+
+PROPERTY_AREA_SIGNAL_RE = re.compile(
+    r"\b\d+(?:,\d{3})*(?:\.\d+)?\s*(?:SQ\s*FT|SQFT|SFT|SQ\s*YD|SQYD|"
+    r"SYD|SYDS|GAJ|YARDS?|SQ\s*M|SQM|SQ\s*MT|SQMT|ACRE|ACRES|MTR|METRE|METER)\b",
+    re.I,
+)
+
+PROPERTY_MONEY_SIGNAL_RE = re.compile(
+    r"(?:₹|RS\.?|INR|\bRENT\b|\bDEMAND\b|\bASK(?:ING)?\b|\bPRICE\b|"
+    r"\b\d+(?:\.\d+)?\s*(?:CR|CRORE|CRORES|L|LAC|LACS|LAKH|LAKHS|K)\b)",
+    re.I,
+)
+
+PROPERTY_TX_SIGNAL_RE = re.compile(
+    r"\b(?:FOR\s+SALE|FOR\s+RENT|AVAILABLE|AVL|SALE|RENT|LEASE|PRE[\s\-]?RENTED)\b",
+    re.I,
+)
+
+PROPERTY_LOCATION_SIGNAL_RE = re.compile(
+    r"\b(?:SECTOR\s*[-:]?\s*\d+[A-Z]?|SEC\s*[-:]?\s*\d+[A-Z]?|"
+    r"PHASE\s*[-:]?\s*\d+|BLOCK\s*[-:]?\s*[A-Z0-9]+|"
+    r"GURGAON|GURUGRAM|DELHI|NOIDA|GOA|MUMBAI|DWARKA|SAKET|KALKAJI|"
+    r"JANAK\s*PURI|VASANT\s*KUNJ|GREATER\s*KAILASH|DLF|M3M|EMAAR|IREO)\b",
+    re.I,
+)
+
+REQUIREMENT_SIGNAL_RE = re.compile(
+    r"\b(?:LOOKING\s+FOR|REQUIRED|WANTED|NEED(?:ED)?|DIRECT\s+CLIENT|"
+    r"REQUIREMENT|BUYER\s+REQUIREMENT|RENTAL\s+REQUIREMENT)\b",
+    re.I,
+)
+
+ERROR_SIGNAL_RE = re.compile(
+    r"\b(?:TRACEBACK|EXCEPTION|ERROR|FAILED|TIMEOUT|HTTP\s*\d{3}|STACK\s+TRACE)\b",
+    re.I,
+)
+
+ID_LIKE_RE = re.compile(
+    r"^[A-Za-z0-9_\-]{16,64}$"
 )
 
 def _tables(engine) -> List[str]:
@@ -341,6 +397,36 @@ def _row_count(engine, table_name: str) -> int:
     with engine.connect() as conn:
         return int(conn.execute(text(f"SELECT count(*) FROM {qt}")).scalar() or 0)
 
+def _source_class(table_name: str, column_name: str) -> str:
+    t = table_name.lower()
+    c = column_name.lower()
+    if "requirement" in t or "demand" in t:
+        return "REQUIREMENT_EVIDENCE"
+    if "whatsapp" in t or "live_feed" in t:
+        if c in {"raw_text", "raw_message", "message_text", "entity_text"}:
+            return "WHATSAPP_EVIDENCE"
+    if "magazine" in t or "newspaper" in t:
+        return "PRINT_EVIDENCE"
+    if "clean_property_entity" in t or "property_listings" in t:
+        return "SEGMENTED_PROPERTY_EVIDENCE"
+    if t.startswith("pb_"):
+        return "PROPERTY_BRAIN_EVIDENCE"
+    if "property" in t:
+        return "PROPERTY_EVIDENCE"
+    return "OTHER_EVIDENCE"
+
+def _semantic_signal_count(value: str) -> int:
+    s = value or ""
+    signals = 0
+    signals += 1 if PROPERTY_TYPE_RE.search(s) else 0
+    signals += 1 if PROPERTY_AREA_SIGNAL_RE.search(s) else 0
+    signals += 1 if PROPERTY_MONEY_SIGNAL_RE.search(s) else 0
+    signals += 1 if PROPERTY_TX_SIGNAL_RE.search(s) else 0
+    signals += 1 if PROPERTY_LOCATION_SIGNAL_RE.search(s) else 0
+    signals += 1 if REQUIREMENT_SIGNAL_RE.search(s) else 0
+    signals += 1 if PHONE_RE.search(s) else 0
+    return signals
+
 def _profile_text_column(
     engine,
     table_name: str,
@@ -349,6 +435,16 @@ def _profile_text_column(
 ) -> Dict[str, Any]:
     qt = _safe_identifier(table_name)
     qc = _safe_identifier(column_name)
+
+    if BAD_TEXT_COLUMN_RE.search(column_name):
+        return {
+            "table": table_name,
+            "column": column_name,
+            "eligible": False,
+            "rejection_reason": "IDENTIFIER_OR_METADATA_COLUMN",
+            "score": -1000.0,
+        }
+
     try:
         with engine.connect() as conn:
             values = [
@@ -372,7 +468,8 @@ def _profile_text_column(
         return {
             "table": table_name,
             "column": column_name,
-            "score": -1,
+            "eligible": False,
+            "score": -1000.0,
             "error": f"{type(exc).__name__}: {exc}",
         }
 
@@ -384,7 +481,11 @@ def _profile_text_column(
             "distinct": 0,
             "distinct_ratio": 0.0,
             "avg_len": 0.0,
-            "giant_blob_ratio": 0.0,
+            "property_like_ratio": 0.0,
+            "avg_property_signals": 0.0,
+            "error_like_ratio": 0.0,
+            "id_like_ratio": 0.0,
+            "eligible": False,
             "score": 0.0,
         }
 
@@ -393,23 +494,56 @@ def _profile_text_column(
     avg_len = sum(len(v) for v in values) / len(values)
     giant_ratio = sum(1 for v in values if len(v) >= 5000) / len(values)
 
-    # Diversity matters most. Giant blobs remain useful as Gold sources, but
-    # should not dominate a random sample.
+    signal_counts = [_semantic_signal_count(v) for v in values]
+    property_like = sum(1 for n in signal_counts if n >= 2) / len(values)
+    strong_property_like = sum(1 for n in signal_counts if n >= 3) / len(values)
+    avg_signals = sum(signal_counts) / len(values)
+
+    error_like = sum(1 for v in values if ERROR_SIGNAL_RE.search(v)) / len(values)
+    id_like = sum(
+        1 for v in values
+        if ID_LIKE_RE.fullmatch(v.strip()) is not None
+    ) / len(values)
+
+    source_class = _source_class(table_name, column_name)
+
+    # Eligibility requires actual property language, not merely distinct text.
+    eligible = (
+        property_like >= 0.15
+        and error_like <= 0.10
+        and id_like <= 0.20
+        and avg_len >= 35
+    )
+
+    # Property semantics dominate score. Diversity prevents repeated dumps
+    # from pretending to be hundreds of independent examples.
     score = (
-        unique * 12
-        + ratio * 100
-        + min(avg_len, 1200) / 40
-        - giant_ratio * 40
+        property_like * 1800
+        + strong_property_like * 1200
+        + avg_signals * 120
+        + ratio * 400
+        + min(unique, 300) * 2.0
+        + min(avg_len, 1200) / 20
+        - giant_ratio * 250
+        - error_like * 2000
+        - id_like * 2000
     )
 
     return {
         "table": table_name,
         "column": column_name,
+        "source_class": source_class,
         "sampled": len(values),
         "distinct": unique,
         "distinct_ratio": round(ratio, 4),
         "avg_len": round(avg_len, 2),
         "giant_blob_ratio": round(giant_ratio, 4),
+        "property_like_ratio": round(property_like, 4),
+        "strong_property_like_ratio": round(strong_property_like, 4),
+        "avg_property_signals": round(avg_signals, 3),
+        "error_like_ratio": round(error_like, 4),
+        "id_like_ratio": round(id_like, 4),
+        "eligible": bool(eligible),
         "score": round(score, 2),
     }
 
@@ -417,7 +551,7 @@ def discover_sources(engine) -> Dict[str, Any]:
     profiles: List[Dict[str, Any]] = []
 
     for table_name in _tables(engine):
-        if EXCLUDE_TABLE_RE.search(table_name):
+        if BAD_TABLE_RE.search(table_name):
             continue
 
         try:
@@ -436,31 +570,160 @@ def discover_sources(engine) -> Dict[str, Any]:
             in {"text", "character varying", "character", "varchar"}
         ]
 
-        candidates = [c for c in textual if TEXT_HINT_RE.search(c)]
-        for col in candidates[:10]:
+        candidates = [
+            c for c in textual
+            if TEXT_HINT_RE.search(c)
+            and not BAD_TEXT_COLUMN_RE.search(c)
+        ]
+
+        for col in candidates[:12]:
             p = _profile_text_column(engine, table_name, col)
             p["row_count"] = count
             profiles.append(p)
 
     ranked = sorted(
-        [p for p in profiles if p.get("score", -1) >= 0],
+        profiles,
         key=lambda p: (
-            p.get("distinct", 0),
+            1 if p.get("eligible") else 0,
+            p.get("score", -9999),
+            p.get("property_like_ratio", 0),
             p.get("distinct_ratio", 0),
-            p.get("score", 0),
         ),
         reverse=True,
     )
 
+    recommended = [p for p in ranked if p.get("eligible")][:15]
+
+    # Build a mixed curriculum. We prefer more than one evidence class so
+    # the first Gold pilot is not dominated by one ingestion path.
+    curriculum = []
+    used = set()
+
+    desired_classes = [
+        "WHATSAPP_EVIDENCE",
+        "SEGMENTED_PROPERTY_EVIDENCE",
+        "PROPERTY_BRAIN_EVIDENCE",
+        "REQUIREMENT_EVIDENCE",
+        "PRINT_EVIDENCE",
+        "PROPERTY_EVIDENCE",
+    ]
+
+    for source_class in desired_classes:
+        candidate = next(
+            (
+                p for p in recommended
+                if p.get("source_class") == source_class
+                and (p["table"], p["column"]) not in used
+            ),
+            None,
+        )
+        if candidate:
+            used.add((candidate["table"], candidate["column"]))
+            curriculum.append(candidate)
+
+    for p in recommended:
+        if len(curriculum) >= 6:
+            break
+        key = (p["table"], p["column"])
+        if key not in used:
+            used.add(key)
+            curriculum.append(p)
+
     return {
         "status": "PASS",
         "version": VERSION,
+        "selector": "PROPERTY_AWARE_SEMANTIC_DENSITY_V1",
         "ranked_sources": ranked[:40],
-        "recommended_sources": [
-            p for p in ranked
-            if p.get("distinct", 0) >= 25
-        ][:10],
+        "recommended_sources": recommended,
+        "recommended_curriculum": curriculum,
+        "selection_rules": {
+            "reject_identifier_columns": True,
+            "reject_error_log_tables": True,
+            "minimum_property_like_ratio": 0.15,
+            "maximum_error_like_ratio": 0.10,
+            "maximum_id_like_ratio": 0.20,
+            "mixed_source_curriculum": True,
+        },
         "read_only_discovery": True,
+    }
+
+def curriculum_plan(engine, total_messages: int = 25) -> Dict[str, Any]:
+    discovery = discover_sources(engine)
+    curriculum = discovery.get("recommended_curriculum") or []
+
+    if not curriculum:
+        return {
+            "status": "NO_ELIGIBLE_PROPERTY_SOURCES",
+            "version": VERSION,
+            "plan": [],
+            "total_messages": 0,
+        }
+
+    total_messages = max(1, min(int(total_messages), 100))
+    base = max(1, total_messages // len(curriculum))
+    remaining = total_messages
+
+    plan = []
+    for idx, src in enumerate(curriculum):
+        slots_left = len(curriculum) - idx
+        take = base if slots_left > 1 else remaining
+        take = min(take, remaining)
+        if take <= 0:
+            break
+
+        plan.append({
+            "table": src["table"],
+            "column": src["column"],
+            "source_class": src.get("source_class"),
+            "messages": take,
+            "property_like_ratio": src.get("property_like_ratio"),
+            "distinct_ratio": src.get("distinct_ratio"),
+            "avg_len": src.get("avg_len"),
+        })
+        remaining -= take
+
+    return {
+        "status": "PASS",
+        "version": VERSION,
+        "requested_total_messages": total_messages,
+        "planned_total_messages": sum(x["messages"] for x in plan),
+        "plan": plan,
+        "note": (
+            "This is a Gold-Lab sampling curriculum, not production ingestion. "
+            "Humans remain the source of truth."
+        ),
+    }
+
+def import_curriculum(engine, total_messages: int = 25) -> Dict[str, Any]:
+    plan = curriculum_plan(engine, total_messages)
+    if plan.get("status") != "PASS":
+        return plan
+
+    results = []
+    for item in plan["plan"]:
+        result = import_sources(
+            engine,
+            item["table"],
+            item["column"],
+            item["messages"],
+        )
+        results.append({
+            "source_class": item.get("source_class"),
+            **result,
+        })
+
+    return {
+        "status": "IMPORTED",
+        "version": VERSION,
+        "plan": plan["plan"],
+        "results": results,
+        "inserted_sources": sum(r.get("inserted_sources", 0) for r in results),
+        "inserted_proposed_spans": sum(r.get("inserted_proposed_spans", 0) for r in results),
+        "academy_writes_only": True,
+        "canonical_writes": 0,
+        "offer_writes": 0,
+        "matcher_writes": 0,
+        "whatsapp_live_writes": 0,
     }
 
 # ---------------------------------------------------------------------------
@@ -1410,7 +1673,15 @@ button{border:0;border-radius:8px;padding:10px 14px;cursor:pointer;font-weight:7
 <textarea id="notes"></textarea>
 
 <div class="actions">
-<button class="good" onclick="save()">Save Human Gold Label</button>
+<button class="good" onclick="quickSave('PROPERTY_AVAILABILITY')">Correct Property</button>
+<button class="good" onclick="quickSave('REQUIREMENT')">Correct Requirement</button>
+<button class="secondary" onclick="quickSave('PROJECT_HEADER')">Project Header</button>
+<button class="secondary" onclick="quickSave('LOCALITY_HEADER')">Locality Header</button>
+<button class="secondary" onclick="quickSave('FRAGMENT')">Fragment</button>
+<button class="secondary" onclick="quickSave('NOISE')">Noise</button>
+</div>
+<div class="actions">
+<button class="primary" onclick="save()">Save Edited Gold Label</button>
 <button class="secondary" onclick="loadNext()">Skip / Next</button>
 </div>
 <div id="msg"></div>
@@ -1458,6 +1729,11 @@ async function loadNext(){
   document.getElementById("areas").value=JSON.stringify(p.areas||[],null,2);
   document.getElementById("money").value=JSON.stringify(p.money_mentions||[],null,2);
   document.getElementById("contacts").value=JSON.stringify(p.contacts||[],null,2);
+}
+async function quickSave(contentType){
+  document.getElementById("contentType").value=contentType;
+  document.getElementById("boundary").value="CORRECT";
+  await save();
 }
 async function save(){
   try{
@@ -1623,6 +1899,31 @@ Rent 4 Lac
         sorted(PRODUCTION_WRITE_TABLES & ACADEMY_TABLES),
     )
 
+    check(
+        "ERROR_COLUMN_REJECTED",
+        bool(BAD_TEXT_COLUMN_RE.search("error_message")),
+        "error_message",
+    )
+
+    check(
+        "ID_COLUMN_REJECTED",
+        bool(BAD_TEXT_COLUMN_RE.search("property_id")),
+        "property_id",
+    )
+
+    property_example = "DLF Phase 2 4 BHK 2700 sqft available for rent asking 2.15 Lakh"
+    check(
+        "PROPERTY_SEMANTIC_DENSITY",
+        _semantic_signal_count(property_example) >= 4,
+        _semantic_signal_count(property_example),
+    )
+
+    check(
+        "WHATSAPP_SOURCE_CLASS",
+        _source_class("ai_whatsapp_purity", "raw_text") == "WHATSAPP_EVIDENCE",
+        _source_class("ai_whatsapp_purity", "raw_text"),
+    )
+
     failed = [c for c in cases if not c["passed"]]
     return {
         "status": "PASS" if not failed else "FAIL",
@@ -1675,6 +1976,8 @@ def register(core):
             "mode": MODE,
             "gold_lab": "/property-brain-gold-lab",
             "evaluation_dashboard": "/property-brain-evaluation",
+            "source_discovery": "/api/property-brain-foundation/sources/discover",
+            "curriculum_plan": "/api/property-brain-foundation/sources/curriculum?total_messages=25",
             "academy_tables": sorted(ACADEMY_TABLES),
             "production_write_permission": False,
             "canonical_writes": 0,
@@ -1690,6 +1993,16 @@ def register(core):
     @app.get("/api/property-brain-foundation/sources/discover")
     def sources_discover():
         return JSONResponse(discover_sources(engine))
+
+    @app.get("/api/property-brain-foundation/sources/curriculum")
+    def sources_curriculum(total_messages: int = Query(25, ge=1, le=100)):
+        return JSONResponse(curriculum_plan(engine, total_messages))
+
+    @app.post("/api/property-brain-foundation/sources/import-curriculum")
+    def sources_import_curriculum(payload: Dict[str, Any] = Body(default={})):
+        total_messages = int((payload or {}).get("total_messages") or 25)
+        total_messages = max(1, min(total_messages, 100))
+        return JSONResponse(import_curriculum(engine, total_messages))
 
     @app.post("/api/property-brain-foundation/sources/import")
     def sources_import(payload: Dict[str, Any] = Body(...)):
