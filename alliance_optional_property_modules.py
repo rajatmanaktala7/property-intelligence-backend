@@ -1,6 +1,6 @@
 ﻿"""Fail-safe optional property module registration."""
 
-VERSION = "1.34.0-OPTIONAL-PROPERTY-MODULES-TOPPER-V261B"
+VERSION = "1.35.0-OPTIONAL-PROPERTY-MODULES-MASTERY-V262A"
 
 
 def _route_exists(app, path):
@@ -1091,4 +1091,14 @@ def register(wrapped):
             "route": "/api/v7/property-ai/topper-v261b/status",
             "fail_safe": True,
         }
+
+    # V262A Real Alliance Brain Correction
+    try:
+        if _route_exists(app, "/api/v7/property-ai/mastery-v262a/status"):
+            result["mastery_v262a"] = {"status":"ALREADY_REGISTERED","route":"/api/v7/property-ai/mastery-v262a/status","error":None}
+        else:
+            import alliance_real_mastery_v262a as mastery_v262a
+            result["mastery_v262a"] = {**mastery_v262a.register(core), "error":None}
+    except Exception as exc:
+        result["mastery_v262a"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","route":"/api/v7/property-ai/mastery-v262a/status","fail_safe":True}
     return result
