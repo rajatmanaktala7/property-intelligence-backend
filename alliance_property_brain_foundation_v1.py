@@ -14,8 +14,8 @@ from fastapi import Body, HTTPException, Query
 from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy import text
 
-VERSION = "1.9.3-ALLIANCE-PROPERTY-BRAIN-FOUNDATION"
-MODE = "AMBIGUOUS_ROW_EVENT_LINEAGE_AND_NAME_SANITIZER"
+VERSION = "1.9.4-ALLIANCE-PROPERTY-BRAIN-FOUNDATION"
+MODE = "RETROACTIVE_GOVERNING_LOCALITY_RECOVERY"
 
 # ---------------------------------------------------------------------------
 # Safety
@@ -4097,6 +4097,113 @@ def merge_with_next(engine, span_id: str, payload: Dict[str, Any]) -> Dict[str, 
         "academy_write_only": True, "canonical_writes": 0, "offer_writes": 0, "matcher_writes": 0, "whatsapp_live_writes": 0,
     })
 
+
+# ---------------------------------------------------------------------------
+# Foundation 1.9D: retroactive governing locality recovery for legacy spans
+# ---------------------------------------------------------------------------
+
+V19D_NON_LOCALITY_HEADER_RE = re.compile(
+    r"\b(?:INVENTORY|OPTIONS?|DIRECT\s+CLIENT|AVAILABLE|PROPERTY|PROPERTIES|"
+    r"FOR\s+SALE|FOR\s+RENT|DETAILS?|SITE\s+VISITS?|CONTACT|CALL|DM|QUERY)\b",
+    re.I,
+)
+V19D_PORTFOLIO_COVERAGE_RE = re.compile(
+    r"(?:\s[•|]\s|\s+&\s+|\bAND\s+NEARBY\b|\bNEARBY\b)",
+    re.I,
+)
+V19D_BULLET_RE = re.compile(r"^\s*[•●▪◦*\-–—]\s*")
+
+def _v19d_clean_locality_header(line: str) -> Optional[str]:
+    raw = str(line or "").strip()
+    if not raw or V19D_BULLET_RE.match(raw):
+        return None
+    had_pin = raw.startswith("📍")
+    clean = re.sub(r"^\s*📍\s*", "", raw).strip()
+    clean = re.sub(r"[*_`#]+", "", clean).strip()
+    if not clean:
+        return None
+    if V19D_PORTFOLIO_COVERAGE_RE.search(clean):
+        return None
+    if not had_pin and V19D_NON_LOCALITY_HEADER_RE.search(clean):
+        return None
+    if PROPERTY_FACT_RE.search(clean) or PHONE_RE.search(clean) or MONEY_RE.search(clean) or AREA_RE.search(clean):
+        return None
+    if not re.fullmatch(r"[A-Za-z][A-Za-z0-9 .&()/'\-]{1,70}", clean):
+        return None
+    return re.sub(r"\s+", " ", clean).strip(" .:-") or None
+
+def _v19d_find_span_occurrence(source_raw: str, span_text: str, proposed_start_offset: Any = None) -> Optional[Tuple[int, int]]:
+    raw = str(source_raw or "")
+    needle = str(span_text or "")
+    if not raw or not needle:
+        return None
+    try:
+        hint = int(proposed_start_offset)
+    except Exception:
+        hint = None
+    if hint is not None and 0 <= hint < len(raw) and raw[hint:hint + len(needle)] == needle:
+        return hint, hint + len(needle)
+    starts: List[int] = []
+    cursor = 0
+    while True:
+        pos = raw.find(needle, cursor)
+        if pos < 0:
+            break
+        starts.append(pos)
+        cursor = pos + max(1, len(needle))
+    if len(starts) == 1:
+        pos = starts[0]
+        return pos, pos + len(needle)
+    if starts and hint is not None:
+        pos = min(starts, key=lambda x: abs(x - hint))
+        return pos, pos + len(needle)
+    return None
+
+def _v19d_governing_locality(source_raw: str, span_text: str, proposed_start_offset: Any = None) -> Dict[str, Any]:
+    raw = str(source_raw or "")
+    occurrence = _v19d_find_span_occurrence(raw, span_text, proposed_start_offset)
+    if not occurrence:
+        return {"status": "SPAN_NOT_UNIQUELY_LOCATED", "locality": None, "provenance": None}
+    span_start, span_end = occurrence
+    active_locality = None
+    active_header_text = None
+    active_header_start = None
+    for line_start, _line_end, line in _line_ranges(raw):
+        if line_start >= span_start:
+            break
+        locality = _v19d_clean_locality_header(line)
+        if locality:
+            active_locality = locality
+            active_header_text = str(line or "").strip()
+            active_header_start = line_start
+    if not active_locality:
+        return {"status": "NO_GOVERNING_LOCALITY_HEADER", "locality": None, "provenance": None, "span_start": span_start, "span_end": span_end}
+    return {
+        "status": "FOUND_GOVERNING_LOCALITY",
+        "locality": active_locality,
+        "provenance": "RETROACTIVE_SOURCE_LOCALITY_HEADER",
+        "header_text": active_header_text,
+        "header_start": active_header_start,
+        "span_start": span_start,
+        "span_end": span_end,
+    }
+
+def _v19d_merge_retroactive_locality(proposal: Dict[str, Any], source_raw: str, span_text: str, proposed_start_offset: Any = None) -> Dict[str, Any]:
+    proposal = dict(proposal or {})
+    if proposal.get("locality_hint"):
+        return proposal
+    recovered = _v19d_governing_locality(source_raw, span_text, proposed_start_offset)
+    if recovered.get("status") != "FOUND_GOVERNING_LOCALITY":
+        return proposal
+    proposal["locality_hint"] = recovered["locality"]
+    proposal["source_grounded_inherited_locality"] = recovered["locality"]
+    proposal["retroactive_locality_recovery"] = True
+    proposal.setdefault("context_provenance", {})
+    if isinstance(proposal["context_provenance"], dict):
+        proposal["context_provenance"]["locality_hint"] = recovered["provenance"]
+        proposal["context_provenance"]["locality_header_evidence"] = recovered.get("header_text")
+    return proposal
+
 # ---------------------------------------------------------------------------
 # Gold dataset / evaluation
 # ---------------------------------------------------------------------------
@@ -4229,6 +4336,15 @@ def next_span(engine, labeler_id: Optional[str] = None) -> Dict[str, Any]:
             proposal["context_provenance"]["locality_hint"] = "INHERITED_FROM_SOURCE_LOCALITY_HEADER"
         if inherited_locality:
             proposal["source_grounded_inherited_locality"] = inherited_locality
+
+    # Foundation 1.9D: recover governing locality for pre-1.7 split children
+    # from the original source message. Proposal-time only: no DB write.
+    proposal = _v19d_merge_retroactive_locality(
+        proposal,
+        str(out.get("source_raw_text") or ""),
+        str(out.get("proposed_text") or ""),
+        out.get("proposed_start_offset"),
+    )
 
     # Foundation 1.8D recovers shared footer contacts from the ORIGINAL
     # source message, including child spans created before Foundation 1.8.
