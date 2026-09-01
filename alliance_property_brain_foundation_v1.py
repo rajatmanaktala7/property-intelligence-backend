@@ -14,8 +14,8 @@ from fastapi import Body, HTTPException, Query
 from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy import text
 
-VERSION = "1.9.6-ALLIANCE-PROPERTY-BRAIN-FOUNDATION"
-MODE = "INLINE_NUMBERED_ATOMIC_SPLIT_FIXED"
+VERSION = "1.9.7-ALLIANCE-PROPERTY-BRAIN-FOUNDATION"
+MODE = "GOLD_SKIP_AND_LIVE_SENDER_CONTACT"
 
 # ---------------------------------------------------------------------------
 # Safety
@@ -3388,6 +3388,112 @@ def backfill_upstream_sender_lineage(
     }
 
 
+
+# ---------------------------------------------------------------------------
+# Foundation 1.9G: live sender-contact recovery + contact-lineage diagnostic
+# ---------------------------------------------------------------------------
+
+def _v19g_live_upstream_sender_contact(
+    engine,
+    proposal: Dict[str, Any],
+    source: Dict[str, Any],
+) -> Dict[str, Any]:
+    p = dict(proposal or {})
+    if p.get("contacts"):
+        return p
+
+    resolution = resolve_upstream_sender_for_gold_source(
+        engine,
+        {
+            "source_message_id": source.get("source_message_id"),
+            "source_table": source.get("source_table"),
+            "raw_text": source.get("source_raw_text") or source.get("raw_text"),
+            "source_metadata": source.get("source_metadata"),
+        },
+    )
+
+    p["sender_lineage_status"] = resolution.get("status")
+    p["sender_lineage_resolution_stage"] = resolution.get("resolution_stage")
+    p["sender_lineage_candidate_count"] = resolution.get("candidate_count", 0)
+
+    if resolution.get("status") != "FOUND_UNIQUE_UPSTREAM_SENDER":
+        if resolution.get("ambiguous_phones"):
+            p["sender_lineage_ambiguous"] = True
+        return p
+
+    sender = resolution.get("sender") or {}
+    phone = _v19_phone_from_sender_value(sender.get("phone"))
+    if not phone:
+        return p
+
+    p["contacts"] = [{
+        "phone": phone,
+        "name": _v19c_clean_sender_name(sender.get("name")),
+        "company": None,
+        "role": "SOURCE_CONTACT",
+        "provenance": "WHATSAPP_SENDER",
+        "scope": "SOURCE_MESSAGE_SENDER",
+        "owner_status": "NOT_PROVEN",
+        "broker_status": "NOT_PROVEN",
+        "source_table": sender.get("source_table"),
+        "resolved_via": sender.get("match_method"),
+        "match_column": sender.get("match_column"),
+        "lineage_resolution_stage": resolution.get("resolution_stage"),
+    }]
+    p["sender_contact_fallback_used"] = True
+    p["sender_contact_is_owner"] = False
+    p["sender_contact_is_broker"] = False
+    p["sender_contact_live_recovery"] = True
+    return p
+
+
+def span_contact_lineage_diagnostic(engine, span_id: str) -> Dict[str, Any]:
+    with engine.connect() as conn:
+        row = conn.execute(
+            text(
+                "SELECT sp.span_id, sp.source_message_id, sp.proposed_text, "
+                "s.raw_text AS source_raw_text, s.source_table, "
+                "s.source_metadata, s.source_row_ref "
+                "FROM alliance_gold_spans sp "
+                "JOIN alliance_gold_source_messages s "
+                "ON s.source_message_id=sp.source_message_id "
+                "WHERE sp.span_id=:span_id"
+            ),
+            {"span_id": span_id},
+        ).mappings().first()
+
+    if not row:
+        raise HTTPException(404, "Span not found")
+
+    source = dict(row)
+    resolution = resolve_upstream_sender_for_gold_source(
+        engine,
+        {
+            "source_message_id": source.get("source_message_id"),
+            "source_table": source.get("source_table"),
+            "raw_text": source.get("source_raw_text"),
+            "source_metadata": source.get("source_metadata"),
+        },
+    )
+
+    return _json_safe({
+        "status": "PASS",
+        "version": VERSION,
+        "span_id": str(source.get("span_id")),
+        "source_message_id": str(source.get("source_message_id")),
+        "source_table": source.get("source_table"),
+        "source_row_ref": source.get("source_row_ref"),
+        "resolution": resolution,
+        "read_only": True,
+        "academy_writes": 0,
+        "human_labels_modified": 0,
+        "canonical_writes": 0,
+        "offer_writes": 0,
+        "matcher_writes": 0,
+        "whatsapp_live_writes": 0,
+    })
+
+
 # ---------------------------------------------------------------------------
 # Foundation 1.6A: entity scope + inventory-group intelligence
 # ---------------------------------------------------------------------------
@@ -4386,7 +4492,26 @@ def progress(engine) -> Dict[str, Any]:
         ),
     }
 
-def next_span(engine, labeler_id: Optional[str] = None) -> Dict[str, Any]:
+def next_span(
+    engine,
+    labeler_id: Optional[str] = None,
+    skip_span_ids: Optional[str] = None,
+) -> Dict[str, Any]:
+    raw_skip_ids = [
+        x.strip()
+        for x in str(skip_span_ids or "").split(",")
+        if x.strip()
+    ]
+    valid_skip_ids = [
+        x for x in raw_skip_ids
+        if re.fullmatch(
+            r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-"
+            r"[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}",
+            x,
+        )
+    ][:500]
+    skip_csv = ",".join(valid_skip_ids)
+
     with engine.connect() as conn:
         row = conn.execute(
             text(
@@ -4410,6 +4535,12 @@ def next_span(engine, labeler_id: Optional[str] = None) -> Dict[str, Any]:
                   ON s.source_message_id=sp.source_message_id
                 WHERE COALESCE(sp.span_status, 'ACTIVE')='ACTIVE'
                   AND sp.boundary_status <> 'LABELED'
+                  AND (
+                      :skip_csv = ''
+                      OR NOT (
+                          sp.span_id::text = ANY(string_to_array(:skip_csv, ','))
+                      )
+                  )
                 ORDER BY
                     CASE s.sampling_bucket
                         WHEN 'GIANT_DUMP' THEN 1
@@ -4421,7 +4552,8 @@ def next_span(engine, labeler_id: Optional[str] = None) -> Dict[str, Any]:
                     sp.span_order
                 LIMIT 1
                 """
-            )
+            ),
+            {"skip_csv": skip_csv},
         ).mappings().first()
 
     if not row:
@@ -4492,6 +4624,9 @@ def next_span(engine, labeler_id: Optional[str] = None) -> Dict[str, Any]:
         str(out.get("source_raw_text") or ""),
         out.get("source_metadata"),
     )
+
+    if not proposal.get("contacts"):
+        proposal = _v19g_live_upstream_sender_contact(engine, proposal, out)
 
     out["lineage_metadata"] = lineage
     out["proposal"] = proposal
@@ -4825,7 +4960,7 @@ button{border:0;border-radius:8px;padding:10px 14px;cursor:pointer;font-weight:7
 </div>
 <div class="actions">
 <button class="primary" onclick="save()">Save Edited Gold Label</button>
-<button class="secondary" onclick="loadNext()">Skip / Next</button>
+<button class="secondary" onclick="skipNext()">Skip / Next</button>
 </div>
 <div id="msg"></div>
 </div>
@@ -4835,6 +4970,7 @@ button{border:0;border-radius:8px;padding:10px 14px;cursor:pointer;font-weight:7
 <script>
 let current=null;
 let splitDraft=[];
+let skippedSpanIds=[];
 
 function csvList(id){
   return document.getElementById(id).value.split(",").map(x=>x.trim()).filter(Boolean);
@@ -4854,7 +4990,10 @@ async function loadNext(){
   document.getElementById("source").innerText="Loading...";
   document.getElementById("span").innerText="Loading...";
   try{
-    const r=await fetch("/api/property-brain-foundation/next-span");
+    const skipQuery = skippedSpanIds.length
+      ? `?skip_span_ids=${encodeURIComponent(skippedSpanIds.join(","))}`
+      : "";
+    const r=await fetch("/api/property-brain-foundation/next-span"+skipQuery);
     const raw=await r.text();
     let d={};
     try{ d=JSON.parse(raw); }
@@ -4863,6 +5002,10 @@ async function loadNext(){
     if(d.status!=="PASS"){
       document.getElementById("source").innerText=d.message||"No spans.";
       document.getElementById("span").innerText="";
+      if(skippedSpanIds.length){
+        document.getElementById("msg").innerText =
+          "All currently-unlabeled spans have been skipped in this browser session. Refresh the page to revisit skipped spans.";
+      }
       current=null;
       return;
     }
@@ -4958,6 +5101,22 @@ async function mergeWithNext(){
     document.getElementById("msg").innerText="Real merge complete. Original spans preserved as SUPERSEDED.";
     await refreshProgress(); await loadNext();
   }catch(e){ document.getElementById("msg").innerText="ERROR: "+e.message; }
+}
+
+async function skipNext(){
+  try{
+    if(!current) throw new Error("No span loaded");
+    const id=String(current.span_id||"");
+    if(id && !skippedSpanIds.includes(id)) skippedSpanIds.push(id);
+    if(skippedSpanIds.length>500) skippedSpanIds=skippedSpanIds.slice(-500);
+    await loadNext();
+    if(current){
+      document.getElementById("msg").innerText =
+        "Skipped for this browser session. No Gold label was written.";
+    }
+  }catch(e){
+    document.getElementById("msg").innerText="ERROR: "+e.message;
+  }
 }
 
 async function quickSave(contentType){
@@ -5399,6 +5558,26 @@ Hemant Lohia
     check("ATOMIC_UI_REAL_SPLIT_PRESENT", "prepareAtomicSplit()" in LAB_UI and "confirmAtomicSplit()" in LAB_UI and "/split-preview" in LAB_UI, "Gold Lab real split controls")
     check("ATOMIC_LINEAGE_SCHEMA_PRESENT", any("span_status" in x for x in MIGRATIONS) and any("parent_span_id" in x for x in MIGRATIONS) and any("superseded_by" in x for x in MIGRATIONS), MIGRATIONS)
 
+    check(
+        "GOLD_UI_SKIP_NEXT_HAS_REAL_EXCLUSION",
+        "skipNext()" in LAB_UI
+        and "skippedSpanIds" in LAB_UI
+        and "skip_span_ids=" in LAB_UI
+        and 'onclick="skipNext()"' in LAB_UI,
+        "Skip / Next excludes current span in-session without Gold write.",
+    )
+    check(
+        "GOLD_SKIP_IS_NON_WRITING",
+        "Skipped for this browser session. No Gold label was written." in LAB_UI,
+        "Skip is navigation-only.",
+    )
+    check(
+        "LIVE_WHATSAPP_SENDER_RECOVERY_AVAILABLE",
+        callable(_v19g_live_upstream_sender_contact)
+        and callable(span_contact_lineage_diagnostic),
+        "Read-only live upstream sender recovery + diagnostic.",
+    )
+
     failed = [c for c in cases if not c["passed"]]
     return {
         "status": "PASS" if not failed else "FAIL",
@@ -5545,8 +5724,17 @@ def register(core):
         })
 
     @app.get("/api/property-brain-foundation/next-span")
-    def next_span_route(labeler_id: Optional[str] = Query(None)):
-        return _json_response(next_span(engine, labeler_id))
+    def next_span_route(
+        labeler_id: Optional[str] = Query(None),
+        skip_span_ids: Optional[str] = Query(None),
+    ):
+        return _json_response(
+            next_span(engine, labeler_id, skip_span_ids=skip_span_ids)
+        )
+
+    @app.get("/api/property-brain-foundation/span/{span_id}/contact-lineage")
+    def span_contact_lineage_route(span_id: str):
+        return _json_response(span_contact_lineage_diagnostic(engine, span_id))
 
     @app.post("/api/property-brain-foundation/span/{span_id}/label")
     def label_span(span_id: str, payload: Dict[str, Any] = Body(...)):
