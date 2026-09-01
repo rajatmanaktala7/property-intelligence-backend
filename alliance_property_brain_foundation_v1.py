@@ -6,15 +6,16 @@ import html
 import json
 import re
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
+from decimal import Decimal
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import Body, HTTPException, Query
 from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy import text
 
-VERSION = "1.2.0-ALLIANCE-PROPERTY-BRAIN-FOUNDATION"
-MODE = "TRUSTED_EVIDENCE_CURRICULUM_GOLD_LAB"
+VERSION = "1.2.1-ALLIANCE-PROPERTY-BRAIN-FOUNDATION"
+MODE = "TRUSTED_EVIDENCE_CURRICULUM_GOLD_LAB_RUNTIME_SAFE"
 
 # ---------------------------------------------------------------------------
 # Safety
@@ -130,8 +131,28 @@ MONEY_RE = re.compile(
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
+def _json_safe(value: Any) -> Any:
+    """Convert DB/runtime values into JSON-safe Python primitives."""
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, Decimal):
+        # Preserve integer Decimals as ints; otherwise use float for UI/API use.
+        return int(value) if value == value.to_integral_value() else float(value)
+    if isinstance(value, uuid.UUID):
+        return str(value)
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe(v) for v in value]
+    return str(value)
+
+def _json_response(value: Any, status_code: int = 200) -> JSONResponse:
+    return JSONResponse(content=_json_safe(value), status_code=status_code)
+
 def _json(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, default=str)
+    return json.dumps(_json_safe(value), ensure_ascii=False)
 
 def _loads(value: Any, default: Any) -> Any:
     if value is None:
@@ -1453,7 +1474,7 @@ def next_span(engine, labeler_id: Optional[str] = None) -> Dict[str, Any]:
     out["span_id"] = str(out["span_id"])
     out["source_message_id"] = str(out["source_message_id"])
     out["proposal"] = propose_fields(out["proposed_text"])
-    return {"status": "PASS", "span": out}
+    return _json_safe({"status": "PASS", "span": out})
 
 def disagreements(engine) -> Dict[str, Any]:
     with engine.connect() as conn:
@@ -1783,13 +1804,21 @@ async function refreshProgress(){
 }
 async function loadNext(){
   document.getElementById("msg").innerText="";
-  const r=await fetch("/api/property-brain-foundation/next-span");
-  const d=await r.json();
-  if(d.status!=="PASS"){
-    document.getElementById("source").innerText=d.message||"No spans.";
-    document.getElementById("span").innerText="";
-    return;
-  }
+  document.getElementById("source").innerText="Loading...";
+  document.getElementById("span").innerText="Loading...";
+  try{
+    const r=await fetch("/api/property-brain-foundation/next-span");
+    const raw=await r.text();
+    let d={};
+    try{ d=JSON.parse(raw); }
+    catch(e){ throw new Error("Backend returned non-JSON response"); }
+    if(!r.ok) throw new Error(d.detail||d.message||"Gold Lab backend error");
+    if(d.status!=="PASS"){
+      document.getElementById("source").innerText=d.message||"No spans.";
+      document.getElementById("span").innerText="";
+      current=null;
+      return;
+    }
   current=d.span;
   document.getElementById("source").innerText=current.source_raw_text;
   document.getElementById("span").innerText=current.proposed_text;
@@ -1805,6 +1834,12 @@ async function loadNext(){
   document.getElementById("areas").value=JSON.stringify(p.areas||[],null,2);
   document.getElementById("money").value=JSON.stringify(p.money_mentions||[],null,2);
   document.getElementById("contacts").value=JSON.stringify(p.contacts||[],null,2);
+  }catch(e){
+    current=null;
+    document.getElementById("source").innerText="Gold Lab runtime error. Do not label this record.";
+    document.getElementById("span").innerText="";
+    document.getElementById("msg").innerText="ERROR: "+e.message;
+  }
 }
 async function quickSave(contentType){
   document.getElementById("contentType").value=contentType;
@@ -2024,6 +2059,29 @@ Rent 4 Lac
         "ai_whatsapp_purity.raw_text",
     )
 
+    runtime_payload = {
+        "proposal_confidence": Decimal("0.65"),
+        "source_message_id": uuid.UUID("12345678-1234-5678-1234-567812345678"),
+        "created_at": datetime(2026, 9, 1, 12, 30, tzinfo=timezone.utc),
+    }
+    safe_runtime_payload = _json_safe(runtime_payload)
+    check(
+        "DECIMAL_JSON_SERIALIZATION",
+        isinstance(safe_runtime_payload["proposal_confidence"], float)
+        and safe_runtime_payload["proposal_confidence"] == 0.65,
+        safe_runtime_payload,
+    )
+    check(
+        "UUID_JSON_SERIALIZATION",
+        safe_runtime_payload["source_message_id"] == "12345678-1234-5678-1234-567812345678",
+        safe_runtime_payload,
+    )
+    check(
+        "DATETIME_JSON_SERIALIZATION",
+        safe_runtime_payload["created_at"].startswith("2026-09-01T12:30:00"),
+        safe_runtime_payload,
+    )
+
     failed = [c for c in cases if not c["passed"]]
     return {
         "status": "PASS" if not failed else "FAIL",
@@ -2070,7 +2128,7 @@ def register(core):
 
     @app.get(status_route)
     def status():
-        return JSONResponse({
+        return _json_response({
             "status": "READY",
             "version": VERSION,
             "mode": MODE,
@@ -2088,21 +2146,21 @@ def register(core):
 
     @app.get("/api/property-brain-foundation/regression")
     def regression_route():
-        return JSONResponse(regression())
+        return _json_response(regression())
 
     @app.get("/api/property-brain-foundation/sources/discover")
     def sources_discover():
-        return JSONResponse(discover_sources(engine))
+        return _json_response(discover_sources(engine))
 
     @app.get("/api/property-brain-foundation/sources/curriculum")
     def sources_curriculum(total_messages: int = Query(25, ge=1, le=100)):
-        return JSONResponse(curriculum_plan(engine, total_messages))
+        return _json_response(curriculum_plan(engine, total_messages))
 
     @app.post("/api/property-brain-foundation/sources/import-curriculum")
     def sources_import_curriculum(payload: Dict[str, Any] = Body(default={})):
         total_messages = int((payload or {}).get("total_messages") or 25)
         total_messages = max(1, min(total_messages, 100))
-        return JSONResponse(import_curriculum(engine, total_messages))
+        return _json_response(import_curriculum(engine, total_messages))
 
     @app.post("/api/property-brain-foundation/sources/import")
     def sources_import(payload: Dict[str, Any] = Body(...)):
@@ -2112,12 +2170,12 @@ def register(core):
         if not table_name or not column_name:
             raise HTTPException(400, "table and column are required")
         limit = max(1, min(limit, 250))
-        return JSONResponse(import_sources(engine, table_name, column_name, limit))
+        return _json_response(import_sources(engine, table_name, column_name, limit))
 
     @app.post("/api/property-brain-foundation/propose")
     def propose(payload: Dict[str, Any] = Body(...)):
         raw = str(payload.get("raw_text") or "")
-        return JSONResponse({
+        return _json_response({
             "status": "PASS",
             "spans": [
                 {**s, "proposal": propose_fields(s["text"])}
@@ -2128,31 +2186,31 @@ def register(core):
 
     @app.get("/api/property-brain-foundation/next-span")
     def next_span_route(labeler_id: Optional[str] = Query(None)):
-        return JSONResponse(next_span(engine, labeler_id))
+        return _json_response(next_span(engine, labeler_id))
 
     @app.post("/api/property-brain-foundation/span/{span_id}/label")
     def label_span(span_id: str, payload: Dict[str, Any] = Body(...)):
-        return JSONResponse(save_label(engine, span_id, payload))
+        return _json_response(save_label(engine, span_id, payload))
 
     @app.post("/api/property-brain-foundation/relationship")
     def relationship(payload: Dict[str, Any] = Body(...)):
-        return JSONResponse(save_relationship(engine, payload))
+        return _json_response(save_relationship(engine, payload))
 
     @app.get("/api/property-brain-foundation/progress")
     def progress_route():
-        return JSONResponse(progress(engine))
+        return _json_response(progress(engine))
 
     @app.get("/api/property-brain-foundation/disagreements")
     def disagreements_route():
-        return JSONResponse(disagreements(engine))
+        return _json_response(disagreements(engine))
 
     @app.get("/api/property-brain-foundation/gold/export")
     def gold_export(limit: int = Query(1000, ge=1, le=5000)):
-        return JSONResponse(export_gold(engine, limit))
+        return _json_response(export_gold(engine, limit))
 
     @app.get("/api/property-brain-foundation/evaluation/boundary")
     def evaluation_boundary(limit: int = Query(500, ge=1, le=5000)):
-        return JSONResponse(boundary_baseline(engine, limit))
+        return _json_response(boundary_baseline(engine, limit))
 
     return {
         "status": "REGISTERED",
