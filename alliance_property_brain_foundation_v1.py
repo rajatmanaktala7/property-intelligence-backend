@@ -13,8 +13,8 @@ from fastapi import Body, HTTPException, Query
 from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy import text
 
-VERSION = "1.1.0-ALLIANCE-PROPERTY-BRAIN-FOUNDATION"
-MODE = "PROPERTY_AWARE_SOURCE_SELECTOR_EVIDENCE_SPAN_GOLD_LAB"
+VERSION = "1.2.0-ALLIANCE-PROPERTY-BRAIN-FOUNDATION"
+MODE = "TRUSTED_EVIDENCE_CURRICULUM_GOLD_LAB"
 
 # ---------------------------------------------------------------------------
 # Safety
@@ -312,6 +312,35 @@ BAD_TABLE_RE = re.compile(
     re.I,
 )
 
+DERIVED_TEXT_COLUMN_RE = re.compile(
+    r"(?:^|_)(?:frontage|floor|location|property_name|configuration|preferred_locations|"
+    r"source_detail|evidence_basis|raw_value|remarks)(?:$|_)",
+    re.I,
+)
+
+DERIVED_OR_AUX_TABLE_RE = re.compile(
+    r"^(?:ai_property_match_index|pi_hospitality_phone_evidence|"
+    r"pi_hospitality_enrichment_evidence|pi_message_drafts|"
+    r"pi_operational_properties|aci_|pi_marketing_contacts|"
+    r"pi_contact_directory_v2|ai_whatsapp_area_intelligence|"
+    r"pi_property_contact_links)$",
+    re.I,
+)
+
+TRUSTED_GOLD_SOURCES = [
+    ("ai_whatsapp_purity", "raw_text", "WHATSAPP_EVIDENCE", 8),
+    ("alliance_live_feed_entities", "raw_message", "WHATSAPP_EVIDENCE", 5),
+    ("alliance_property_listings", "raw_text", "SEGMENTED_PROPERTY_EVIDENCE", 4),
+    ("ai_clean_property_entity", "raw_text", "SEGMENTED_PROPERTY_EVIDENCE", 2),
+    ("pb_raw_evidence", "raw_text", "PROPERTY_BRAIN_EVIDENCE", 3),
+    ("ai_demand_signals", "source_contact_text", "REQUIREMENT_EVIDENCE", 3),
+]
+
+HARD_BOUNDARY_SOURCES = [
+    ("pi_whatsapp_normalized_property", "raw_message", "HARD_BOUNDARY_EVIDENCE", 2),
+    ("pi_whatsapp_newspaper_format", "raw_message", "HARD_BOUNDARY_EVIDENCE", 1),
+]
+
 PROPERTY_TYPE_RE = re.compile(
     r"\b(?:BHK|FLAT|APARTMENT|FLOOR|VILLA|KOTHI|HOUSE|BUNGALOW|PLOT|LAND|"
     r"SHOP|SHOWROOM|SCO|OFFICE|COMMERCIAL|WAREHOUSE|GODOWN|HOTEL|BANQUET|"
@@ -507,12 +536,19 @@ def _profile_text_column(
 
     source_class = _source_class(table_name, column_name)
 
-    # Eligibility requires actual property language, not merely distinct text.
+    derived_column = bool(DERIVED_TEXT_COLUMN_RE.search(column_name))
+    derived_table = bool(DERIVED_OR_AUX_TABLE_RE.search(table_name))
+    sufficient_diversity = unique >= 20 and ratio >= 0.10
+
     eligible = (
-        property_like >= 0.15
-        and error_like <= 0.10
-        and id_like <= 0.20
+        property_like >= 0.20
+        and strong_property_like >= 0.10
+        and error_like <= 0.05
+        and id_like <= 0.10
         and avg_len >= 35
+        and sufficient_diversity
+        and not derived_column
+        and not derived_table
     )
 
     # Property semantics dominate score. Diversity prevents repeated dumps
@@ -543,29 +579,30 @@ def _profile_text_column(
         "avg_property_signals": round(avg_signals, 3),
         "error_like_ratio": round(error_like, 4),
         "id_like_ratio": round(id_like, 4),
+        "derived_column": bool(derived_column),
+        "derived_or_aux_table": bool(derived_table),
+        "sufficient_diversity": bool(sufficient_diversity),
         "eligible": bool(eligible),
         "score": round(score, 2),
     }
 
 def discover_sources(engine) -> Dict[str, Any]:
     profiles: List[Dict[str, Any]] = []
+    available_tables = set(_tables(engine))
 
-    for table_name in _tables(engine):
-        if BAD_TABLE_RE.search(table_name):
+    for table_name in sorted(available_tables):
+        if BAD_TABLE_RE.search(table_name) or DERIVED_OR_AUX_TABLE_RE.search(table_name):
             continue
-
         try:
             count = _row_count(engine, table_name)
         except Exception:
             continue
-
         if count < 20:
             continue
 
         cols = _columns(engine, table_name)
         textual = [
-            c["column_name"]
-            for c in cols
+            c["column_name"] for c in cols
             if str(c["data_type"]).lower()
             in {"text", "character varying", "character", "varchar"}
         ]
@@ -574,6 +611,7 @@ def discover_sources(engine) -> Dict[str, Any]:
             c for c in textual
             if TEXT_HINT_RE.search(c)
             and not BAD_TEXT_COLUMN_RE.search(c)
+            and not DERIVED_TEXT_COLUMN_RE.search(c)
         ]
 
         for col in candidates[:12]:
@@ -592,57 +630,58 @@ def discover_sources(engine) -> Dict[str, Any]:
         reverse=True,
     )
 
-    recommended = [p for p in ranked if p.get("eligible")][:15]
+    recommended = [p for p in ranked if p.get("eligible")][:20]
+    by_key = {(p.get("table"), p.get("column")): p for p in profiles}
 
-    # Build a mixed curriculum. We prefer more than one evidence class so
-    # the first Gold pilot is not dominated by one ingestion path.
     curriculum = []
-    used = set()
+    rejected_trusted = []
+    for table_name, column_name, source_class, default_weight in (
+        TRUSTED_GOLD_SOURCES + HARD_BOUNDARY_SOURCES
+    ):
+        profile = by_key.get((table_name, column_name))
+        if not profile:
+            rejected_trusted.append({
+                "table": table_name,
+                "column": column_name,
+                "reason": "NOT_FOUND_OR_NOT_PROFILED",
+            })
+            continue
+        if not profile.get("eligible"):
+            rejected_trusted.append({
+                "table": table_name,
+                "column": column_name,
+                "reason": "FAILED_SEMANTIC_OR_DIVERSITY_GATE",
+                "profile": profile,
+            })
+            continue
 
-    desired_classes = [
-        "WHATSAPP_EVIDENCE",
-        "SEGMENTED_PROPERTY_EVIDENCE",
-        "PROPERTY_BRAIN_EVIDENCE",
-        "REQUIREMENT_EVIDENCE",
-        "PRINT_EVIDENCE",
-        "PROPERTY_EVIDENCE",
-    ]
-
-    for source_class in desired_classes:
-        candidate = next(
-            (
-                p for p in recommended
-                if p.get("source_class") == source_class
-                and (p["table"], p["column"]) not in used
-            ),
-            None,
-        )
-        if candidate:
-            used.add((candidate["table"], candidate["column"]))
-            curriculum.append(candidate)
-
-    for p in recommended:
-        if len(curriculum) >= 6:
-            break
-        key = (p["table"], p["column"])
-        if key not in used:
-            used.add(key)
-            curriculum.append(p)
+        item = dict(profile)
+        item["source_class"] = source_class
+        item["default_weight"] = default_weight
+        item["trusted_gold_source"] = True
+        curriculum.append(item)
 
     return {
         "status": "PASS",
         "version": VERSION,
-        "selector": "PROPERTY_AWARE_SEMANTIC_DENSITY_V1",
+        "selector": "TRUSTED_SOURCE_PLUS_SEMANTIC_GATE_V2",
         "ranked_sources": ranked[:40],
         "recommended_sources": recommended,
         "recommended_curriculum": curriculum,
+        "rejected_trusted_sources": rejected_trusted,
         "selection_rules": {
             "reject_identifier_columns": True,
             "reject_error_log_tables": True,
-            "minimum_property_like_ratio": 0.15,
-            "maximum_error_like_ratio": 0.10,
-            "maximum_id_like_ratio": 0.20,
-            "mixed_source_curriculum": True,
+            "reject_derived_index_fields": True,
+            "reject_auxiliary_hospitality_contact_evidence": True,
+            "minimum_property_like_ratio": 0.20,
+            "minimum_strong_property_like_ratio": 0.10,
+            "minimum_distinct_examples": 20,
+            "minimum_distinct_ratio": 0.10,
+            "maximum_error_like_ratio": 0.05,
+            "maximum_id_like_ratio": 0.10,
+            "trusted_source_curriculum": True,
+            "hard_boundary_examples_capped": True,
         },
         "read_only_discovery": True,
     }
@@ -653,23 +692,27 @@ def curriculum_plan(engine, total_messages: int = 25) -> Dict[str, Any]:
 
     if not curriculum:
         return {
-            "status": "NO_ELIGIBLE_PROPERTY_SOURCES",
+            "status": "NO_TRUSTED_ELIGIBLE_PROPERTY_SOURCES",
             "version": VERSION,
             "plan": [],
             "total_messages": 0,
+            "rejected_trusted_sources": discovery.get("rejected_trusted_sources", []),
         }
 
-    total_messages = max(1, min(int(total_messages), 100))
-    base = max(1, total_messages // len(curriculum))
-    remaining = total_messages
+    requested = max(1, min(int(total_messages), 100))
+    total_weight = sum(max(1, int(x.get("default_weight") or 1)) for x in curriculum)
 
     plan = []
+    assigned = 0
     for idx, src in enumerate(curriculum):
-        slots_left = len(curriculum) - idx
-        take = base if slots_left > 1 else remaining
-        take = min(take, remaining)
+        weight = max(1, int(src.get("default_weight") or 1))
+        if idx == len(curriculum) - 1:
+            take = requested - assigned
+        else:
+            take = max(1, round(requested * weight / total_weight))
+            take = min(take, requested - assigned)
         if take <= 0:
-            break
+            continue
 
         plan.append({
             "table": src["table"],
@@ -677,20 +720,53 @@ def curriculum_plan(engine, total_messages: int = 25) -> Dict[str, Any]:
             "source_class": src.get("source_class"),
             "messages": take,
             "property_like_ratio": src.get("property_like_ratio"),
+            "strong_property_like_ratio": src.get("strong_property_like_ratio"),
+            "distinct": src.get("distinct"),
             "distinct_ratio": src.get("distinct_ratio"),
             "avg_len": src.get("avg_len"),
+            "trusted_gold_source": True,
         })
-        remaining -= take
+        assigned += take
+        if assigned >= requested:
+            break
+
+    planned = sum(x["messages"] for x in plan)
+    if plan and planned != requested:
+        plan[0]["messages"] += requested - planned
+
+    cap = max(1, int(round(requested * 0.40)))
+    overflow = 0
+    for item in plan:
+        if item["messages"] > cap:
+            overflow += item["messages"] - cap
+            item["messages"] = cap
+
+    while overflow > 0:
+        progressed = False
+        for item in plan:
+            if item["messages"] < cap and overflow > 0:
+                item["messages"] += 1
+                overflow -= 1
+                progressed = True
+        if not progressed:
+            break
 
     return {
         "status": "PASS",
         "version": VERSION,
-        "requested_total_messages": total_messages,
+        "requested_total_messages": requested,
         "planned_total_messages": sum(x["messages"] for x in plan),
         "plan": plan,
+        "guardrails": {
+            "trusted_sources_only": True,
+            "derived_fields_forbidden": True,
+            "single_source_max_fraction": 0.40,
+            "production_writes": False,
+        },
         "note": (
-            "This is a Gold-Lab sampling curriculum, not production ingestion. "
-            "Humans remain the source of truth."
+            "Human Gold-Lab sampling only. Derived match-index fields, IDs, "
+            "hospitality contact enrichment, logs and low-diversity repeated "
+            "dumps are excluded from the curriculum."
         ),
     }
 
@@ -1922,6 +1998,30 @@ Rent 4 Lac
         "WHATSAPP_SOURCE_CLASS",
         _source_class("ai_whatsapp_purity", "raw_text") == "WHATSAPP_EVIDENCE",
         _source_class("ai_whatsapp_purity", "raw_text"),
+    )
+
+    check(
+        "MATCH_INDEX_DERIVED_TABLE_REJECTED",
+        bool(DERIVED_OR_AUX_TABLE_RE.search("ai_property_match_index")),
+        "ai_property_match_index",
+    )
+    check(
+        "HOSPITALITY_PHONE_EVIDENCE_REJECTED",
+        bool(DERIVED_OR_AUX_TABLE_RE.search("pi_hospitality_phone_evidence")),
+        "pi_hospitality_phone_evidence",
+    )
+    check(
+        "FRONTAGE_RAW_REJECTED",
+        bool(DERIVED_TEXT_COLUMN_RE.search("frontage_raw")),
+        "frontage_raw",
+    )
+    check(
+        "PRIMARY_WHATSAPP_SOURCE_TRUSTED",
+        any(
+            t == "ai_whatsapp_purity" and c == "raw_text"
+            for t, c, _, _ in TRUSTED_GOLD_SOURCES
+        ),
+        "ai_whatsapp_purity.raw_text",
     )
 
     failed = [c for c in cases if not c["passed"]]
