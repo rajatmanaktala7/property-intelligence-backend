@@ -14,8 +14,8 @@ from fastapi import Body, HTTPException, Query
 from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy import text
 
-VERSION = "1.4.0-ALLIANCE-PROPERTY-BRAIN-FOUNDATION"
-MODE = "ATOMIC_SPAN_EDITOR_GOLD_LINEAGE_SAFE"
+VERSION = "1.5.0-ALLIANCE-PROPERTY-BRAIN-FOUNDATION"
+MODE = "CONTEXT_AWARE_ATOMIC_INVENTORY_BOUNDARY_ENGINE"
 
 # ---------------------------------------------------------------------------
 # Safety
@@ -1841,37 +1841,197 @@ def _context_from_ranges(raw: str, ranges: List[Tuple[int, int]]) -> List[str]:
     return snippets
 
 def automatic_atomic_split(text_value: str) -> Dict[str, Any]:
+    # Foundation 1.5 deterministic atomic boundary engine.
+    # Handles repeated explicit property headings and locality headers followed
+    # by compact inventory bullets. Every child remains an exact ordered
+    # substring of the parent evidence.
     raw = str(text_value or "")
     lines = _line_ranges(raw)
+
+    def clean_locality(line: str) -> Optional[str]:
+        original = str(line or "").strip()
+        if not original:
+            return None
+        if original.startswith("📍"):
+            val = original.lstrip("📍").strip()
+            val = re.sub(r"[*_`]+", "", val).strip()
+            return val or None
+
+        cleaned = re.sub(r"[*_`]+", "", original).strip()
+        if (
+            2 <= len(cleaned) <= 60
+            and not PROPERTY_FACT_RE.search(cleaned)
+            and not PHONE_RE.search(cleaned)
+            and not MONEY_RE.search(cleaned)
+            and not AREA_RE.search(cleaned)
+            and re.search(r"[A-Za-z]", cleaned)
+            and not re.search(
+                r"\b(?:DIRECT CLIENT|INVENTORY|FOR MORE DETAILS|SITE VISITS?|"
+                r"CONTACT|PICTURES?|AVAILABLE|OPTIONS?)\b",
+                cleaned,
+                re.I,
+            )
+            and re.fullmatch(r"[A-Za-z0-9 .&()/'-]{2,60}", cleaned)
+        ):
+            return cleaned
+        return None
+
+    def is_contact_or_footer(line: str) -> bool:
+        c = _boundary_clean_line(line)
+        return bool(
+            ATOMIC_CONTEXT_START_RE.search(c)
+            or PHONE_RE.search(line or "")
+            or re.search(
+                r"\b(?:FOR MORE DETAILS|SITE VISITS?|CONTACT|CALL|"
+                r"GLOBAL HOMES|ASSOCIATES|REALTY|REALITY)\b",
+                c,
+                re.I,
+            )
+        )
+
+    def is_compact_property_anchor(line: str) -> bool:
+        s = str(line or "").strip()
+        if not s:
+            return False
+        bullet = bool(re.match(r"^[•▪●◦·\-–—]\s*", s))
+        cleaned = re.sub(r"^[•▪●◦·\-–—]\s*", "", s)
+        area_signal = bool(
+            AREA_RE.search(cleaned)
+            or re.search(
+                r"\b\d+(?:,\d{3})*(?:\.\d+)?\s*"
+                r"(?:SQ\.?\s*YARDS?|SQ\.?\s*YDS?|SQYDS?|SQYD|YARDS?|GAJ|"
+                r"SQ\.?\s*FT|SQFT|SFT)\b",
+                cleaned,
+                re.I,
+            )
+        )
+        if not area_signal:
+            return False
+        return bullet or cleaned.count("|") >= 1
+
     heading_starts: List[int] = []
-    for start, _end, line in lines:
+    for start_pos, _end_pos, line in lines:
         clean = _boundary_clean_line(line)
         if ATOMIC_PROPERTY_HEADING_RE.search(clean):
-            heading_starts.append(start)
-    if len(heading_starts) < 2:
-        return {"status": "NO_AUTOMATIC_SPLIT", "children": [], "shared_context": [], "reason": "Fewer than two strong property headings were found."}
+            heading_starts.append(start_pos)
+
+    if len(heading_starts) >= 2:
+        ranges: List[Tuple[int, int]] = []
+        children: List[Dict[str, Any]] = []
+        for idx, start_pos in enumerate(heading_starts):
+            raw_end = heading_starts[idx + 1] if idx + 1 < len(heading_starts) else len(raw)
+            child_start, child_end = _trim_atomic_block(raw, start_pos, raw_end)
+            if child_end <= child_start:
+                continue
+            child_text = raw[child_start:child_end].strip()
+            if not child_text:
+                continue
+            ranges.append((child_start, child_end))
+            children.append({
+                "child_order": len(children) + 1,
+                "start_offset": child_start,
+                "end_offset": child_end,
+                "text": child_text,
+                "proposal": propose_fields(child_text),
+                "context": {"boundary_strategy": "EXPLICIT_PROPERTY_HEADING"},
+            })
+        if len(children) >= 2:
+            return {
+                "status": "PASS",
+                "children": children,
+                "shared_context": _context_from_ranges(raw, ranges),
+                "boundary_strategy": "EXPLICIT_PROPERTY_HEADING",
+                "human_confirmation_required": True,
+            }
+
+    anchors: List[Dict[str, Any]] = []
+    current_locality: Optional[str] = None
+
+    for idx, (start_pos, end_pos, line) in enumerate(lines):
+        loc = clean_locality(line)
+        if loc:
+            current_locality = loc
+            continue
+
+        if is_compact_property_anchor(line):
+            anchors.append({
+                "line_index": idx,
+                "start_offset": start_pos,
+                "line_end": end_pos,
+                "locality": current_locality,
+            })
+
+    if len(anchors) < 2:
+        return {
+            "status": "NO_AUTOMATIC_SPLIT",
+            "children": [],
+            "shared_context": [],
+            "reason": "Fewer than two safe property anchors were found.",
+        }
 
     ranges: List[Tuple[int, int]] = []
     children: List[Dict[str, Any]] = []
-    for idx, start in enumerate(heading_starts):
-        raw_end = heading_starts[idx + 1] if idx + 1 < len(heading_starts) else len(raw)
-        child_start, child_end = _trim_atomic_block(raw, start, raw_end)
-        if child_end <= child_start:
-            continue
-        child_text = raw[child_start:child_end].strip()
+
+    for i, anchor in enumerate(anchors):
+        start_pos = int(anchor["start_offset"])
+        next_anchor_start = int(anchors[i + 1]["start_offset"]) if i + 1 < len(anchors) else len(raw)
+
+        child_end = next_anchor_start
+        for j in range(int(anchor["line_index"]) + 1, len(lines)):
+            ls, _le, line = lines[j]
+            if ls >= next_anchor_start:
+                break
+            if clean_locality(line) or is_contact_or_footer(line):
+                child_end = ls
+                break
+
+        block = raw[start_pos:child_end]
+        child_text = block.strip()
         if not child_text:
             continue
-        ranges.append((child_start, child_end))
+
+        left_trim = len(block) - len(block.lstrip())
+        right_trimmed = block.rstrip()
+        exact_start = start_pos + left_trim
+        exact_end = start_pos + len(right_trimmed)
+
+        locality = anchor.get("locality")
+        proposal = propose_fields(child_text)
+        if locality and not proposal.get("locality_hint"):
+            proposal["locality_hint"] = locality
+            proposal.setdefault("context_provenance", {})
+            proposal["context_provenance"]["locality_hint"] = "INHERITED_FROM_SOURCE_LOCALITY_HEADER"
+
+        ranges.append((exact_start, exact_end))
         children.append({
             "child_order": len(children) + 1,
-            "start_offset": child_start,
-            "end_offset": child_end,
+            "start_offset": exact_start,
+            "end_offset": exact_end,
             "text": child_text,
-            "proposal": propose_fields(child_text),
+            "proposal": proposal,
+            "context": {
+                "boundary_strategy": "LOCALITY_COMPACT_INVENTORY",
+                "inherited_locality": locality,
+                "context_is_source_grounded": bool(locality),
+            },
         })
+
     if len(children) < 2:
-        return {"status": "NO_AUTOMATIC_SPLIT", "children": [], "shared_context": [], "reason": "Strong headings were found but fewer than two safe child spans remained."}
-    return {"status": "PASS", "children": children, "shared_context": _context_from_ranges(raw, ranges), "human_confirmation_required": True}
+        return {
+            "status": "NO_AUTOMATIC_SPLIT",
+            "children": [],
+            "shared_context": [],
+            "reason": "Compact inventory anchors were found but fewer than two safe children remained.",
+        }
+
+    return {
+        "status": "PASS",
+        "children": children,
+        "shared_context": _context_from_ranges(raw, ranges),
+        "boundary_strategy": "LOCALITY_COMPACT_INVENTORY",
+        "human_confirmation_required": True,
+    }
+
 
 def split_preview(engine, span_id: str) -> Dict[str, Any]:
     with engine.connect() as conn:
@@ -3186,6 +3346,7 @@ def register(core):
             "curriculum_plan": "/api/property-brain-foundation/sources/curriculum?total_messages=25",
             "atomic_span_editor": True,
             "atomic_split_endpoint": "/api/property-brain-foundation/span/{span_id}/split",
+            "boundary_engine": "CONTEXT_AWARE_ATOMIC_INVENTORY_V1_5",
             "atomic_merge_endpoint": "/api/property-brain-foundation/span/{span_id}/merge-next",
             "academy_tables": sorted(ACADEMY_TABLES),
             "production_write_permission": False,
