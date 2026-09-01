@@ -14,8 +14,8 @@ from fastapi import Body, HTTPException, Query
 from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy import text
 
-VERSION = "1.5.0-ALLIANCE-PROPERTY-BRAIN-FOUNDATION"
-MODE = "CONTEXT_AWARE_ATOMIC_INVENTORY_BOUNDARY_ENGINE"
+VERSION = "1.6.1-ALLIANCE-PROPERTY-BRAIN-FOUNDATION"
+MODE = "ENTITY_BOUNDARY_INVENTORY_GROUP_INTELLIGENCE_FIXED"
 
 # ---------------------------------------------------------------------------
 # Safety
@@ -39,6 +39,7 @@ ACADEMY_TABLES = {
 
 CONTENT_TYPES = {
     "PROPERTY_AVAILABILITY",
+    "INVENTORY_GROUP",
     "REQUIREMENT",
     "CONTACT_ONLY",
     "PROJECT_HEADER",
@@ -1840,12 +1841,245 @@ def _context_from_ranges(raw: str, ranges: List[Tuple[int, int]]) -> List[str]:
             snippets.append(gap)
     return snippets
 
+
+# ---------------------------------------------------------------------------
+# Foundation 1.6A: entity scope + inventory-group intelligence
+# ---------------------------------------------------------------------------
+
+V16_PLOT_RANGE_RE = re.compile(
+    r"\bPLOT\s*NO\.?\s*(\d+)\s*(?:TO|-|–|—)\s*(\d+)\b",
+    re.I,
+)
+
+V16_AREA_RANGE_RE = re.compile(
+    r"(?P<min>\d+(?:\.\d+)?)\s*(?:-|–|—|TO)\s*(?P<max>\d+(?:\.\d+)?)\s*"
+    r"(?P<unit>SQ\.?\s*FT|SQFT|SFT|SQ\.?\s*YD|SQYD|SQYARD|SQYARDS|YARDS?)\b",
+    re.I,
+)
+
+V16_AREA_OPTIONS_RE = re.compile(
+    r"(?P<a>\d+(?:\.\d+)?)\s*&\s*(?P<b>\d+(?:\.\d+)?)\s*"
+    r"(?P<unit>SQ\.?\s*FT|SQFT|SFT|SQ\.?\s*YD|SQYD|SQYARD|SQYARDS|YARDS?)\b",
+    re.I,
+)
+
+def _v16_clean_group_text(text_value: str) -> str:
+    return re.sub(r"[*_`#]+", " ", str(text_value or "")).strip()
+
+def _v16_group_kind(text_value: str) -> Optional[str]:
+    s = _v16_clean_group_text(text_value)
+
+    if re.search(r"\bLUXURY\s+FLOORS?\b", s, re.I):
+        return "LUXURY_FLOORS"
+    if re.search(r"\bRETAIL\s+SHOPS?\b|\bSHOPS?\b", s, re.I):
+        return "SHOPS"
+    if re.search(r"\bOFFICE\s+SPACE\b|\bOFFICES?\b", s, re.I):
+        return "OFFICE"
+    if re.search(r"\bSCO\b", s, re.I):
+        return "SCO"
+    if re.search(r"\bAFFORDABLE\s+FLATS?\b|\bFLATS?\b", s, re.I):
+        return "FLATS"
+    if re.search(r"\bPLOTS?\b|\bPLOT\s*NO\b", s, re.I):
+        return "PLOTS"
+
+    # Plot-number ranges are inherently grouped plot inventory even when the
+    # word "plots" is absent from the block.
+    if V16_PLOT_RANGE_RE.search(s):
+        return "PLOTS"
+
+    return None
+
+def _v16_is_inventory_group(text_value: str) -> bool:
+    s = _v16_clean_group_text(text_value)
+
+    if V16_PLOT_RANGE_RE.search(s):
+        return True
+    if V16_AREA_RANGE_RE.search(s):
+        return True
+    if V16_AREA_OPTIONS_RE.search(s) and re.search(r"\bPLOTS?\b", s, re.I):
+        return True
+    if re.search(r"\bMULTIPLE\s+PROJECTS?\b", s, re.I):
+        return True
+    if re.search(r"\bLUXURY\s+FLOORS?\b.*\bAVAILABLE\b.*(?:&|AND).*\bSECTOR\b", s, re.I | re.S):
+        return True
+    if re.search(
+        r"^(?:PLOTS?|SHOPS?|SCO|RETAIL\s+SHOPS?|OFFICE\s+SPACE|AFFORDABLE\s+FLATS?)\b",
+        s,
+        re.I,
+    ):
+        return True
+    return False
+
+def _v16_inventory_group_fields(text_value: str) -> Dict[str, Any]:
+    s = str(text_value or "")
+    if not _v16_is_inventory_group(s):
+        return {}
+
+    group: Dict[str, Any] = {
+        "entity_scope": "INVENTORY_GROUP",
+        "do_not_expand_to_physical_properties": True,
+    }
+
+    kind = _v16_group_kind(s)
+    if kind:
+        group["inventory_kind"] = kind
+
+    m = V16_PLOT_RANGE_RE.search(_v16_clean_group_text(s))
+    if m:
+        group["plot_number_range"] = {
+            "from": int(m.group(1)),
+            "to": int(m.group(2)),
+            "evidence": m.group(0),
+        }
+
+    m = V16_AREA_RANGE_RE.search(_v16_clean_group_text(s))
+    if m:
+        lo = float(m.group("min"))
+        hi = float(m.group("max"))
+        group["area_range"] = {
+            "min": int(lo) if lo.is_integer() else lo,
+            "max": int(hi) if hi.is_integer() else hi,
+            "unit": _normalized_area_unit(m.group("unit")),
+            "evidence": m.group(0),
+        }
+
+    m = V16_AREA_OPTIONS_RE.search(_v16_clean_group_text(s))
+    if m:
+        a = float(m.group("a"))
+        b = float(m.group("b"))
+        group["area_options"] = [
+            int(a) if a.is_integer() else a,
+            int(b) if b.is_integer() else b,
+        ]
+        group["area_options_unit"] = _normalized_area_unit(m.group("unit"))
+        group["area_options_evidence"] = m.group(0)
+
+    configs = re.findall(r"\b(\d+(?:\.\d+)?)\s*BHK\b", _v16_clean_group_text(s), re.I)
+    if configs:
+        group["configuration_options"] = [
+            (x[:-2] if x.endswith(".0") else x) + " BHK" for x in configs
+        ]
+
+    if re.search(r"\bMULTIPLE\s+PROJECTS?\b", _v16_clean_group_text(s), re.I):
+        group["project_scope"] = "MULTIPLE_PROJECTS"
+
+    return group
+
+def _v16_enrich_proposal(text_value: str, proposal: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    p = dict(proposal or propose_fields(text_value))
+    group = _v16_inventory_group_fields(text_value)
+    if not group:
+        return p
+
+    p["content_type_hint"] = "INVENTORY_GROUP"
+    pf = dict(p.get("property_fields") or {})
+    pf.update(group)
+    p["property_fields"] = pf
+    p["entity_scope"] = "INVENTORY_GROUP"
+    p["human_review_required"] = True
+    return p
+
+def _v16_entity_group_split(raw: str) -> Optional[Dict[str, Any]]:
+    lines = _line_ranges(raw)
+    if not lines:
+        return None
+
+    trigger = (
+        V16_PLOT_RANGE_RE.search(_v16_clean_group_text(raw))
+        or re.search(r"\bMULTIPLE\s+PROJECTS?\b", _v16_clean_group_text(raw), re.I)
+        or re.search(
+            r"^\s*#\s*(?:\*|_)?(?:PLOTS?|SHOPS?|SCO|RETAIL|OFFICE|AFFORDABLE|LUXURY)",
+            raw,
+            re.I | re.M,
+        )
+    )
+    if not trigger:
+        return None
+
+    starts: List[Tuple[int, int, str]] = []
+
+    block_re = re.compile(
+        r"^\s*[A-Z]\s*BLOCK\b.*\b\d+(?:\.\d+)?\s*"
+        r"(?:SQYDS?|SQYD|SQ\.?\s*YDS?|YARDS?|SQFT|SFT)\b",
+        re.I,
+    )
+    broad_re = re.compile(
+        r"^\s*#\s*(?:\*|_)?(?:LUXURY\s+FLOORS?|PLOTS?|SHOPS?|SCO|"
+        r"RETAIL\s+SHOPS?|OFFICE\s+SPACE|AFFORDABLE\s+FLATS?)\b",
+        re.I,
+    )
+
+    for idx, (start, _end, line) in enumerate(lines):
+        clean = re.sub(r"[*_`]+", "", str(line or "")).strip()
+        if block_re.search(clean) or broad_re.search(clean):
+            starts.append((start, idx, clean))
+
+    if len(starts) < 2:
+        return None
+
+    children: List[Dict[str, Any]] = []
+    ranges: List[Tuple[int, int]] = []
+
+    for i, (start, line_idx, _clean) in enumerate(starts):
+        end = starts[i + 1][0] if i + 1 < len(starts) else len(raw)
+
+        for j in range(line_idx + 1, len(lines)):
+            ls, _le, line = lines[j]
+            if ls >= end:
+                break
+            clean = re.sub(r"[*_`]+", "", str(line or "")).strip()
+            if re.fullmatch(r"(?:GURGAON|GURUGRAM)\s+PROPERTIES", clean, re.I):
+                end = ls
+                break
+            if re.search(r"^FOR\s+ANY\s+QUERY\b|^FOR\s+MORE\s+DETAILS\b", clean, re.I):
+                end = ls
+                break
+
+        block = raw[start:end]
+        text_value = block.strip()
+        if not text_value:
+            continue
+
+        left = len(block) - len(block.lstrip())
+        exact_start = start + left
+        exact_end = start + len(block.rstrip())
+        proposal = _v16_enrich_proposal(text_value)
+
+        children.append({
+            "child_order": len(children) + 1,
+            "start_offset": exact_start,
+            "end_offset": exact_end,
+            "text": text_value,
+            "proposal": proposal,
+            "context": {
+                "boundary_strategy": "ENTITY_GROUP_BOUNDARY_V1_6A",
+                "entity_scope": proposal.get("entity_scope") or "ATOMIC_OR_REVIEW",
+            },
+        })
+        ranges.append((exact_start, exact_end))
+
+    if len(children) < 2:
+        return None
+
+    return {
+        "status": "PASS",
+        "children": children,
+        "shared_context": _context_from_ranges(raw, ranges),
+        "boundary_strategy": "ENTITY_GROUP_BOUNDARY_V1_6A",
+        "human_confirmation_required": True,
+        "range_expansion_forbidden": True,
+    }
+
 def automatic_atomic_split(text_value: str) -> Dict[str, Any]:
+    raw = str(text_value or "")
+    v16 = _v16_entity_group_split(raw)
+    if v16 is not None:
+        return v16
+
     # Foundation 1.5 deterministic atomic boundary engine.
     # Handles repeated explicit property headings and locality headers followed
     # by compact inventory bullets. Every child remains an exact ordered
     # substring of the parent evidence.
-    raw = str(text_value or "")
     lines = _line_ranges(raw)
 
     def clean_locality(line: str) -> Optional[str]:
@@ -1932,7 +2166,7 @@ def automatic_atomic_split(text_value: str) -> Dict[str, Any]:
                 "start_offset": child_start,
                 "end_offset": child_end,
                 "text": child_text,
-                "proposal": propose_fields(child_text),
+                "proposal": _v16_enrich_proposal(child_text),
                 "context": {"boundary_strategy": "EXPLICIT_PROPERTY_HEADING"},
             })
         if len(children) >= 2:
@@ -1996,7 +2230,7 @@ def automatic_atomic_split(text_value: str) -> Dict[str, Any]:
         exact_end = start_pos + len(right_trimmed)
 
         locality = anchor.get("locality")
-        proposal = propose_fields(child_text)
+        proposal = _v16_enrich_proposal(child_text)
         if locality and not proposal.get("locality_hint"):
             proposal["locality_hint"] = locality
             proposal.setdefault("context_provenance", {})
@@ -2777,7 +3011,7 @@ async function loadNext(){
     `Span ${current.span_order} | Proposal confidence: ${current.proposal_confidence}`;
   const p=current.proposal||{};
   document.getElementById("contentType").value =
-    ["PROPERTY_AVAILABILITY","REQUIREMENT","FRAGMENT"].includes(p.content_type_hint)
+    ["PROPERTY_AVAILABILITY","INVENTORY_GROUP","REQUIREMENT","FRAGMENT"].includes(p.content_type_hint)
       ? p.content_type_hint : "FRAGMENT";
   document.getElementById("transaction").value=p.transaction_type_hint||"UNKNOWN";
   document.getElementById("city").value=p.city_hint||"";
@@ -3346,7 +3580,9 @@ def register(core):
             "curriculum_plan": "/api/property-brain-foundation/sources/curriculum?total_messages=25",
             "atomic_span_editor": True,
             "atomic_split_endpoint": "/api/property-brain-foundation/span/{span_id}/split",
-            "boundary_engine": "CONTEXT_AWARE_ATOMIC_INVENTORY_V1_5",
+            "boundary_engine": "ENTITY_BOUNDARY_INVENTORY_GROUP_V1_6A",
+            "inventory_group_supported": True,
+            "range_expansion_policy": "NEVER_INVENT_INDIVIDUAL_PROPERTIES",
             "atomic_merge_endpoint": "/api/property-brain-foundation/span/{span_id}/merge-next",
             "academy_tables": sorted(ACADEMY_TABLES),
             "production_write_permission": False,
