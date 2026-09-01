@@ -14,8 +14,8 @@ from fastapi import Body, HTTPException, Query
 from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy import text
 
-VERSION = "1.9.5-ALLIANCE-PROPERTY-BRAIN-FOUNDATION"
-MODE = "PINNED_GOVERNING_LOCALITY_ONLY"
+VERSION = "1.9.6-ALLIANCE-PROPERTY-BRAIN-FOUNDATION"
+MODE = "INLINE_NUMBERED_ATOMIC_SPLIT_FIXED"
 
 # ---------------------------------------------------------------------------
 # Safety
@@ -3616,8 +3616,121 @@ def _v16_entity_group_split(raw: str) -> Optional[Dict[str, Any]]:
         "range_expansion_forbidden": True,
     }
 
+
+# ---------------------------------------------------------------------------
+# Foundation 1.9F: inline numbered atomic split support
+# ---------------------------------------------------------------------------
+
+V19F_INLINE_NUMBER_RE = re.compile(r"(?<![A-Za-z0-9])(?P<num>\d{1,2})\)\s*")
+V19F_CONTACT_TAIL_RE = re.compile(
+    r"\s+(?P<footer>(?:contact|call|for\s+details?|dm)\b.*)$",
+    re.I | re.S,
+)
+
+def _v19f_inline_numbered_split(text_value: str) -> Optional[Dict[str, Any]]:
+    raw = str(text_value or "")
+    matches = list(V19F_INLINE_NUMBER_RE.finditer(raw))
+    if len(matches) < 2:
+        return None
+
+    numbers = [int(m.group("num")) for m in matches]
+    if numbers[0] != 1 or numbers != list(range(1, len(numbers) + 1)):
+        return None
+
+    if not (
+        re.search(r"\b(?:PLOTS?|FLATS?|SHOPS?|OFFICES?|VILLAS?|FLOORS?)\b", raw, re.I)
+        or PROPERTY_TYPE_RE.search(raw)
+    ):
+        return None
+
+    prefix = raw[:matches[0].start()].strip()
+    clean_prefix = re.sub(r"[*_`#]+", "", prefix)
+    prefix_proposal = _v16_enrich_proposal(prefix) if prefix else {}
+    transaction_hint = prefix_proposal.get("transaction_type_hint")
+    project_hint = prefix_proposal.get("project_name_hint")
+
+    m_project = re.search(
+        r"\b(?:PLOTS?|FLATS?|SHOPS?|OFFICES?|VILLAS?|FLOORS?)\s+"
+        r"(?:FOR\s+(?:SALE|RENT)\s+)?IN\s+(.+?)\s*$",
+        clean_prefix,
+        re.I,
+    )
+    if m_project:
+        candidate = m_project.group(1).strip(" ,.-")
+        if candidate and len(candidate) <= 100:
+            project_hint = candidate
+
+    if re.search(r"\bFOR\s+SALE\b", clean_prefix, re.I):
+        transaction_hint = "SALE"
+    elif re.search(r"\bFOR\s+RENT\b", clean_prefix, re.I):
+        transaction_hint = "RENT"
+
+    children = []
+    shared_context = [prefix] if prefix else []
+
+    for i, m in enumerate(matches):
+        start = m.start()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(raw)
+        block = raw[start:end]
+
+        if i == len(matches) - 1:
+            footer_match = V19F_CONTACT_TAIL_RE.search(block)
+            if footer_match:
+                footer_abs_start = start + footer_match.start("footer")
+                footer_text = raw[footer_abs_start:end].strip()
+                if footer_text:
+                    shared_context.append(footer_text)
+                block = raw[start:footer_abs_start]
+
+        child_text = block.strip()
+        if not child_text:
+            continue
+
+        proposal = _v16_enrich_proposal(child_text)
+        child_tx = str(proposal.get("transaction_type_hint") or "").strip().upper()
+        if transaction_hint and child_tx in {"", "UNKNOWN", "AMBIGUOUS"}:
+            proposal["transaction_type_hint"] = transaction_hint
+
+        child_project = str(proposal.get("project_name_hint") or "").strip()
+        if project_hint and not child_project:
+            proposal["project_name_hint"] = project_hint
+
+        proposal.setdefault("context_provenance", {})
+        if isinstance(proposal.get("context_provenance"), dict):
+            if transaction_hint and child_tx in {"", "UNKNOWN", "AMBIGUOUS"}:
+                proposal["context_provenance"]["transaction_type_hint"] = "INHERITED_FROM_SOURCE_PREAMBLE"
+            if project_hint and not child_project:
+                proposal["context_provenance"]["project_name_hint"] = "INHERITED_FROM_SOURCE_PREAMBLE"
+
+        children.append({
+            "child_order": len(children) + 1,
+            "text": child_text,
+            "proposal": proposal,
+            "context": {
+                "boundary_strategy": "INLINE_NUMBERED_ATOMIC_V1_9F",
+                "context_is_source_grounded": bool(prefix),
+                "shared_preamble": prefix or None,
+                "inherited_transaction": transaction_hint,
+                "inherited_project": project_hint,
+            },
+        })
+
+    if len(children) < 2:
+        return None
+
+    return {
+        "status": "PASS",
+        "children": children,
+        "shared_context": [x for x in shared_context if x],
+        "boundary_strategy": "INLINE_NUMBERED_ATOMIC_V1_9F",
+        "human_confirmation_required": True,
+    }
+
 def automatic_atomic_split(text_value: str) -> Dict[str, Any]:
     raw = str(text_value or "")
+    v19f = _v19f_inline_numbered_split(raw)
+    if v19f is not None:
+        return v19f
     v16 = _v16_entity_group_split(raw)
     if v16 is not None:
         return v16
