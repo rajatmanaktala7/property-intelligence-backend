@@ -14,8 +14,8 @@ from fastapi import Body, HTTPException, Query
 from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy import text
 
-VERSION = "1.6.2-ALLIANCE-PROPERTY-BRAIN-FOUNDATION"
-MODE = "ENTITY_BOUNDARY_INVENTORY_GROUP_GOLD_UI_COMPLETE"
+VERSION = "1.7.1-ALLIANCE-PROPERTY-BRAIN-FOUNDATION"
+MODE = "PERSISTENT_SOURCE_GROUNDED_SPLIT_CONTEXT_FIXED"
 
 # ---------------------------------------------------------------------------
 # Safety
@@ -2293,23 +2293,40 @@ def split_preview(engine, span_id: str) -> Dict[str, Any]:
 def _locate_children(parent_text: str, children_payload: Any) -> Tuple[List[Dict[str, Any]], List[str]]:
     if not isinstance(children_payload, list) or len(children_payload) < 2:
         raise HTTPException(400, "At least two child spans are required")
-    children: List[str] = []
+
+    children: List[Dict[str, Any]] = []
     for item in children_payload:
-        value = item.get("text") if isinstance(item, dict) else item
-        value = str(value or "").strip()
+        if isinstance(item, dict):
+            value = str(item.get("text") or "").strip()
+            context = item.get("context") if isinstance(item.get("context"), dict) else {}
+            proposal = item.get("proposal") if isinstance(item.get("proposal"), dict) else {}
+        else:
+            value = str(item or "").strip()
+            context = {}
+            proposal = {}
         if value:
-            children.append(value)
+            children.append({"text": value, "context": context, "proposal": proposal})
+
     if len(children) < 2:
         raise HTTPException(400, "At least two non-empty child spans are required")
+
     located: List[Dict[str, Any]] = []
     cursor = 0
     ranges: List[Tuple[int, int]] = []
     for idx, child in enumerate(children, start=1):
-        start = parent_text.find(child, cursor)
+        child_text = child["text"]
+        start = parent_text.find(child_text, cursor)
         if start < 0:
             raise HTTPException(400, f"Child {idx} is not an exact ordered substring of the parent span. Do not rewrite evidence while splitting; only cut the original text.")
-        end = start + len(child)
-        located.append({"child_order": idx, "start_offset": start, "end_offset": end, "text": child})
+        end = start + len(child_text)
+        located.append({
+            "child_order": idx,
+            "start_offset": start,
+            "end_offset": end,
+            "text": child_text,
+            "context": child.get("context") or {},
+            "proposal": child.get("proposal") or {},
+        })
         ranges.append((start, end))
         cursor = end
     return located, _context_from_ranges(parent_text, ranges)
@@ -2425,7 +2442,17 @@ def split_span(engine, span_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
                 "start_offset": base_start + int(child["start_offset"]),
                 "end_offset": base_start + int(child["end_offset"]),
                 "proposed_text": child["text"], "parent_span_id": span_id,
-                "lineage_metadata": _json({"created_by": labeler_id, "operation": "SPLIT", "reason": reason, "parent_span_id": span_id}),
+                "lineage_metadata": _json({
+                    "created_by": labeler_id,
+                    "operation": "SPLIT",
+                    "reason": reason,
+                    "parent_span_id": span_id,
+                    "source_grounded_context": child.get("context") or {},
+                    "preview_proposal_context": {
+                        k: v for k, v in (child.get("proposal") or {}).items()
+                        if k in {"locality_hint", "city_hint", "project_name_hint", "context_provenance", "entity_scope"}
+                    },
+                }),
             })
         conn.execute(text('''
             UPDATE alliance_gold_spans
@@ -2600,6 +2627,7 @@ def next_span(engine, labeler_id: Optional[str] = None) -> Dict[str, Any]:
                     sp.proposed_end_offset,
                     sp.proposed_text,
                     sp.proposal_confidence,
+                    sp.lineage_metadata,
                     s.raw_text AS source_raw_text,
                     s.source_table,
                     s.sampling_bucket,
@@ -2629,7 +2657,34 @@ def next_span(engine, labeler_id: Optional[str] = None) -> Dict[str, Any]:
     out = dict(row)
     out["span_id"] = str(out["span_id"])
     out["source_message_id"] = str(out["source_message_id"])
-    out["proposal"] = propose_fields(out["proposed_text"])
+    proposal = _v16_enrich_proposal(out["proposed_text"])
+    lineage = _loads(out.get("lineage_metadata"), {})
+    if not isinstance(lineage, dict):
+        lineage = {}
+
+    source_context = lineage.get("source_grounded_context") or {}
+    preview_context = lineage.get("preview_proposal_context") or {}
+
+    if isinstance(preview_context, dict):
+        for key in ("locality_hint", "city_hint", "project_name_hint", "entity_scope"):
+            if not proposal.get(key) and preview_context.get(key):
+                proposal[key] = preview_context.get(key)
+        if preview_context.get("context_provenance"):
+            proposal.setdefault("context_provenance", {})
+            if isinstance(preview_context.get("context_provenance"), dict):
+                proposal["context_provenance"].update(preview_context["context_provenance"])
+
+    if isinstance(source_context, dict):
+        inherited_locality = source_context.get("inherited_locality")
+        if inherited_locality and not proposal.get("locality_hint"):
+            proposal["locality_hint"] = inherited_locality
+            proposal.setdefault("context_provenance", {})
+            proposal["context_provenance"]["locality_hint"] = "INHERITED_FROM_SOURCE_LOCALITY_HEADER"
+        if inherited_locality:
+            proposal["source_grounded_inherited_locality"] = inherited_locality
+
+    out["lineage_metadata"] = lineage
+    out["proposal"] = proposal
     return _json_safe({"status": "PASS", "span": out})
 
 def disagreements(engine) -> Dict[str, Any]:
@@ -3043,12 +3098,16 @@ async function prepareAtomicSplit(){
     if(!r.ok) throw new Error(d.detail||d.message||"Split preview failed");
     if(d.status!=="PASS" || !d.children || d.children.length<2) throw new Error(d.reason||"No safe automatic atomic split found");
     document.getElementById("boundary").value="SPLIT";
-    splitDraft=d.children.map(x=>x.text);
+    splitDraft=d.children.map(x=>({
+      text:x.text,
+      context:x.context||{},
+      proposal:x.proposal||{}
+    }));
     const host=document.getElementById("splitChildren");
     host.innerHTML="";
-    splitDraft.forEach((txt,i)=>{
+    splitDraft.forEach((child,i)=>{
       const label=document.createElement("label"); label.innerText=`Child ${i+1}`;
-      const ta=document.createElement("textarea"); ta.className="splitChild"; ta.value=txt; ta.style.minHeight="125px";
+      const ta=document.createElement("textarea"); ta.className="splitChild"; ta.value=child.text; ta.dataset.childIndex=String(i); ta.style.minHeight="125px";
       host.appendChild(label); host.appendChild(ta);
     });
     const ctx=(d.shared_context||[]).filter(Boolean);
@@ -3065,7 +3124,11 @@ async function confirmAtomicSplit(){
   try{
     if(!current) throw new Error("No span loaded");
     const labeler=document.getElementById("labeler").value.trim(); if(!labeler) throw new Error("Enter Labeler ID / team member name");
-    const children=[...document.querySelectorAll(".splitChild")].map(x=>x.value.trim()).filter(Boolean);
+    const children=[...document.querySelectorAll(".splitChild")].map((x,i)=>({
+      text:x.value.trim(),
+      context:(splitDraft[i]&&splitDraft[i].context)||{},
+      proposal:(splitDraft[i]&&splitDraft[i].proposal)||{}
+    })).filter(x=>x.text);
     if(children.length<2) throw new Error("At least two child spans are required");
     const payload={labeler_id:labeler,children:children,reason:document.getElementById("notes").value.trim()||"Human atomic split in Gold Lab",invalidate_existing_labels:false};
     const r=await fetch(`/api/property-brain-foundation/span/${current.span_id}/split`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});
@@ -3582,7 +3645,8 @@ def register(core):
             "curriculum_plan": "/api/property-brain-foundation/sources/curriculum?total_messages=25",
             "atomic_span_editor": True,
             "atomic_split_endpoint": "/api/property-brain-foundation/span/{span_id}/split",
-            "boundary_engine": "ENTITY_BOUNDARY_INVENTORY_GROUP_V1_6A",
+            "boundary_engine": "PERSISTENT_SOURCE_GROUNDED_CONTEXT_V1_7A",
+            "split_context_persistence": True,
             "inventory_group_supported": True,
             "range_expansion_policy": "NEVER_INVENT_INDIVIDUAL_PROPERTIES",
             "atomic_merge_endpoint": "/api/property-brain-foundation/span/{span_id}/merge-next",
