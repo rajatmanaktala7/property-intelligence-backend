@@ -1,6 +1,6 @@
 ﻿"""Fail-safe optional property module registration."""
 
-VERSION = "1.38.1-OPTIONAL-PROPERTY-MODULES-CONTEXT-V262D1"
+VERSION = "1.39.1-OPTIONAL-PROPERTY-MODULES-SEMANTIC-V262E1"
 
 
 def _route_exists(app, path):
@@ -1142,4 +1142,19 @@ def register(wrapped):
     except Exception as exc:
         result["mastery_v262d"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}",
                                    "route":"/api/v7/property-ai/mastery-v262d/status","fail_safe":True}
+
+    # V262E Semantic Context Mastery
+    try:
+        if _route_exists(app, "/api/v7/property-ai/mastery-v262e/status"):
+            result["mastery_v262e"] = {"status":"ALREADY_REGISTERED","route":"/api/v7/property-ai/mastery-v262e/status","error":None}
+        else:
+            import alliance_semantic_context_mastery_v262e as mastery_v262e
+            result["mastery_v262e"] = {**mastery_v262e.register(core), "error":None}
+    except Exception as exc:
+        result["mastery_v262e"] = {
+            "status":"ERROR",
+            "error":f"{type(exc).__name__}: {exc}",
+            "route":"/api/v7/property-ai/mastery-v262e/status",
+            "fail_safe":True
+        }
     return result
