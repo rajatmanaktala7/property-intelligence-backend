@@ -1,6 +1,6 @@
 ﻿"""Fail-safe optional property module registration."""
 
-VERSION = "1.40.0-OPTIONAL-PROPERTY-MODULES-REAL-SAMPLER-V263"
+VERSION = "1.40.1-OPTIONAL-PROPERTY-MODULES-SCHEMA-SAMPLER-V263A"
 
 
 def _route_exists(app, path):
@@ -1170,6 +1170,21 @@ def register(wrapped):
             "status":"ERROR",
             "error":f"{type(exc).__name__}: {exc}",
             "route":"/api/v7/property-ai/mastery-v263/status",
+            "fail_safe":True
+        }
+
+    # V263A Schema-Aware Real Sampler
+    try:
+        if _route_exists(app, "/api/v7/property-ai/mastery-v263a/status"):
+            result["mastery_v263a"] = {"status":"ALREADY_REGISTERED","route":"/api/v7/property-ai/mastery-v263a/status","error":None}
+        else:
+            import alliance_real_data_sampler_v263a as mastery_v263a
+            result["mastery_v263a"] = {**mastery_v263a.register(core), "error":None}
+    except Exception as exc:
+        result["mastery_v263a"] = {
+            "status":"ERROR",
+            "error":f"{type(exc).__name__}: {exc}",
+            "route":"/api/v7/property-ai/mastery-v263a/status",
             "fail_safe":True
         }
     return result
