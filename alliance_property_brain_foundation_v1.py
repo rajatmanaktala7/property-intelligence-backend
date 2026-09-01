@@ -14,8 +14,8 @@ from fastapi import Body, HTTPException, Query
 from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy import text
 
-VERSION = "1.9.2-ALLIANCE-PROPERTY-BRAIN-FOUNDATION"
-MODE = "UPSTREAM_WHATSAPP_SENDER_LINEAGE_RESOLVER"
+VERSION = "1.9.3-ALLIANCE-PROPERTY-BRAIN-FOUNDATION"
+MODE = "AMBIGUOUS_ROW_EVENT_LINEAGE_AND_NAME_SANITIZER"
 
 # ---------------------------------------------------------------------------
 # Safety
@@ -2914,6 +2914,312 @@ def resolve_upstream_sender_for_gold_source(
         "ambiguous_phones": chosen.get("phones", []),
     })
     return result
+
+
+# ---------------------------------------------------------------------------
+# Foundation 1.9C: ambiguous normalized-row event lineage + name sanitizer
+# ---------------------------------------------------------------------------
+
+def _v19c_is_phone_like_name(value: Any) -> bool:
+    raw = str(value or "").strip()
+    if not raw:
+        return False
+
+    if _v19_phone_from_sender_value(raw):
+        return True
+
+    digits = re.sub(r"\D", "", raw)
+    compact = re.sub(r"[\s+\-().]", "", raw)
+
+    if len(digits) >= 10 and compact.isdigit():
+        return True
+
+    return False
+
+def _v19c_clean_sender_name(value: Any) -> Optional[str]:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    if _v19c_is_phone_like_name(raw):
+        return None
+    return raw
+
+def _v19b_extract_sender_from_rows(
+    table_name: str,
+    rows: List[Dict[str, Any]],
+    phone_columns: List[str],
+    name_columns: List[str],
+    match_method: str,
+    match_column: Optional[str] = None,
+    match_value: Optional[str] = None,
+) -> Dict[str, Any]:
+    phones = set()
+    names = set()
+    used_phone_columns = set()
+    used_name_columns = set()
+    rejected_phone_like_names = []
+
+    for row in rows:
+        for col in phone_columns:
+            phone = _v19_phone_from_sender_value(row.get(col))
+            if phone:
+                phones.add(phone)
+                used_phone_columns.add(col)
+
+        for col in name_columns:
+            raw_name = str(row.get(col) or "").strip()
+            if not raw_name:
+                continue
+            clean_name = _v19c_clean_sender_name(raw_name)
+            if clean_name:
+                names.add(clean_name)
+                used_name_columns.add(col)
+            else:
+                rejected_phone_like_names.append({
+                    "column": col,
+                    "value": raw_name,
+                    "reason": "PHONE_LIKE_SENDER_NAME",
+                })
+
+    if len(phones) != 1:
+        return {
+            "status": "NO_UNIQUE_SENDER",
+            "phones_found": sorted(phones),
+            "row_count": len(rows),
+            "rejected_sender_names": rejected_phone_like_names[:20],
+        }
+
+    evidence_columns = sorted(used_phone_columns | used_name_columns)
+
+    return {
+        "status": "FOUND_UNIQUE_SENDER",
+        "phone": next(iter(phones)),
+        "name": next(iter(names)) if len(names) == 1 else None,
+        "source_table": table_name,
+        "columns": evidence_columns,
+        "phone_columns": sorted(used_phone_columns),
+        "name_columns": sorted(used_name_columns),
+        "rejected_sender_names": rejected_phone_like_names[:20],
+        "match_method": match_method,
+        "match_column": match_column,
+        "match_value": match_value,
+        "row_count": len(rows),
+    }
+
+def _v19c_fetch_source_rows(
+    engine,
+    source_table: str,
+    source_column: str,
+    raw_text: str,
+    limit: int = 10,
+) -> Dict[str, Any]:
+    table_name = str(source_table or "").strip()
+    column_name = str(source_column or "").strip()
+    raw = str(raw_text or "")
+
+    result: Dict[str, Any] = {
+        "status": "UNRESOLVED",
+        "source_table": table_name,
+        "source_column": column_name,
+        "rows": [],
+        "columns": [],
+        "match_count": 0,
+    }
+
+    if not table_name or not column_name or not raw:
+        result["status"] = "INSUFFICIENT_INPUT"
+        return result
+
+    columns = [c["column_name"] for c in _columns(engine, table_name)]
+    result["columns"] = columns
+
+    if column_name not in columns:
+        result["status"] = "SOURCE_COLUMN_MISSING"
+        return result
+
+    qt = _safe_identifier(table_name)
+    qc = _safe_identifier(column_name)
+    select_sql = ", ".join(_safe_identifier(c) for c in columns)
+
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text(
+                "SELECT " + select_sql + " FROM " + qt + " "
+                "WHERE " + qc + "::text = :raw "
+                "LIMIT :limit"
+            ),
+            {"raw": raw, "limit": max(1, min(int(limit), 50))},
+        ).mappings().all()
+
+    result["rows"] = [dict(r) for r in rows]
+    result["match_count"] = len(rows)
+
+    if len(rows) == 0:
+        result["status"] = "SOURCE_ROW_NOT_FOUND"
+    elif len(rows) == 1:
+        result["status"] = "UNIQUE_SOURCE_ROW"
+    else:
+        result["status"] = "MULTIPLE_SOURCE_ROWS"
+
+    return result
+
+def _v19c_row_trace_summary(
+    source_row: Dict[str, Any],
+    source_columns: List[str],
+) -> Dict[str, Any]:
+    ids = _v19b_id_values(source_row, source_columns)
+    return {
+        "id_values": ids,
+        "id_count": len(ids),
+    }
+
+def _v19c_match_all_source_rows_by_shared_ids(
+    engine,
+    upstream_tables: List[Dict[str, Any]],
+    source_rows: List[Dict[str, Any]],
+    source_columns: List[str],
+    source_table: str,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    candidates: List[Dict[str, Any]] = []
+    traces: List[Dict[str, Any]] = []
+
+    for index, row in enumerate(source_rows):
+        row_candidates: List[Dict[str, Any]] = []
+
+        for upstream in upstream_tables:
+            if upstream["table"] == source_table:
+                continue
+            row_candidates.extend(
+                _v19b_match_upstream_by_shared_ids(
+                    engine,
+                    upstream,
+                    row,
+                    source_columns,
+                )
+            )
+
+        candidates.extend(row_candidates)
+        traces.append({
+            "source_row_index": index,
+            **_v19c_row_trace_summary(row, source_columns),
+            "resolved_candidate_count": len(row_candidates),
+            "resolved_phones": sorted({
+                c.get("phone")
+                for c in row_candidates
+                if c.get("phone")
+            }),
+            "paths": [
+                {
+                    "upstream_table": c.get("source_table"),
+                    "match_method": c.get("match_method"),
+                    "match_column": c.get("match_column"),
+                    "phone": c.get("phone"),
+                }
+                for c in row_candidates
+            ][:20],
+        })
+
+    return candidates, traces
+
+def resolve_upstream_sender_for_gold_source(
+    engine,
+    source: Dict[str, Any],
+    upstream_tables: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    source_table = str(source.get("source_table") or "")
+    raw_text = str(source.get("raw_text") or "")
+    metadata = _loads(source.get("source_metadata"), {})
+    if not isinstance(metadata, dict):
+        metadata = {}
+
+    source_column = str(metadata.get("source_column") or "raw_message")
+    result: Dict[str, Any] = {
+        "source_message_id": str(source.get("source_message_id") or ""),
+        "source_table": source_table,
+        "source_column": source_column,
+        "status": "UNRESOLVED",
+        "sender": None,
+        "source_row_status": None,
+        "source_rows_considered": 0,
+        "id_candidate_count": 0,
+        "raw_text_candidate_count": 0,
+        "row_id_traces": [],
+    }
+
+    if not V19_WHATSAPP_SOURCE_RE.search(source_table):
+        result["status"] = "NON_WHATSAPP_SOURCE"
+        return result
+
+    upstream_tables = upstream_tables or _v19b_candidate_tables(engine)
+
+    source_rows = _v19c_fetch_source_rows(
+        engine,
+        source_table,
+        source_column,
+        raw_text,
+        limit=10,
+    )
+
+    result["source_row_status"] = source_rows.get("status")
+    result["source_match_count"] = source_rows.get("match_count")
+    result["source_rows_considered"] = len(source_rows.get("rows") or [])
+
+    id_candidates: List[Dict[str, Any]] = []
+    row_traces: List[Dict[str, Any]] = []
+
+    if source_rows.get("rows"):
+        id_candidates, row_traces = _v19c_match_all_source_rows_by_shared_ids(
+            engine,
+            upstream_tables,
+            source_rows["rows"],
+            source_rows["columns"],
+            source_table,
+        )
+
+    result["id_candidate_count"] = len(id_candidates)
+    result["row_id_traces"] = row_traces
+
+    if id_candidates:
+        chosen = _v19b_choose_unique_sender(id_candidates)
+        result.update({
+            "status": chosen.get("status"),
+            "sender": chosen.get("sender"),
+            "candidate_count": chosen.get("candidate_count", 0),
+            "supporting_paths": chosen.get("all_supporting_paths", []),
+            "ambiguous_phones": chosen.get("phones", []),
+            "resolution_stage": "EVENT_OR_MESSAGE_ID",
+        })
+        return result
+
+    raw_candidates: List[Dict[str, Any]] = []
+    for upstream in upstream_tables:
+        if upstream["table"] == source_table:
+            continue
+        raw_candidates.extend(
+            _v19b_match_upstream_by_raw_text(
+                engine,
+                upstream,
+                raw_text,
+            )
+        )
+
+    result["raw_text_candidate_count"] = len(raw_candidates)
+    chosen = _v19b_choose_unique_sender(raw_candidates)
+
+    result.update({
+        "status": chosen.get("status"),
+        "sender": chosen.get("sender"),
+        "candidate_count": chosen.get("candidate_count", 0),
+        "supporting_paths": chosen.get("all_supporting_paths", []),
+        "ambiguous_phones": chosen.get("phones", []),
+        "resolution_stage": (
+            "UNIQUE_EXACT_RAW_TEXT"
+            if raw_candidates
+            else "UNRESOLVED"
+        ),
+    })
+    return result
+
 
 def upstream_sender_lineage_diagnostic(engine) -> Dict[str, Any]:
     candidates = _v19b_candidate_tables(engine)
