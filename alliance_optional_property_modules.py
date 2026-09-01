@@ -1,6 +1,6 @@
 ﻿"""Fail-safe optional property module registration."""
 
-VERSION = "1.37.0-OPTIONAL-PROPERTY-MODULES-EXCELLENCE-V262C"
+VERSION = "1.38.1-OPTIONAL-PROPERTY-MODULES-CONTEXT-V262D1"
 
 
 def _route_exists(app, path):
@@ -1131,4 +1131,15 @@ def register(wrapped):
     except Exception as exc:
         result["mastery_v262c"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}",
                                    "route":"/api/v7/property-ai/mastery-v262c/status","fail_safe":True}
+
+    # V262D Real Context Recovery Academy
+    try:
+        if _route_exists(app, "/api/v7/property-ai/mastery-v262d/status"):
+            result["mastery_v262d"] = {"status":"ALREADY_REGISTERED","route":"/api/v7/property-ai/mastery-v262d/status","error":None}
+        else:
+            import alliance_context_recovery_academy_v262d as mastery_v262d
+            result["mastery_v262d"] = {**mastery_v262d.register(core), "error":None}
+    except Exception as exc:
+        result["mastery_v262d"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}",
+                                   "route":"/api/v7/property-ai/mastery-v262d/status","fail_safe":True}
     return result
