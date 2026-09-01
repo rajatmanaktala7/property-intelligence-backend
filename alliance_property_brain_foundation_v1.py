@@ -14,8 +14,8 @@ from fastapi import Body, HTTPException, Query
 from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy import text
 
-VERSION = "1.9.4-ALLIANCE-PROPERTY-BRAIN-FOUNDATION"
-MODE = "RETROACTIVE_GOVERNING_LOCALITY_RECOVERY"
+VERSION = "1.9.5-ALLIANCE-PROPERTY-BRAIN-FOUNDATION"
+MODE = "PINNED_GOVERNING_LOCALITY_ONLY"
 
 # ---------------------------------------------------------------------------
 # Safety
@@ -4118,13 +4118,19 @@ def _v19d_clean_locality_header(line: str) -> Optional[str]:
     if not raw or V19D_BULLET_RE.match(raw):
         return None
     had_pin = raw.startswith("📍")
+
+    # Foundation 1.9E safety rule: retroactive locality recovery is only
+    # allowed from an explicit pinned locality header. Legacy unpinned lines
+    # can be plot identifiers, projects, sectors, inventory headings, or
+    # residue from a previous group and must never leak into later spans.
+    if not had_pin:
+        return None
+
     clean = re.sub(r"^\s*📍\s*", "", raw).strip()
     clean = re.sub(r"[*_`#]+", "", clean).strip()
     if not clean:
         return None
     if V19D_PORTFOLIO_COVERAGE_RE.search(clean):
-        return None
-    if not had_pin and V19D_NON_LOCALITY_HEADER_RE.search(clean):
         return None
     if PROPERTY_FACT_RE.search(clean) or PHONE_RE.search(clean) or MONEY_RE.search(clean) or AREA_RE.search(clean):
         return None
