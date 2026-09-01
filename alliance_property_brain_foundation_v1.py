@@ -14,8 +14,8 @@ from fastapi import Body, HTTPException, Query
 from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy import text
 
-VERSION = "1.2.2C-ALLIANCE-PROPERTY-BRAIN-FOUNDATION"
-MODE = "TRUSTED_EVIDENCE_CURRICULUM_GOLD_LAB_BOUNDARY_SAFE_C"
+VERSION = "1.2.3B-ALLIANCE-PROPERTY-BRAIN-FOUNDATION"
+MODE = "GOLD_LAB_COMPLETE_SEMANTIC_FIELDS_RUNTIME_SAFE_B"
 
 # ---------------------------------------------------------------------------
 # Safety
@@ -1918,6 +1918,12 @@ button{border:0;border-radius:8px;padding:10px 14px;cursor:pointer;font-weight:7
 <label>Contacts JSON</label>
 <textarea id="contacts">[]</textarea>
 
+<label>Property fields JSON</label>
+<textarea id="propertyFields">{}</textarea>
+
+<label>Requirement fields JSON</label>
+<textarea id="requirementFields">{}</textarea>
+
 <label>Notes / why</label>
 <textarea id="notes"></textarea>
 
@@ -1986,6 +1992,8 @@ async function loadNext(){
   document.getElementById("areas").value=JSON.stringify(p.areas||[],null,2);
   document.getElementById("money").value=JSON.stringify(p.money_mentions||[],null,2);
   document.getElementById("contacts").value=JSON.stringify(p.contacts||[],null,2);
+  document.getElementById("propertyFields").value=JSON.stringify(p.property_fields||{},null,2);
+  document.getElementById("requirementFields").value=JSON.stringify(p.requirement_fields||{},null,2);
   }catch(e){
     current=null;
     document.getElementById("source").innerText="Gold Lab runtime error. Do not label this record.";
@@ -2018,6 +2026,8 @@ async function save(){
       areas:parseJson("areas"),
       money_mentions:parseJson("money"),
       contacts:parseJson("contacts"),
+      property_fields:parseJson("propertyFields"),
+      requirement_fields:parseJson("requirementFields"),
       notes:document.getElementById("notes").value.trim()||null
     };
     const r=await fetch(`/api/property-brain-foundation/span/${current.span_id}/label`,{
@@ -2033,6 +2043,8 @@ async function save(){
     document.getElementById("unit").value="";
     document.getElementById("locations").value="";
     document.getElementById("uses").value="";
+    document.getElementById("propertyFields").value="{}";
+    document.getElementById("requirementFields").value="{}";
     await refreshProgress();
     await loadNext();
   }catch(e){
@@ -2275,6 +2287,29 @@ Rent 4 Lac
         "PROJECT_HEADING_IS_PROPERTY_ANCHOR",
         _is_named_property_anchor("✨ DLH LEGACY"),
         _clean_anchor_text("✨ DLH LEGACY"),
+    )
+
+    check(
+        "GOLD_UI_PROPERTY_FIELDS_PRESENT",
+        'id="propertyFields"' in LAB_UI
+        and "property_fields:parseJson" in LAB_UI,
+        "Property fields JSON input + save mapping",
+    )
+    check(
+        "GOLD_UI_REQUIREMENT_FIELDS_PRESENT",
+        'id="requirementFields"' in LAB_UI
+        and "requirement_fields:parseJson" in LAB_UI,
+        "Requirement fields JSON input + save mapping",
+    )
+    check(
+        "GOLD_SCHEMA_PROPERTY_FIELDS_PRESENT",
+        "property_fields JSONB" in DDL,
+        "alliance_gold_span_labels.property_fields",
+    )
+    check(
+        "GOLD_SCHEMA_REQUIREMENT_FIELDS_PRESENT",
+        "requirement_fields JSONB" in DDL,
+        "alliance_gold_span_labels.requirement_fields",
     )
 
     failed = [c for c in cases if not c["passed"]]
