@@ -5114,10 +5114,10 @@ def rebuild_pin_source_spans(engine, source_message_id: str, payload: Dict[str, 
                 }),
             })
 
-        # FOUNDATION_1_9Q4_SAFE_TEMP_ORDER_SHIFT
-        # The unique key covers ALL historical spans, including SUPERSEDED rows.
-        # A fixed +1,000,000 shift can collide with old temporary orders.
-        # Move active rows above the current maximum order for this source.
+        # FOUNDATION_1_9Q5_SHIFT_ALL_SOURCE_ROWS
+        # The unique key is enforced across ACTIVE and SUPERSEDED rows.
+        # Move every historical row for this source out of canonical 1..N
+        # before restoring preserved spans / creating canonical children.
         current_max_order = int(conn.execute(text("""
             SELECT COALESCE(MAX(span_order), 0)
             FROM alliance_gold_spans
@@ -5127,9 +5127,9 @@ def rebuild_pin_source_spans(engine, source_message_id: str, payload: Dict[str, 
 
         conn.execute(text("""
             UPDATE alliance_gold_spans
-            SET span_order=span_order+:safe_shift
+            SET span_order=span_order+:safe_shift,
+                updated_at=now()
             WHERE source_message_id=:sid
-              AND COALESCE(span_status, 'ACTIVE')='ACTIVE'
         """), {"sid": sid, "safe_shift": safe_order_shift})
 
         final_ids: List[str] = []
