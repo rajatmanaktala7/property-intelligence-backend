@@ -1459,4 +1459,26 @@ def register(wrapped):
             "fail_safe":True,
         }
 
+    # FOUNDATION 2.9.2.2 - Final Deterministic Examiner
+    try:
+        if _route_exists(app, "/api/property-brain/final-exam-v2922/status"):
+            result["final_exam_v2922"] = {
+                "status":"ALREADY_REGISTERED",
+                "route":"/property-brain/final-exam-v2922",
+                "error":None,
+            }
+        else:
+            import alliance_final_exam_v2922 as final_exam_v2922
+            result["final_exam_v2922"] = {
+                **final_exam_v2922.register(core),
+                "error":None,
+            }
+    except Exception as exc:
+        result["final_exam_v2922"] = {
+            "status":"ERROR",
+            "error":f"{type(exc).__name__}: {exc}",
+            "route":"/property-brain/final-exam-v2922",
+            "fail_safe":True,
+        }
+
     return result
