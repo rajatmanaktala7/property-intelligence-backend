@@ -1256,4 +1256,28 @@ def register(wrapped):
         }
 
 
+
+    # FOUNDATION 2.2 - World Topper Tutor + WhatsApp Live shadow infrastructure
+    try:
+        if _route_exists(app, "/api/property-brain/topper-v22/status"):
+            result["world_topper_tutor_v22"] = {
+                "status": "ALREADY_REGISTERED",
+                "route": "/property-brain/topper-v22",
+                "error": None,
+            }
+        else:
+            import alliance_world_topper_tutor_v22 as topper_v22
+            result["world_topper_tutor_v22"] = {
+                **topper_v22.register(core),
+                "error": None,
+            }
+    except Exception as exc:
+        result["world_topper_tutor_v22"] = {
+            "status": "ERROR",
+            "error": f"{type(exc).__name__}: {exc}",
+            "route": "/property-brain/topper-v22",
+            "fail_safe": True,
+        }
+
+
     return result
