@@ -1372,4 +1372,14 @@ def register(wrapped):
     except Exception as exc:
         result["world_topper_academy_v27"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","route":"/property-brain/academy-v27","fail_safe":True}
 
+    # FOUNDATION 2.8 - Intensive Tutor Weak Subject Repair
+    try:
+        if _route_exists(app, "/api/property-brain/tutor-v28/status"):
+            result["intensive_tutor_v28"] = {"status":"ALREADY_REGISTERED","route":"/property-brain/tutor-v28","error":None}
+        else:
+            import alliance_intensive_tutor_v28 as tutor_v28
+            result["intensive_tutor_v28"] = {**tutor_v28.register(core),"error":None}
+    except Exception as exc:
+        result["intensive_tutor_v28"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","route":"/property-brain/tutor-v28","fail_safe":True}
+
     return result
