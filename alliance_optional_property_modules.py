@@ -1382,4 +1382,15 @@ def register(wrapped):
     except Exception as exc:
         result["intensive_tutor_v28"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","route":"/property-brain/tutor-v28","fail_safe":True}
 
+    # FOUNDATION 2.9 - Infrastructure First Geography + Transaction/Occupancy
+    try:
+        if _route_exists(app, "/api/property-brain/infrastructure-v29/status"):
+            result["infrastructure_v29"] = {"status":"ALREADY_REGISTERED","route":"/property-brain/infrastructure-v29","error":None}
+        else:
+            import alliance_infrastructure_first_v29 as infrastructure_v29
+            result["infrastructure_v29"] = {**infrastructure_v29.register(core),"error":None}
+    except Exception as exc:
+        result["infrastructure_v29"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}",
+                                        "route":"/property-brain/infrastructure-v29","fail_safe":True}
+
     return result
