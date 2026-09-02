@@ -1362,4 +1362,14 @@ def register(wrapped):
     except Exception as exc:
         result["magic_examiner_v26"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","route":"/property-brain/magic-v26","fail_safe":True}
 
+    # FOUNDATION 2.7 - World Topper Magic Academy
+    try:
+        if _route_exists(app, "/api/property-brain/academy-v27/status"):
+            result["world_topper_academy_v27"] = {"status":"ALREADY_REGISTERED","route":"/property-brain/academy-v27","error":None}
+        else:
+            import alliance_world_topper_academy_v27 as academy_v27
+            result["world_topper_academy_v27"] = {**academy_v27.register(core),"error":None}
+    except Exception as exc:
+        result["world_topper_academy_v27"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","route":"/property-brain/academy-v27","fail_safe":True}
+
     return result
