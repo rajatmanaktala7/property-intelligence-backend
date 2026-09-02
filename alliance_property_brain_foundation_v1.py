@@ -15,8 +15,8 @@ from fastapi import Body, HTTPException, Query
 from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy import create_engine, text
 
-VERSION = "1.9.24-ALLIANCE-PROPERTY-BRAIN-FOUNDATION"
-MODE = "PROJECT_BHK_ATOMIC_SPLIT_1_9V"
+VERSION = "1.9.25-ALLIANCE-PROPERTY-BRAIN-FOUNDATION"
+MODE = "SHARED_TAIL_CONTACT_RECOVERY_1_9W"
 
 # ---------------------------------------------------------------------------
 # Safety
@@ -1915,14 +1915,73 @@ def _v18_normalize_phone(value: str) -> str:
         return "+91" + digits
     return str(value or "").strip()
 
+# FOUNDATION_1_9W_SHARED_TAIL_CONTACT_RECOVERY
 def _v18_shared_source_contacts(source_raw: str) -> List[Dict[str, Any]]:
+    # Recover shared broker/source contacts from the ORIGINAL source message.
+    # 1.9W safely supports footer blocks without CONTACT/CALL keywords.
     raw = str(source_raw or "")
-    footer_start = None
+    if not raw.strip():
+        return []
 
-    for start, _end, line in _line_ranges(raw):
+    line_ranges = _line_ranges(raw)
+    if not line_ranges:
+        return []
+
+    footer_start = None
+    for start, _end, line in line_ranges:
         if V18_FOOTER_SIGNAL_RE.search(_boundary_clean_line(line)):
             footer_start = start
             break
+
+    if footer_start is None:
+        last_property_fact_end = 0
+        phone_line_indexes = []
+
+        for idx, (ls, le, line) in enumerate(line_ranges):
+            clean = _boundary_clean_line(line)
+            if (
+                PROPERTY_FACT_RE.search(clean)
+                or AREA_RE.search(clean)
+                or MONEY_RE.search(clean)
+                or re.search(r"\b\d+(?:\.\d+)?\s*BHK\b", clean, re.I)
+                or re.search(r"@\s*\d", clean)
+            ):
+                last_property_fact_end = max(last_property_fact_end, le)
+
+            if V18_FOOTER_PHONE_RE.search(str(line or "")):
+                phone_line_indexes.append(idx)
+
+        trailing_phone_indexes = [
+            idx for idx in phone_line_indexes
+            if line_ranges[idx][0] >= last_property_fact_end
+        ]
+
+        if trailing_phone_indexes:
+            first_phone_idx = trailing_phone_indexes[0]
+            candidate_idx = first_phone_idx
+            steps = 0
+            j = first_phone_idx - 1
+
+            while j >= 0 and steps < 2:
+                ls, le, line = line_ranges[j]
+                clean = _boundary_clean_line(line)
+                if not clean:
+                    j -= 1
+                    continue
+                if le <= last_property_fact_end:
+                    break
+                if (
+                    PROPERTY_FACT_RE.search(clean)
+                    or AREA_RE.search(clean)
+                    or MONEY_RE.search(clean)
+                    or re.search(r"\b\d+(?:\.\d+)?\s*BHK\b", clean, re.I)
+                ):
+                    break
+                candidate_idx = j
+                steps += 1
+                j -= 1
+
+            footer_start = line_ranges[candidate_idx][0]
 
     if footer_start is None:
         return []
@@ -1932,7 +1991,10 @@ def _v18_shared_source_contacts(source_raw: str) -> List[Dict[str, Any]]:
     if not phone_matches:
         return []
 
-    footer_lines = [re.sub(r"\s+", " ", x).strip() for x in footer.splitlines()]
+    footer_lines = [
+        re.sub(r"[*_`]+", "", re.sub(r"\s+", " ", x)).strip()
+        for x in footer.splitlines()
+    ]
     footer_lines = [x for x in footer_lines if x]
 
     result: List[Dict[str, Any]] = []
@@ -1953,27 +2015,38 @@ def _v18_shared_source_contacts(source_raw: str) -> List[Dict[str, Any]]:
 
         name = None
         company = None
+
         if phone_line_index is not None:
-            candidates: List[str] = []
-            for line in footer_lines[max(0, phone_line_index - 4):phone_line_index]:
+            before = []
+            for line in footer_lines[max(0, phone_line_index - 3):phone_line_index]:
                 if V18_FOOTER_SIGNAL_RE.search(line):
                     continue
                 if V18_FOOTER_PHONE_RE.search(line):
                     continue
-                candidates.append(line)
+                if PROPERTY_FACT_RE.search(line) or AREA_RE.search(line) or MONEY_RE.search(line):
+                    continue
+                before.append(line)
 
-            if len(candidates) >= 2:
-                name = candidates[-2]
-                company = candidates[-1]
-            elif len(candidates) == 1:
-                company = candidates[-1]
+            if before:
+                name = before[-1]
+
+            for line in footer_lines[phone_line_index + 1:]:
+                if V18_FOOTER_PHONE_RE.search(line):
+                    continue
+                if V18_FOOTER_SIGNAL_RE.search(line):
+                    continue
+                if PROPERTY_FACT_RE.search(line) or AREA_RE.search(line) or MONEY_RE.search(line):
+                    continue
+                if line:
+                    company = line
+                    break
 
         result.append({
             "phone": phone,
             "name": name,
             "company": company,
             "role": "SOURCE_CONTACT",
-            "provenance": "MESSAGE_FOOTER",
+            "provenance": "SOURCE_SHARED_CONTACT",
             "scope": "SHARED_SOURCE_MESSAGE",
             "owner_status": "NOT_PROVEN",
             "broker_status": "SOURCE_OR_BROKER_CONTEXT",
@@ -2005,7 +2078,7 @@ def _v18_merge_source_contacts(
             known.add(digits)
 
     p["contacts"] = existing
-    p["shared_source_contact_provenance"] = "MESSAGE_FOOTER"
+    p["shared_source_contact_provenance"] = "SOURCE_SHARED_CONTACT"
     p["shared_contact_is_owner"] = False
     p["shared_source_contact_recovered_from_original_message"] = True
     return p
