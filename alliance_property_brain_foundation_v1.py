@@ -15,8 +15,8 @@ from fastapi import Body, HTTPException, Query
 from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy import create_engine, text
 
-VERSION = "1.9.20-ALLIANCE-PROPERTY-BRAIN-FOUNDATION"
-MODE = "NATURAL_COMMERCIAL_ATOMIC_SPLIT_1_9T"
+VERSION = "1.9.21-ALLIANCE-PROPERTY-BRAIN-FOUNDATION"
+MODE = "NATURAL_COMMERCIAL_ATOMIC_SPLIT_1_9T2"
 
 # ---------------------------------------------------------------------------
 # Safety
@@ -4275,6 +4275,7 @@ def _v19r_sparkle_heading_split(text_value: str):
 
 
 # FOUNDATION_1_9T_NATURAL_COMMERCIAL_ATOMIC_SPLIT
+# FOUNDATION_1_9T2_PARTNERSHIP_TYPO_TOLERANCE
 def _v19t_natural_commercial_heading_split(text_value: str):
     # Source-grounded splitter for long commercial/hospitality WhatsApp dumps.
     raw = str(text_value or "")
@@ -4309,7 +4310,7 @@ def _v19t_natural_commercial_heading_split(text_value: str):
     opportunity_re = re.compile(
         r"\b(?:ON\s+SET\s*UP\s+SALE|SET\s*UP\s+SALE|ON\s+SALE|FOR\s+SALE|"
         r"ON\s+LEASE|FOR\s+LEASE|AVAILABLE\s+ON\s+LEASE|"
-        r"(?:PARTNERSHIP|PATNERSHIP|PATNERSHIP)\s+(?:IS\s+)?AVAILABLE)\b",
+        r"(?:PARTNERSHIP|PATNERSHIP)\s+(?:IS\s+)?(?:AVAILABLE|AVILABLE|AVAILBLE))\b",
         re.I,
     )
 
