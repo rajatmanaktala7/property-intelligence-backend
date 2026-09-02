@@ -15,8 +15,8 @@ from fastapi import Body, HTTPException, Query
 from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy import create_engine, text
 
-VERSION = "1.9.27-ALLIANCE-PROPERTY-BRAIN-FOUNDATION"
-MODE = "SPLIT_SOURCE_LABELING_FLOW_1_9Y"
+VERSION = "1.9.28-ALLIANCE-PROPERTY-BRAIN-FOUNDATION"
+MODE = "GOLD_LAB_JS_PARSE_REPAIR_1_9Y2"
 
 # ---------------------------------------------------------------------------
 # Safety
@@ -6802,7 +6802,7 @@ async function loadNext(preferredSourceId=null){
   }
 }
 
-# FOUNDATION_1_9Y_STAY_ON_SPLIT_SOURCE
+// FOUNDATION_1_9Y_STAY_ON_SPLIT_SOURCE
 async function loadNextInSourceOrGlobal(sourceId){
   const preferred=String(sourceId||"").trim();
   if(preferred){
