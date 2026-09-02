@@ -1415,4 +1415,26 @@ def register(wrapped):
             "fail_safe":True,
         }
 
+    # FOUNDATION 2.9.2 - Ownership Wiring & Structural Resolution
+    try:
+        if _route_exists(app, "/api/property-brain/ownership-v292/status"):
+            result["ownership_v292"] = {
+                "status":"ALREADY_REGISTERED",
+                "route":"/property-brain/ownership-v292",
+                "error":None,
+            }
+        else:
+            import alliance_ownership_structural_v292 as ownership_v292
+            result["ownership_v292"] = {
+                **ownership_v292.register(core),
+                "error":None,
+            }
+    except Exception as exc:
+        result["ownership_v292"] = {
+            "status":"ERROR",
+            "error":f"{type(exc).__name__}: {exc}",
+            "route":"/property-brain/ownership-v292",
+            "fail_safe":True,
+        }
+
     return result
