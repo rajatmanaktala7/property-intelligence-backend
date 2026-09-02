@@ -1481,4 +1481,26 @@ def register(wrapped):
             "fail_safe":True,
         }
 
+    # FOUNDATION 2.9.3 - Gold V2 Structural Lab
+    try:
+        if _route_exists(app, "/api/property-brain/gold-v2-structural/status"):
+            result["gold_v2_structural_lab"] = {
+                "status":"ALREADY_REGISTERED",
+                "route":"/property-brain/gold-v2-structural",
+                "error":None,
+            }
+        else:
+            import alliance_gold_v2_structural_lab_v293 as gold_v2_structural
+            result["gold_v2_structural_lab"] = {
+                **gold_v2_structural.register(core),
+                "error":None,
+            }
+    except Exception as exc:
+        result["gold_v2_structural_lab"] = {
+            "status":"ERROR",
+            "error":f"{type(exc).__name__}: {exc}",
+            "route":"/property-brain/gold-v2-structural",
+            "fail_safe":True,
+        }
+
     return result
