@@ -4000,6 +4000,106 @@ def _v19f_inline_numbered_split(text_value: str) -> Optional[Dict[str, Any]]:
         "human_confirmation_required": True,
     }
 
+
+# FOUNDATION_1_9M_PIN_HEADING_ATOMIC_SPLIT
+def _v19m_pin_heading_split(text_value: str) -> Optional[Dict[str, Any]]:
+    # Safe deterministic splitter for WhatsApp inventory blocks where each
+    # property starts with a map-pin heading such as: 📍Rudra Sector-6
+    raw = str(text_value or "")
+    if not raw.strip():
+        return None
+
+    lines = _line_ranges(raw)
+    pin_rows: List[Tuple[int, int, str]] = []
+
+    for start_pos, end_pos, line in lines:
+        if re.match(r"^\s*📍\s*\S+", str(line or "")):
+            pin_rows.append((start_pos, end_pos, line))
+
+    if len(pin_rows) < 2:
+        return None
+
+    def _is_true_footer(line: str) -> bool:
+        s = _boundary_clean_line(line)
+        if not s:
+            return False
+        if ATOMIC_CONTEXT_START_RE.search(s):
+            return True
+        # Do not use generic CALL here because "Rent On Call" is a valid fact.
+        return bool(re.search(
+            r"^(?:CONTACT\b|CONTACT\s+US\b|OFFICE\b|BROKER\s+DETAILS?\b|"
+            r"FOR\s+MORE\s+DETAILS\b|FOR\s+SITE\s+VISITS?\b)",
+            s,
+            re.I,
+        ))
+
+    ranges: List[Tuple[int, int]] = []
+    children: List[Dict[str, Any]] = []
+
+    for idx, (start_pos, _heading_end, heading_line) in enumerate(pin_rows):
+        next_start = pin_rows[idx + 1][0] if idx + 1 < len(pin_rows) else len(raw)
+        child_end = next_start
+
+        if idx + 1 == len(pin_rows):
+            for ls, _le, line in lines:
+                if ls <= start_pos:
+                    continue
+                if _is_true_footer(line):
+                    child_end = ls
+                    break
+
+        child_start, child_end = _trim_atomic_block(raw, start_pos, child_end)
+        if child_end <= child_start:
+            continue
+
+        child_text = raw[child_start:child_end].strip()
+        if not child_text:
+            continue
+
+        exact_pos = raw.find(child_text, child_start, child_end + 1)
+        if exact_pos < 0:
+            return {
+                "status": "NO_AUTOMATIC_SPLIT",
+                "children": [],
+                "shared_context": [],
+                "reason": "Pin-heading child was not an exact source substring.",
+            }
+
+        exact_start = exact_pos
+        exact_end = exact_pos + len(child_text)
+        proposal = _v16_enrich_proposal(child_text)
+
+        ranges.append((exact_start, exact_end))
+        children.append({
+            "child_order": len(children) + 1,
+            "start_offset": exact_start,
+            "end_offset": exact_end,
+            "text": child_text,
+            "proposal": proposal,
+            "context": {
+                "boundary_strategy": "PIN_HEADING_PROPERTY_BLOCK",
+                "source_heading": str(heading_line or "").strip(),
+                "context_is_source_grounded": True,
+            },
+        })
+
+    if len(children) < 2:
+        return {
+            "status": "NO_AUTOMATIC_SPLIT",
+            "children": [],
+            "shared_context": [],
+            "reason": "Repeated pin headings were found but fewer than two safe children remained.",
+        }
+
+    return {
+        "status": "PASS",
+        "children": children,
+        "shared_context": _context_from_ranges(raw, ranges),
+        "boundary_strategy": "PIN_HEADING_PROPERTY_BLOCK",
+        "human_confirmation_required": True,
+    }
+
+
 def automatic_atomic_split(text_value: str) -> Dict[str, Any]:
     raw = str(text_value or "")
     v19f = _v19f_inline_numbered_split(raw)
@@ -4008,6 +4108,12 @@ def automatic_atomic_split(text_value: str) -> Dict[str, Any]:
     v16 = _v16_entity_group_split(raw)
     if v16 is not None:
         return v16
+
+    # Foundation 1.9M: repeated 📍 headings are real property boundaries.
+    # Existing v19f/v16 precedence is preserved to avoid regressions.
+    v19m = _v19m_pin_heading_split(raw)
+    if v19m is not None:
+        return v19m
 
     # Foundation 1.5 deterministic atomic boundary engine.
     # Handles repeated explicit property headings and locality headers followed
