@@ -15,8 +15,8 @@ from fastapi import Body, HTTPException, Query
 from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy import create_engine, text
 
-VERSION = "1.9.10-ALLIANCE-PROPERTY-BRAIN-FOUNDATION"
-MODE = "DOT_NUMBERED_BHK_ATOMIC_SPLIT_FIXED"
+VERSION = "1.9.20-ALLIANCE-PROPERTY-BRAIN-FOUNDATION"
+MODE = "NATURAL_COMMERCIAL_ATOMIC_SPLIT_1_9T"
 
 # ---------------------------------------------------------------------------
 # Safety
@@ -4273,6 +4273,152 @@ def _v19r_sparkle_heading_split(text_value: str):
     }
 
 
+
+# FOUNDATION_1_9T_NATURAL_COMMERCIAL_ATOMIC_SPLIT
+def _v19t_natural_commercial_heading_split(text_value: str):
+    # Source-grounded splitter for long commercial/hospitality WhatsApp dumps.
+    raw = str(text_value or "")
+    if not raw.strip():
+        return None
+
+    line_ranges = _line_offsets(raw)
+    if not line_ranges:
+        return None
+
+    system_event_re = re.compile(
+        r"^(?:\d{1,2}/\d{1,2}/\d{2,4},\s*\d{1,2}:\d{2}\s*-\s*)?.*"
+        r"(?:\bwas added\b|\bwere added\b|\badded\b.*\+?91|\bleft\b|"
+        r"\bchanged their phone number\b|\bmessage or add the new number\b)",
+        re.I,
+    )
+
+    broker_footer_re = re.compile(
+        r"^(?:DEALS\s+ONLY\s+IN\b|BROTAJIT\s+ASSOCIATES\b|"
+        r"FOR\s+SITE\s+VISITS?\b|FOR\s+MORE\s+(?:DETAILS|LISTINGS)\b|"
+        r"CONTACT\s+(?:US|BROKER|AGENT)\b)",
+        re.I,
+    )
+
+    asset_re = re.compile(
+        r"\b(?:RESTAURANT|RESTURANT|RESTRO(?:\s*[- ]?\s*BAR)?|RESTROBAR|"
+        r"BAR|NIGHT\s*CLUB|CLUB|BANQUET(?:\s+HALL|\s+FARM)?|"
+        r"HOTEL|MOTEL|RESORT|CAFE|CAFÉ|FARMHOUSE|GUEST\s+HOUSE)\b",
+        re.I,
+    )
+
+    opportunity_re = re.compile(
+        r"\b(?:ON\s+SET\s*UP\s+SALE|SET\s*UP\s+SALE|ON\s+SALE|FOR\s+SALE|"
+        r"ON\s+LEASE|FOR\s+LEASE|AVAILABLE\s+ON\s+LEASE|"
+        r"(?:PARTNERSHIP|PATNERSHIP|PATNERSHIP)\s+(?:IS\s+)?AVAILABLE)\b",
+        re.I,
+    )
+
+    def clean_heading(line: str) -> str:
+        s = str(line or "").strip()
+        s = re.sub(r"^[^A-Za-z0-9]+", "", s).strip()
+        return s
+
+    headings = []
+    for start, end, line in line_ranges:
+        s = clean_heading(line)
+        if not s or len(s) > 220:
+            continue
+        if system_event_re.search(s) or broker_footer_re.search(s):
+            continue
+        if not asset_re.search(s):
+            continue
+        if not opportunity_re.search(s):
+            continue
+        if re.match(
+            r"^(?:LOCATION|AREA|COVERED|OPEN|RENT|SECURITY|DEPOSIT|DEMAND|"
+            r"COMMISSION|BROKAGE|FLOOR|FLOORS|ROOMS|PLOT\s+SIZE|BUILD\s*UP|"
+            r"BUILD\s+UP\s+AREA|SEATING\s+CAPACITY|MONTHLY\s+SALE|YEARLY\s+TURNOVER)\s*[-:]",
+            s,
+            re.I,
+        ):
+            continue
+        headings.append({"start": start, "end": end, "line": line})
+
+    if len(headings) < 2:
+        return None
+
+    def first_context_start(block_start: int, block_end: int):
+        for start, _end, line in line_ranges:
+            if start <= block_start:
+                continue
+            if start >= block_end:
+                break
+            s = clean_heading(line)
+            if not s:
+                continue
+            if system_event_re.search(s) or broker_footer_re.search(s):
+                return start
+        return None
+
+    children = []
+    ranges = []
+
+    for idx, head in enumerate(headings):
+        start = int(head["start"])
+        next_start = int(headings[idx + 1]["start"]) if idx + 1 < len(headings) else len(raw)
+        context_start = first_context_start(start, next_start)
+        end = context_start if context_start is not None else next_start
+
+        while end > start and raw[end - 1] in "\r\n \t":
+            end -= 1
+
+        if end <= start:
+            return None
+
+        child_text = raw[start:end]
+        if not child_text.strip() or raw[start:end] != child_text:
+            return None
+
+        proposal = _v16_enrich_proposal(child_text)
+        proposal.setdefault("entity_scope", "COMMERCIAL_HOSPITALITY_OPPORTUNITY")
+        proposal.setdefault("context_provenance", {})
+        proposal["context_provenance"]["atomic_boundary"] = (
+            "NATURAL_COMMERCIAL_HEADING_SOURCE_TEXT"
+        )
+
+        children.append({
+            "child_order": len(children) + 1,
+            "start_offset": start,
+            "end_offset": end,
+            "text": child_text,
+            "proposal": proposal,
+            "context": {
+                "boundary_strategy": "NATURAL_COMMERCIAL_HEADING_1_9T",
+                "source_grounded": True,
+            },
+        })
+        ranges.append((start, end))
+
+    if len(children) < 2:
+        return None
+
+    previous_end = -1
+    for child in children:
+        start = int(child["start_offset"])
+        end = int(child["end_offset"])
+        if start < previous_end or raw[start:end] != child["text"]:
+            return None
+        previous_end = end
+
+    return {
+        "status": "PASS",
+        "reason": (
+            "Repeated natural-language restaurant/banquet/hotel opportunity "
+            "headings form atomic commercial property blocks."
+        ),
+        "boundary_strategy": "NATURAL_COMMERCIAL_HEADING_1_9T",
+        "children": children,
+        "shared_context": _context_from_ranges(raw, ranges),
+        "source_grounded": True,
+        "human_confirmation_required": True,
+    }
+
+
 def automatic_atomic_split(text_value: str) -> Dict[str, Any]:
     raw = str(text_value or "")
     v19f = _v19f_inline_numbered_split(raw)
@@ -4290,6 +4436,11 @@ def automatic_atomic_split(text_value: str) -> Dict[str, Any]:
     v19r = _v19r_sparkle_heading_split(raw)
     if v19r is not None:
         return v19r
+
+    # Foundation 1.9T: natural-language commercial / hospitality inventory.
+    v19t = _v19t_natural_commercial_heading_split(raw)
+    if v19t is not None:
+        return v19t
 
     # Foundation 1.5 deterministic atomic boundary engine.
     # Handles repeated explicit property headings and locality headers followed
@@ -5514,12 +5665,15 @@ def rebuild_pin_source_spans(engine, source_message_id: str, payload: Dict[str, 
         raise HTTPException(404, "Gold source message not found")
 
     raw = str(source_row.get("raw_text") or "")
-    sparkle = _v19r_sparkle_heading_split(raw)
 
-    if not isinstance(sparkle, dict) or sparkle.get("status") != "PASS":
+    rebuilt = _v19r_sparkle_heading_split(raw)
+    if not isinstance(rebuilt, dict) or rebuilt.get("status") != "PASS":
+        rebuilt = _v19t_natural_commercial_heading_split(raw)
+
+    if not isinstance(rebuilt, dict) or rebuilt.get("status") != "PASS":
         return _rebuild_pin_source_spans_legacy(engine, source_message_id, payload)
 
-    raw_children = list(sparkle.get("children") or [])
+    raw_children = list(rebuilt.get("children") or [])
     if len(raw_children) < 2:
         return _rebuild_pin_source_spans_legacy(engine, source_message_id, payload)
 
@@ -5530,11 +5684,11 @@ def rebuild_pin_source_spans(engine, source_message_id: str, payload: Dict[str, 
         end = int((child or {}).get("end_offset") or 0)
 
         if not ctext.strip() or end <= start:
-            raise HTTPException(409, "Sparkle rebuild produced an invalid child span")
+            raise HTTPException(409, "Source rebuild produced an invalid canonical child span")
         if raw[start:end] != ctext:
             raise HTTPException(
                 409,
-                "Sparkle rebuild grounding check failed: child is not exact source evidence",
+                "Source rebuild grounding check failed: child is not exact source evidence",
             )
 
         canonical.append(
@@ -5549,7 +5703,7 @@ def rebuild_pin_source_spans(engine, source_message_id: str, payload: Dict[str, 
     previous_end = -1
     for child in canonical:
         if child["start_offset"] < previous_end:
-            raise HTTPException(409, "Sparkle rebuild produced overlapping child spans")
+            raise HTTPException(409, "Source rebuild produced overlapping canonical child spans")
         previous_end = child["end_offset"]
 
     with engine.begin() as conn:
@@ -5621,7 +5775,7 @@ def rebuild_pin_source_spans(engine, source_message_id: str, payload: Dict[str, 
                         "proposed_start_offset=:start_offset, "
                         "proposed_end_offset=:end_offset, "
                         "proposed_text=:proposed_text, "
-                        "proposal_method='SOURCE_REBUILD_SPARKLE_1_9S', "
+                        "proposal_method='SOURCE_REBUILD_GENERIC_1_9T', "
                         "proposal_confidence=1.0, "
                         "span_status='ACTIVE', "
                         "superseded_at=NULL, "
@@ -5654,7 +5808,7 @@ def rebuild_pin_source_spans(engine, source_message_id: str, payload: Dict[str, 
                         "span_status, lineage_metadata"
                         ") VALUES ("
                         ":span_id, :sid, :span_order, :start_offset, :end_offset, "
-                        ":proposed_text, 'SOURCE_REBUILD_SPARKLE_1_9S', 1.0, "
+                        ":proposed_text, 'SOURCE_REBUILD_GENERIC_1_9T', 1.0, "
                         "'PENDING', 'ACTIVE', CAST(:lineage_metadata AS jsonb))"
                     ),
                     {
@@ -5666,9 +5820,9 @@ def rebuild_pin_source_spans(engine, source_message_id: str, payload: Dict[str, 
                         "proposed_text": child["text"],
                         "lineage_metadata": _json(
                             {
-                                "repair": "FOUNDATION_1_9S_GENERIC_SOURCE_REBUILD",
-                                "boundary_strategy": sparkle.get("boundary_strategy"),
-                                "shared_context_preserved": bool(sparkle.get("shared_context")),
+                                "repair": "FOUNDATION_1_9T_GENERIC_SOURCE_REBUILD",
+                                "boundary_strategy": rebuilt.get("boundary_strategy"),
+                                "shared_context_preserved": bool(rebuilt.get("shared_context")),
                             }
                         ),
                     },
@@ -5709,7 +5863,7 @@ def rebuild_pin_source_spans(engine, source_message_id: str, payload: Dict[str, 
                 {
                     **id_params,
                     "audit_note": (
-                        "[INVALIDATED_BY_FOUNDATION_1_9S] "
+                        "[INVALIDATED_BY_FOUNDATION_1_9T] "
                         + reason
                         + ". Original source evidence preserved."
                     ),
@@ -5764,14 +5918,14 @@ def rebuild_pin_source_spans(engine, source_message_id: str, payload: Dict[str, 
 
     return {
         "status": "SOURCE_REBUILT",
-        "repair_version": "1.9S",
-        "boundary_strategy": sparkle.get("boundary_strategy"),
+        "repair_version": "1.9T",
+        "boundary_strategy": rebuilt.get("boundary_strategy"),
         "canonical_span_count": len(canonical),
         "reused_existing_spans": reused,
         "created_spans": created,
         "superseded_spans": len(obsolete_ids),
         "invalidated_conflicting_gold_labels": invalidated_labels,
-        "shared_context_preserved": bool(sparkle.get("shared_context")),
+        "shared_context_preserved": bool(rebuilt.get("shared_context")),
         "academy_writes_only": True,
         "production_tables_modified": [],
         "canonical_writes": 0,
