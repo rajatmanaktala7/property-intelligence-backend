@@ -1393,4 +1393,26 @@ def register(wrapped):
         result["infrastructure_v29"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}",
                                         "route":"/property-brain/infrastructure-v29","fail_safe":True}
 
+    # FOUNDATION 2.9.1 - Revised Geography + Transaction Curriculum
+    try:
+        if _route_exists(app, "/api/property-brain/infrastructure-v291/status"):
+            result["infrastructure_v291"] = {
+                "status":"ALREADY_REGISTERED",
+                "route":"/property-brain/infrastructure-v291",
+                "error":None,
+            }
+        else:
+            import alliance_infrastructure_curriculum_v291 as infrastructure_v291
+            result["infrastructure_v291"] = {
+                **infrastructure_v291.register(core),
+                "error":None,
+            }
+    except Exception as exc:
+        result["infrastructure_v291"] = {
+            "status":"ERROR",
+            "error":f"{type(exc).__name__}: {exc}",
+            "route":"/property-brain/infrastructure-v291",
+            "fail_safe":True,
+        }
+
     return result
