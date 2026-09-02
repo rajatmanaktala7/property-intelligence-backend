@@ -15,8 +15,8 @@ from fastapi import Body, HTTPException, Query
 from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy import create_engine, text
 
-VERSION = "1.9.25-ALLIANCE-PROPERTY-BRAIN-FOUNDATION"
-MODE = "SHARED_TAIL_CONTACT_RECOVERY_1_9W"
+VERSION = "1.9.26-ALLIANCE-PROPERTY-BRAIN-FOUNDATION"
+MODE = "MIXED_PIN_ASSET_ATOMIC_SPLIT_1_9X"
 
 # ---------------------------------------------------------------------------
 # Safety
@@ -4835,6 +4835,175 @@ def _v19v_project_bhk_inventory_split(text_value: str):
     }
 
 
+# FOUNDATION_1_9X_MIXED_PIN_ASSET_HEADING_SPLIT
+def _v19x_mixed_pin_asset_heading_split(text_value: str):
+    # Mixed inventories: repeated 📍 headings plus a later strong standalone
+    # residential asset heading such as "🏡 Luxury Kothi – Sector 72".
+    raw = str(text_value or "")
+    if not raw.strip():
+        return None
+
+    lines = _line_ranges(raw)
+    if not lines:
+        return None
+
+    def clean(line):
+        s = str(line or "").strip()
+        return re.sub(r"[*_`]+", "", s).strip()
+
+    def is_pin_heading(line):
+        return bool(re.match(r"^\s*📍\s*\S", str(line or "")))
+
+    strong_asset_re = re.compile(
+        r"^\s*(?:🏡|🏠|🏢|🏘️?|🏚️?)\s*"
+        r"(?:LUXURY\s+|PREMIUM\s+|INDEPENDENT\s+)?"
+        r"(?:KOTHI|BUNGALOW|VILLA|HOUSE|APARTMENT|FLAT)\b",
+        re.I,
+    )
+
+    def is_strong_asset_heading(line):
+        return bool(strong_asset_re.search(str(line or "")))
+
+    def is_footer_line(line):
+        original = str(line or "").strip()
+        c = clean(original)
+        if not c:
+            return False
+        if re.match(r"^\s*(?:⭐|📞|☎️?|📲)", original):
+            return True
+        if PHONE_RE.search(c) or V18_FOOTER_PHONE_RE.search(original):
+            return True
+        return bool(re.search(
+            r"\b(?:BEST DEALS?|PRIME LOCATIONS?|GENUINE PROPERTIES|"
+            r"INVESTMENT OPPORTUNITIES|CONTACT|CALL|SITE VISITS?|FOR MORE DETAILS)\b",
+            c,
+            re.I,
+        ))
+
+    pin_indexes = [
+        i for i, (_s, _e, line) in enumerate(lines)
+        if is_pin_heading(line)
+    ]
+    if len(pin_indexes) < 2:
+        return None
+
+    first_pin_idx = pin_indexes[0]
+    anchors = []
+    pin_count = 0
+    asset_count = 0
+
+    for idx, (start, end, line) in enumerate(lines):
+        if idx < first_pin_idx:
+            continue
+        if is_pin_heading(line):
+            anchors.append((idx, start, end, "PIN"))
+            pin_count += 1
+        elif is_strong_asset_heading(line):
+            anchors.append((idx, start, end, "ASSET"))
+            asset_count += 1
+
+    if pin_count < 2 or asset_count < 1 or len(anchors) < 3:
+        return None
+
+    anchors.sort(key=lambda x: x[1])
+
+    footer_start = len(raw)
+    last_anchor_idx = anchors[-1][0]
+    for idx in range(last_anchor_idx + 1, len(lines)):
+        ls, _le, line = lines[idx]
+        if is_footer_line(line):
+            footer_start = ls
+            break
+
+    preamble = raw[:anchors[0][1]]
+    inherited_tx = None
+    if re.search(
+        r"\b(?:FOR\s+SALE|SALE\s+AVAILABLE|PROPERTIES?\s+FOR\s+SALE)\b",
+        preamble,
+        re.I,
+    ):
+        inherited_tx = "SALE"
+    elif re.search(
+        r"\b(?:FOR\s+RENT|RENTAL\s+AVAILABLE|PROPERTIES?\s+FOR\s+RENT)\b",
+        preamble,
+        re.I,
+    ):
+        inherited_tx = "RENT"
+
+    children = []
+    ranges = []
+
+    for n, item in enumerate(anchors):
+        _idx, start, _line_end, kind = item
+        end = anchors[n + 1][1] if n + 1 < len(anchors) else footer_start
+
+        while end > start and raw[end - 1] in "\r\n \t":
+            end -= 1
+        if end <= start:
+            return None
+
+        exact = raw[start:end]
+        child_text = exact.strip()
+        if not child_text:
+            return None
+
+        left = len(exact) - len(exact.lstrip())
+        exact_start = start + left
+        exact_end = exact_start + len(child_text)
+        if raw[exact_start:exact_end] != child_text:
+            return None
+
+        proposal = _v16_enrich_proposal(child_text)
+        proposal.setdefault("context_provenance", {})
+        proposal["context_provenance"]["atomic_boundary"] = (
+            "MIXED_PIN_ASSET_HEADING_SOURCE_TEXT_1_9X"
+        )
+
+        current_tx = str(
+            proposal.get("transaction_type_hint") or ""
+        ).strip().upper()
+        if inherited_tx and current_tx in {"", "UNKNOWN", "AMBIGUOUS"}:
+            proposal["transaction_type_hint"] = inherited_tx
+            proposal["context_provenance"]["transaction_type_hint"] = (
+                "INHERITED_FROM_SOURCE_PREAMBLE"
+            )
+
+        children.append({
+            "child_order": n + 1,
+            "start_offset": exact_start,
+            "end_offset": exact_end,
+            "text": child_text,
+            "proposal": proposal,
+            "context": {
+                "boundary_strategy": "MIXED_PIN_ASSET_HEADING_1_9X",
+                "heading_kind": kind,
+                "context_is_source_grounded": True,
+                "inherited_transaction": inherited_tx,
+            },
+        })
+        ranges.append((exact_start, exact_end))
+
+    previous_end = -1
+    for child in children:
+        s = int(child["start_offset"])
+        e = int(child["end_offset"])
+        if s < previous_end or raw[s:e] != child["text"]:
+            return None
+        previous_end = e
+
+    return {
+        "status": "PASS",
+        "reason": (
+            "Mixed pin headings plus strong standalone residential asset "
+            "headings form atomic property blocks."
+        ),
+        "boundary_strategy": "MIXED_PIN_ASSET_HEADING_1_9X",
+        "children": children,
+        "shared_context": _context_from_ranges(raw, ranges),
+        "source_grounded": True,
+        "human_confirmation_required": True,
+    }
+
 def automatic_atomic_split(text_value: str) -> Dict[str, Any]:
     raw = str(text_value or "")
 
@@ -4842,6 +5011,11 @@ def automatic_atomic_split(text_value: str) -> Dict[str, Any]:
     v19v = _v19v_project_bhk_inventory_split(raw)
     if v19v is not None:
         return v19v
+
+    # Foundation 1.9X: mixed pin headings plus standalone asset headings.
+    v19x = _v19x_mixed_pin_asset_heading_split(raw)
+    if v19x is not None:
+        return v19x
 
     v19f = _v19f_inline_numbered_split(raw)
     if v19f is not None:
