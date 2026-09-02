@@ -11,7 +11,7 @@ from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 
 
-VERSION = "3.3-EMERGENCY-EVENT-LOOP-SHIELD"
+VERSION = "3.4-SAFE-WHATSAPP-QUEUE"
 
 BOOT = {
     "state": "STARTING",
@@ -234,6 +234,18 @@ code{{background:#f5eee5;padding:4px 6px;border-radius:5px}}
     )
 
 
+@health_app.get("/whatsapp-queue-status")
+async def whatsapp_queue_status():
+    try:
+        import alliance_whatsapp_safe_ingest_v5 as safe_wa
+        return safe_wa.queue_status()
+    except Exception as exc:
+        return JSONResponse(
+            status_code=503,
+            content={"status":"ERROR","error":f"{type(exc).__name__}: {exc}"},
+        )
+
+
 @health_app.get("/core-route-status")
 async def core_route_status():
     routes = []
@@ -250,6 +262,7 @@ async def core_route_status():
         "/api/v451/live/status",
         "/api/v451/live/properties",
         "/api/live-bootstrap-status",
+        "/whatsapp-queue-status",
         "/whatsapp-live",
         "/whatsapp-live/feed",
         "/commercial-intelligence",
@@ -435,6 +448,18 @@ def _load_core():
             )
 
         CORE_APP = wrapped.app
+        try:
+            import alliance_whatsapp_safe_ingest_v5 as safe_wa
+            safe_wa.start_worker()
+            stabilization = dict(stabilization or {})
+            stabilization["whatsapp_safe_queue"] = safe_wa.queue_status()
+        except Exception as exc:
+            stabilization = dict(stabilization or {})
+            stabilization["whatsapp_safe_queue"] = {
+                "status":"ERROR",
+                "error":f"{type(exc).__name__}: {exc}",
+            }
+            print("[whatsapp-safe-queue] warning:", type(exc).__name__, str(exc))
         BOOT["core_loaded"] = True
         BOOT["state"] = "READY" if stabilization.get("registered") else "DEGRADED"
         BOOT["stabilization"] = stabilization
@@ -547,21 +572,28 @@ class HealthFirstDispatcher:
                 gate.release()
 
     async def _serve_ingest(self, scope: dict[str, Any], receive, send):
-        # EMERGENCY STABILITY MODE:
-        # Do not allow WhatsApp ingest to enter the core ASGI app at all.
-        # A previously admitted ingest request can execute blocking synchronous
-        # work inside async middleware and freeze the shared Uvicorn event loop,
-        # which also freezes /healthz and /runtime-status.
-        RUNTIME["rejected_ingest_requests"] += 1
-        response = PlainTextResponse(
-            "WhatsApp ingest temporarily paused for production stability.",
-            status_code=503,
-            headers={
-                "Retry-After": "30",
-                "Cache-Control": "no-store",
-            },
-        )
-        await response(scope, receive, send)
+        # SAFE QUEUE MODE: acknowledge quickly and process outside Uvicorn's event loop.
+        try:
+            import alliance_whatsapp_safe_ingest_v5 as safe_wa
+            RUNTIME["active_ingest_requests"] += 1
+            RUNTIME["accepted_ingest_requests"] += 1
+            await safe_wa.handle_ingest(scope, receive, send)
+        except Exception as exc:
+            RUNTIME["rejected_ingest_requests"] += 1
+            response = JSONResponse(
+                status_code=503,
+                content={
+                    "status":"ERROR",
+                    "message":"Safe WhatsApp ingest receiver failed",
+                    "detail":f"{type(exc).__name__}: {exc}",
+                },
+                headers={"Retry-After":"5","Cache-Control":"no-store"},
+            )
+            await response(scope, receive, send)
+        finally:
+            RUNTIME["active_ingest_requests"] = max(
+                0, RUNTIME["active_ingest_requests"] - 1
+            )
 
     async def _serve_freshness(self, scope: dict[str, Any], receive, send):
         # EMERGENCY STABILITY MODE:
