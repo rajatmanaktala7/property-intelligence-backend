@@ -15,8 +15,8 @@ from fastapi import Body, HTTPException, Query
 from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy import create_engine, text
 
-VERSION = "1.9.29-ALLIANCE-PROPERTY-BRAIN-FOUNDATION"
-MODE = "RESTORED_ALL_GOLD_FIXES_PLUS_FLOOR_SPLIT_1_9Z"
+VERSION = "1.9.30-ALLIANCE-PROPERTY-BRAIN-FOUNDATION"
+MODE = "GOLD_REFRESH_STAYS_ON_CURRENT_SPAN_1_9Z2"
 
 # ---------------------------------------------------------------------------
 # Safety
@@ -5874,6 +5874,7 @@ def next_span(
     labeler_id: Optional[str] = None,
     skip_span_ids: Optional[str] = None,
     source_message_id: Optional[str] = None,
+    span_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     raw_skip_ids = [
         x.strip()
@@ -5897,6 +5898,15 @@ def next_span(
         source_filter,
     ):
         source_filter = ""
+
+    # Foundation 1.9Z2: exact current-span restore after browser refresh.
+    span_filter = str(span_id or "").strip()
+    if span_filter and not re.fullmatch(
+        r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-"
+        r"[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}",
+        span_filter,
+    ):
+        span_filter = ""
 
     with engine.connect() as conn:
         row = conn.execute(
@@ -5927,6 +5937,10 @@ def next_span(
                       OR sp.source_message_id::text = :source_filter
                   )
                   AND (
+                      :span_filter = ''
+                      OR sp.span_id::text = :span_filter
+                  )
+                  AND (
                       :skip_csv = ''
                       OR NOT (
                           sp.span_id::text = ANY(string_to_array(:skip_csv, ','))
@@ -5947,6 +5961,7 @@ def next_span(
             {
                 "skip_csv": skip_csv,
                 "source_filter": source_filter,
+                "span_filter": span_filter,
             },
         ).mappings().first()
 
@@ -6902,6 +6917,10 @@ let current=null;
 let splitDraft=[];
 let skippedSpanIds=[];
 
+// FOUNDATION_1_9Z2_REFRESH_STAYS_ON_CURRENT_SPAN
+const GOLD_LAST_SPAN_KEY="alliance_gold_lab_last_span_id";
+const GOLD_LAST_SOURCE_KEY="alliance_gold_lab_last_source_id";
+
 function csvList(id){
   return document.getElementById(id).value.split(",").map(x=>x.trim()).filter(Boolean);
 }
@@ -6915,7 +6934,7 @@ async function refreshProgress(){
   document.getElementById("progress").innerText =
     `Sources: ${d.source_messages} | Proposed spans: ${d.proposed_spans} | Labeled spans: ${d.labeled_spans} | ${d.first_milestone}`;
 }
-async function loadNext(preferredSourceId=null){
+async function loadNext(preferredSourceId=null, preferredSpanId=null){
   document.getElementById("msg").innerText="";
   document.getElementById("source").innerText="Loading...";
   document.getElementById("span").innerText="Loading...";
@@ -6926,6 +6945,9 @@ async function loadNext(preferredSourceId=null){
     }
     if(preferredSourceId){
       params.set("source_message_id", preferredSourceId);
+    }
+    if(preferredSpanId){
+      params.set("span_id", preferredSpanId);
     }
     const query=params.toString() ? "?"+params.toString() : "";
     const r=await fetch("/api/property-brain-foundation/next-span"+query);
@@ -6945,6 +6967,10 @@ async function loadNext(preferredSourceId=null){
       return;
     }
   current=d.span;
+  try{
+    localStorage.setItem(GOLD_LAST_SPAN_KEY,String(current.span_id||""));
+    localStorage.setItem(GOLD_LAST_SOURCE_KEY,String(current.source_message_id||""));
+  }catch(e){}
   splitDraft=[];
   document.getElementById("splitPanel").style.display="none";
   document.getElementById("splitChildren").innerHTML="";
@@ -7178,8 +7204,29 @@ async function save(){
     document.getElementById("msg").innerText="ERROR: "+e.message;
   }
 }
-refreshProgress();
-loadNext();
+async function restoreGoldLabPosition(){
+  await refreshProgress();
+
+  let savedSpan="";
+  let savedSource="";
+  try{
+    savedSpan=localStorage.getItem(GOLD_LAST_SPAN_KEY)||"";
+    savedSource=localStorage.getItem(GOLD_LAST_SOURCE_KEY)||"";
+  }catch(e){}
+
+  if(savedSpan){
+    await loadNext(savedSource||null,savedSpan);
+    if(current) return;
+  }
+
+  if(savedSource){
+    await loadNext(savedSource);
+    if(current) return;
+  }
+
+  await loadNext();
+}
+restoreGoldLabPosition();
 </script>
 </body>
 </html>
@@ -7746,6 +7793,7 @@ def register(core):
         labeler_id: Optional[str] = Query(None),
         skip_span_ids: Optional[str] = Query(None),
         source_message_id: Optional[str] = Query(None),
+        span_id: Optional[str] = Query(None),
     ):
         return _json_response(
             next_span(
@@ -7753,6 +7801,7 @@ def register(core):
                 labeler_id,
                 skip_span_ids=skip_span_ids,
                 source_message_id=source_message_id,
+                span_id=span_id,
             )
         )
 
