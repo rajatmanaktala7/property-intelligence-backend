@@ -1062,22 +1062,54 @@ def _line_for_offset(text_value: str, offset: int) -> str:
 
 
 def _title_parts(span_text: str) -> Dict[str, Optional[str]]:
+    # Foundation 1.9N source-grounded title parser.
     lines = [x.strip() for x in (span_text or "").splitlines() if x.strip()]
     if not lines:
         return {"project_name": None, "locality": None}
+
     raw_title = lines[0]
     if not _is_named_property_anchor(raw_title):
         return {"project_name": None, "locality": None}
+
     title = _clean_anchor_text(raw_title)
+    if not title:
+        return {"project_name": None, "locality": None}
+
+    sector_match = re.match(
+        r"^(?P<project>.+?)\s+"
+        r"(?P<label>SECTOR|SEC)\s*[-:]?\s*"
+        r"(?P<number>\d+(?:\s*/\s*[A-Z0-9]+)?)\s*$",
+        title,
+        re.I,
+    )
+    if sector_match:
+        project = re.sub(r"\s+", " ", sector_match.group("project")).strip(" -–—")
+        number = re.sub(r"\s+", "", sector_match.group("number")).strip()
+        locality = f"Sector {number}" if number else None
+        return {"project_name": project or None, "locality": locality}
+
     parts = re.split(r"\s+[–—-]\s+", title, maxsplit=1)
     if len(parts) == 2:
         left, right = parts[0].strip(), parts[1].strip()
-        if re.search(
-            r"\b(?:WEST|EAST|NORTH|SOUTH|CENTRAL|SECTOR|PHASE|EXTENSION|EXTN)\b",
-            right,
-            re.I,
-        ):
+        locality_signal = bool(
+            re.search(
+                r"\b(?:WEST|EAST|NORTH|SOUTH|CENTRAL|SECTOR|SEC|PHASE|"
+                r"EXTENSION|EXTN|EXPRESSWAY|EXPWY|ROAD|MARG)\b",
+                right,
+                re.I,
+            )
+        )
+        if locality_signal:
+            sec = re.fullmatch(
+                r"(?:SECTOR|SEC)\s*[-:]?\s*(\d+(?:\s*/\s*[A-Z0-9]+)?)",
+                right,
+                re.I,
+            )
+            if sec:
+                number = re.sub(r"\s+", "", sec.group(1))
+                right = f"Sector {number}"
             return {"project_name": left or None, "locality": right or None}
+
     return {"project_name": title or None, "locality": None}
 
 
