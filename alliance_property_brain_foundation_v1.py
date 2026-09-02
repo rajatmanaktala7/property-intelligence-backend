@@ -5120,7 +5120,7 @@ def disagreements(engine) -> Dict[str, Any]:
 # FOUNDATION_1_9Q2_TYPED_AUDIT_NOTE
 # FOUNDATION_1_9Q3_SOURCE_AUDIT_SQL_FIX
 # FOUNDATION_1_9Q_SOURCE_LEVEL_PIN_REBUILD
-def rebuild_pin_source_spans(engine, source_message_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+def _rebuild_pin_source_spans_legacy(engine, source_message_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     sid = str(source_message_id or "").strip()
     labeler_id = str((payload or {}).get("labeler_id") or "").strip()
     reason = str((payload or {}).get("reason") or "").strip() or "Source-level pin boundary repair 1.9Q"
@@ -5486,6 +5486,301 @@ def boundary_baseline(engine, limit: int = 500) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 # UI
 # ---------------------------------------------------------------------------
+
+
+# FOUNDATION_1_9S_GENERIC_SOURCE_REBUILD
+def rebuild_pin_source_spans(engine, source_message_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    # Foundation 1.9S extends Repair Current Source to repeated sparkle headings.
+    sid = str(source_message_id or "").strip()
+    labeler_id = str((payload or {}).get("labeler_id") or "").strip()
+    reason = str((payload or {}).get("reason") or "").strip() or "Source-level sparkle inventory rebuild 1.9S"
+
+    if not sid:
+        raise HTTPException(400, "source_message_id is required")
+    if not labeler_id:
+        raise HTTPException(400, "labeler_id is required")
+
+    with engine.connect() as conn:
+        source_row = conn.execute(
+            text(
+                "SELECT source_message_id, raw_text "
+                "FROM alliance_gold_source_messages "
+                "WHERE source_message_id=:sid"
+            ),
+            {"sid": sid},
+        ).mappings().first()
+
+    if not source_row:
+        raise HTTPException(404, "Gold source message not found")
+
+    raw = str(source_row.get("raw_text") or "")
+    sparkle = _v19r_sparkle_heading_split(raw)
+
+    if not isinstance(sparkle, dict) or sparkle.get("status") != "PASS":
+        return _rebuild_pin_source_spans_legacy(engine, source_message_id, payload)
+
+    raw_children = list(sparkle.get("children") or [])
+    if len(raw_children) < 2:
+        return _rebuild_pin_source_spans_legacy(engine, source_message_id, payload)
+
+    canonical = []
+    for idx, child in enumerate(raw_children, start=1):
+        ctext = str((child or {}).get("text") or "")
+        start = int((child or {}).get("start_offset") or 0)
+        end = int((child or {}).get("end_offset") or 0)
+
+        if not ctext.strip() or end <= start:
+            raise HTTPException(409, "Sparkle rebuild produced an invalid child span")
+        if raw[start:end] != ctext:
+            raise HTTPException(
+                409,
+                "Sparkle rebuild grounding check failed: child is not exact source evidence",
+            )
+
+        canonical.append(
+            {
+                "span_order": idx,
+                "text": ctext,
+                "start_offset": start,
+                "end_offset": end,
+            }
+        )
+
+    previous_end = -1
+    for child in canonical:
+        if child["start_offset"] < previous_end:
+            raise HTTPException(409, "Sparkle rebuild produced overlapping child spans")
+        previous_end = child["end_offset"]
+
+    with engine.begin() as conn:
+        existing = conn.execute(
+            text(
+                "SELECT sp.span_id, sp.span_order, sp.proposed_start_offset, "
+                "sp.proposed_end_offset, sp.proposed_text, sp.boundary_status, "
+                "COALESCE(sp.span_status,'ACTIVE') AS span_status, "
+                "EXISTS (SELECT 1 FROM alliance_gold_span_labels gl "
+                "WHERE gl.span_id=sp.span_id AND gl.active=TRUE) AS has_active_gold "
+                "FROM alliance_gold_spans sp "
+                "WHERE sp.source_message_id=:sid "
+                "ORDER BY sp.span_order, sp.created_at, sp.span_id"
+            ),
+            {"sid": sid},
+        ).mappings().all()
+
+        current_max_order = int(
+            conn.execute(
+                text(
+                    "SELECT COALESCE(MAX(span_order),0) "
+                    "FROM alliance_gold_spans WHERE source_message_id=:sid"
+                ),
+                {"sid": sid},
+            ).scalar()
+            or 0
+        )
+        safe_shift = current_max_order + 1000000
+
+        conn.execute(
+            text(
+                "UPDATE alliance_gold_spans "
+                "SET span_order=span_order+:safe_shift, updated_at=now() "
+                "WHERE source_message_id=:sid"
+            ),
+            {"sid": sid, "safe_shift": safe_shift},
+        )
+
+        used_ids = set()
+        canonical_ids = []
+        reused = 0
+        created = 0
+
+        for child in canonical:
+            exact_candidates = [
+                row for row in existing
+                if str(row.get("proposed_text") or "") == child["text"]
+                and str(row.get("span_id")) not in used_ids
+            ]
+            exact_candidates.sort(
+                key=lambda row: (
+                    0 if bool(row.get("has_active_gold")) else 1,
+                    0 if str(row.get("span_status") or "").upper() == "ACTIVE" else 1,
+                    int(row.get("span_order") or 0),
+                )
+            )
+
+            if exact_candidates:
+                chosen = exact_candidates[0]
+                span_id = str(chosen["span_id"])
+                used_ids.add(span_id)
+                canonical_ids.append(span_id)
+                reused += 1
+
+                conn.execute(
+                    text(
+                        "UPDATE alliance_gold_spans SET "
+                        "span_order=:span_order, "
+                        "proposed_start_offset=:start_offset, "
+                        "proposed_end_offset=:end_offset, "
+                        "proposed_text=:proposed_text, "
+                        "proposal_method='SOURCE_REBUILD_SPARKLE_1_9S', "
+                        "proposal_confidence=1.0, "
+                        "span_status='ACTIVE', "
+                        "superseded_at=NULL, "
+                        "superseded_by='[]'::jsonb, "
+                        "boundary_status=CASE WHEN EXISTS ("
+                        "SELECT 1 FROM alliance_gold_span_labels gl "
+                        "WHERE gl.span_id=alliance_gold_spans.span_id AND gl.active=TRUE"
+                        ") THEN 'LABELED' ELSE 'PENDING' END, "
+                        "updated_at=now() WHERE span_id=:span_id"
+                    ),
+                    {
+                        "span_order": child["span_order"],
+                        "start_offset": child["start_offset"],
+                        "end_offset": child["end_offset"],
+                        "proposed_text": child["text"],
+                        "span_id": span_id,
+                    },
+                )
+            else:
+                span_id = str(uuid.uuid4())
+                canonical_ids.append(span_id)
+                created += 1
+
+                conn.execute(
+                    text(
+                        "INSERT INTO alliance_gold_spans ("
+                        "span_id, source_message_id, span_order, "
+                        "proposed_start_offset, proposed_end_offset, proposed_text, "
+                        "proposal_method, proposal_confidence, boundary_status, "
+                        "span_status, lineage_metadata"
+                        ") VALUES ("
+                        ":span_id, :sid, :span_order, :start_offset, :end_offset, "
+                        ":proposed_text, 'SOURCE_REBUILD_SPARKLE_1_9S', 1.0, "
+                        "'PENDING', 'ACTIVE', CAST(:lineage_metadata AS jsonb))"
+                    ),
+                    {
+                        "span_id": span_id,
+                        "sid": sid,
+                        "span_order": child["span_order"],
+                        "start_offset": child["start_offset"],
+                        "end_offset": child["end_offset"],
+                        "proposed_text": child["text"],
+                        "lineage_metadata": _json(
+                            {
+                                "repair": "FOUNDATION_1_9S_GENERIC_SOURCE_REBUILD",
+                                "boundary_strategy": sparkle.get("boundary_strategy"),
+                                "shared_context_preserved": bool(sparkle.get("shared_context")),
+                            }
+                        ),
+                    },
+                )
+
+        canonical_id_set = set(canonical_ids)
+        obsolete_ids = [
+            str(row["span_id"])
+            for row in existing
+            if str(row["span_id"]) not in canonical_id_set
+        ]
+
+        invalidated_labels = 0
+        if obsolete_ids:
+            id_params = {f"oid_{i}": value for i, value in enumerate(obsolete_ids)}
+            id_sql = ",".join(f":oid_{i}" for i in range(len(obsolete_ids)))
+
+            invalidated_labels = int(
+                conn.execute(
+                    text(
+                        f"SELECT count(*) FROM alliance_gold_span_labels "
+                        f"WHERE active=TRUE AND span_id IN ({id_sql})"
+                    ),
+                    id_params,
+                ).scalar()
+                or 0
+            )
+
+            conn.execute(
+                text(
+                    f"UPDATE alliance_gold_span_labels SET active=FALSE, "
+                    f"notes=CASE WHEN COALESCE(notes,'')='' "
+                    f"THEN CAST(:audit_note AS text) "
+                    f"ELSE notes || E'\\n' || CAST(:audit_note AS text) END, "
+                    f"updated_at=now() "
+                    f"WHERE active=TRUE AND span_id IN ({id_sql})"
+                ),
+                {
+                    **id_params,
+                    "audit_note": (
+                        "[INVALIDATED_BY_FOUNDATION_1_9S] "
+                        + reason
+                        + ". Original source evidence preserved."
+                    ),
+                },
+            )
+
+            conn.execute(
+                text(
+                    f"UPDATE alliance_gold_relationship_labels SET active=FALSE "
+                    f"WHERE active=TRUE AND ("
+                    f"left_span_id IN ({id_sql}) OR right_span_id IN ({id_sql}))"
+                ),
+                id_params,
+            )
+
+            conn.execute(
+                text(
+                    f"UPDATE alliance_gold_spans SET "
+                    f"span_status='SUPERSEDED', superseded_at=now(), "
+                    f"superseded_by=CAST(:replacement_ids AS jsonb), updated_at=now() "
+                    f"WHERE span_id IN ({id_sql})"
+                ),
+                {
+                    **id_params,
+                    "replacement_ids": _json(canonical_ids),
+                },
+            )
+
+        pending = int(
+            conn.execute(
+                text(
+                    "SELECT count(*) FROM alliance_gold_spans "
+                    "WHERE source_message_id=:sid "
+                    "AND COALESCE(span_status,'ACTIVE')='ACTIVE' "
+                    "AND boundary_status <> 'LABELED'"
+                ),
+                {"sid": sid},
+            ).scalar()
+            or 0
+        )
+
+        conn.execute(
+            text(
+                "UPDATE alliance_gold_source_messages SET "
+                "proposed_span_count=:n, "
+                "labeling_status=CASE WHEN :pending=0 THEN 'LABELED' "
+                "ELSE 'IN_PROGRESS' END, updated_at=now() "
+                "WHERE source_message_id=:sid"
+            ),
+            {"n": len(canonical), "pending": pending, "sid": sid},
+        )
+
+    return {
+        "status": "SOURCE_REBUILT",
+        "repair_version": "1.9S",
+        "boundary_strategy": sparkle.get("boundary_strategy"),
+        "canonical_span_count": len(canonical),
+        "reused_existing_spans": reused,
+        "created_spans": created,
+        "superseded_spans": len(obsolete_ids),
+        "invalidated_conflicting_gold_labels": invalidated_labels,
+        "shared_context_preserved": bool(sparkle.get("shared_context")),
+        "academy_writes_only": True,
+        "production_tables_modified": [],
+        "canonical_writes": 0,
+        "offer_writes": 0,
+        "matcher_writes": 0,
+        "whatsapp_live_writes": 0,
+    }
+
+
 
 LAB_UI = r"""
 <!doctype html>
