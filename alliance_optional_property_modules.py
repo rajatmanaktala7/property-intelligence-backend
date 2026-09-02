@@ -1,4 +1,4 @@
-﻿"""Fail-safe optional property module registration."""
+"""Fail-safe optional property module registration."""
 
 VERSION = "2.0.0-OPTIONAL-PROPERTY-MODULES-PROPERTY-BRAIN-FOUNDATION"
 
@@ -1212,4 +1212,24 @@ def register(wrapped):
             "route": "/api/property-brain-foundation/status",
             "fail_safe": True,
         }
+
+    # FOUNDATION 2.0 - Gold V1 freeze + tutor training + benchmark
+    try:
+        if _route_exists(app, "/api/property-brain/gold-v2/status"):
+            result["gold_v2_training"] = {
+                "status": "ALREADY_REGISTERED",
+                "route": "/property-brain/gold-v2",
+                "error": None,
+            }
+        else:
+            import alliance_property_brain_gold_v2 as gold_v2
+            result["gold_v2_training"] = {**gold_v2.register(core), "error": None}
+    except Exception as exc:
+        result["gold_v2_training"] = {
+            "status": "ERROR",
+            "error": f"{type(exc).__name__}: {exc}",
+            "route": "/property-brain/gold-v2",
+            "fail_safe": True,
+        }
+
     return result
