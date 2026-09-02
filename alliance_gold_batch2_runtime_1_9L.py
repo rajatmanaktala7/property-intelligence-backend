@@ -1,0 +1,130 @@
+from __future__ import annotations
+
+from typing import List, Set
+
+from sqlalchemy import text
+
+import alliance_property_brain_foundation_v1 as foundation
+
+
+PATCH_VERSION = "1.9L-GOLD-BATCH2-FRESH-REFILL"
+MAX_FETCH_PER_SOURCE = 15000
+
+
+def _existing_gold_fingerprints(engine) -> Set[str]:
+    with engine.connect() as conn:
+        return {
+            str(row[0])
+            for row in conn.execute(
+                text("SELECT source_fingerprint FROM alliance_gold_source_messages")
+            ).all()
+            if row[0]
+        }
+
+
+def _fresh_fetch_distinct_text(
+    engine,
+    table_name: str,
+    column_name: str,
+    limit: int,
+) -> List[str]:
+    qt = foundation._safe_identifier(table_name)
+    qc = foundation._safe_identifier(column_name)
+    requested = max(1, int(limit))
+    fetch_limit = min(max(requested * 80, 2500), MAX_FETCH_PER_SOURCE)
+    existing = _existing_gold_fingerprints(engine)
+
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text(
+                f'''
+                SELECT {qc}::text AS raw_text
+                FROM {qt}
+                WHERE {qc} IS NOT NULL
+                  AND length(trim({qc}::text)) >= 20
+                ORDER BY md5({qc}::text)
+                LIMIT :n
+                '''
+            ),
+            {"n": fetch_limit},
+        ).all()
+
+    seen: Set[str] = set()
+    fresh: List[str] = []
+    for row in rows:
+        raw = str(row[0] or "").strip()
+        if not raw:
+            continue
+        fp = foundation._fingerprint(raw)
+        if fp in existing or fp in seen:
+            continue
+        seen.add(fp)
+        fresh.append(raw)
+        if len(fresh) >= requested:
+            break
+    return fresh
+
+
+def _patch_gold_lab_ui() -> None:
+    ui = foundation.LAB_UI
+
+    progress_marker = '<div id="progress" class="small" style="margin-top:10px">Loading progress...</div>'
+    progress_replacement = progress_marker + '''
+<div class="actions" style="margin-top:12px">
+<button id="refillFreshBtn" class="primary" type="button" onclick="refillFreshBatch()">Load Fresh Batch</button>
+<span id="refillStatus" class="small"></span>
+</div>'''
+    if 'id="refillFreshBtn"' not in ui and progress_marker in ui:
+        ui = ui.replace(progress_marker, progress_replacement, 1)
+
+    js_marker = 'async function refreshProgress(){'
+    js_function = r'''
+async function refillFreshBatch(){
+  const btn=document.getElementById("refillFreshBtn");
+  const status=document.getElementById("refillStatus");
+  const msg=document.getElementById("msg");
+  try{
+    if(btn) btn.disabled=true;
+    if(status) status.innerText="Loading fresh Academy candidates...";
+    if(msg) msg.innerText="";
+    const r=await fetch("/api/property-brain-foundation/sources/import-curriculum",{
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({total_messages:70})
+    });
+    const raw=await r.text();
+    let d={};
+    try{d=JSON.parse(raw)}catch(e){throw new Error("Backend returned non-JSON response")}
+    if(!r.ok) throw new Error(d.detail||d.message||"Fresh batch refill failed");
+    const inserted=Number(d.inserted_proposed_spans||0);
+    const sources=Number(d.inserted_sources||0);
+    if(status) status.innerText = inserted>0
+      ? `Fresh batch ready: ${sources} sources / ${inserted} spans added.`
+      : "No new trusted source evidence was available.";
+    skippedSpanIds=[];
+    await refreshProgress();
+    await loadNext();
+  }catch(e){
+    if(status) status.innerText="ERROR: "+e.message;
+  }finally{
+    if(btn) btn.disabled=false;
+  }
+}
+
+'''
+    if 'async function refillFreshBatch()' not in ui and js_marker in ui:
+        ui = ui.replace(js_marker, js_function + js_marker, 1)
+
+    foundation.LAB_UI = ui
+
+
+def install_patch() -> None:
+    foundation._fetch_distinct_text = _fresh_fetch_distinct_text
+    foundation.VERSION = "1.9.11-ALLIANCE-PROPERTY-BRAIN-FOUNDATION"
+    foundation.MODE = "GOLD_BATCH2_FRESH_REFILL_1_9L"
+    _patch_gold_lab_ui()
+
+
+install_patch()
+
+from production_entrypoint import app  # noqa: E402,F401
