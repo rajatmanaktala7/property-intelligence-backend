@@ -1232,4 +1232,28 @@ def register(wrapped):
             "fail_safe": True,
         }
 
+
+    # FOUNDATION 2.1 - Gold benchmark intelligence repair
+    try:
+        if _route_exists(app, "/api/property-brain/gold-v21/status"):
+            result["gold_v21_benchmark_repair"] = {
+                "status": "ALREADY_REGISTERED",
+                "route": "/property-brain/gold-v21",
+                "error": None,
+            }
+        else:
+            import alliance_property_brain_gold_v21 as gold_v21
+            result["gold_v21_benchmark_repair"] = {
+                **gold_v21.register(core),
+                "error": None,
+            }
+    except Exception as exc:
+        result["gold_v21_benchmark_repair"] = {
+            "status": "ERROR",
+            "error": f"{type(exc).__name__}: {exc}",
+            "route": "/property-brain/gold-v21",
+            "fail_safe": True,
+        }
+
+
     return result
