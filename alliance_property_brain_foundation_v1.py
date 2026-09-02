@@ -15,8 +15,8 @@ from fastapi import Body, HTTPException, Query
 from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy import create_engine, text
 
-VERSION = "1.9.23-ALLIANCE-PROPERTY-BRAIN-FOUNDATION"
-MODE = "WHATSAPP_SENDER_JID_CONTACT_RECOVERY_1_9U"
+VERSION = "1.9.24-ALLIANCE-PROPERTY-BRAIN-FOUNDATION"
+MODE = "PROJECT_BHK_ATOMIC_SPLIT_1_9V"
 
 # ---------------------------------------------------------------------------
 # Safety
@@ -4685,8 +4685,91 @@ def _v19t_natural_commercial_heading_split(text_value: str):
     }
 
 
+
+# FOUNDATION_1_9V_PROJECT_BHK_INVENTORY_SPLIT
+def _v19v_project_bhk_inventory_split(text_value: str):
+    raw = str(text_value or "")
+    if not raw.strip():
+        return None
+    lines = _line_ranges(raw)
+    anchors = []
+
+    def clean(line):
+        return re.sub(r"[*_`]+", "", str(line or "")).strip()
+
+    def footerish(line):
+        c = clean(line)
+        return bool(PHONE_RE.search(c) or re.search(
+            r"\b(?:CONTACT|CALL|FOR MORE DETAILS|SITE VISIT|BROKER|REALTOR|REALTY|ASSOCIATES)\b",
+            c, re.I))
+
+    for idx, (start, end, line) in enumerate(lines):
+        c = clean(line)
+        if not c or footerish(c):
+            continue
+        same_bhk = bool(re.search(r"\b\d+(?:\.\d+)?\s*BHK\b", c, re.I))
+        named_bhk = same_bhk and bool(re.match(r"^[A-Za-z][A-Za-z0-9 .&()/'-]{2,100}", c))
+        first_header = False
+        if re.search(r"\b(?:SALE|RENT)\b", c, re.I) and re.search(r"\bSIZE\b", c, re.I):
+            if idx + 1 < len(lines):
+                first_header = bool(re.search(r"\b\d+(?:\.\d+)?\s*BHK\b", clean(lines[idx+1][2]), re.I))
+        if named_bhk or first_header:
+            anchors.append((idx, start, end, c, same_bhk))
+
+    if len(anchors) < 3 or sum(1 for x in anchors if x[4]) < 2:
+        return None
+
+    footer_start = len(raw)
+    for idx in range(anchors[-1][0] + 1, len(lines)):
+        ls, le, line = lines[idx]
+        c = clean(line)
+        if c and footerish(c):
+            footer_start = ls
+            break
+
+    children = []
+    for n, item in enumerate(anchors):
+        start = item[1]
+        end = anchors[n+1][1] if n + 1 < len(anchors) else footer_start
+        exact = raw[start:end]
+        if not exact.strip():
+            return None
+        proposal = _v16_enrich_proposal(exact.strip())
+        proposal.setdefault("context_provenance", {})
+        proposal["context_provenance"]["atomic_boundary"] = "PROJECT_BHK_INVENTORY_SOURCE_TEXT_1_9V"
+        children.append({
+            "child_order": n + 1,
+            "start_offset": start,
+            "end_offset": end,
+            "text": exact.strip(),
+            "proposal": proposal,
+        })
+
+    shared = []
+    if anchors[0][1] > 0 and raw[:anchors[0][1]].strip():
+        shared.append(raw[:anchors[0][1]].strip())
+    if footer_start < len(raw) and raw[footer_start:].strip():
+        shared.append(raw[footer_start:].strip())
+
+    return {
+        "status": "PASS",
+        "reason": "Repeated project + BHK inventory headings form atomic property blocks.",
+        "boundary_strategy": "PROJECT_BHK_INVENTORY_1_9V",
+        "children": children,
+        "shared_context": "\n\n".join(shared),
+        "source_grounded": True,
+        "human_confirmation_required": True,
+    }
+
+
 def automatic_atomic_split(text_value: str) -> Dict[str, Any]:
     raw = str(text_value or "")
+
+    # Foundation 1.9V: compact project-name + BHK broker inventories.
+    v19v = _v19v_project_bhk_inventory_split(raw)
+    if v19v is not None:
+        return v19v
+
     v19f = _v19f_inline_numbered_split(raw)
     if v19f is not None:
         return v19f
