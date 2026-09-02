@@ -1280,4 +1280,28 @@ def register(wrapped):
         }
 
 
+
+    # FOUNDATION 2.3 - Deep Availability Intelligence Extractor
+    try:
+        if _route_exists(app, "/api/property-brain/deep-v23/status"):
+            result["deep_availability_v23"] = {
+                "status": "ALREADY_REGISTERED",
+                "route": "/property-brain/deep-v23",
+                "error": None,
+            }
+        else:
+            import alliance_deep_availability_v23 as deep_v23
+            result["deep_availability_v23"] = {
+                **deep_v23.register(core),
+                "error": None,
+            }
+    except Exception as exc:
+        result["deep_availability_v23"] = {
+            "status": "ERROR",
+            "error": f"{type(exc).__name__}: {exc}",
+            "route": "/property-brain/deep-v23",
+            "fail_safe": True,
+        }
+
+
     return result
