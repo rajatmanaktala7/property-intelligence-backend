@@ -4157,6 +4157,122 @@ def _v19m_pin_heading_split(text_value: str) -> Optional[Dict[str, Any]]:
 
 
 
+
+# FOUNDATION_1_9R_SPARKLE_HEADING_SPLIT
+def _v19r_sparkle_heading_split(text_value: str):
+    """Split broker inventory where each atomic property begins with ✨.
+
+    Safety:
+    - activates only when at least two plausible ✨ property headings exist;
+    - header/contact material before the first property remains shared context;
+    - footer/contact material after the final property remains shared context;
+    - every child is an exact, ordered, non-overlapping source substring;
+    - no city/locality is inferred from broker service-area/header text.
+    """
+    raw = str(text_value or "")
+    if not raw.strip() or "✨" not in raw:
+        return None
+
+    import re as _re
+
+    # Match the full heading line, not facts beneath it.
+    heading_matches = list(_re.finditer(r"(?m)^[ \t]*✨[ \t]*(?P<title>[^\r\n]+?)[ \t]*$", raw))
+    if len(heading_matches) < 2:
+        return None
+
+    def _looks_like_property_title(title: str) -> bool:
+        t = str(title or "").strip(" \t-–—:|")
+        if not t:
+            return False
+        upper = t.upper()
+        reject = (
+            "CONTACT", "CALL ", "CALL:", "OFFICE", "ADDRESS", "FOR SITE",
+            "FOR PROPERTY", "ENQUIR", "INVENTORY", "LISTING", "TEAM"
+        )
+        if any(x in upper for x in reject):
+            return False
+        # A sparkle heading should be a concise building/project name, optionally
+        # followed by an explicit locality after a dash.
+        return len(t) <= 120
+
+    property_heads = [m for m in heading_matches if _looks_like_property_title(m.group("title"))]
+    if len(property_heads) < 2:
+        return None
+
+    # Footer begins only on explicit contact/marketing footer lines after last property.
+    footer_re = _re.compile(
+        r"(?mi)^[ \t]*(?:━{3,}|[-_]{5,})?[ \t]*(?:\r?\n)?"
+        r"[ \t]*(?:📞|📲|☎️?|CONTACT\b|FOR SITE VISITS?\b|FOR PROPERTY VISITS?\b|"
+        r"FOR MORE (?:DETAILS|LISTINGS)\b|FOR .*ENQUIR(?:Y|IES)\b)"
+    )
+
+    first_start = property_heads[0].start()
+    last_head = property_heads[-1]
+    footer_match = footer_re.search(raw, last_head.end())
+    footer_start = footer_match.start() if footer_match else len(raw)
+
+    children = []
+    for idx, head in enumerate(property_heads):
+        start = head.start()
+        end = property_heads[idx + 1].start() if idx + 1 < len(property_heads) else footer_start
+        # Preserve exact source substring while trimming only inter-block whitespace.
+        while end > start and raw[end - 1] in "\r\n \t":
+            end -= 1
+        if end <= start:
+            return None
+        child_text = raw[start:end]
+        if raw[start:end] != child_text:
+            return None
+
+        title = str(head.group("title") or "").strip()
+        project_name = title
+        locality = None
+
+        # Only explicit "PROJECT – LOCALITY" text is parsed. Generic broker header
+        # locations such as "Juhu • Bandra • Khar & Nearby" are never inherited.
+        parts = _re.split(r"\s+[–—-]\s+", title, maxsplit=1)
+        if len(parts) == 2 and parts[0].strip() and parts[1].strip():
+            project_name = parts[0].strip()
+            locality = parts[1].strip()
+
+        children.append({
+            "text": child_text,
+            "start_offset": start,
+            "end_offset": end,
+            "proposal": {
+                "project_name_hint": project_name or None,
+                "city_hint": None,
+                "locality_hint": locality,
+            },
+        })
+
+    # Strong source-grounding checks.
+    previous_end = -1
+    for child in children:
+        s = int(child["start_offset"])
+        e = int(child["end_offset"])
+        if s < previous_end or raw[s:e] != child["text"]:
+            return None
+        previous_end = e
+
+    shared_parts = []
+    header = raw[:first_start].strip()
+    footer = raw[footer_start:].strip() if footer_start < len(raw) else ""
+    if header:
+        shared_parts.append(header)
+    if footer:
+        shared_parts.append(footer)
+
+    return {
+        "status": "PASS",
+        "reason": "Repeated sparkle project headings form atomic property blocks.",
+        "boundary_strategy": "SPARKLE_HEADING_PROPERTY_BLOCK_1_9R",
+        "children": children,
+        "shared_context": "\n\n".join(shared_parts),
+        "source_grounded": True,
+    }
+
+
 def automatic_atomic_split(text_value: str) -> Dict[str, Any]:
     raw = str(text_value or "")
     v19f = _v19f_inline_numbered_split(raw)
@@ -4171,6 +4287,9 @@ def automatic_atomic_split(text_value: str) -> Dict[str, Any]:
     v19m = _v19m_pin_heading_split(raw)
     if v19m is not None:
         return v19m
+    v19r = _v19r_sparkle_heading_split(raw)
+    if v19r is not None:
+        return v19r
 
     # Foundation 1.5 deterministic atomic boundary engine.
     # Handles repeated explicit property headings and locality headers followed
