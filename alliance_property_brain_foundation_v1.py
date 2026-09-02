@@ -4046,72 +4046,82 @@ def _v19f_inline_numbered_split(text_value: str) -> Optional[Dict[str, Any]]:
 
 # FOUNDATION_1_9M_PIN_HEADING_ATOMIC_SPLIT
 def _v19m_pin_heading_split(text_value: str) -> Optional[Dict[str, Any]]:
-    # Safe deterministic splitter for WhatsApp inventory blocks where each
-    # property starts with a map-pin heading such as: 📍Rudra Sector-6
+    # Foundation 1.9P: every property map-pin heading owns following facts.
     raw = str(text_value or "")
     if not raw.strip():
         return None
-
     lines = _line_ranges(raw)
-    pin_rows: List[Tuple[int, int, str]] = []
 
-    for start_pos, end_pos, line in lines:
-        if re.match(r"^\s*📍\s*\S+", str(line or "")):
-            pin_rows.append((start_pos, end_pos, line))
+    def _pin_text(line: str) -> Optional[str]:
+        original = str(line or "").strip()
+        if not re.match(r"^\s*📍", original):
+            return None
+        cleaned = re.sub(r"^\s*📍\s*", "", original).strip()
+        cleaned = re.sub(r"[*_`]+", "", cleaned).strip()
+        return cleaned or None
 
-    if len(pin_rows) < 2:
-        return None
+    def _is_footer_pin(cleaned: str) -> bool:
+        return bool(re.match(r"^(?:OFFICE|CONTACT|ADDRESS|BROKER\s+DETAILS?)\b", cleaned or "", re.I))
 
     def _is_true_footer(line: str) -> bool:
-        s = _boundary_clean_line(line)
-        if not s:
-            return False
-        if ATOMIC_CONTEXT_START_RE.search(s):
+        original = str(line or "").strip()
+        cleaned = _boundary_clean_line(original)
+        pin = _pin_text(original)
+        if pin and _is_footer_pin(pin):
             return True
-        # Do not use generic CALL here because "Rent On Call" is a valid fact.
+        if ATOMIC_CONTEXT_START_RE.search(cleaned):
+            return True
         return bool(re.search(
             r"^(?:CONTACT\b|CONTACT\s+US\b|OFFICE\b|BROKER\s+DETAILS?\b|"
-            r"FOR\s+MORE\s+DETAILS\b|FOR\s+SITE\s+VISITS?\b)",
-            s,
-            re.I,
-        ))
+            r"FOR\s+MORE\s+DETAILS\b|FOR\s+SITE\s+VISITS?\b|FOR\s+PROPERTY\s+VISITS?\b)",
+            cleaned, re.I))
 
-    ranges: List[Tuple[int, int]] = []
-    children: List[Dict[str, Any]] = []
+    property_pins = []
+    footer_start = None
+    for start_pos, end_pos, line in lines:
+        pin = _pin_text(line)
+        if not pin:
+            continue
+        if _is_footer_pin(pin):
+            if footer_start is None:
+                footer_start = start_pos
+            continue
+        property_pins.append((start_pos, end_pos, line))
 
-    for idx, (start_pos, _heading_end, heading_line) in enumerate(pin_rows):
-        next_start = pin_rows[idx + 1][0] if idx + 1 < len(pin_rows) else len(raw)
+    if len(property_pins) < 2:
+        return None
+
+    ranges = []
+    children = []
+    for idx, (start_pos, _heading_end, heading_line) in enumerate(property_pins):
+        next_start = property_pins[idx + 1][0] if idx + 1 < len(property_pins) else (
+            footer_start if footer_start is not None and footer_start > start_pos else len(raw))
         child_end = next_start
 
-        if idx + 1 == len(pin_rows):
-            for ls, _le, line in lines:
-                if ls <= start_pos:
-                    continue
-                if _is_true_footer(line):
-                    child_end = ls
-                    break
+        for ls, _le, line in lines:
+            if ls <= start_pos:
+                continue
+            if ls >= child_end:
+                break
+            if _is_true_footer(line):
+                child_end = ls
+                break
 
         child_start, child_end = _trim_atomic_block(raw, start_pos, child_end)
         if child_end <= child_start:
             continue
-
-        child_text = raw[child_start:child_end].strip()
+        block = raw[child_start:child_end]
+        child_text = block.strip()
         if not child_text:
             continue
-
         exact_pos = raw.find(child_text, child_start, child_end + 1)
-        if exact_pos < 0:
-            return {
-                "status": "NO_AUTOMATIC_SPLIT",
-                "children": [],
-                "shared_context": [],
-                "reason": "Pin-heading child was not an exact source substring.",
-            }
+        if exact_pos < 0 or not re.match(r"^\s*📍", child_text):
+            return {"status":"NO_AUTOMATIC_SPLIT","children":[],"shared_context":[],
+                    "reason":"Unsafe pin-heading child boundary."}
 
         exact_start = exact_pos
         exact_end = exact_pos + len(child_text)
         proposal = _v16_enrich_proposal(child_text)
-
         ranges.append((exact_start, exact_end))
         children.append({
             "child_order": len(children) + 1,
@@ -4120,27 +4130,31 @@ def _v19m_pin_heading_split(text_value: str) -> Optional[Dict[str, Any]]:
             "text": child_text,
             "proposal": proposal,
             "context": {
-                "boundary_strategy": "PIN_HEADING_PROPERTY_BLOCK",
+                "boundary_strategy": "PIN_HEADING_OWNS_FOLLOWING_FACTS_1_9P",
                 "source_heading": str(heading_line or "").strip(),
                 "context_is_source_grounded": True,
             },
         })
 
     if len(children) < 2:
-        return {
-            "status": "NO_AUTOMATIC_SPLIT",
-            "children": [],
-            "shared_context": [],
-            "reason": "Repeated pin headings were found but fewer than two safe children remained.",
-        }
+        return {"status":"NO_AUTOMATIC_SPLIT","children":[],"shared_context":[],
+                "reason":"Fewer than two safe property pin children remained."}
+
+    previous_end = -1
+    for child in children:
+        if int(child["start_offset"]) < previous_end:
+            return {"status":"NO_AUTOMATIC_SPLIT","children":[],"shared_context":[],
+                    "reason":"Pin-heading children overlapped."}
+        previous_end = int(child["end_offset"])
 
     return {
-        "status": "PASS",
-        "children": children,
-        "shared_context": _context_from_ranges(raw, ranges),
-        "boundary_strategy": "PIN_HEADING_PROPERTY_BLOCK",
-        "human_confirmation_required": True,
+        "status":"PASS",
+        "children":children,
+        "shared_context":_context_from_ranges(raw, ranges),
+        "boundary_strategy":"PIN_HEADING_OWNS_FOLLOWING_FACTS_1_9P",
+        "human_confirmation_required":True,
     }
+
 
 
 def automatic_atomic_split(text_value: str) -> Dict[str, Any]:
