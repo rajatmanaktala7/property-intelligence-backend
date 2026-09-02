@@ -1328,4 +1328,28 @@ def register(wrapped):
         }
 
 
+
+    # FOUNDATION 2.5 - Context Ownership + Active Learning
+    try:
+        if _route_exists(app, "/api/property-brain/context-v25/status"):
+            result["context_ownership_v25"] = {
+                "status": "ALREADY_REGISTERED",
+                "route": "/property-brain/context-v25",
+                "error": None,
+            }
+        else:
+            import alliance_context_ownership_v25 as context_v25
+            result["context_ownership_v25"] = {
+                **context_v25.register(core),
+                "error": None,
+            }
+    except Exception as exc:
+        result["context_ownership_v25"] = {
+            "status": "ERROR",
+            "error": f"{type(exc).__name__}: {exc}",
+            "route": "/property-brain/context-v25",
+            "fail_safe": True,
+        }
+
+
     return result
