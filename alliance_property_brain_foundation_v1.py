@@ -4601,7 +4601,7 @@ def merge_with_next(engine, span_id: str, payload: Dict[str, Any]) -> Dict[str, 
         if active_labels:
             conn.execute(text('''
                 UPDATE alliance_gold_span_labels
-                SET active=FALSE, notes=concat_ws(E'\\n', NULLIF(notes,''), :audit_note), updated_at=now()
+                SET active=FALSE, notes=concat_ws(E'\\n', NULLIF(notes,''), CAST(:audit_note AS text)), updated_at=now()
                 WHERE span_id = ANY(CAST(:ids AS uuid[])) AND active=TRUE
             '''), {"ids": merge_ids, "audit_note": f"[Foundation 1.4 merge invalidation by {labeler_id}] {reason}"})
         source_raw = str(conn.execute(text("SELECT raw_text FROM alliance_gold_source_messages WHERE source_message_id=:sid"), {"sid": str(current["source_message_id"])}).scalar() or "")
@@ -4998,6 +4998,7 @@ def disagreements(engine) -> Dict[str, Any]:
     }
 
 
+# FOUNDATION_1_9Q2_TYPED_AUDIT_NOTE
 # FOUNDATION_1_9Q_SOURCE_LEVEL_PIN_REBUILD
 def rebuild_pin_source_spans(engine, source_message_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     sid = str(source_message_id or "").strip()
