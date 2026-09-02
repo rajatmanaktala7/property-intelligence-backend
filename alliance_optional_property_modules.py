@@ -1352,4 +1352,14 @@ def register(wrapped):
         }
 
 
+    # FOUNDATION 2.6 - Magic Source Truth Examiner
+    try:
+        if _route_exists(app, "/api/property-brain/magic-v26/status"):
+            result["magic_examiner_v26"] = {"status":"ALREADY_REGISTERED","route":"/property-brain/magic-v26","error":None}
+        else:
+            import alliance_magic_examiner_v26 as magic_v26
+            result["magic_examiner_v26"] = {**magic_v26.register(core),"error":None}
+    except Exception as exc:
+        result["magic_examiner_v26"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","route":"/property-brain/magic-v26","fail_safe":True}
+
     return result
