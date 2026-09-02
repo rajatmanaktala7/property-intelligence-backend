@@ -15,8 +15,8 @@ from fastapi import Body, HTTPException, Query
 from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy import create_engine, text
 
-VERSION = "1.9.21-ALLIANCE-PROPERTY-BRAIN-FOUNDATION"
-MODE = "NATURAL_COMMERCIAL_ATOMIC_SPLIT_1_9T2"
+VERSION = "1.9.22-ALLIANCE-PROPERTY-BRAIN-FOUNDATION"
+MODE = "GOLD_REPAIR_STAY_ON_SOURCE_1_9T3"
 
 # ---------------------------------------------------------------------------
 # Safety
@@ -5094,10 +5094,12 @@ def progress(engine) -> Dict[str, Any]:
         ),
     }
 
+# FOUNDATION_1_9T3_STAY_ON_REPAIRED_SOURCE
 def next_span(
     engine,
     labeler_id: Optional[str] = None,
     skip_span_ids: Optional[str] = None,
+    source_message_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     raw_skip_ids = [
         x.strip()
@@ -5113,6 +5115,14 @@ def next_span(
         )
     ][:500]
     skip_csv = ",".join(valid_skip_ids)
+
+    source_filter = str(source_message_id or "").strip()
+    if source_filter and not re.fullmatch(
+        r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-"
+        r"[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}",
+        source_filter,
+    ):
+        source_filter = ""
 
     with engine.connect() as conn:
         row = conn.execute(
@@ -5139,6 +5149,10 @@ def next_span(
                 WHERE COALESCE(sp.span_status, 'ACTIVE')='ACTIVE'
                   AND sp.boundary_status <> 'LABELED'
                   AND (
+                      :source_filter = ''
+                      OR sp.source_message_id::text = :source_filter
+                  )
+                  AND (
                       :skip_csv = ''
                       OR NOT (
                           sp.span_id::text = ANY(string_to_array(:skip_csv, ','))
@@ -5156,7 +5170,10 @@ def next_span(
                 LIMIT 1
                 """
             ),
-            {"skip_csv": skip_csv},
+            {
+                "skip_csv": skip_csv,
+                "source_filter": source_filter,
+            },
         ).mappings().first()
 
     if not row:
@@ -6124,15 +6141,20 @@ async function refreshProgress(){
   document.getElementById("progress").innerText =
     `Sources: ${d.source_messages} | Proposed spans: ${d.proposed_spans} | Labeled spans: ${d.labeled_spans} | ${d.first_milestone}`;
 }
-async function loadNext(){
+async function loadNext(preferredSourceId=null){
   document.getElementById("msg").innerText="";
   document.getElementById("source").innerText="Loading...";
   document.getElementById("span").innerText="Loading...";
   try{
-    const skipQuery = skippedSpanIds.length
-      ? `?skip_span_ids=${encodeURIComponent(skippedSpanIds.join(","))}`
-      : "";
-    const r=await fetch("/api/property-brain-foundation/next-span"+skipQuery);
+    const params=new URLSearchParams();
+    if(skippedSpanIds.length){
+      params.set("skip_span_ids", skippedSpanIds.join(","));
+    }
+    if(preferredSourceId){
+      params.set("source_message_id", preferredSourceId);
+    }
+    const query=params.toString() ? "?"+params.toString() : "";
+    const r=await fetch("/api/property-brain-foundation/next-span"+query);
     const raw=await r.text();
     let d={};
     try{ d=JSON.parse(raw); }
@@ -6188,6 +6210,7 @@ async function loadNext(){
 async function repairCurrentSource(){
   try{
     if(!current) throw new Error("No span loaded");
+    const repairedSourceId=String(current.source_message_id||"");
     const labeler=document.getElementById("labeler").value.trim();
     if(!labeler) throw new Error("Enter Labeler ID / team member name");
     const ok=confirm(
@@ -6217,7 +6240,11 @@ async function repairCurrentSource(){
       `${d.invalidated_malformed_gold_labels} malformed Gold label(s) invalidated.`;
     skippedSpanIds=[];
     await refreshProgress();
-    await loadNext();
+    await loadNext(repairedSourceId);
+    if(!current){
+      document.getElementById("msg").innerText =
+        "Source repair completed. No unlabeled active spans remain in this source.";
+    }
   }catch(e){
     document.getElementById("msg").innerText="ERROR: "+e.message;
   }
@@ -6919,9 +6946,15 @@ def register(core):
     def next_span_route(
         labeler_id: Optional[str] = Query(None),
         skip_span_ids: Optional[str] = Query(None),
+        source_message_id: Optional[str] = Query(None),
     ):
         return _json_response(
-            next_span(engine, labeler_id, skip_span_ids=skip_span_ids)
+            next_span(
+                engine,
+                labeler_id,
+                skip_span_ids=skip_span_ids,
+                source_message_id=source_message_id,
+            )
         )
 
     @app.get("/api/property-brain-foundation/span/{span_id}/contact-lineage")
