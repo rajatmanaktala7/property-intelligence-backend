@@ -1304,4 +1304,28 @@ def register(wrapped):
         }
 
 
+
+    # FOUNDATION 2.4 - Evidence First Maximum Extraction
+    try:
+        if _route_exists(app, "/api/property-brain/evidence-v24/status"):
+            result["evidence_first_v24"] = {
+                "status": "ALREADY_REGISTERED",
+                "route": "/property-brain/evidence-v24",
+                "error": None,
+            }
+        else:
+            import alliance_evidence_first_v24 as evidence_v24
+            result["evidence_first_v24"] = {
+                **evidence_v24.register(core),
+                "error": None,
+            }
+    except Exception as exc:
+        result["evidence_first_v24"] = {
+            "status": "ERROR",
+            "error": f"{type(exc).__name__}: {exc}",
+            "route": "/property-brain/evidence-v24",
+            "fail_safe": True,
+        }
+
+
     return result
