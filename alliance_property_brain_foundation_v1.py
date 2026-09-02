@@ -1062,19 +1062,28 @@ def _line_for_offset(text_value: str, offset: int) -> str:
 
 
 def _title_parts(span_text: str) -> Dict[str, Optional[str]]:
-    # Foundation 1.9N source-grounded title parser.
+    # Foundation 1.9O2 source-grounded title parser.
+    #
+    # A map-pin heading is explicit source evidence that the first line is a
+    # project/location heading. Mixed-case names such as "Supriya Sec- 10"
+    # must not be rejected by the older uppercase-only generic anchor rule.
     lines = [x.strip() for x in (span_text or "").splitlines() if x.strip()]
     if not lines:
         return {"project_name": None, "locality": None}
 
     raw_title = lines[0]
-    if not _is_named_property_anchor(raw_title):
+    is_pin_heading = bool(re.match(r"^\s*📍", raw_title))
+
+    # Preserve the conservative generic detector for normal text. Pin-heading
+    # children produced by Foundation 1.9M are allowed through directly.
+    if not is_pin_heading and not _is_named_property_anchor(raw_title):
         return {"project_name": None, "locality": None}
 
     title = _clean_anchor_text(raw_title)
     if not title:
         return {"project_name": None, "locality": None}
 
+    # Compact project + sector headings.
     sector_match = re.match(
         r"^(?P<project>.+?)\s+"
         r"(?P<label>SECTOR|SEC)\s*[-:]?\s*"
@@ -1088,6 +1097,7 @@ def _title_parts(span_text: str) -> Dict[str, Optional[str]]:
         locality = f"Sector {number}" if number else None
         return {"project_name": project or None, "locality": locality}
 
+    # Explicit project/locality separator.
     parts = re.split(r"\s+[–—-]\s+", title, maxsplit=1)
     if len(parts) == 2:
         left, right = parts[0].strip(), parts[1].strip()
@@ -1111,6 +1121,7 @@ def _title_parts(span_text: str) -> Dict[str, Optional[str]]:
             return {"project_name": left or None, "locality": right or None}
 
     return {"project_name": title or None, "locality": None}
+
 
 
 def _extract_property_fields(span_text: str, tx: str) -> Dict[str, Any]:
