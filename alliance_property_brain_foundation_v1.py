@@ -4999,6 +4999,7 @@ def disagreements(engine) -> Dict[str, Any]:
 
 
 # FOUNDATION_1_9Q2_TYPED_AUDIT_NOTE
+# FOUNDATION_1_9Q3_SOURCE_AUDIT_SQL_FIX
 # FOUNDATION_1_9Q_SOURCE_LEVEL_PIN_REBUILD
 def rebuild_pin_source_spans(engine, source_message_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     sid = str(source_message_id or "").strip()
@@ -5078,7 +5079,7 @@ def rebuild_pin_source_spans(engine, source_message_id: str, payload: Dict[str, 
             conn.execute(text("""
                 UPDATE alliance_gold_span_labels
                 SET active=FALSE,
-                    notes=concat_ws(E'\\n', NULLIF(notes,''), :audit_note),
+                    notes=concat_ws(E'\\n', NULLIF(notes,''), CAST(:audit_note AS text)),
                     updated_at=now()
                 WHERE active=TRUE
                   AND span_id = ANY(CAST(:ids AS uuid[]))
