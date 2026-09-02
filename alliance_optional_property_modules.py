@@ -1437,4 +1437,26 @@ def register(wrapped):
             "fail_safe":True,
         }
 
+    # FOUNDATION 2.9.2.1 - Structural Integrity Repair
+    try:
+        if _route_exists(app, "/api/property-brain/integrity-v2921/status"):
+            result["integrity_v2921"] = {
+                "status":"ALREADY_REGISTERED",
+                "route":"/property-brain/integrity-v2921",
+                "error":None,
+            }
+        else:
+            import alliance_structural_integrity_v2921 as integrity_v2921
+            result["integrity_v2921"] = {
+                **integrity_v2921.register(core),
+                "error":None,
+            }
+    except Exception as exc:
+        result["integrity_v2921"] = {
+            "status":"ERROR",
+            "error":f"{type(exc).__name__}: {exc}",
+            "route":"/property-brain/integrity-v2921",
+            "fail_safe":True,
+        }
+
     return result
