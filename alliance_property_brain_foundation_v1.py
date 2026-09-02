@@ -15,8 +15,8 @@ from fastapi import Body, HTTPException, Query
 from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy import create_engine, text
 
-VERSION = "1.9.26-ALLIANCE-PROPERTY-BRAIN-FOUNDATION"
-MODE = "MIXED_PIN_ASSET_ATOMIC_SPLIT_1_9X"
+VERSION = "1.9.27-ALLIANCE-PROPERTY-BRAIN-FOUNDATION"
+MODE = "SPLIT_SOURCE_LABELING_FLOW_1_9Y"
 
 # ---------------------------------------------------------------------------
 # Safety
@@ -6802,6 +6802,16 @@ async function loadNext(preferredSourceId=null){
   }
 }
 
+# FOUNDATION_1_9Y_STAY_ON_SPLIT_SOURCE
+async function loadNextInSourceOrGlobal(sourceId){
+  const preferred=String(sourceId||"").trim();
+  if(preferred){
+    await loadNext(preferred);
+    if(current) return;
+  }
+  await loadNext();
+}
+
 async function repairCurrentSource(){
   try{
     if(!current) throw new Error("No span loaded");
@@ -6878,6 +6888,7 @@ function cancelAtomicSplit(){
 async function confirmAtomicSplit(){
   try{
     if(!current) throw new Error("No span loaded");
+    const splitSourceId=String(current.source_message_id||"");
     const labeler=document.getElementById("labeler").value.trim(); if(!labeler) throw new Error("Enter Labeler ID / team member name");
     const children=[...document.querySelectorAll(".splitChild")].map((x,i)=>({
       text:x.value.trim(),
@@ -6888,8 +6899,14 @@ async function confirmAtomicSplit(){
     const payload={labeler_id:labeler,children:children,reason:document.getElementById("notes").value.trim()||"Human atomic split in Gold Lab",invalidate_existing_labels:false};
     const r=await fetch(`/api/property-brain-foundation/span/${current.span_id}/split`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});
     const d=await r.json(); if(!r.ok) throw new Error(d.detail||JSON.stringify(d));
-    document.getElementById("msg").innerText=`Real split complete: ${d.child_count} active child spans created. Parent preserved as SUPERSEDED.`;
-    cancelAtomicSplit(); await refreshProgress(); await loadNext();
+    cancelAtomicSplit();
+    await refreshProgress();
+    await loadNextInSourceOrGlobal(splitSourceId);
+    if(current && String(current.source_message_id||"")===splitSourceId){
+      document.getElementById("msg").innerText=`Real split complete: ${d.child_count} active child spans created. Now reviewing the first unlabeled child from the same source.`;
+    }else{
+      document.getElementById("msg").innerText=`Real split complete: ${d.child_count} active child spans created. Source complete; resumed global queue.`;
+    }
   }catch(e){ document.getElementById("msg").innerText="ERROR: "+e.message; }
 }
 async function mergeWithNext(){
@@ -6929,6 +6946,7 @@ async function quickSave(contentType){
 async function save(){
   try{
     if(!current) throw new Error("No span loaded");
+    const savedSourceId=String(current.source_message_id||"");
     const boundaryAction=document.getElementById("boundary").value;
     if(boundaryAction==="SPLIT") throw new Error("Use Prepare Atomic Split → Confirm Real Split. SPLIT is no longer a cosmetic label.");
     if(boundaryAction==="MERGE") throw new Error("Use Merge With Next Span. MERGE is no longer a cosmetic label.");
@@ -6969,7 +6987,14 @@ async function save(){
     document.getElementById("propertyFields").value="{}";
     document.getElementById("requirementFields").value="{}";
     await refreshProgress();
-    await loadNext();
+    await loadNextInSourceOrGlobal(savedSourceId);
+    if(current && String(current.source_message_id||"")===savedSourceId){
+      document.getElementById("msg").innerText="Saved to Gold Dataset. Loaded next unlabeled span from the same source.";
+    }else if(current){
+      document.getElementById("msg").innerText="Saved to Gold Dataset. Source complete; resumed global queue.";
+    }else{
+      document.getElementById("msg").innerText="Saved to Gold Dataset. No unlabeled spans remain.";
+    }
   }catch(e){
     document.getElementById("msg").innerText="ERROR: "+e.message;
   }
