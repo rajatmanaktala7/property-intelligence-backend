@@ -4997,6 +4997,230 @@ def disagreements(engine) -> Dict[str, Any]:
         ],
     }
 
+
+# FOUNDATION_1_9Q_SOURCE_LEVEL_PIN_REBUILD
+def rebuild_pin_source_spans(engine, source_message_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    sid = str(source_message_id or "").strip()
+    labeler_id = str((payload or {}).get("labeler_id") or "").strip()
+    reason = str((payload or {}).get("reason") or "").strip() or "Source-level pin boundary repair 1.9Q"
+    if not sid:
+        raise HTTPException(400, "source_message_id is required")
+    if not labeler_id:
+        raise HTTPException(400, "labeler_id is required")
+
+    with engine.begin() as conn:
+        source_row = conn.execute(text("""
+            SELECT source_message_id, raw_text, source_table, sampling_bucket
+            FROM alliance_gold_source_messages
+            WHERE source_message_id=:sid
+            FOR UPDATE
+        """), {"sid": sid}).mappings().first()
+        if not source_row:
+            raise HTTPException(404, "Gold source message not found")
+
+        raw = str(source_row["raw_text"] or "")
+        rebuilt = _v19m_pin_heading_split(raw)
+        if not rebuilt or rebuilt.get("status") != "PASS":
+            raise HTTPException(409, (rebuilt or {}).get("reason") or "No safe source-level pin reconstruction.")
+        canonical = rebuilt.get("children") or []
+        if len(canonical) < 2:
+            raise HTTPException(409, "Source rebuild produced fewer than two canonical children")
+
+        previous_end = -1
+        canonical_by_text: Dict[str, List[Dict[str, Any]]] = {}
+        for child in canonical:
+            ctext = str(child.get("text") or "")
+            start = int(child.get("start_offset") or 0)
+            end = int(child.get("end_offset") or 0)
+            if not ctext or raw[start:end] != ctext:
+                raise HTTPException(409, "Canonical child is not an exact substring of original source")
+            if start < previous_end:
+                raise HTTPException(409, "Canonical source children overlap")
+            previous_end = end
+            canonical_by_text.setdefault(ctext, []).append(child)
+
+        active_rows = conn.execute(text("""
+            SELECT sp.span_id, sp.span_order,
+                   sp.proposed_start_offset, sp.proposed_end_offset,
+                   COALESCE(sp.human_text, sp.proposed_text) AS span_text,
+                   sp.boundary_status,
+                   EXISTS(
+                       SELECT 1 FROM alliance_gold_span_labels l
+                       WHERE l.span_id=sp.span_id AND l.active=TRUE
+                   ) AS has_active_label
+            FROM alliance_gold_spans sp
+            WHERE sp.source_message_id=:sid
+              AND COALESCE(sp.span_status, 'ACTIVE')='ACTIVE'
+            ORDER BY sp.span_order, sp.created_at, sp.span_id
+            FOR UPDATE
+        """), {"sid": sid}).mappings().all()
+
+        preserved_by_text: Dict[str, str] = {}
+        preserved_ids: List[str] = []
+        supersede_ids: List[str] = []
+        invalidated_label_ids: List[str] = []
+
+        for row in active_rows:
+            span_id = str(row["span_id"])
+            span_text = str(row["span_text"] or "").strip()
+            canonical_matches = canonical_by_text.get(span_text) or []
+            is_exact_canonical = len(canonical_matches) == 1
+            if bool(row["has_active_label"]) and is_exact_canonical and span_text not in preserved_by_text:
+                preserved_by_text[span_text] = span_id
+                preserved_ids.append(span_id)
+            else:
+                supersede_ids.append(span_id)
+                if bool(row["has_active_label"]):
+                    invalidated_label_ids.append(span_id)
+
+        if invalidated_label_ids:
+            conn.execute(text("""
+                UPDATE alliance_gold_span_labels
+                SET active=FALSE,
+                    notes=concat_ws(E'\\n', NULLIF(notes,''), :audit_note),
+                    updated_at=now()
+                WHERE active=TRUE
+                  AND span_id = ANY(CAST(:ids AS uuid[]))
+            """), {
+                "ids": invalidated_label_ids,
+                "audit_note": (
+                    "[Foundation 1.9Q source-boundary correction by " + labeler_id +
+                    "] Label invalidated because its evidence span was not an exact "
+                    "canonical child of the original source. " + reason
+                ),
+            })
+
+        if supersede_ids:
+            _deactivate_lineage_dependencies(conn, supersede_ids)
+            conn.execute(text("""
+                UPDATE alliance_gold_spans
+                SET span_status='SUPERSEDED',
+                    boundary_status='SUPERSEDED',
+                    boundary_action='SOURCE_REBUILD',
+                    superseded_at=now(),
+                    lineage_metadata=COALESCE(lineage_metadata, '{}'::jsonb)
+                        || CAST(:meta AS jsonb),
+                    updated_at=now()
+                WHERE span_id = ANY(CAST(:ids AS uuid[]))
+            """), {
+                "ids": supersede_ids,
+                "meta": _json({
+                    "operation": "SOURCE_LEVEL_PIN_REBUILD_1_9Q",
+                    "labeler_id": labeler_id,
+                    "reason": reason,
+                    "source_message_id": sid,
+                }),
+            })
+
+        conn.execute(text("""
+            UPDATE alliance_gold_spans
+            SET span_order=span_order+1000000
+            WHERE source_message_id=:sid
+              AND COALESCE(span_status, 'ACTIVE')='ACTIVE'
+        """), {"sid": sid})
+
+        final_ids: List[str] = []
+        created_ids: List[str] = []
+
+        for order_no, child in enumerate(canonical, start=1):
+            ctext = str(child["text"])
+            start = int(child["start_offset"])
+            end = int(child["end_offset"])
+            preserved_id = preserved_by_text.get(ctext)
+
+            if preserved_id:
+                conn.execute(text("""
+                    UPDATE alliance_gold_spans
+                    SET span_order=:span_order,
+                        proposed_start_offset=:start_offset,
+                        proposed_end_offset=:end_offset,
+                        updated_at=now(),
+                        lineage_metadata=COALESCE(lineage_metadata, '{}'::jsonb)
+                          || CAST(:meta AS jsonb)
+                    WHERE span_id=:span_id
+                """), {
+                    "span_id": preserved_id,
+                    "span_order": order_no,
+                    "start_offset": start,
+                    "end_offset": end,
+                    "meta": _json({
+                        "source_rebuild_verified": True,
+                        "source_rebuild_version": "1.9Q",
+                        "canonical_boundary_strategy": "PIN_HEADING_OWNS_FOLLOWING_FACTS_1_9P",
+                    }),
+                })
+                final_ids.append(preserved_id)
+                continue
+
+            new_id = str(uuid.uuid4())
+            proposal = child.get("proposal") if isinstance(child.get("proposal"), dict) else {}
+            conn.execute(text("""
+                INSERT INTO alliance_gold_spans (
+                    span_id, source_message_id, span_order,
+                    proposed_start_offset, proposed_end_offset,
+                    proposed_text, proposal_method, proposal_confidence,
+                    parent_span_id, span_status, boundary_status, lineage_metadata
+                ) VALUES (
+                    :span_id, :source_message_id, :span_order,
+                    :start_offset, :end_offset,
+                    :proposed_text, 'SOURCE_LEVEL_PIN_REBUILD_1_9Q', 1.0,
+                    NULL, 'ACTIVE', 'PENDING', CAST(:lineage_metadata AS jsonb)
+                )
+            """), {
+                "span_id": new_id,
+                "source_message_id": sid,
+                "span_order": order_no,
+                "start_offset": start,
+                "end_offset": end,
+                "proposed_text": ctext,
+                "lineage_metadata": _json({
+                    "created_by": labeler_id,
+                    "operation": "SOURCE_LEVEL_PIN_REBUILD_1_9Q",
+                    "reason": reason,
+                    "source_grounded_context": child.get("context") or {},
+                    "preview_proposal_context": {
+                        k: v for k, v in proposal.items()
+                        if k in {"locality_hint","city_hint","project_name_hint","context_provenance","entity_scope"}
+                    },
+                }),
+            })
+            final_ids.append(new_id)
+            created_ids.append(new_id)
+
+        if supersede_ids:
+            conn.execute(text("""
+                UPDATE alliance_gold_spans
+                SET superseded_by=CAST(:replacement_ids AS jsonb),
+                    updated_at=now()
+                WHERE span_id = ANY(CAST(:ids AS uuid[]))
+            """), {
+                "ids": supersede_ids,
+                "replacement_ids": _json(final_ids),
+            })
+
+        _refresh_source_after_boundary_edit(conn, sid)
+
+    return _json_safe({
+        "status": "SOURCE_REBUILT",
+        "version": VERSION,
+        "repair_version": "1.9Q",
+        "source_message_id": sid,
+        "canonical_child_count": len(canonical),
+        "preserved_labeled_spans": len(preserved_ids),
+        "created_pending_spans": len(created_ids),
+        "superseded_malformed_spans": len(supersede_ids),
+        "invalidated_malformed_gold_labels": len(invalidated_label_ids),
+        "invalidated_span_ids": invalidated_label_ids,
+        "shared_context": rebuilt.get("shared_context") or [],
+        "academy_write_only": True,
+        "production_writes": False,
+        "canonical_writes": 0,
+        "offer_writes": 0,
+        "matcher_writes": 0,
+        "whatsapp_live_writes": 0,
+    })
+
+
 def export_gold(engine, limit: int = 1000) -> Dict[str, Any]:
     with engine.connect() as conn:
         rows = conn.execute(
@@ -5191,6 +5415,7 @@ button{border:0;border-radius:8px;padding:10px 14px;cursor:pointer;font-weight:7
 <div class="actions">
 <button class="secondary" type="button" onclick="prepareAtomicSplit()">Prepare Atomic Split</button>
 <button class="secondary" type="button" onclick="mergeWithNext()">Merge With Next Span</button>
+<button class="secondary" type="button" onclick="repairCurrentSource()">Repair Current Source</button>
 </div>
 <div id="splitPanel" style="display:none;margin-top:12px;border:1px solid #f59e0b;border-radius:8px;padding:12px;background:#fffbeb">
 <strong>Atomic Split Editor</strong>
@@ -5374,6 +5599,44 @@ async function loadNext(){
     current=null;
     document.getElementById("source").innerText="Gold Lab runtime error. Do not label this record.";
     document.getElementById("span").innerText="";
+    document.getElementById("msg").innerText="ERROR: "+e.message;
+  }
+}
+
+async function repairCurrentSource(){
+  try{
+    if(!current) throw new Error("No span loaded");
+    const labeler=document.getElementById("labeler").value.trim();
+    if(!labeler) throw new Error("Enter Labeler ID / team member name");
+    const ok=confirm(
+      "Repair this entire source from the ORIGINAL source message?\\n\\n"+
+      "Exact already-labeled canonical property spans will be preserved. "+
+      "Malformed/conflicting Gold labels will be invalidated with an audit trail. "+
+      "Production inventory will NOT be written."
+    );
+    if(!ok) return;
+    document.getElementById("msg").innerText="Repairing current source...";
+    const r=await fetch(
+      `/api/property-brain-foundation/source/${current.source_message_id}/rebuild-pin-spans`,
+      {
+        method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({labeler_id:labeler,reason:"Human-confirmed source-level repair from Gold Lab"})
+      }
+    );
+    const raw=await r.text();
+    let d={};
+    try{ d=JSON.parse(raw); }catch(e){ throw new Error("Backend returned non-JSON response"); }
+    if(!r.ok) throw new Error(d.detail||d.message||"Source repair failed");
+    document.getElementById("msg").innerText =
+      `Source repaired: ${d.canonical_child_count} canonical properties; `+
+      `${d.preserved_labeled_spans} labeled preserved; `+
+      `${d.created_pending_spans} pending created; `+
+      `${d.invalidated_malformed_gold_labels} malformed Gold label(s) invalidated.`;
+    skippedSpanIds=[];
+    await refreshProgress();
+    await loadNext();
+  }catch(e){
     document.getElementById("msg").innerText="ERROR: "+e.message;
   }
 }
@@ -6098,6 +6361,10 @@ def register(core):
     @app.post("/api/property-brain-foundation/span/{span_id}/merge-next")
     def merge_span_next_route(span_id: str, payload: Dict[str, Any] = Body(...)):
         return _json_response(merge_with_next(engine, span_id, payload))
+
+    @app.post("/api/property-brain-foundation/source/{source_message_id}/rebuild-pin-spans")
+    def rebuild_pin_source_route(source_message_id: str, payload: Dict[str, Any] = Body(...)):
+        return _json_response(rebuild_pin_source_spans(engine, source_message_id, payload))
 
     @app.post("/api/property-brain-foundation/relationship")
     def relationship(payload: Dict[str, Any] = Body(...)):
