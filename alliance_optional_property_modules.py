@@ -1834,4 +1834,16 @@ def register(wrapped):
             "fail_safe": True,
         }
 
+
+    # FOUNDATION 4.3.0 - Alliance Autonomous Student V5
+    # V4 is closed training data. Fresh V5 is frozen only after regression gates pass.
+    try:
+        if _route_exists(app, "/api/property-brain/autonomous-v430/status"):
+            result["autonomous_v430"] = {"status":"ALREADY_REGISTERED","route":"/property-brain/autonomous-v430","error":None}
+        else:
+            import alliance_autonomous_student_v430 as autonomous_v430
+            result["autonomous_v430"] = {**autonomous_v430.register(core), "error": None}
+    except Exception as exc:
+        result["autonomous_v430"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","route":"/property-brain/autonomous-v430","fail_safe":True}
+
     return result
