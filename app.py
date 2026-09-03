@@ -17095,3 +17095,12 @@ try:
     print("Alliance Magazine Failure-Only Field Challenger 6.3: registered")
 except Exception as _v630_exc:
     print("Alliance Magazine Failure-Only 6.3 registration warning:",_v630_exc)
+
+# FOUNDATION_6_3_2_MAGAZINE_VISUAL_ROW_LOCATOR_REPAIR
+try:
+    import sys as _v632_sys
+    import alliance_magazine_visual_row_v632 as _v632
+    _v632.start(_v632_sys.modules[__name__])
+    print("Alliance Magazine Visual Row Locator Repair 6.3.2: registered")
+except Exception as _v632_exc:
+    print("Alliance Magazine Visual Row 6.3.2 registration warning:",_v632_exc)
