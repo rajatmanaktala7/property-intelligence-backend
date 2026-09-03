@@ -17086,3 +17086,12 @@ try:
     print("Alliance Magazine Vision Lab 6.2.2: registered")
 except Exception as _v622_exc:
     print("Alliance Magazine Vision Lab 6.2.2 registration warning:",_v622_exc)
+
+# FOUNDATION_6_3_MAGAZINE_FAILURE_ONLY_FIELD_CHALLENGER
+try:
+    import sys as _v630_sys
+    import alliance_magazine_failure_only_v630 as _v630
+    _v630.start(_v630_sys.modules[__name__])
+    print("Alliance Magazine Failure-Only Field Challenger 6.3: registered")
+except Exception as _v630_exc:
+    print("Alliance Magazine Failure-Only 6.3 registration warning:",_v630_exc)
