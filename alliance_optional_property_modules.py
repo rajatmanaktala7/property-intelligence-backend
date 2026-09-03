@@ -1577,4 +1577,17 @@ def register(wrapped):
         }
 
 
+
+    # FOUNDATION 3.2 - Mastery Repair + Blind Holdout Gate
+    try:
+        if _route_exists(app, "/api/property-brain/mastery-v320/status"):
+            result["mastery_v320"] = {"status":"ALREADY_REGISTERED","route":"/property-brain/mastery-v320","error":None}
+        else:
+            import alliance_mastery_repair_v320 as mastery_v320
+            result["mastery_v320"] = {**mastery_v320.register(core),"error":None}
+    except Exception as exc:
+        result["mastery_v320"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}",
+                                  "route":"/property-brain/mastery-v320","fail_safe":True}
+
+
     return result
