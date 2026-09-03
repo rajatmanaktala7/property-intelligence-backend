@@ -1739,4 +1739,11 @@ def register(wrapped):
     except Exception as exc:
         result["automation_v420"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","route":"/property-brain/automation-v420","fail_safe":True}
 
+    # V19.0 single stable property operations owner
+    try:
+        import alliance_property_operations_v190 as property_ops_v190
+        result["property_operations_v190"] = {**property_ops_v190.register(wrapped), "error": None}
+    except Exception as exc:
+        result["property_operations_v190"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","fail_safe":True}
+
     return result
