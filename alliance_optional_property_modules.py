@@ -1929,4 +1929,16 @@ def register(wrapped):
     except Exception as exc:
         result["autonomous_v438"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","fail_safe":True}
 
+
+    # FOUNDATION 4.3.9 - Fresh V5 Frozen Certification
+    # Locks Student 4.3.8 before truth; no student tuning after freeze.
+    try:
+        if _route_exists(app, "/api/property-brain/fresh-v5-v439/status"):
+            result["fresh_v5_v439"] = {"status":"ALREADY_REGISTERED","route":"/property-brain/fresh-v5-v439","error":None}
+        else:
+            import alliance_fresh_v5_v439 as v439
+            result["fresh_v5_v439"] = {**v439.register(core), "error": None}
+    except Exception as exc:
+        result["fresh_v5_v439"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","fail_safe":True}
+
     return result
