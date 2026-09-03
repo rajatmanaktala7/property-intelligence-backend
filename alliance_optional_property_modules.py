@@ -1715,4 +1715,16 @@ def register(wrapped):
     except Exception as exc:
         result["academy_v402"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","route":"/property-brain/academy-v402","fail_safe":True}
 
+
+    # FOUNDATION 4.1 - Alliance CRE Championship Blind V4
+    # Certification only. No predictor tuning. Preserves 4.0.2 and all earlier foundations.
+    try:
+        if _route_exists(app, "/api/property-brain/championship-v410/status"):
+            result["championship_v410"] = {"status":"ALREADY_REGISTERED","route":"/property-brain/championship-v410","error":None}
+        else:
+            import alliance_cre_championship_v410 as championship_v410
+            result["championship_v410"] = {**championship_v410.register(core), "error": None}
+    except Exception as exc:
+        result["championship_v410"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","route":"/property-brain/championship-v410","fail_safe":True}
+
     return result
