@@ -17122,3 +17122,12 @@ try:
     print("Alliance Magazine Contextual Neighborhood Repair 6.3.4: registered")
 except Exception as _v634_exc:
     print("Alliance Magazine Contextual 6.3.4 registration warning:",_v634_exc)
+
+# FOUNDATION_6_3_5_MAGAZINE_LINE_STRIP_SEGMENTATION_REPAIR
+try:
+    import sys as _v635_sys
+    import alliance_magazine_line_strip_v635 as _v635
+    _v635.start(_v635_sys.modules[__name__])
+    print("Alliance Magazine Line Strip Segmentation Repair 6.3.5: registered")
+except Exception as _v635_exc:
+    print("Alliance Magazine Line Strip 6.3.5 registration warning:",_v635_exc)
