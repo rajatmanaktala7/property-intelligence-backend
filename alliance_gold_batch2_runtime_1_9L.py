@@ -142,6 +142,15 @@ def _register_optional_with_property_v181(wrapped):
         v181_result = _property_v181.register(wrapped)
         if isinstance(result, dict):
             result["property_edit_v181"] = v181_result
+        try:
+            import alliance_unified_data_organizer_v182 as _data_v182
+            v182_result = _data_v182.register(wrapped)
+            if isinstance(result, dict):
+                result["unified_data_v182"] = v182_result
+        except Exception as exc:
+            if isinstance(result, dict):
+                result["unified_data_v182"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","fail_safe":True}
+            print("[unified-data-v182] warning:", type(exc).__name__, str(exc))
     except Exception as exc:
         if isinstance(result, dict):
             result["property_edit_v181"] = {
