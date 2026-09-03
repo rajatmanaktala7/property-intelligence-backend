@@ -1629,4 +1629,25 @@ def register(wrapped):
                                   "route":"/property-brain/mastery-v350","fail_safe":True}
 
 
+
+    # FOUNDATION 3.6 - blind failure learning + new frozen unseen exam
+    try:
+        if _route_exists(app, "/api/property-brain/mastery-v360/status"):
+            result["mastery_v360"] = {
+                "status": "ALREADY_REGISTERED",
+                "route": "/property-brain/mastery-v360",
+                "error": None,
+            }
+        else:
+            import alliance_blind_failure_learning_v360 as mastery_v360
+            mastery_result = mastery_v360.register(core)
+            result["mastery_v360"] = {**mastery_result, "error": None}
+    except Exception as exc:
+        result["mastery_v360"] = {
+            "status": "ERROR",
+            "error": f"{type(exc).__name__}: {exc}",
+            "route": "/property-brain/mastery-v360",
+            "fail_safe": True,
+        }
+
     return result
