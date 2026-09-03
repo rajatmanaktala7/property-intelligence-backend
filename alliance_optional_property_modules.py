@@ -1880,4 +1880,17 @@ def register(wrapped):
     except Exception as exc:
         result["v434_forensics"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","route":"/property-brain/autonomous-v434-forensics","fail_safe":True}
 
+
+    # FOUNDATION 4.3.5 - Truth Integrity Repair
+    try:
+        import alliance_truth_integrity_v426 as v426
+        result["truth_integrity_v426"] = {**v426.register(core), "error": None}
+    except Exception as exc:
+        result["truth_integrity_v426"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","fail_safe":True}
+    try:
+        import alliance_autonomous_student_v435 as v435
+        result["autonomous_v435"] = {**v435.register(core), "error": None}
+    except Exception as exc:
+        result["autonomous_v435"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","fail_safe":True}
+
     return result
