@@ -1703,4 +1703,16 @@ def register(wrapped):
     except Exception as exc:
         result["academy_v401"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","route":"/property-brain/academy-v401","fail_safe":True}
 
+
+    # FOUNDATION 4.0.2 - Alliance CRE Academy Pre-Cert Finalizer
+    # Additive only. Preserves 4.0.1, 4.0, 3.8 and every earlier registered foundation.
+    try:
+        if _route_exists(app, "/api/property-brain/academy-v402/status"):
+            result["academy_v402"] = {"status":"ALREADY_REGISTERED","route":"/property-brain/academy-v402","error":None}
+        else:
+            import alliance_cre_academy_v402 as academy_v402
+            result["academy_v402"] = {**academy_v402.register(core), "error": None}
+    except Exception as exc:
+        result["academy_v402"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","route":"/property-brain/academy-v402","fail_safe":True}
+
     return result
