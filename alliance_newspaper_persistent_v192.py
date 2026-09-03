@@ -3,7 +3,7 @@ import hashlib, os, tempfile
 from fastapi import BackgroundTasks, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import text
-import alliance_newspaper_live_bridge_v196 as newspaper_live_v196
+import alliance_newspaper_live_bridge_v197 as newspaper_live_v197
 
 VERSION="19.2-PERSISTENT-NEWSPAPER-SOURCE"
 DDL="CREATE TABLE IF NOT EXISTS pi_source_files(source_id BIGINT PRIMARY KEY, original_filename TEXT NOT NULL, mime_type TEXT, file_size BIGINT NOT NULL, sha256 TEXT NOT NULL, content BYTEA NOT NULL, created_at TIMESTAMPTZ DEFAULT NOW())"
@@ -45,7 +45,7 @@ def _materialize_and_run(core,sid,jid):
             f.write(bytes(row["content"]))
         core.run_file_job(sid,jid,path,row["mime_type"] or "application/octet-stream")
         try:
-            sync_result=newspaper_live_v196.sync_source(core,sid)
+            sync_result=newspaper_live_v197.sync_source(core,sid)
             with core.engine.begin() as c:
                 c.execute(text("UPDATE pi_ai_jobs SET output_summary=COALESCE(output_summary,'') || :x WHERE id=:j"), {"x":f" | Newspaper Live sync: {sync_result.get('inserted',0)} new, {sync_result.get('duplicates',0)} duplicates","j":jid})
         except Exception as sync_exc:
@@ -86,7 +86,8 @@ file.onchange=()=>setFile(file.files[0]);drop.onclick=e=>{if(e.target!==file)fil
 drop.addEventListener('drop',e=>setFile(e.dataTransfer.files?.[0]));
 drop.addEventListener('paste',e=>{const it=[...(e.clipboardData?.items||[])].find(x=>x.kind==='file'&&x.type.startsWith('image/'));if(!it){msg.className='stage err';msg.textContent='Clipboard has no image.';return}e.preventDefault();let x=it.getAsFile();const ext=(x.type.split('/')[1]||'png').replace('jpeg','jpg');x=new File([x],'clipboard-newspaper-'+Date.now()+'.'+ext,{type:x.type});setFile(x);});
 function label(x){const s=String(x.job_status||x.ingestion_status||'').toUpperCase();if(!x.original_saved)return 'Original not saved';if(['RUNNING','PROCESSING','RECEIVED','PENDING'].includes(s))return 'AI Extracting';if(['COMPLETED','PROCESSED','PROCESSED_WITH_ERRORS'].includes(s))return 'Completed';if(['FAILED','ERROR'].includes(s))return 'Failed';return s||'Queued';}
-async function load(){try{const r=await fetch('/api/v19-2/newspaper-status');const d=await r.json();if(!r.ok)throw new Error(d.detail||'Status failed');const a=d.rows||[];jobs.innerHTML=a.length?a.map(x=>`<div class="stage"><b>${E(label(x))}</b> | ${E(x.original_filename||'')}<br>Original saved: <b>${x.original_saved?'YES':'NO'}</b> | New records: <b>${E(x.processed_records||0)}</b> | Duplicates: ${E(x.duplicate_records||0)}${x.output_summary?'<br>'+E(x.output_summary):''}${x.error_message?'<br><span class="err">'+E(x.error_message)+'</span>':''}${x.source_id?'<br><button type="button" onclick="retry('+x.source_id+')">Retry AI from saved original</button>':''}</div>`).join(''):'No newspaper uploads yet.'}catch(e){jobs.innerHTML='<span class="err">'+E(e.message)+'</span>'}}
+async function load(){try{const r=await fetch('/api/v19-2/newspaper-status');const d=await r.json();if(!r.ok)throw new Error(d.detail||'Status failed');const a=d.rows||[];jobs.innerHTML=a.length?a.map(x=>`<div class="stage"><b>${E(label(x))}</b> | ${E(x.original_filename||'')}<br>Original saved: <b>${x.original_saved?'YES':'NO'}</b> | New records: <b>${E(x.processed_records||0)}</b> | Duplicates: ${E(x.duplicate_records||0)}${x.output_summary?'<br>'+E(x.output_summary):''}${x.error_message?'<br><span class="err">'+E(x.error_message)+'</span>':''}${x.source_id?'<br><button type="button" onclick="syncLive('+x.source_id+')">Sync to Newspaper Live</button> <button type="button" onclick="retry('+x.source_id+')">Retry AI from saved original</button>':''}</div>`).join(''):'No newspaper uploads yet.'}catch(e){jobs.innerHTML='<span class="err">'+E(e.message)+'</span>'}}
+async function syncLive(id){try{const r=await fetch('/api/v19-7/newspaper-sync/'+id,{method:'POST'});const raw=await r.text();let d={};try{d=JSON.parse(raw)}catch(_){}if(!r.ok)throw new Error(d.detail||raw||('HTTP '+r.status));alert('Newspaper Live sync complete. New: '+(d.inserted||0)+' | Duplicates: '+(d.duplicates||0)+' | Already synced: '+(d.already_synced||0)+' | Newspaper Live total: '+(d.newspaper_live_total||0));location.href='/newspaper-v83#newspaper-database'}catch(e){alert('SYNC FAILED: '+e.message)}}
 async function retry(id){try{const r=await fetch('/api/v19-2/newspaper-retry/'+id,{method:'POST'});const d=await r.json();if(!r.ok)throw new Error(d.detail||'Retry failed');await load()}catch(e){alert(e.message)}}
 f.onsubmit=async e=>{e.preventDefault();if(!file.files.length){msg.className='stage err';msg.textContent='Choose, drop or paste a full newspaper page first.';return}go.disabled=true;msg.className='stage';msg.textContent='Saving original page...';try{const r=await fetch('/api/v19-2/newspaper-upload',{method:'POST',body:new FormData(f)});const raw=await r.text();let d={};try{d=JSON.parse(raw)}catch(_){}if(!r.ok)throw new Error(d.detail||d.message||raw||('HTTP '+r.status));msg.className='stage ok';msg.textContent='Original saved. AI extraction started. Source ID: '+d.source_id+' | Job ID: '+d.job_id;await load()}catch(e){msg.className='stage err';msg.textContent='UPLOAD FAILED: '+e.message}finally{go.disabled=false}};
 const q=new URLSearchParams(location.search).get('source_type');if(q)st.value=q.toUpperCase();load();setInterval(load,5000);
@@ -100,7 +101,7 @@ def register(wrapped):
         with core.engine.connect() as c:
             latest=c.execute(text("SELECT s.id FROM pi_sources s JOIN pi_source_files sf ON sf.source_id=s.id WHERE upper(coalesce(s.source_type,''))='NEWSPAPER' AND upper(coalesce(s.ingestion_status,'')) IN ('PROCESSED','PROCESSED_WITH_ERRORS','COMPLETED') ORDER BY s.uploaded_at DESC LIMIT 1")).first()
         if latest:
-            newspaper_live_v196.sync_source(core,int(latest[0]))
+            newspaper_live_v197.sync_source(core,int(latest[0]))
     except Exception as exc:
         print("[V19.6 startup newspaper sync]",type(exc).__name__,str(exc))
 
@@ -158,6 +159,14 @@ def register(wrapped):
             c.execute(text("UPDATE pi_sources SET ingestion_status='RECEIVED',error_message=NULL WHERE id=:s"),{"s":source_id})
         bg.add_task(_materialize_and_run,core,source_id,jid)
         return {"status":"ACCEPTED","source_id":source_id,"job_id":jid,"original_saved":True}
+
+    @app.post("/api/v19-7/newspaper-sync/{source_id}")
+    def sync_to_live(source_id:int,req:Request):
+        core.need_login(req)
+        try:
+            return newspaper_live_v197.sync_source(core,source_id)
+        except Exception as exc:
+            raise HTTPException(500,f"NEWSPAPER LIVE SYNC FAILED: {type(exc).__name__}: {exc}")
 
     @app.get("/api/v19-2/newspaper-status")
     def status(req:Request):
