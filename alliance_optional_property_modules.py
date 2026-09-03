@@ -1856,4 +1856,16 @@ def register(wrapped):
     except Exception as exc:
         result["autonomous_v433"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","route":"/property-brain/autonomous-v433","fail_safe":True}
 
+
+    # FOUNDATION 4.3.4 - Alliance Demand Ownership Closure
+    # Additive only. Fresh V5 remains protected until all cumulative gates PASS.
+    try:
+        if _route_exists(app, "/api/property-brain/autonomous-v434/status"):
+            result["autonomous_v434"] = {"status":"ALREADY_REGISTERED","route":"/property-brain/autonomous-v434","error":None}
+        else:
+            import alliance_autonomous_student_v434 as autonomous_v434
+            result["autonomous_v434"] = {**autonomous_v434.register(core), "error": None}
+    except Exception as exc:
+        result["autonomous_v434"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","route":"/property-brain/autonomous-v434","fail_safe":True}
+
     return result
