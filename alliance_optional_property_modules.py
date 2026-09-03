@@ -1820,4 +1820,16 @@ def register(wrapped):
     except Exception as exc:
         result["automation_v425"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","route":"/property-brain/automation-v425","fail_safe":True}
 
+
+    # FOUNDATION 4.3.1 - Alliance Autonomous Student Mastery Repair
+    # Additive only. 4.3.0 remains intact; V5 freezes only after 4.3.1 regression PASS.
+    try:
+        if _route_exists(app, "/api/property-brain/autonomous-v431/status"):
+            result["autonomous_v431"] = {"status":"ALREADY_REGISTERED","route":"/property-brain/autonomous-v431","error":None}
+        else:
+            import alliance_autonomous_student_v431 as autonomous_v431
+            result["autonomous_v431"] = {**autonomous_v431.register(core), "error": None}
+    except Exception as exc:
+        result["autonomous_v431"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","route":"/property-brain/autonomous-v431","fail_safe":True}
+
     return result
