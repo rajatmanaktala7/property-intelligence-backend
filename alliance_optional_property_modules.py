@@ -1603,4 +1603,17 @@ def register(wrapped):
                                   "route":"/property-brain/mastery-v330","fail_safe":True}
 
 
+
+    # FOUNDATION 3.4 - Mastery Finalizer + Minimal Blind Audit
+    try:
+        if _route_exists(app, "/api/property-brain/mastery-v340/status"):
+            result["mastery_v340"] = {"status":"ALREADY_REGISTERED","route":"/property-brain/mastery-v340","error":None}
+        else:
+            import alliance_mastery_finalizer_v340 as mastery_v340
+            result["mastery_v340"] = {**mastery_v340.register(core),"error":None}
+    except Exception as exc:
+        result["mastery_v340"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}",
+                                  "route":"/property-brain/mastery-v340","fail_safe":True}
+
+
     return result
