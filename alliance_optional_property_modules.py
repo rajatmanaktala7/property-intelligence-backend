@@ -1553,4 +1553,28 @@ def register(wrapped):
         }
 
 
+
+    # FOUNDATION 3.1 - Autonomous Expertise Bootcamp
+    try:
+        if _route_exists(app, "/api/property-brain/expertise-v310/status"):
+            result["expertise_v310"] = {
+                "status":"ALREADY_REGISTERED",
+                "route":"/property-brain/expertise-v310",
+                "error":None,
+            }
+        else:
+            import alliance_expertise_bootcamp_v310 as expertise_v310
+            result["expertise_v310"] = {
+                **expertise_v310.register(core),
+                "error":None,
+            }
+    except Exception as exc:
+        result["expertise_v310"] = {
+            "status":"ERROR",
+            "error":f"{type(exc).__name__}: {exc}",
+            "route":"/property-brain/expertise-v310",
+            "fail_safe":True,
+        }
+
+
     return result
