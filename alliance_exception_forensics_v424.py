@@ -9,8 +9,8 @@ import alliance_automation_truth_escalator_v421 as v421
 import alliance_automation_closure_v422 as v422
 import alliance_automation_grammar_rescue_v423 as v423
 
-VERSION="4.2.4-ALLIANCE-EXCEPTION-FORENSICS"
-MODE="READ_ONLY_FORENSICS_FOR_ONLY_V423_UNRESOLVED_CASES"
+VERSION="4.2.4.1-ALLIANCE-EXCEPTION-FORENSICS-HOTFIX"
+MODE="READ_ONLY_FORENSICS_SCHEMA_HOTFIX_V421_CONSENSUS_COLUMN"
 EXAM_VERSION=v410.EXAM_VERSION
 
 def _engine(core): return foundation._engine_from_core(core)
@@ -23,7 +23,7 @@ def inspect(engine):
         SELECT c.audit_id,c.ordinal,c.raw_text,
                c.predicted_class,c.predicted_transaction,c.predicted_ownership,
                c.prediction_confidence,c.prediction_rule,
-               a.status a_status,a.truth_class a_class,a.truth_transaction a_tx,a.truth_ownership a_own,a.evidence a_evidence,
+               a.status a_status,a.truth_class a_class,a.truth_transaction a_tx,a.truth_ownership a_own,a.consensus a_evidence,
                z.status z_status,z.truth_class z_class,z.truth_transaction z_tx,z.truth_ownership z_own,z.evidence z_evidence,
                r.status r_status,r.truth_class r_class,r.truth_transaction r_tx,r.truth_ownership r_own,r.evidence r_evidence
         FROM alliance_championship_v410_cases c
