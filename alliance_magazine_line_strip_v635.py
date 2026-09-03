@@ -3,7 +3,6 @@ import base64, html, io, json, os, re, threading, time
 from collections import defaultdict
 from datetime import datetime, timezone
 
-import numpy as np
 from fastapi.responses import HTMLResponse
 from google.genai import types
 from PIL import Image, ImageDraw, ImageFont
@@ -12,8 +11,8 @@ from sqlalchemy import text
 import alliance_magazine_field_v610 as frozen_v2
 import alliance_magazine_challenger_v514 as semantic_student
 
-VERSION="6.3.5-ALLIANCE-MAGAZINE-LINE-STRIP-SEGMENTATION-REPAIR"
-MODE="LOCK_199_FROM_631_DETERMINISTIC_HORIZONTAL_TEXT_LINE_SEGMENTATION_CONTACT_SHEET_EXACT_STRIP_VERIFY_NO_FRESH_EXAM"
+VERSION="6.3.5.1-ALLIANCE-MAGAZINE-LINE-STRIP-SEGMENTATION-REPAIR-NO-NUMPY"
+MODE="SAME_635_LOGIC_PURE_PIL_PIXEL_PROJECTION_NO_NUMPY_RUNTIME_IMPORT_FIX"
 
 EXPECTED_EXAM="MAGAZINE_PIXEL_FIELD_V2_610_AUG2026_PAGES_36_38"
 EXPECTED_FREEZE="ad68a70bcf5ac3ecc73858b16825487e845820dfd5c78768cc0252309d4849d3"
@@ -95,29 +94,37 @@ def _jpeg(im):
     b=io.BytesIO();im.save(b,format="JPEG",quality=99);return b.getvalue()
 
 def _right_text_boundary(gray):
-    a=np.asarray(gray)
-    h,w=a.shape
-    ink=a<165
+    w,h=gray.size
+    pix=gray.load()
     y0=max(0,int(h*.14));y1=min(h,int(h*.91))
-    dens=ink[y0:y1].mean(axis=0)
-    # Dense vertical advertisement on far right: cut before it.
-    far=dens[int(w*.72):]
-    active=np.where(far>.18)[0]
+    span=max(1,y1-y0)
+    start=int(w*.72)
+    active=[]
+    for x in range(start,w):
+        dark=0
+        for y in range(y0,y1):
+            if pix[x,y] < 165:
+                dark += 1
+        if dark/span > .18:
+            active.append(x)
     if len(active)>=20:
-        first=int(w*.72)+int(active.min())
+        first=min(active)
         return max(int(w*.60),first-22)
     return w-38
-
 def segment_lines(img_bytes):
     im=Image.open(io.BytesIO(img_bytes)).convert("RGB")
     gray=im.convert("L")
-    a=np.asarray(gray)
-    h,w=a.shape
+    w,h=gray.size
     x0=max(35,int(w*.045));x1=_right_text_boundary(gray)
     y0=max(145,int(h*.125));y1=min(h-90,int(h*.925))
-    ink=a<170
-    proj=ink[y0:y1,x0:x1].sum(axis=1)
-    mask=proj>12
+    pix=gray.load()
+    mask=[]
+    for y in range(y0,y1):
+        dark=0
+        for x in range(x0,x1):
+            if pix[x,y] < 170:
+                dark += 1
+        mask.append(dark > 12)
 
     raw=[];s=None
     for i,v in enumerate(mask):
