@@ -1503,4 +1503,30 @@ def register(wrapped):
             "fail_safe":True,
         }
 
+
+    # FOUNDATION 2.9.4 - Autonomous Gold Teacher
+    # Uses immutable Human Gold as seed supervision. Auto predictions stay in shadow/academy tables.
+    # Only low-confidence exceptions remain for human review. No production or WhatsApp writes.
+    try:
+        if _route_exists(app, "/api/property-brain/auto-teacher-v294/status"):
+            result["auto_teacher_v294"] = {
+                "status": "ALREADY_REGISTERED",
+                "route": "/property-brain/auto-teacher-v294",
+                "error": None,
+            }
+        else:
+            import alliance_autonomous_gold_teacher_v294 as auto_teacher_v294
+            result["auto_teacher_v294"] = {
+                **auto_teacher_v294.register(core),
+                "error": None,
+            }
+    except Exception as exc:
+        result["auto_teacher_v294"] = {
+            "status": "ERROR",
+            "error": f"{type(exc).__name__}: {exc}",
+            "route": "/property-brain/auto-teacher-v294",
+            "fail_safe": True,
+        }
+
+
     return result
