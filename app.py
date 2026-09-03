@@ -1218,6 +1218,18 @@ async def ingest_file(
             mime
         )
 
+        # FOUNDATION_5_6_CAPTURE_SOURCE_PIXELS
+        # Preserve original image/PDF bytes immutably BEFORE any AI processing.
+        # This is additive evidence storage only; it does not mutate canonical records.
+        if mime in {"image/jpeg","image/png","image/webp","application/pdf"} or filename.lower().endswith((".jpg",".jpeg",".png",".webp",".pdf")):
+            try:
+                import alliance_magazine_image_v560 as _source_evidence_v560
+                _source_evidence_v560.capture_file(
+                    engine, sid, path, source_type.upper(), filename, mime
+                )
+            except Exception as _evidence_exc:
+                print("Source evidence capture warning:", _evidence_exc)
+
         # CSV is processed directly after streamed upload.
         if filename.lower().endswith(".csv"):
             inserted=0
@@ -17011,3 +17023,12 @@ try:
     print("Alliance Magazine Challenger 5.1.4 + Fresh V4 5.5: registered")
 except Exception as _m550_exc:
     print("Alliance Magazine V4 registration warning:", _m550_exc)
+
+# FOUNDATION_5_6_MAGAZINE_IMAGE_EVIDENCE_VAULT
+try:
+    import sys as _m560_sys
+    import alliance_magazine_image_v560 as _mag_img_v560
+    _mag_img_v560.start(_m560_sys.modules[__name__])
+    print("Alliance Magazine Image Evidence Gate 5.6: registered")
+except Exception as _m560_exc:
+    print("Alliance Magazine Image Evidence Gate 5.6 registration warning:", _m560_exc)
