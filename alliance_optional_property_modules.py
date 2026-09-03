@@ -1820,30 +1820,4 @@ def register(wrapped):
     except Exception as exc:
         result["automation_v425"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","route":"/property-brain/automation-v425","fail_safe":True}
 
-    # V19.4 real team dashboard Newspaper Capture navigation
-    try:
-        import alliance_team_dashboard_newspaper_v194 as newspaper_dashboard_v194
-        result["newspaper_dashboard_v194"] = {
-            **newspaper_dashboard_v194.register(wrapped),
-            "error": None,
-        }
-    except Exception as exc:
-        result["newspaper_dashboard_v194"] = {
-            "status": "ERROR",
-            "error": f"{type(exc).__name__}: {exc}",
-            "fail_safe": True,
-        }
-
-
-    # FOUNDATION 4.3.0 - Alliance Autonomous Student V5
-    # V4 is closed training data. Fresh V5 is frozen only after regression gates pass.
-    try:
-        if _route_exists(app, "/api/property-brain/autonomous-v430/status"):
-            result["autonomous_v430"] = {"status":"ALREADY_REGISTERED","route":"/property-brain/autonomous-v430","error":None}
-        else:
-            import alliance_autonomous_student_v430 as autonomous_v430
-            result["autonomous_v430"] = {**autonomous_v430.register(core), "error": None}
-    except Exception as exc:
-        result["autonomous_v430"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","route":"/property-brain/autonomous-v430","fail_safe":True}
-
     return result
