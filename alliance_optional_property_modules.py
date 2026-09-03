@@ -1650,4 +1650,17 @@ def register(wrapped):
             "fail_safe": True,
         }
 
+
+    # FOUNDATION 3.7 - Autonomous Property Brain Teacher
+    # Routine message labeling is automated. Human review is exception-only.
+    # No production/WhatsApp/Gold mutations.
+    try:
+        if _route_exists(app, "/api/property-brain/autonomous-v370/status"):
+            result["autonomous_v370"] = {"status":"ALREADY_REGISTERED","route":"/property-brain/autonomous-v370","error":None}
+        else:
+            import alliance_autonomous_property_brain_v370 as autonomous_v370
+            result["autonomous_v370"] = {**autonomous_v370.register(core), "error": None}
+    except Exception as exc:
+        result["autonomous_v370"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","route":"/property-brain/autonomous-v370","fail_safe":True}
+
     return result
