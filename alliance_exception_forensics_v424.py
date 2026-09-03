@@ -9,8 +9,8 @@ import alliance_automation_truth_escalator_v421 as v421
 import alliance_automation_closure_v422 as v422
 import alliance_automation_grammar_rescue_v423 as v423
 
-VERSION="4.2.4.1-ALLIANCE-EXCEPTION-FORENSICS-HOTFIX"
-MODE="READ_ONLY_FORENSICS_SCHEMA_HOTFIX_V421_CONSENSUS_COLUMN"
+VERSION="4.2.4.2-ALLIANCE-EXCEPTION-FORENSICS-HOTFIX"
+MODE="READ_ONLY_FORENSICS_API_HOTFIX_V421_INTERNAL_JUDGE_REGISTRY"
 EXAM_VERSION=v410.EXAM_VERSION
 
 def _engine(core): return foundation._engine_from_core(core)
@@ -66,8 +66,7 @@ def inspect(engine):
                 "evidence":x["r_evidence"],
             },
             "fresh_diagnostics":{
-                "v421_evidence_judge":v421.judge_evidence(raw),
-                "v421_counterfactual_critic":v421.judge_critic(raw),
+                "v421_all_judges":v421._judges(engine,raw),
                 "v422_semantic_truth":v422.semantic_truth(raw),
                 "v423_grammar_judge_one":v423.grammar_judge_one(raw),
                 "v423_grammar_judge_two":v423.grammar_judge_two(raw),
