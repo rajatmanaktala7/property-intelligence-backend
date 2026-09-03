@@ -1663,4 +1663,19 @@ def register(wrapped):
     except Exception as exc:
         result["autonomous_v370"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","route":"/property-brain/autonomous-v370","fail_safe":True}
 
+
+    # FOUNDATION 3.8 - Failure-Driven Mastery + Automated Routine Training
+    # Learns only from already-frozen V2 human truth, suppresses duplicate source messages,
+    # repairs class/transaction semantics, and freezes a NEW V3 certification set.
+    # Routine labeling is automated. V3 remains independent certification only.
+    # No production/WhatsApp/Gold mutations.
+    try:
+        if _route_exists(app, "/api/property-brain/mastery-v380/status"):
+            result["mastery_v380"] = {"status":"ALREADY_REGISTERED","route":"/property-brain/mastery-v380","error":None}
+        else:
+            import alliance_failure_driven_mastery_v380 as mastery_v380
+            result["mastery_v380"] = {**mastery_v380.register(core), "error": None}
+    except Exception as exc:
+        result["mastery_v380"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","route":"/property-brain/mastery-v380","fail_safe":True}
+
     return result
