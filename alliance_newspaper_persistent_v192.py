@@ -3,6 +3,7 @@ import hashlib, os, tempfile
 from fastapi import BackgroundTasks, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import text
+import alliance_newspaper_live_bridge_v196 as newspaper_live_v196
 
 VERSION="19.2-PERSISTENT-NEWSPAPER-SOURCE"
 DDL="CREATE TABLE IF NOT EXISTS pi_source_files(source_id BIGINT PRIMARY KEY, original_filename TEXT NOT NULL, mime_type TEXT, file_size BIGINT NOT NULL, sha256 TEXT NOT NULL, content BYTEA NOT NULL, created_at TIMESTAMPTZ DEFAULT NOW())"
@@ -43,6 +44,13 @@ def _materialize_and_run(core,sid,jid):
         with open(path,"wb") as f:
             f.write(bytes(row["content"]))
         core.run_file_job(sid,jid,path,row["mime_type"] or "application/octet-stream")
+        try:
+            sync_result=newspaper_live_v196.sync_source(core,sid)
+            with core.engine.begin() as c:
+                c.execute(text("UPDATE pi_ai_jobs SET output_summary=COALESCE(output_summary,'') || :x WHERE id=:j"), {"x":f" | Newspaper Live sync: {sync_result.get('inserted',0)} new, {sync_result.get('duplicates',0)} duplicates","j":jid})
+        except Exception as sync_exc:
+            with core.engine.begin() as c:
+                c.execute(text("UPDATE pi_ai_jobs SET error_message=CONCAT_WS(' | ',NULLIF(error_message,''),:e) WHERE id=:j"), {"e":f"NEWSPAPER_LIVE_SYNC: {type(sync_exc).__name__}: {sync_exc}"[:4000],"j":jid})
     except Exception as exc:
         with core.engine.begin() as c:
             c.execute(text("UPDATE pi_sources SET ingestion_status='FAILED',error_message=:e WHERE id=:s"),{"e":str(exc),"s":sid})
@@ -60,7 +68,7 @@ input,select{width:100%;padding:10px;border:1px solid #cbd6e2;border-radius:8px}
 .stage{padding:10px 12px;border-radius:8px;background:#f7f9fc;margin:8px 0}.ok{color:#08734b;font-weight:700}.err{color:#a11;font-weight:700}.muted{font-size:12px;color:#62748a}
 @media(max-width:760px){.grid{grid-template-columns:1fr}}</style></head><body>
 <header><b>Newspaper / Magazine Upload</b><br><small>Original full page is saved permanently before AI extraction</small></header><div class="w">
-<div class="card"><a class="btn gray" href="/workspace">Dashboard</a> <a class="btn gray" href="/manual-property-database-v178">Manual Property Database</a></div>
+<div class="card"><a class="btn gray" href="/workspace">Dashboard</a> <a class="btn gray" href="/newspaper-v83#newspaper-database">Newspaper Live Database</a> <a class="btn gray" href="/manual-property-database-v178">Manual Property Database</a></div>
 <form id="f" class="card"><div class="grid">
 <label>Source Type<select name="source_type" id="st"><option>NEWSPAPER</option><option>MAGAZINE</option></select></label>
 <label>Optional Note<input name="note" placeholder="e.g. Property Informer Sep 2026 / Page 12"></label></div>
@@ -88,6 +96,13 @@ def register(wrapped):
     core=wrapped.core;app=wrapped.app
     _setup(core)
     removed=_remove(app)
+    try:
+        with core.engine.connect() as c:
+            latest=c.execute(text("SELECT s.id FROM pi_sources s JOIN pi_source_files sf ON sf.source_id=s.id WHERE upper(coalesce(s.source_type,''))='NEWSPAPER' AND upper(coalesce(s.ingestion_status,'')) IN ('PROCESSED','PROCESSED_WITH_ERRORS','COMPLETED') ORDER BY s.uploaded_at DESC LIMIT 1")).first()
+        if latest:
+            newspaper_live_v196.sync_source(core,int(latest[0]))
+    except Exception as exc:
+        print("[V19.6 startup newspaper sync]",type(exc).__name__,str(exc))
 
     @app.get("/capture-intelligence",response_class=HTMLResponse)
     def capture(req:Request):
