@@ -1777,4 +1777,16 @@ def register(wrapped):
     except Exception as exc:
         result["newspaper_upload_v191"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","fail_safe":True}
 
+
+    # FOUNDATION 4.2.3 - Alliance Grammar Rescue
+    # Additive only. Repairs generic CRE grammar gaps for v422 abstentions.
+    try:
+        if _route_exists(app, "/api/property-brain/automation-v423/status"):
+            result["automation_v423"] = {"status":"ALREADY_REGISTERED","route":"/property-brain/automation-v423","error":None}
+        else:
+            import alliance_automation_grammar_rescue_v423 as automation_v423
+            result["automation_v423"] = {**automation_v423.register(core), "error": None}
+    except Exception as exc:
+        result["automation_v423"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","route":"/property-brain/automation-v423","fail_safe":True}
+
     return result
