@@ -1770,4 +1770,11 @@ def register(wrapped):
     except Exception as exc:
         result["automation_v422"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","route":"/property-brain/automation-v422","fail_safe":True}
 
+    # V19.1 reliable newspaper/magazine upload owner
+    try:
+        import alliance_newspaper_upload_v191 as newspaper_v191
+        result["newspaper_upload_v191"] = {**newspaper_v191.register(wrapped), "error": None}
+    except Exception as exc:
+        result["newspaper_upload_v191"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","fail_safe":True}
+
     return result
