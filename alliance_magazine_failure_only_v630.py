@@ -11,8 +11,8 @@ from sqlalchemy import text
 import alliance_magazine_field_v610 as frozen_v2
 import alliance_magazine_challenger_v514 as semantic_student
 
-VERSION = "6.3.0-ALLIANCE-MAGAZINE-FAILURE-ONLY-FIELD-CHALLENGER"
-MODE = "RESTORE_621_STABLE_PARENT_LOCK_194_PASSED_CHECKS_REPAIR_ONLY_16_FAILED_FIELDS_NO_FRESH_EXAM"
+VERSION = "6.3.1-ALLIANCE-MAGAZINE-FAILURE-ONLY-FIELD-CHALLENGER-HISTORICAL-PARENT-PIN"
+MODE = "PIN_EXACT_HISTORICAL_621_194_OF_210_PARENT_REPAIR_ONLY_16_FAILED_FIELDS_NO_FRESH_EXAM"
 
 EXPECTED_EXAM = "MAGAZINE_PIXEL_FIELD_V2_610_AUG2026_PAGES_36_38"
 EXPECTED_FREEZE = "ad68a70bcf5ac3ecc73858b16825487e845820dfd5c78768cc0252309d4849d3"
@@ -215,20 +215,48 @@ def repair_field(client,img_bytes,ref,field,model):
     return value,meta
 
 def _load_parent(engine):
+    # 6.3.1 critical fix:
+    # 6.2.1 may have been re-run after Railway restarts, so "latest row" is not
+    # scientifically equivalent to the already-observed stable 194/210 run.
+    # Pin the immutable historical parent by its exact exam, freeze hash,
+    # total checks, correct checks, and 16-error manifest.
     with engine.connect() as c:
-        row=c.execute(text("""
-          SELECT version, source_exam_id, source_prediction_freeze_sha256,
-                 total_checks, correct_checks, accuracy, status, result
+        rows=c.execute(text("""
+          SELECT run_id, version, source_exam_id, source_prediction_freeze_sha256,
+                 total_checks, correct_checks, accuracy, status, result, created_at
           FROM alliance_magazine_vision_lab_runs
           WHERE version=:v
-          ORDER BY run_id DESC
-          LIMIT 1
-        """),{"v":EXPECTED_PARENT_VERSION}).first()
-    if not row:return None
-    return dict(row._mapping)
+            AND source_exam_id=:e
+            AND source_prediction_freeze_sha256=:p
+            AND total_checks=:t
+            AND correct_checks=:c
+          ORDER BY run_id ASC
+        """),{
+            "v":EXPECTED_PARENT_VERSION,
+            "e":EXPECTED_EXAM,
+            "p":EXPECTED_FREEZE,
+            "t":EXPECTED_PARENT_TOTAL,
+            "c":EXPECTED_PARENT_CORRECT
+        }).all()
+
+    valid=[]
+    for row in rows:
+        d=dict(row._mapping)
+        result=d.get("result") or {}
+        errs=((result.get("training") or {}).get("errors") or []) if isinstance(result,dict) else []
+        if len(errs)==EXPECTED_PARENT_ERRORS:
+            d["_error_count"]=len(errs)
+            valid.append(d)
+
+    if not valid:
+        return None
+
+    # Earliest exact matching row is the historical stable parent.
+    return valid[0]
 
 def _validate_parent(parent):
-    if not parent:raise RuntimeError("Stable 6.2.1 parent result not found")
+    if not parent:
+        raise RuntimeError("Exact historical 6.2.1 parent 194/210 with 16 errors not found")
     if parent.get("source_exam_id")!=EXPECTED_EXAM:raise RuntimeError("6.2.1 source exam changed")
     if parent.get("source_prediction_freeze_sha256")!=EXPECTED_FREEZE:raise RuntimeError("6.2.1 freeze hash changed")
     if int(parent.get("total_checks") or 0)!=EXPECTED_PARENT_TOTAL:raise RuntimeError("6.2.1 total checks changed")
@@ -303,7 +331,10 @@ def run_once(core):
                 "historical_score":{"correct":EXPECTED_PARENT_CORRECT,"total":EXPECTED_PARENT_TOTAL,"accuracy":round(100*EXPECTED_PARENT_CORRECT/EXPECTED_PARENT_TOTAL,4)},
                 "locked_verified_pass_checks":EXPECTED_PARENT_CORRECT,
                 "failed_fields_to_repair":EXPECTED_PARENT_ERRORS,
-                "preserved_immutable":True
+                "preserved_immutable":True,
+                "historical_parent_run_id":parent.get("run_id"),
+                "historical_parent_created_at":str(parent.get("created_at") or ""),
+                "selection_rule":"exact version + exam + freeze hash + 210 total + 194 correct + 16 errors; earliest matching historical row"
             },
             "repair":{
                 "repair_checks":EXPECTED_PARENT_ERRORS,
@@ -353,11 +384,11 @@ def status(core):
 def dashboard(core):
     s=status(core);r=s.get("repair") or {};c=s.get("cumulative_training_closure") or {}
     return f"""<!doctype html><html><head><meta charset='utf-8'><meta http-equiv='refresh' content='10'>
-<meta name='viewport' content='width=device-width,initial-scale=1'><title>Magazine Failure-Only Challenger 6.3</title>
+<meta name='viewport' content='width=device-width,initial-scale=1'><title>Magazine Failure-Only Challenger 6.3.1</title>
 <style>body{{font-family:Arial;background:#f5f7fb;color:#172033;margin:0}}header{{background:#102235;color:white;padding:18px}}
 .wrap{{max-width:1400px;margin:auto;padding:18px}}.card{{background:white;border:1px solid #e2e8f0;border-radius:12px;padding:14px;margin-bottom:12px}}
 pre{{white-space:pre-wrap;background:#0f172a;color:#e2e8f0;padding:14px;border-radius:10px;overflow:auto}}</style></head>
-<body><header><b>Alliance Magazine Failure-Only Field Challenger 6.3</b><br><small>Stable parent 6.2.1 · lock 194 correct checks · repair only 16 failed fields</small></header>
+<body><header><b>Alliance Magazine Failure-Only Field Challenger 6.3.1</b><br><small>Stable parent 6.2.1 · lock 194 correct checks · repair only 16 failed fields</small></header>
 <div class='wrap'><div class='card'><b>{html.escape(str(s.get("status")))}</b><br>
 Repair progress {html.escape(str(s.get("repairs_completed")))} / {html.escape(str(s.get("total_repairs")))} · Current {html.escape(str(s.get("current_repair")))}<br>
 Repair accuracy {html.escape(str(r.get("repair_accuracy")))}% · Cumulative {html.escape(str(c.get("correct_checks")))} / {html.escape(str(c.get("total_checks")))} ({html.escape(str(c.get("accuracy")))}%)</div>
