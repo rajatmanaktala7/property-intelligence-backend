@@ -1796,4 +1796,16 @@ def register(wrapped):
     except Exception as exc:
         result["newspaper_persistent_v192"]={"status":"ERROR","error":f"{type(exc).__name__}: {exc}","fail_safe":True}
 
+
+    # FOUNDATION 4.2.4 - Alliance Exception Forensics
+    # Read-only. Surfaces raw evidence and all independent judge diagnostics for unresolved V4 cases.
+    try:
+        if _route_exists(app, "/api/property-brain/automation-v424/status"):
+            result["automation_v424"] = {"status":"ALREADY_REGISTERED","route":"/property-brain/automation-v424","error":None}
+        else:
+            import alliance_exception_forensics_v424 as automation_v424
+            result["automation_v424"] = {**automation_v424.register(core), "error": None}
+    except Exception as exc:
+        result["automation_v424"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","route":"/property-brain/automation-v424","fail_safe":True}
+
     return result
