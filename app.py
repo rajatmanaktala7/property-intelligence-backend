@@ -17113,3 +17113,12 @@ try:
     print("Alliance Magazine Deterministic Tile Locator Repair 6.3.3: registered")
 except Exception as _v633_exc:
     print("Alliance Magazine Tile Locator 6.3.3 registration warning:",_v633_exc)
+
+# FOUNDATION_6_3_4_MAGAZINE_CONTEXTUAL_NEIGHBORHOOD_REPAIR
+try:
+    import sys as _v634_sys
+    import alliance_magazine_contextual_v634 as _v634
+    _v634.start(_v634_sys.modules[__name__])
+    print("Alliance Magazine Contextual Neighborhood Repair 6.3.4: registered")
+except Exception as _v634_exc:
+    print("Alliance Magazine Contextual 6.3.4 registration warning:",_v634_exc)
