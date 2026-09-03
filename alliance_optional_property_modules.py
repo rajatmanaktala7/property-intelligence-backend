@@ -1789,4 +1789,11 @@ def register(wrapped):
     except Exception as exc:
         result["automation_v423"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","route":"/property-brain/automation-v423","fail_safe":True}
 
+    # V19.2 persistent original newspaper source + direct exhaustive worker
+    try:
+        import alliance_newspaper_persistent_v192 as newspaper_v192
+        result["newspaper_persistent_v192"]={**newspaper_v192.register(wrapped),"error":None}
+    except Exception as exc:
+        result["newspaper_persistent_v192"]={"status":"ERROR","error":f"{type(exc).__name__}: {exc}","fail_safe":True}
+
     return result
