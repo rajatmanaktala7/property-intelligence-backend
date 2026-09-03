@@ -1820,4 +1820,18 @@ def register(wrapped):
     except Exception as exc:
         result["automation_v425"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","route":"/property-brain/automation-v425","fail_safe":True}
 
+    # V19.3 dashboard-only Newspaper Capture navigation
+    try:
+        import alliance_newspaper_dashboard_link_v193 as newspaper_dashboard_v193
+        result["newspaper_dashboard_v193"] = {
+            **newspaper_dashboard_v193.register(wrapped),
+            "error": None,
+        }
+    except Exception as exc:
+        result["newspaper_dashboard_v193"] = {
+            "status": "ERROR",
+            "error": f"{type(exc).__name__}: {exc}",
+            "fail_safe": True,
+        }
+
     return result
