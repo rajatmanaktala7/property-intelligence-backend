@@ -4,7 +4,7 @@ import hashlib
 import re
 from sqlalchemy import text
 
-VERSION = "19.7-NEWSPAPER-LIVE-DIRECT-SYNC"
+VERSION = "19.8-NEWSPAPER-LIVE-HASH64-FIX"
 
 DDL = """
 CREATE TABLE IF NOT EXISTS pi_newspaper_capture_sync(
@@ -106,7 +106,11 @@ def sync_source(core, source_id:int):
             {"s":source_id}
         ).mappings().all()]
 
-    source_hash=f"v197-{src['sha256']}"
+    # pi_newspaper_sources.source_hash is VARCHAR(64).
+    # Keep the persisted SHA-256 exactly 64 chars. Do not prefix version text.
+    source_hash=str(src["sha256"] or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", source_hash):
+        source_hash=hashlib.sha256(bytes(src["content"])).hexdigest()
     with core.engine.begin() as c:
         nsid=c.execute(text("""
             INSERT INTO pi_newspaper_sources(
