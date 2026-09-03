@@ -1746,4 +1746,16 @@ def register(wrapped):
     except Exception as exc:
         result["property_operations_v190"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","fail_safe":True}
 
+
+    # FOUNDATION 4.2.1 - Alliance Automation Truth Escalator
+    # Additive. Student/V4 predictions remain frozen. Human work only after field-wise multi-judge abstention.
+    try:
+        if _route_exists(app, "/api/property-brain/automation-v421/status"):
+            result["automation_v421"] = {"status":"ALREADY_REGISTERED","route":"/property-brain/automation-v421","error":None}
+        else:
+            import alliance_automation_truth_escalator_v421 as automation_v421
+            result["automation_v421"] = {**automation_v421.register(core), "error": None}
+    except Exception as exc:
+        result["automation_v421"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","route":"/property-brain/automation-v421","fail_safe":True}
+
     return result
