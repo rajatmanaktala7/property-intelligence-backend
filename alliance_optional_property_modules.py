@@ -1893,4 +1893,16 @@ def register(wrapped):
     except Exception as exc:
         result["autonomous_v435"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","fail_safe":True}
 
+
+    # FOUNDATION 4.3.6 - Demand Contract Closure
+    # Training only. Fresh V5 is not frozen here.
+    try:
+        if _route_exists(app, "/api/property-brain/autonomous-v436/status"):
+            result["autonomous_v436"] = {"status":"ALREADY_REGISTERED","route":"/property-brain/autonomous-v436","error":None}
+        else:
+            import alliance_autonomous_student_v436 as v436
+            result["autonomous_v436"] = {**v436.register(core), "error": None}
+    except Exception as exc:
+        result["autonomous_v436"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","fail_safe":True}
+
     return result
