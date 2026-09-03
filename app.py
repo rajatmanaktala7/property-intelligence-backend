@@ -17068,3 +17068,12 @@ try:
     print("Alliance Magazine Vision Field Challenger 6.0 + Fresh V2 6.1: registered")
 except Exception as _m610_exc:
     print("Alliance Magazine Field V2 6.1 registration warning:", _m610_exc)
+
+# FOUNDATION_6_2_MAGAZINE_VISION_FIELD_LAB
+try:
+    import sys as _m620_sys
+    import alliance_magazine_vision_lab_v620 as _mag_lab_v620
+    _mag_lab_v620.start(_m620_sys.modules[__name__])
+    print("Alliance Magazine Vision Field Laboratory 6.2: registered")
+except Exception as _m620_exc:
+    print("Alliance Magazine Vision Lab 6.2 registration warning:", _m620_exc)
