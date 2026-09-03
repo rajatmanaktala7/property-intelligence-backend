@@ -15,8 +15,8 @@ from sqlalchemy import text
 
 import alliance_autonomous_student_v438 as champion
 
-VERSION = "5.0.0-ALLIANCE-NEWSPAPER-AUTONOMOUS-ACADEMY"
-MODE = "IMMUTABLE_V438_CHAMPION_NEWSPAPER_CHALLENGER_AUTOMATED_TRAINING_NO_PRODUCTION_WRITES"
+VERSION = "5.0.1-ALLIANCE-NEWSPAPER-AUTONOMOUS-ACADEMY-MIXED-TX-REPAIR"
+MODE = "CUMULATIVE_MIXED_SALE_RENT_REPAIR_AND_PROPERTY_TABLE_ONLY_AUDIT_NO_PRODUCTION_WRITES"
 CHAMPION_VERSION = "4.3.8-ALLIANCE-STUDENT-DEMAND-OBJECT-CLOSURE"
 CHAMPION_PREDICTOR_SHA256 = "8b5014fa5ec5e38b75f4da15945b357230573c88a096be9c4b2e0609ecd52694"
 
@@ -90,10 +90,22 @@ def _norm(v):
 
 def _explicit_tx(raw):
     n = _norm(raw)
+
+    # Parent-level mixed offering must be preserved before ordinary SALE logic.
+    # Examples: "Sale / Rent", "Sale & Rent", "Sale or Rent", "sale and lease".
+    mixed_offer = bool(re.search(
+        r"\b(?:sale\s*(?:/|&|or|and)\s*(?:rent|lease)|"
+        r"(?:rent|lease)\s*(?:/|&|or|and)\s*sale)\b", n
+    ))
+    if mixed_offer:
+        return "AMBIGUOUS"
+
     sale = bool(re.search(r"\b(?:for\s+sale|available\s+for\s+sale|sale\s+@|asking\s+(?:rs|₹|\d)|price\s+(?:rs|₹|\d)|buy|purchase|resale)\b", n))
     rent = bool(re.search(r"\b(?:for\s+rent|to[- ]?let|available\s+for\s+rent|rent\s+(?:rs|₹|\d)|rental\s+requirement)\b", n))
     lease = bool(re.search(r"\b(?:for\s+lease|available\s+for\s+lease|lease\s+office|company\s+lease)\b", n))
     occupied = bool(re.search(r"\b(?:pre[- ]?rented|pre[- ]?leased|rented\s+(?:commercial|shop|office|property)|leased\s+to)\b", n))
+
+    # Pre-rented/pre-leased is occupancy/income context, not a RENT offering.
     if sale and occupied:
         return "SALE"
     if sale and (rent or lease):
@@ -297,13 +309,29 @@ def _score_curriculum():
             "accuracy": round(100.0 * correct / max(comparable, 1), 4), "errors": errors}
 
 def _discover_newspaper_tables(engine):
+    # Audit only record-bearing newspaper property/classified tables.
+    # Academy metadata, source manifests and sync-control tables do not contain
+    # property locality fields and previously created false locality alarms.
     with engine.connect() as c:
-        return [str(x) for x in c.execute(text("""
+        tables = [str(x) for x in c.execute(text("""
             SELECT table_name FROM information_schema.tables
             WHERE table_schema=current_schema()
               AND (table_name ILIKE '%newspaper%' OR table_name ILIKE '%classified%')
-            ORDER BY CASE WHEN table_name ILIKE '%newspaper%' THEN 0 ELSE 1 END, table_name
+            ORDER BY table_name
         """)).scalars().all()]
+    excluded_exact = {
+        "alliance_newspaper_academy_lessons",
+        "alliance_newspaper_academy_runs",
+        "pi_newspaper_capture_sync",
+        "pi_newspaper_sources",
+    }
+    return [
+        t for t in tables
+        if t not in excluded_exact
+        and not t.startswith("alliance_newspaper_academy_")
+        and not t.endswith("_generation")
+        and not t.endswith("_format")
+    ]
 
 def _pick(row, names):
     low = {str(k).lower(): v for k, v in row.items()}
