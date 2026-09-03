@@ -17104,3 +17104,12 @@ try:
     print("Alliance Magazine Visual Row Locator Repair 6.3.2: registered")
 except Exception as _v632_exc:
     print("Alliance Magazine Visual Row 6.3.2 registration warning:",_v632_exc)
+
+# FOUNDATION_6_3_3_MAGAZINE_DETERMINISTIC_TILE_LOCATOR_REPAIR
+try:
+    import sys as _v633_sys
+    import alliance_magazine_tile_locator_v633 as _v633
+    _v633.start(_v633_sys.modules[__name__])
+    print("Alliance Magazine Deterministic Tile Locator Repair 6.3.3: registered")
+except Exception as _v633_exc:
+    print("Alliance Magazine Tile Locator 6.3.3 registration warning:",_v633_exc)
