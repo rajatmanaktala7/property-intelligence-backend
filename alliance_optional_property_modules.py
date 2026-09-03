@@ -1808,4 +1808,16 @@ def register(wrapped):
     except Exception as exc:
         result["automation_v424"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","route":"/property-brain/automation-v424","fail_safe":True}
 
+
+    # FOUNDATION 4.2.5 - Alliance Acquisition Intent Closure
+    # Additive only. Two independent generic acquisition-intent judges for final V4 abstentions.
+    try:
+        if _route_exists(app, "/api/property-brain/automation-v425/status"):
+            result["automation_v425"] = {"status":"ALREADY_REGISTERED","route":"/property-brain/automation-v425","error":None}
+        else:
+            import alliance_acquisition_intent_closure_v425 as automation_v425
+            result["automation_v425"] = {**automation_v425.register(core), "error": None}
+    except Exception as exc:
+        result["automation_v425"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","route":"/property-brain/automation-v425","fail_safe":True}
+
     return result
