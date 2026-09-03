@@ -1529,4 +1529,28 @@ def register(wrapped):
         }
 
 
+
+    # FOUNDATION 3.0 - Autonomous Expertise Loop
+    try:
+        if _route_exists(app, "/api/property-brain/expertise-v300/status"):
+            result["expertise_v300"] = {
+                "status":"ALREADY_REGISTERED",
+                "route":"/property-brain/expertise-v300",
+                "error":None,
+            }
+        else:
+            import alliance_property_brain_expertise_v300 as expertise_v300
+            result["expertise_v300"] = {
+                **expertise_v300.register(core),
+                "error":None,
+            }
+    except Exception as exc:
+        result["expertise_v300"] = {
+            "status":"ERROR",
+            "error":f"{type(exc).__name__}: {exc}",
+            "route":"/property-brain/expertise-v300",
+            "fail_safe":True,
+        }
+
+
     return result
