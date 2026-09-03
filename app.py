@@ -16966,3 +16966,12 @@ try:
     print("Alliance Newspaper Academy 5.0: registered and autonomous training started")
 except Exception as _v500_exc:
     print("Alliance Newspaper Academy 5.0 registration warning:", _v500_exc)
+
+# FOUNDATION_5_1_MAGAZINE_AUTONOMOUS_ACADEMY
+try:
+    import sys as _v510_sys
+    import alliance_magazine_academy_v510 as _magazine_academy_v510
+    _magazine_academy_v510.start(_v510_sys.modules[__name__])
+    print("Alliance Magazine Academy 5.1: registered and autonomous audit/training started")
+except Exception as _v510_exc:
+    print("Alliance Magazine Academy 5.1 registration warning:", _v510_exc)
