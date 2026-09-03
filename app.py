@@ -16957,3 +16957,12 @@ from whatsapp_live_bridge import router as whatsapp_live_bridge_router
 app.include_router(whatsapp_live_bridge_router)
 # === END WHATSAPP LIVE BRIDGE MODULE ===
 
+
+# FOUNDATION_5_0_NEWSPAPER_AUTONOMOUS_ACADEMY
+try:
+    import sys as _v500_sys
+    import alliance_newspaper_academy_v500 as _newspaper_academy_v500
+    _newspaper_academy_v500.start(_v500_sys.modules[__name__])
+    print("Alliance Newspaper Academy 5.0: registered and autonomous training started")
+except Exception as _v500_exc:
+    print("Alliance Newspaper Academy 5.0 registration warning:", _v500_exc)
