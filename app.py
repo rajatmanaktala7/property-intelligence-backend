@@ -17059,3 +17059,12 @@ try:
     print("Alliance Magazine Pixel Field Fidelity 5.9: registered")
 except Exception as _m590_exc:
     print("Alliance Magazine Field Fidelity 5.9 registration warning:", _m590_exc)
+
+# FOUNDATION_6_0_AND_6_1_MAGAZINE_VISION_FIELD_CHALLENGER_V2
+try:
+    import sys as _m610_sys
+    import alliance_magazine_field_v610 as _mag_field_v610
+    _mag_field_v610.start(_m610_sys.modules[__name__])
+    print("Alliance Magazine Vision Field Challenger 6.0 + Fresh V2 6.1: registered")
+except Exception as _m610_exc:
+    print("Alliance Magazine Field V2 6.1 registration warning:", _m610_exc)
