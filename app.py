@@ -17050,3 +17050,12 @@ try:
     print("Alliance Magazine Pixel Examiner Adjudication 5.8: registered")
 except Exception as _m580_exc:
     print("Alliance Magazine Pixel Adjudication 5.8 registration warning:", _m580_exc)
+
+# FOUNDATION_5_9_MAGAZINE_PIXEL_FIELD_FIDELITY_CERTIFICATION
+try:
+    import sys as _m590_sys
+    import alliance_magazine_field_v590 as _mag_field_v590
+    _mag_field_v590.start(_m590_sys.modules[__name__])
+    print("Alliance Magazine Pixel Field Fidelity 5.9: registered")
+except Exception as _m590_exc:
+    print("Alliance Magazine Field Fidelity 5.9 registration warning:", _m590_exc)
