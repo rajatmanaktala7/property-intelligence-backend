@@ -1727,4 +1727,16 @@ def register(wrapped):
     except Exception as exc:
         result["championship_v410"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","route":"/property-brain/championship-v410","fail_safe":True}
 
+
+    # FOUNDATION 4.2 - Alliance Automation Machine
+    # Automation-first. V4 predictions remain frozen. Human work only for irreducible exceptions.
+    try:
+        if _route_exists(app, "/api/property-brain/automation-v420/status"):
+            result["automation_v420"] = {"status":"ALREADY_REGISTERED","route":"/property-brain/automation-v420","error":None}
+        else:
+            import alliance_automation_machine_v420 as automation_v420
+            result["automation_v420"] = {**automation_v420.register(core), "error": None}
+    except Exception as exc:
+        result["automation_v420"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","route":"/property-brain/automation-v420","fail_safe":True}
+
     return result
