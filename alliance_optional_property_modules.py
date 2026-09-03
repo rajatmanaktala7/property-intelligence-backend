@@ -1678,4 +1678,17 @@ def register(wrapped):
     except Exception as exc:
         result["mastery_v380"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","route":"/property-brain/mastery-v380","fail_safe":True}
 
+
+    # FOUNDATION 4.0 - Alliance CRE Academy
+    # Additive only. Foundation 3.8 and all earlier modules remain untouched.
+    # V3 is retired unlabeled for 4.0 certification; a fresh V4 is required after pre-cert PASS.
+    try:
+        if _route_exists(app, "/api/property-brain/academy-v400/status"):
+            result["academy_v400"] = {"status":"ALREADY_REGISTERED","route":"/property-brain/academy-v400","error":None}
+        else:
+            import alliance_cre_academy_v400 as academy_v400
+            result["academy_v400"] = {**academy_v400.register(core), "error": None}
+    except Exception as exc:
+        result["academy_v400"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","route":"/property-brain/academy-v400","fail_safe":True}
+
     return result
