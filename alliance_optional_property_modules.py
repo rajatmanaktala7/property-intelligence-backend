@@ -1616,4 +1616,17 @@ def register(wrapped):
                                   "route":"/property-brain/mastery-v340","fail_safe":True}
 
 
+
+    # FOUNDATION 3.5 - Training Gate Finalizer
+    try:
+        if _route_exists(app, "/api/property-brain/mastery-v350/status"):
+            result["mastery_v350"] = {"status":"ALREADY_REGISTERED","route":"/property-brain/mastery-v350","error":None}
+        else:
+            import alliance_training_gate_finalizer_v350 as mastery_v350
+            result["mastery_v350"] = {**mastery_v350.register(core),"error":None}
+    except Exception as exc:
+        result["mastery_v350"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}",
+                                  "route":"/property-brain/mastery-v350","fail_safe":True}
+
+
     return result
