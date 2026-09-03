@@ -20,8 +20,8 @@ from sqlalchemy import text
 import alliance_magazine_field_v610 as frozen_v2
 import alliance_magazine_challenger_v514 as semantic_student
 
-VERSION = "6.2.0-ALLIANCE-MAGAZINE-VISION-FIELD-LAB"
-MODE = "POST_EXAM_FAILURE_TRAINING_MULTI_STRATEGY_LOCATOR_PHONE_REPAIR_NO_FRESH_EXAM_NO_SOURCE_MUTATION"
+VERSION = "6.2.1-ALLIANCE-MAGAZINE-VISION-FIELD-LAB-OBSERVABILITY"
+MODE = "SAME_620_TRAINING_LOGIC_RUNNER_OBSERVABILITY_ONLY_NO_EXAM_OR_TRUTH_CHANGE"
 
 EXPECTED_V2_EXAM_ID = "MAGAZINE_PIXEL_FIELD_V2_610_AUG2026_PAGES_36_38"
 EXPECTED_V2_STATUS = "AUTOMATED_INDEPENDENT_MAGAZINE_FIELD_V2_HOLD"
@@ -29,7 +29,7 @@ EXPECTED_V2_PREDICTION_FREEZE = "ad68a70bcf5ac3ecc73858b16825487e845820dfd5c7876
 EXPECTED_SEMANTIC = "5.1.4-ALLIANCE-MAGAZINE-CHALLENGER-V3-FAILURE-CLOSURE"
 
 FIELDS = ("ref","area_value","area_unit","floor","bedrooms","price","phones")
-STATE={"status":"NOT_STARTED","result":None,"last_error":None}
+STATE={"status":"NOT_STARTED","result":None,"last_error":None,"started_at":None,"finished_at":None,"phase":"WAITING","pages_completed":0,"total_pages":3,"current_page":None}
 _LOCK=threading.Lock()
 _STARTED=False
 
@@ -292,10 +292,33 @@ def _validate_source(source):
     if source.get("prediction_freeze_sha256")!=EXPECTED_V2_PREDICTION_FREEZE:
         raise RuntimeError("Frozen 6.1 prediction hash changed")
 
+def _public_state():
+    return {
+        "version": VERSION,
+        "mode": MODE,
+        "status": STATE.get("status"),
+        "started_at": STATE.get("started_at"),
+        "finished_at": STATE.get("finished_at"),
+        "phase": STATE.get("phase"),
+        "pages_completed": STATE.get("pages_completed",0),
+        "total_pages": STATE.get("total_pages",3),
+        "current_page": STATE.get("current_page"),
+        "last_error": STATE.get("last_error"),
+        "result_ready": bool(STATE.get("result"))
+    }
+
 def run_once(core):
     if not _LOCK.acquire(blocking=False):
-        return {"status":"SKIPPED","reason":"VISION_LAB_ALREADY_RUNNING"}
+        # Observability fix: an active training run is RUNNING, never SKIPPED.
+        return _public_state()
     try:
+        STATE["status"]="RUNNING"
+        STATE["started_at"]=datetime.now(timezone.utc).isoformat()
+        STATE["finished_at"]=None
+        STATE["phase"]="INITIALIZING"
+        STATE["pages_completed"]=0
+        STATE["current_page"]=None
+        STATE["last_error"]=None
         engine=_engine(core);client=_client(core)
         if engine is None:raise RuntimeError("Core engine unavailable")
         if client is None:raise RuntimeError("GEMINI client unavailable")
@@ -314,13 +337,20 @@ def run_once(core):
 
         preds=[]
         methods={}
-        for page,refs in sorted(refs_by_page.items()):
+        ordered_pages=sorted(refs_by_page.items())
+        STATE["total_pages"]=len(ordered_pages)
+        for page_index,(page,refs) in enumerate(ordered_pages, start=1):
+            STATE["phase"]="VISION_EXTRACTION"
+            STATE["current_page"]=page
             image=base64.b64decode(pages[str(page)])
             lines,used=locate_training_lines(client,image,refs,model)
             methods[str(page)]=used
             for ref in refs:
                 preds.append({"page":page,**parse_line(ref,lines.get(ref,""))})
+            STATE["pages_completed"]=page_index
 
+        STATE["phase"]="EXACT_REGRESSION_GRADING"
+        STATE["current_page"]=None
         by={(int(r["page"]),_norm_ref(r["ref"])):_canon(r) for r in preds}
         errors=[];total=0;correct=0;cases=[]
         field_stats={f:{"correct":0,"total":0} for f in FIELDS}
@@ -373,26 +403,41 @@ def run_once(core):
             {"v":VERSION,"e":EXPECTED_V2_EXAM_ID,"p":source["prediction_freeze_sha256"],
              "tc":len(truth),"tch":total,"cc":correct,"a":accuracy,"s":status,
              "r":json.dumps(result,ensure_ascii=False)})
-        STATE["result"]=result;STATE["status"]=status;STATE["last_error"]=None
+        STATE["result"]=result
+        STATE["status"]=status
+        STATE["phase"]="COMPLETE"
+        STATE["finished_at"]=datetime.now(timezone.utc).isoformat()
+        STATE["last_error"]=None
         return result
     except Exception as exc:
-        STATE["status"]="ERROR";STATE["last_error"]=f"{type(exc).__name__}: {exc}"
+        STATE["status"]="ERROR"
+        STATE["phase"]="ERROR"
+        STATE["finished_at"]=datetime.now(timezone.utc).isoformat()
+        STATE["last_error"]=f"{type(exc).__name__}: {exc}"
         return {"version":VERSION,"status":"ERROR","error":STATE["last_error"]}
     finally:
         _LOCK.release()
 
-def status(core):return STATE["result"] or run_once(core)
+def status(core):
+    if STATE.get("result"):
+        return STATE["result"]
+    # Never invoke run_once from a status/dashboard request while the worker owns the lock.
+    # This is the exact 6.2.1 fix for misleading SKIPPED output.
+    if _LOCK.locked():
+        return _public_state()
+    return _public_state()
 
 def dashboard(core):
     s=status(core);t=s.get("training") or {}
     return f"""<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>
-<title>Magazine Vision Lab 6.2</title><style>
+<title>Magazine Vision Lab 6.2.1</title><meta http-equiv='refresh' content='10'><style>
 body{{font-family:Arial;background:#f5f7fb;color:#172033;margin:0}}header{{background:#102235;color:white;padding:18px}}
 .wrap{{max-width:1350px;margin:auto;padding:18px}}.card{{background:white;border:1px solid #e2e8f0;border-radius:12px;padding:14px;margin-bottom:12px}}
 pre{{white-space:pre-wrap;background:#0f172a;color:#e2e8f0;padding:14px;border-radius:10px;overflow:auto}}</style></head>
-<body><header><b>Alliance Magazine Vision Field Laboratory 6.2</b><br><small>6.1 frozen · failure training only · no fresh exam pages consumed</small></header>
+<body><header><b>Alliance Magazine Vision Field Laboratory 6.2.1</b><br><small>6.1 frozen · failure training only · no fresh exam pages consumed</small></header>
 <div class='wrap'><div class='card'><b>{html.escape(str(s.get("status")))}</b><br>
-Training accuracy {html.escape(str(t.get("accuracy")))}% · Checks {html.escape(str(t.get("correct_checks")))} / {html.escape(str(t.get("total_checks")))}</div>
+Training accuracy {html.escape(str(t.get("accuracy")))}% · Checks {html.escape(str(t.get("correct_checks")))} / {html.escape(str(t.get("total_checks")))}<br>
+Phase {html.escape(str(s.get("phase")))} · Pages {html.escape(str(s.get("pages_completed")))} / {html.escape(str(s.get("total_pages")))} · Current page {html.escape(str(s.get("current_page")))}</div>
 <pre>{html.escape(json.dumps(s,ensure_ascii=False,indent=2))}</pre></div></body></html>"""
 
 def register(core):
