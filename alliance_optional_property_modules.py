@@ -1758,4 +1758,16 @@ def register(wrapped):
     except Exception as exc:
         result["automation_v421"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","route":"/property-brain/automation-v421","fail_safe":True}
 
+
+    # FOUNDATION 4.2.2 - Alliance Automation Closure
+    # Additive semantic closure. Frozen V4 student is never modified.
+    try:
+        if _route_exists(app, "/api/property-brain/automation-v422/status"):
+            result["automation_v422"] = {"status":"ALREADY_REGISTERED","route":"/property-brain/automation-v422","error":None}
+        else:
+            import alliance_automation_closure_v422 as automation_v422
+            result["automation_v422"] = {**automation_v422.register(core), "error": None}
+    except Exception as exc:
+        result["automation_v422"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","route":"/property-brain/automation-v422","fail_safe":True}
+
     return result
