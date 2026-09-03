@@ -16993,3 +16993,12 @@ try:
     print("Alliance Magazine Challenger 5.1.2 + Fresh V2 5.3: registered")
 except Exception as _m530_exc:
     print("Alliance Magazine V2 registration warning:", _m530_exc)
+
+# FOUNDATION_5_1_3_AND_5_4_MAGAZINE_CHALLENGER_FRESH_V3
+try:
+    import sys as _m540_sys
+    import alliance_magazine_fresh_v540 as _mag_v540
+    _mag_v540.start(_m540_sys.modules[__name__])
+    print("Alliance Magazine Challenger 5.1.3 + Fresh V3 5.4: registered")
+except Exception as _m540_exc:
+    print("Alliance Magazine V3 registration warning:", _m540_exc)
