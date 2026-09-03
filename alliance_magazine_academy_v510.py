@@ -17,8 +17,8 @@ from sqlalchemy import text
 import alliance_autonomous_student_v438 as champion
 import alliance_newspaper_academy_v500 as newspaper
 
-VERSION = "5.1.0-ALLIANCE-MAGAZINE-AUTONOMOUS-ACADEMY"
-MODE = "IMMUTABLE_CHAMPION_MAGAZINE_FORENSIC_AUDIT_SHADOW_CLEAN_AUTOMATED_NO_SOURCE_MUTATION"
+VERSION = "5.1.1-ALLIANCE-MAGAZINE-AUTONOMOUS-ACADEMY-SEMANTIC-CLOSURE"
+MODE = "CUMULATIVE_LISTING_SEMANTICS_PRICE_EVIDENCE_LOCALITY_HYGIENE_NO_SOURCE_MUTATION"
 CHAMPION_VERSION = "4.3.8-ALLIANCE-STUDENT-DEMAND-OBJECT-CLOSURE"
 CHAMPION_PREDICTOR_SHA256 = "8b5014fa5ec5e38b75f4da15945b357230573c88a096be9c4b2e0609ecd52694"
 
@@ -163,7 +163,10 @@ def _row_get(row, *names):
     return None
 
 def _transaction(raw, listing_type=""):
+    raw_n = _norm(raw)
+    lt = _norm(listing_type)
     n = _norm((listing_type or "") + " " + (raw or ""))
+
     mixed = bool(re.search(
         r"\b(?:sale\s*(?:/|&|or|and)\s*(?:rent|lease)|"
         r"(?:rent|lease)\s*(?:/|&|or|and)\s*sale)\b", n
@@ -175,24 +178,30 @@ def _transaction(raw, listing_type=""):
         r"\b(?:pre[- ]?rented|pre[- ]?leased|pre[- ]?tenanted|"
         r"rented\s+(?:shop|office|showroom|property|building)|leased\s+to)\b", n
     ))
-    sale = bool(re.search(
-        r"\b(?:for\s+sale|sale\b|resale|asking\s+(?:rs|₹|\d)|"
-        r"price\s+(?:rs|₹|\d)|@\s*\d+(?:\.\d+)?\s*(?:cr|crore|lac|lakh))\b", n
+
+    # Magazine listing labels are structured evidence when they explicitly say
+    # Sale/Rent/Lease. Asset-class-only labels such as Commercial are not.
+    lt_sale = bool(re.search(r"\b(?:sale|resale|buy)\b", lt))
+    lt_rent = bool(re.search(r"\b(?:rent|rental|lease)\b", lt))
+
+    sale = lt_sale or bool(re.search(
+        r"\b(?:for\s+sale|sale\b|resale|asking\s+(?:rs|₹|\d[\d,.]*)|"
+        r"price\s+(?:rs|₹|\d[\d,.]*)|@\s*\d+(?:\.\d+)?\s*(?:cr|crore|lac|lakh))\b", n
     ))
-    rent = bool(re.search(
-        r"\b(?:for\s+rent|to[- ]?let|rent\s+(?:rs|₹|\d)|rental\b)\b", n
-    ))
-    lease = bool(re.search(
-        r"\b(?:for\s+lease|lease\s+out|available\s+for\s+lease|company\s+lease)\b", n
+    rent = lt_rent or bool(re.search(
+        r"\b(?:for\s+rent|to[- ]?let|rent\s+(?:rs\.?|₹|\d[\d,.]*)|"
+        r"rental\b|for\s+lease|on\s+lease|available\s+for\s+lease|"
+        r"company\s+lease|lease\s+out)\b", n
     ))
 
+    # Occupancy income is not a rent offering when the asset is explicitly sold.
     if sale and occupied:
         return "SALE"
-    if sale and (rent or lease):
+    if sale and rent:
         return "AMBIGUOUS"
     if sale:
         return "SALE"
-    if rent or lease:
+    if rent:
         return "RENT"
     return "UNKNOWN"
 
@@ -206,23 +215,41 @@ def _occupancy(raw):
 
 def _classify(raw, listing_type=""):
     n = _norm((listing_type or "") + " " + (raw or ""))
+    lt = _norm(listing_type)
+
     demand = bool(re.search(
         r"\b(?:requirement|required|wanted|looking\s+for|seeking|need(?:ed)?|"
         r"wants?\s+to\s+(?:buy|purchase|rent|lease))\b", n
     ))
     demand_asset = bool(re.search(
         r"\b(?:property|plot|flat|apartment|office|shop|showroom|land|building|"
-        r"warehouse|farmhouse|hotel|floor|space|villa|kothi)\b", n
+        r"warehouse|farmhouse|hotel|floor|space|villa|kothi|rooms?|rk|bhk)\b", n
     ))
     if demand and demand_asset:
         return "REQUIREMENT"
 
+    # Explicit structured listing labels Sale/Rent/Lease indicate supply-side
+    # inventory unless demand grammar above owns the object.
+    if re.search(r"\b(?:sale|resale|rent|rental|lease|available)\b", lt):
+        return "PROPERTY_AVAILABILITY"
+
     if re.search(
-        r"\b(?:available|for\s+sale|for\s+rent|for\s+lease|to[- ]?let|"
-        r"plot|flat|apartment|office|shop|showroom|land|building|floor|warehouse|hotel)\b", n
+        r"\b(?:available|for\s+sale|for\s+rent|for\s+lease|on\s+lease|to[- ]?let|"
+        r"plot|flat|apartment|office|shop|showroom|land|building|floor|warehouse|hotel|"
+        r"rooms?|rk|bhk)\b", n
     ):
         return "PROPERTY_AVAILABILITY"
-    return champion.predict_message(raw or "").get("class") or "UNKNOWN"
+
+    p = champion.predict_message(raw or "")
+    cls = p.get("class") or "UNKNOWN"
+    # A group-like magazine row with concrete asset evidence must not collapse
+    # to UNRESOLVED solely because the legacy Champion did not own magazine syntax.
+    if cls in {"UNRESOLVED", "NOISE"} and re.search(
+        r"\b(?:plot|flat|apartment|office|shop|showroom|land|building|floor|warehouse|hotel|"
+        r"rooms?|rk|bhk)\b", n
+    ):
+        return "PROPERTY_AVAILABILITY"
+    return cls
 
 def _asset_class(raw, category=""):
     n = _norm((category or "") + " " + (raw or ""))
@@ -262,16 +289,31 @@ def _area_candidates(raw):
     return out
 
 def _price_kind(raw, price):
-    n = _norm((price or "") + " " + (raw or ""))
-    if not str(price or "").strip():
+    # Classify the structured Price field itself. Raw text may contain a
+    # different legitimate rent/price and must not sanitize a contaminated
+    # bare number copied from BHK/room/sector/area.
+    p = _norm(price)
+    if not p:
         return "UNKNOWN"
-    if re.search(r"\b(?:/|per)\s*(?:sq\.?\s*ft|sqft|sq\.?\s*yd|sqyd|month|pm)\b", n):
+    if re.search(r"\b(?:/|per)\s*(?:sq\.?\s*ft|sqft|sq\.?\s*yd|sqyd|month|pm)\b", p):
         return "RATE_OR_RENT_RATE"
-    if re.search(r"\b(?:cr|crore|crores|lac|lakh|lakhs|₹|rs\.?|inr)\b", n):
+    if re.search(r"\b(?:cr|crore|crores|lac|lakh|lakhs|₹|rs\.?|inr)\b", p):
         return "MONEY_AMOUNT"
-    if re.fullmatch(r"[\d,.]+", str(price or "").strip()):
+    if re.fullmatch(r"[\d,.]+", p):
         return "BARE_NUMBER"
     return "TEXT_PRICE"
+
+def _bare_price_supported_by_same_number(raw, price):
+    digits = re.sub(r"\D", "", str(price or ""))
+    if not digits:
+        return False
+    # Require the SAME number to appear in explicit money context.
+    money_patterns = [
+        rf"(?i)(?:₹|rs\.?|inr)\s*{re.escape(str(price).strip())}\b",
+        rf"(?i)\b(?:price|asking|rent|rate)\s*[:@-]?\s*{re.escape(str(price).strip())}\b",
+        rf"(?i)\b{re.escape(str(price).strip())}\s*(?:cr|crore|crores|lac|lakh|lakhs)\b",
+    ]
+    return any(re.search(pat, str(raw or "")) for pat in money_patterns)
 
 def _phones(raw):
     s = str(raw or "")
@@ -296,6 +338,15 @@ def _locality_clean(locality):
     if re.fullmatch(r"[\d\W_]+", n):
         return None
     return v
+
+def _locality_status(locality):
+    v = str(locality or "").strip()
+    n = _norm(v)
+    if not n or n in {"unknown", "na", "n/a", "-", "not specified"}:
+        return "MISSING"
+    if _locality_clean(locality) is None:
+        return "POLLUTED"
+    return "VALID_OR_UNPROVEN"
 
 def _multi_property(raw):
     n = _norm(raw)
@@ -354,8 +405,7 @@ def analyze(row):
     if occ == "TENANTED" and tx == "SALE":
         reasons.append("PRE_RENTED_SALE_OCCUPANCY_SEPARATE")
     if _price_kind(raw, price) == "BARE_NUMBER":
-        money_evidence = re.search(r"(?i)\b(?:price|asking|rent|rate|₹|rs\.?|cr|crore|lac|lakh)\b", raw)
-        if not money_evidence:
+        if not _bare_price_supported_by_same_number(raw, price):
             reasons.append("NUMERIC_PRICE_WITHOUT_MONEY_EVIDENCE")
 
     structured_area_missing = not str(area or "").strip() or _norm(area) in {"unknown", "na", "n/a", "-"}
@@ -367,7 +417,10 @@ def analyze(row):
         if (source_unit == "SQYD" and "ft" in u) or (source_unit == "SQM" and "ft" in u):
             reasons.append("AREA_UNIT_CONFLICT")
 
-    if loc_clean is None:
+    loc_status = _locality_status(locality)
+    # Missing locality is incomplete data, but not automatically a wrong
+    # extraction. Only a non-empty polluted locality is a proven quality defect.
+    if loc_status == "POLLUTED":
         reasons.append("LOCALITY_FRAGMENT_OR_MISSING")
 
     phone_quality = "NO_CONTACT"
@@ -403,6 +456,7 @@ def analyze(row):
             "listing_type": listing,
             "category": category,
             "locality_original": locality,
+            "locality_status": _locality_status(locality),
             "area_candidates": areas,
             "contacts": contacts,
             "price_original": price,
