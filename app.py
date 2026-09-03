@@ -17041,3 +17041,12 @@ try:
     print("Alliance Magazine Fresh Pixel Certification 5.7: registered")
 except Exception as _m570_exc:
     print("Alliance Magazine Pixel 5.7 registration warning:", _m570_exc)
+
+# FOUNDATION_5_8_MAGAZINE_PIXEL_EXAMINER_TRUTH_ADJUDICATION
+try:
+    import sys as _m580_sys
+    import alliance_magazine_pixel_adjudication_v580 as _mag_adj_v580
+    _mag_adj_v580.start(_m580_sys.modules[__name__])
+    print("Alliance Magazine Pixel Examiner Adjudication 5.8: registered")
+except Exception as _m580_exc:
+    print("Alliance Magazine Pixel Adjudication 5.8 registration warning:", _m580_exc)
