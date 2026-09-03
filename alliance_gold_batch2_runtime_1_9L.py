@@ -127,4 +127,31 @@ def install_patch() -> None:
 
 install_patch()
 
+# ---------------------------------------------------------------------------
+# V18.1 property edit/media/area/rent-sale hotfix
+# Installs before production_entrypoint loads the core application.
+# ---------------------------------------------------------------------------
+import alliance_optional_property_modules as _optional_property_modules_v181
+
+_original_optional_register_v181 = _optional_property_modules_v181.register
+
+def _register_optional_with_property_v181(wrapped):
+    result = _original_optional_register_v181(wrapped)
+    try:
+        import alliance_property_edit_hotfix_v181 as _property_v181
+        v181_result = _property_v181.register(wrapped)
+        if isinstance(result, dict):
+            result["property_edit_v181"] = v181_result
+    except Exception as exc:
+        if isinstance(result, dict):
+            result["property_edit_v181"] = {
+                "status": "ERROR",
+                "error": f"{type(exc).__name__}: {exc}",
+                "fail_safe": True,
+            }
+        print("[property-edit-v181] warning:", type(exc).__name__, str(exc))
+    return result
+
+_optional_property_modules_v181.register = _register_optional_with_property_v181
+
 from production_entrypoint import app  # noqa: E402,F401
