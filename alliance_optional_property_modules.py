@@ -1868,4 +1868,16 @@ def register(wrapped):
     except Exception as exc:
         result["autonomous_v434"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","route":"/property-brain/autonomous-v434","fail_safe":True}
 
+
+    # FOUNDATION 4.3.4F - Exact V4 Failure Forensics
+    # Read-only forensic route. No student changes. No V5 freeze.
+    try:
+        if _route_exists(app, "/api/property-brain/autonomous-v434-forensics/status"):
+            result["v434_forensics"] = {"status":"ALREADY_REGISTERED","route":"/property-brain/autonomous-v434-forensics","error":None}
+        else:
+            import alliance_v4_failure_forensics_v434f as v434_forensics
+            result["v434_forensics"] = {**v434_forensics.register(core), "error": None}
+    except Exception as exc:
+        result["v434_forensics"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","route":"/property-brain/autonomous-v434-forensics","fail_safe":True}
+
     return result
