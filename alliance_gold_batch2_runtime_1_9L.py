@@ -163,4 +163,19 @@ def _register_optional_with_property_v181(wrapped):
 
 _optional_property_modules_v181.register = _register_optional_with_property_v181
 
+# V18.3 upload/clipboard repair
+import alliance_optional_property_modules as _opm183
+_old183=_opm183.register
+def _reg183(wrapped):
+    result=_old183(wrapped)
+    try:
+        import alliance_upload_clipboard_fix_v183 as _m183
+        r=_m183.register(wrapped)
+        if isinstance(result,dict): result["upload_clipboard_v183"]=r
+    except Exception as exc:
+        if isinstance(result,dict): result["upload_clipboard_v183"]={"status":"ERROR","error":f"{type(exc).__name__}: {exc}","fail_safe":True}
+        print("[v183]",type(exc).__name__,str(exc))
+    return result
+_opm183.register=_reg183
+
 from production_entrypoint import app  # noqa: E402,F401
