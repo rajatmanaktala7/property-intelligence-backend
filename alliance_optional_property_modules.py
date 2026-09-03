@@ -1590,4 +1590,17 @@ def register(wrapped):
                                   "route":"/property-brain/mastery-v320","fail_safe":True}
 
 
+
+    # FOUNDATION 3.3 - Ownership Mastery + Frozen Blind Set
+    try:
+        if _route_exists(app, "/api/property-brain/mastery-v330/status"):
+            result["mastery_v330"] = {"status":"ALREADY_REGISTERED","route":"/property-brain/mastery-v330","error":None}
+        else:
+            import alliance_ownership_mastery_blind_v330 as mastery_v330
+            result["mastery_v330"] = {**mastery_v330.register(core),"error":None}
+    except Exception as exc:
+        result["mastery_v330"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}",
+                                  "route":"/property-brain/mastery-v330","fail_safe":True}
+
+
     return result
