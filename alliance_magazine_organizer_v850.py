@@ -1,10 +1,10 @@
 from __future__ import annotations
-import html, json, re
+import html, json, re, fitz
 from fastapi import Body, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import text
 
-VERSION="8.5.2-LOCATION-INTELLIGENCE"
+VERSION="8.5.3-CATEGORY-LOCATION-CONTEXT"
 MOBILE_RE=re.compile(r"(?<!\d)([6-9]\d{9})(?!\d)")
 LANDLINE_RE=re.compile(r"(?<!\d)(0?11[-\s]?\d{7,8}(?:/\d(?:/\d)*)?)(?!\d)")
 PHONE_ANY_RE=re.compile(r"(?<!\d)(?:[6-9]\d{9}|0?11[-\s]?\d{7,8}(?:/\d(?:/\d)*)?)(?!\d)")
@@ -43,6 +43,87 @@ def _trusted_section(v):
     return s if any(_canon_location(x)==s for x in TRUSTED_LOCATIONS) else None
 
 
+CATEGORY_PATTERNS=[
+    (re.compile(r"(?i)\bRESIDENTIAL\s*[-–| ]\s*SALE\b"),"Residential Sale"),
+    (re.compile(r"(?i)\bRESIDENTIAL\s*[-–| ]\s*RENT(?:ING)?\b"),"Residential Rent"),
+    (re.compile(r"(?i)\bCOMMERCIAL\s*[-–| ]\s*SALE\b"),"Commercial Sale"),
+    (re.compile(r"(?i)\bCOMMERCIAL\s*[-–| ]\s*RENT(?:ING)?\b"),"Commercial Rent"),
+    (re.compile(r"(?i)\bINDUSTRIAL\s*[-–| ]\s*SALE\b"),"Industrial Sale"),
+    (re.compile(r"(?i)\bINDUSTRIAL\s*[-–| ]\s*RENT(?:ING)?\b"),"Industrial Rent"),
+    (re.compile(r"(?i)\bFARM\s*HOUSES?\s*[-–| ]\s*SALE\b"),"Farmhouse Sale"),
+    (re.compile(r"(?i)\bFARM\s*HOUSES?\s*[-–| ]\s*RENT(?:ING)?\b"),"Farmhouse Rent"),
+]
+FARM_RE=re.compile(r"(?i)\b(FARM\s*HOUSE|FARMHOUSE|SAINIK\s+FARM|DERA\s+MANDI|GADIPUR\s+FARMS?|SULTANPUR\s+FARMS?|FARMALAND)\b")
+COMMERCIAL_RE=re.compile(r"(?i)\b(OFFICE|SHOP|SHOWROOM|COMMERCIAL|RETAIL|MALL|MARKET|WAREHOUSE|GODOWN|SPACE)\b")
+INDUSTRIAL_RE=re.compile(r"(?i)\b(INDUSTRIAL|FACTORY|WAREHOUSE|GODOWN|SHED)\b")
+RENT_RE=re.compile(r"(?i)\b(RENT|RENTED|LEASE|LEASING|RENT\s+ALSO)\b")
+SALE_RE=re.compile(r"(?i)\b(SALE|SELL|RESALE|BOOKING|BKG|U/C|NEW)\b")
+
+def _category_from_text(v):
+    s=v or ""
+    for rx,label in CATEGORY_PATTERNS:
+        if rx.search(s): return label
+    return None
+
+def _page_category_headings(pdf_bytes,page_no):
+    out=[]
+    if not pdf_bytes:return out
+    doc=fitz.open(stream=bytes(pdf_bytes),filetype="pdf")
+    if page_no<1 or page_no>len(doc):
+        doc.close();return out
+    page=doc.load_page(page_no-1)
+    d=page.get_text("dict",sort=True)
+    width=float(page.rect.width or 1)
+    for block in d.get("blocks",[]):
+        if block.get("type")!=0:continue
+        for line in block.get("lines",[]):
+            raw="".join(span.get("text","") for span in line.get("spans",[]) if span.get("text","")).strip()
+            cat=_category_from_text(raw)
+            if not cat: continue
+            bbox=line.get("bbox") or block.get("bbox") or [0,0,0,0]
+            x0=float(bbox[0]); y0=float(bbox[1])
+            col=0 if x0/width<.34 else (1 if x0/width<.67 else 2)
+            out.append({"y0":y0,"x0":x0,"col":col,"category":cat,"text":raw})
+    doc.close()
+    return out
+
+def _category_for_row(row,headings):
+    original=row["original_description"] or ""
+    explicit=_category_from_text(original)
+    if explicit:return explicit,"DESCRIPTION",100
+    bbox=row.get("bbox") or []
+    x0=float(bbox[0]) if isinstance(bbox,(list,tuple)) and len(bbox)>=2 else 0.0
+    y0=float(bbox[1]) if isinstance(bbox,(list,tuple)) and len(bbox)>=2 else 999999.0
+    # Use nearest preceding magazine category heading.
+    candidates=[h for h in headings if h["y0"]<=y0+2]
+    if candidates:
+        h=max(candidates,key=lambda z:z["y0"])
+        return h["category"],"MAGAZINE_HEADING",95
+    # Safe description inference only when heading was not recoverable.
+    if FARM_RE.search(original):
+        return ("Farmhouse Rent" if RENT_RE.search(original) else "Farmhouse Sale"),"DESCRIPTION_FARMHOUSE",85
+    if INDUSTRIAL_RE.search(original):
+        return ("Industrial Rent" if RENT_RE.search(original) else "Industrial Sale"),"DESCRIPTION_ASSET",80
+    if COMMERCIAL_RE.search(original):
+        return ("Commercial Rent" if RENT_RE.search(original) else "Commercial Sale"),"DESCRIPTION_ASSET",80
+    if RENT_RE.search(original):
+        return "Residential Rent","DESCRIPTION_TRANSACTION",75
+    return None,"UNKNOWN",0
+
+def _promo_record(section,clean,original):
+    s=(section or "").upper().strip()
+    if s in BAD_SECTION_EXACT or PROMO_SECTION_RE.search(s):
+        u=(clean or "").upper()
+        if re.search(r"\bBUY\b.*\bSELL\b|\bCOLLABORATION\b|\bINTERIOR\b|\bRENOVATION\b",u):
+            return True,"PROMOTIONAL_COPY"
+        if re.search(r"\bPVT\.?\s*LTD\.?\b|\bOFFICE\s+ADDRESS\b",u):
+            return True,"PROMOTIONAL_COMPANY"
+        # Office/business card style rows with no property inventory signal
+        if not re.search(r"(?i)\b\d+\s*(?:BHK|BR)\b|\b\d{2,7}\s*(?:Y|YD|SQYD|FT|SQFT|MTR|SQM)\b",clean or ""):
+            return True,"PROMOTIONAL_SECTION_NO_PROPERTY"
+    return False,None
+
+
 def _app(core): return getattr(core,"app",None) or core
 def _engine(core): return getattr(core,"engine",None)
 def _login(core,req):
@@ -70,6 +151,9 @@ def _setup(e):
             "ALTER TABLE pi_magazine_organized_v850 ADD COLUMN IF NOT EXISTS location TEXT",
             "ALTER TABLE pi_magazine_organized_v850 ADD COLUMN IF NOT EXISTS location_source TEXT",
             "ALTER TABLE pi_magazine_organized_v850 ADD COLUMN IF NOT EXISTS location_confidence INTEGER",
+            "ALTER TABLE pi_magazine_organized_v850 ADD COLUMN IF NOT EXISTS property_category TEXT",
+            "ALTER TABLE pi_magazine_organized_v850 ADD COLUMN IF NOT EXISTS category_source TEXT",
+            "ALTER TABLE pi_magazine_organized_v850 ADD COLUMN IF NOT EXISTS category_confidence INTEGER",
         ]: c.execute(text(ddl))
         c.execute(text("""CREATE TABLE IF NOT EXISTS pi_magazine_organized_history_v851(
           id BIGSERIAL PRIMARY KEY,source_record_id TEXT NOT NULL,action TEXT NOT NULL,actor TEXT,
@@ -119,12 +203,14 @@ def _dup(section,clean,area,unit,floor):
     vals=[section or "",clean or "",str(area or ""),str(unit or ""),str(floor or "")]
     return "|".join(re.sub(r"[^A-Z0-9]","",v.upper()) for v in vals)[:240]
 
-def _organize(r,location=None,location_source=None,location_confidence=None):
+def _organize(r,location=None,location_source=None,location_confidence=None,property_category=None,category_source=None,category_confidence=None):
     original=r["original_description"] or ""; clean=_clean(original)
     mobiles,lands=_phones(original); name,role=_contact_name_role(original)
     noise,reason=_noise(original,clean,mobiles,lands,r["signal_score"])
+    promo,promo_reason=_promo_record(r["section_heading"],clean,original)
+    if promo: noise,reason=True,promo_reason
     return dict(source_record_id=r["record_id"],upload_id=str(r["upload_id"]),page_number=r["page_number"],
-      section_heading=r["section_heading"],location=location,location_source=location_source,location_confidence=location_confidence,original_description=original,clean_description=clean,contact_name=name,
+      section_heading=r["section_heading"],location=location,location_source=location_source,location_confidence=location_confidence,property_category=property_category,category_source=category_source,category_confidence=category_confidence,original_description=original,clean_description=clean,contact_name=name,
       contact_numbers=list(dict.fromkeys(mobiles+lands)),mobile_numbers=mobiles,landline_numbers=lands,contact_role=role,
       transaction_type=r["transaction_type"],property_type=r["property_type"],area_value=r["area_value"],area_unit=r["area_unit"],
       floor=r["floor"],amount_raw=r["amount_raw"],organizer_status="REJECTED_NOISE" if noise else "CLEAN",
@@ -133,11 +219,17 @@ def _organize(r,location=None,location_source=None,location_confidence=None):
 
 def _run(e,upload_id=None):
     q="""SELECT record_id,upload_id,page_number,section_heading,original_description,transaction_type,property_type,
-    area_value,area_unit,floor,amount_raw,signal_score,needs_review FROM pi_magazine_fastlane_records"""
+    area_value,area_unit,floor,amount_raw,signal_score,needs_review,bbox FROM pi_magazine_fastlane_records"""
     p={}
     if upload_id:q+=" WHERE upload_id=CAST(:u AS UUID)";p["u"]=upload_id
     q+=" ORDER BY page_number,id"
-    with e.connect() as c: rows=c.execute(text(q),p).mappings().all()
+    with e.connect() as c:
+        rows=c.execute(text(q),p).mappings().all()
+        pdfrow=c.execute(text("SELECT pdf_content FROM pi_magazine_fresh_uploads ORDER BY created_at DESC LIMIT 1")).first()
+    pdf_bytes=bytes(pdfrow[0]) if pdfrow and pdfrow[0] is not None else None
+    page_headings={}
+    for pg in sorted({int(r["page_number"]) for r in rows}):
+        page_headings[pg]=_page_category_headings(pdf_bytes,pg) if pdf_bytes else []
     clean=rejected=review=0
     last_location=None
     with e.begin() as c:
@@ -155,16 +247,17 @@ def _run(e,upload_id=None):
                 location,location_source,location_confidence=last_location,"CARRY_FORWARD_AFTER_NOISE",80
             else:
                 location,location_source,location_confidence=None,"UNKNOWN",0
-            x=_organize(r,location,location_source,location_confidence); db=dict(x)
+            property_category,category_source,category_confidence=_category_for_row(r,page_headings.get(int(r["page_number"]),[]))
+            x=_organize(r,location,location_source,location_confidence,property_category,category_source,category_confidence); db=dict(x)
             db["contacts"]=json.dumps(x["contact_numbers"]);db["mobiles"]=json.dumps(x["mobile_numbers"]);db["lands"]=json.dumps(x["landline_numbers"])
             c.execute(text("""INSERT INTO pi_magazine_organized_v850(source_record_id,upload_id,page_number,section_heading,original_description,
-            clean_description,location,location_source,location_confidence,contact_name,contact_numbers,mobile_numbers,landline_numbers,contact_role,transaction_type,property_type,
+            clean_description,location,location_source,location_confidence,property_category,category_source,category_confidence,contact_name,contact_numbers,mobile_numbers,landline_numbers,contact_role,transaction_type,property_type,
             area_value,area_unit,floor,amount_raw,organizer_status,reject_reason,duplicate_key,needs_review)
-            VALUES(:source_record_id,CAST(:upload_id AS UUID),:page_number,:section_heading,:original_description,:clean_description,:location,:location_source,:location_confidence,:contact_name,
+            VALUES(:source_record_id,CAST(:upload_id AS UUID),:page_number,:section_heading,:original_description,:clean_description,:location,:location_source,:location_confidence,:property_category,:category_source,:category_confidence,:contact_name,
             CAST(:contacts AS JSONB),CAST(:mobiles AS JSONB),CAST(:lands AS JSONB),:contact_role,:transaction_type,:property_type,:area_value,
             :area_unit,:floor,:amount_raw,:organizer_status,:reject_reason,:duplicate_key,:needs_review)
             ON CONFLICT(source_record_id) DO UPDATE SET section_heading=EXCLUDED.section_heading,original_description=EXCLUDED.original_description,
-            clean_description=EXCLUDED.clean_description,location=EXCLUDED.location,location_source=EXCLUDED.location_source,location_confidence=EXCLUDED.location_confidence,contact_name=EXCLUDED.contact_name,contact_numbers=EXCLUDED.contact_numbers,
+            clean_description=EXCLUDED.clean_description,location=EXCLUDED.location,location_source=EXCLUDED.location_source,location_confidence=EXCLUDED.location_confidence,property_category=EXCLUDED.property_category,category_source=EXCLUDED.category_source,category_confidence=EXCLUDED.category_confidence,contact_name=EXCLUDED.contact_name,contact_numbers=EXCLUDED.contact_numbers,
             mobile_numbers=EXCLUDED.mobile_numbers,landline_numbers=EXCLUDED.landline_numbers,contact_role=EXCLUDED.contact_role,
             transaction_type=EXCLUDED.transaction_type,property_type=EXCLUDED.property_type,area_value=EXCLUDED.area_value,area_unit=EXCLUDED.area_unit,
             floor=EXCLUDED.floor,amount_raw=EXCLUDED.amount_raw,organizer_status=EXCLUDED.organizer_status,reject_reason=EXCLUDED.reject_reason,
@@ -192,7 +285,7 @@ def register(core):
     @app.post("/api/magazine-organizer/edit/{record_id}")
     def edit(record_id:str,req:Request,payload:dict=Body(...)):
         actor=_actor(core,req)
-        allowed={"clean_description","location","contact_name","contact_numbers","transaction_type","amount_raw","assigned_to","verification_status","needs_review"}
+        allowed={"clean_description","location","property_category","contact_name","contact_numbers","transaction_type","amount_raw","assigned_to","verification_status","needs_review"}
         changes={k:payload[k] for k in allowed if k in payload}
         if not changes:raise HTTPException(400,"No editable fields supplied")
         with e.begin() as c:
@@ -257,17 +350,24 @@ def register(core):
         COUNT(*) FILTER(WHERE organizer_status='REJECTED_NOISE' AND archived_at IS NULL) rejected,
         COUNT(*) FILTER(WHERE organizer_status='DUPLICATE_EXACT' AND archived_at IS NULL) duplicates,
         COUNT(*) FILTER(WHERE needs_review AND archived_at IS NULL) review,
-        COUNT(*) FILTER(WHERE verification_status='AVAILABLE' AND archived_at IS NULL) available
+        COUNT(*) FILTER(WHERE verification_status='AVAILABLE' AND archived_at IS NULL) available,
+        COUNT(*) FILTER(WHERE property_category='Residential Sale' AND archived_at IS NULL) residential_sale,
+        COUNT(*) FILTER(WHERE property_category='Residential Rent' AND archived_at IS NULL) residential_rent,
+        COUNT(*) FILTER(WHERE property_category='Commercial Sale' AND archived_at IS NULL) commercial_sale,
+        COUNT(*) FILTER(WHERE property_category='Commercial Rent' AND archived_at IS NULL) commercial_rent,
+        COUNT(*) FILTER(WHERE property_category='Industrial Sale' AND archived_at IS NULL) industrial_sale,
+        COUNT(*) FILTER(WHERE property_category='Industrial Rent' AND archived_at IS NULL) industrial_rent,
+        COUNT(*) FILTER(WHERE property_category LIKE 'Farmhouse %%' AND archived_at IS NULL) farmhouse
         FROM pi_magazine_organized_v850""")).mappings().first()
         return {"status":"OK","version":VERSION,"cost":0,"external_api_calls":0,**dict(r)}
 
     @app.get("/magazine-organizer",response_class=HTMLResponse)
     def page(req:Request,limit:int=Query(1500,ge=1,le=5000)):
         _login(core,req)
-        with e.connect() as c:rows=c.execute(text("""SELECT source_record_id,page_number,location,location_source,location_confidence,clean_description,contact_name,contact_numbers,
+        with e.connect() as c:rows=c.execute(text("""SELECT source_record_id,page_number,location,location_source,location_confidence,property_category,category_source,category_confidence,clean_description,contact_name,contact_numbers,
         transaction_type,area_value,area_unit,amount_raw,verification_status,assigned_to,source_name,created_at,updated_at,organizer_status,
-        needs_review FROM pi_magazine_organized_v850 WHERE archived_at IS NULL ORDER BY page_number,id LIMIT :n"""),{"n":limit}).mappings().all()
-        heads=["Property ID","Location","Description / Address","Area","Rent/Sale","Amount","Contact Name","Contact No.","Date & Time","Status","Verify","History","Assigned To","Source","Edit","Delete"]
+        needs_review FROM pi_magazine_organized_v850 WHERE archived_at IS NULL AND organizer_status NOT IN ('REJECTED_NOISE') ORDER BY page_number,id LIMIT :n"""),{"n":limit}).mappings().all()
+        heads=["Property ID","Location","Description / Address","Property Category","Area","Amount","Contact Name","Contact No.","Date & Time","Status","Verify","History","Assigned To","Source","Edit","Delete"]
         body=[]
         for r in rows:
             area=" ".join(x for x in [str(r["area_value"] or ""),str(r["area_unit"] or "")] if x)
@@ -275,7 +375,7 @@ def register(core):
             rid=_esc(r["source_record_id"])
             status=r["verification_status"] or ("Needs Review" if r["needs_review"] else r["organizer_status"])
             vals=[
-                rid,_esc(r["location"]),_esc(r["clean_description"]),_esc(area),_esc(r["transaction_type"]),_esc(r["amount_raw"]),
+                rid,_esc(r["location"]),_esc(r["clean_description"]),_esc(r["property_category"]),_esc(area),_esc(r["amount_raw"]),
                 _esc(r["contact_name"]),_esc(", ".join(r["contact_numbers"] or [])),_esc(dt),_esc(status)
             ]
             tr="<tr>"+"".join("<td>"+v+"</td>" for v in vals)
@@ -291,13 +391,13 @@ def register(core):
         button{padding:9px 13px;background:#125bc5;color:white;border:0;border-radius:7px;font-weight:bold}.mini{padding:5px 8px}.del{padding:5px 8px;background:#a21d1d}
         table{width:100%;border-collapse:collapse;background:white;font-size:12px}th,td{padding:7px;border-bottom:1px solid #ddd;text-align:left;vertical-align:top}
         th{background:#eef2f6;position:sticky;top:0}td:nth-child(3){min-width:280px}</style></head><body>
-        <div class='top'><h2>Alliance Magazine Database · 8.5.2</h2>
-        <p><b>Location Intelligence:</b> promotional headings such as TARA / ESTATES are ignored. Trusted locality headings and explicit locality names are used instead. Original evidence remains immutable.</p>
+        <div class='top'><h2>Alliance Magazine Database · 8.5.3</h2>
+        <p><b>8.5.3:</b> Section is hidden from the team database. Location is business-facing. TARA/ESTATES promotional headings are ignored contextually, genuine TARA APT and Farmhouse records are preserved. Property Category is derived from the magazine heading and description. Original evidence remains immutable.</p>
         <button onclick="organize()">Organize FastLane Data — Free</button> <span id='msg'></span></div>"""+table+"""
         <script>
         async function organize(){msg.textContent=' Organizing...';let d=await (await fetch('/api/magazine-organizer/run',{method:'POST'})).json();msg.textContent=' '+JSON.stringify(d);setTimeout(()=>location.reload(),700)}
         async function verifyRec(id){let s=prompt('Status: UNVERIFIED, VERIFICATION DUE, AVAILABLE, NOT AVAILABLE, FOLLOW-UP, CLOSED/REMOVED','AVAILABLE');if(!s)return;await fetch('/api/magazine-organizer/verify/'+id,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({status:s})});location.reload()}
-        async function editRec(id){let loc=prompt('Location (optional)');let desc=prompt('New Clean Description (Original Description will NOT change)');if(desc===null)return;let name=prompt('Contact Name (optional)');let phones=prompt('Contact No(s), comma separated (optional)');let assigned=prompt('Assigned To (optional)');let body={clean_description:desc};if(loc!==null)body.location=loc;if(name!==null)body.contact_name=name;if(phones!==null)body.contact_numbers=phones;if(assigned!==null)body.assigned_to=assigned;await fetch('/api/magazine-organizer/edit/'+id,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});location.reload()}
+        async function editRec(id){let loc=prompt('Location (optional)');let cat=prompt('Property Category: Residential Sale, Residential Rent, Commercial Sale, Commercial Rent, Industrial Sale, Industrial Rent, Farmhouse Sale, Farmhouse Rent (optional)');let desc=prompt('New Clean Description (Original Description will NOT change)');if(desc===null)return;let name=prompt('Contact Name (optional)');let phones=prompt('Contact No(s), comma separated (optional)');let assigned=prompt('Assigned To (optional)');let body={clean_description:desc};if(loc!==null)body.location=loc;if(cat!==null)body.property_category=cat;if(name!==null)body.contact_name=name;if(phones!==null)body.contact_numbers=phones;if(assigned!==null)body.assigned_to=assigned;await fetch('/api/magazine-organizer/edit/'+id,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});location.reload()}
         async function deleteRec(id){if(!confirm('Archive this property? It will NOT be hard deleted.'))return;await fetch('/api/magazine-organizer/delete/'+id,{method:'POST'});location.reload()}
         async function historyRec(id){let d=await (await fetch('/api/magazine-organizer/history/'+id)).json();alert(JSON.stringify(d.history,null,2))}
         </script></body></html>"""
