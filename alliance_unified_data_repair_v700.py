@@ -1,13 +1,14 @@
 from __future__ import annotations
 import hashlib, html, json, re, threading, time
 from collections import defaultdict, Counter
-from datetime import datetime, timezone
+from datetime import date, datetime, time as dt_time, timezone
 from decimal import Decimal
+import uuid
 
 from fastapi.responses import HTMLResponse
 from sqlalchemy import text
 
-VERSION="7.0.1-ALLIANCE-UNIFIED-NEWSPAPER-MAGAZINE-DATA-REPAIR-COLLECTIONS-FIX"
+VERSION="7.0.3-ALLIANCE-UNIFIED-NEWSPAPER-MAGAZINE-DATA-REPAIR-SERIALIZATION-CLOSURE"
 MODE="SOURCE_IMMUTABLE_DETERMINISTIC_CLEAN_SHADOW_STRONG_DEDUPE_CANONICAL_DERIVED_NO_AI_QUOTA_REQUIRED"
 
 STATE={"status":"NOT_STARTED","phase":"WAITING","started_at":None,"finished_at":None,
@@ -103,10 +104,24 @@ def _route_exists(a,p):
     try:return any(getattr(r,"path",None)==p for r in a.routes)
     except:return False
 def _safe(v):
-    if isinstance(v,Decimal): return float(v)
-    if isinstance(v,(datetime,)): return v.isoformat()
-    return v
-def _jsonable(row):return {str(k):_safe(v) for k,v in row.items()}
+    # Recursive JSON-safe conversion for PostgreSQL/Python source values.
+    if v is None or isinstance(v,(str,int,float,bool)):
+        return v
+    if isinstance(v,Decimal):
+        return float(v)
+    if isinstance(v,(datetime,date,dt_time)):
+        return v.isoformat()
+    if isinstance(v,uuid.UUID):
+        return str(v)
+    if isinstance(v,(bytes,bytearray,memoryview)):
+        return bytes(v).hex()
+    if isinstance(v,dict):
+        return {str(k):_safe(val) for k,val in v.items()}
+    if isinstance(v,(list,tuple,set)):
+        return [_safe(x) for x in v]
+    return str(v)
+def _jsonable(row):
+    return {str(k):_safe(v) for k,v in row.items()}
 def _norm_text(v):
     s=re.sub(r"\s+"," ",str(v or "")).strip()
     return "" if s.lower() in BAD_VALUES else s
