@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import text
 import alliance_magazine_safe_gateway_v660 as safe_gateway
 
-VERSION='8.3.1-GROQ-REAL-PAGE-PREVIEW'
+VERSION='8.3.2-PROPERTY-PURITY-GROQ-900'
 CHUNK_SIZE=4*1024*1024
 MAX_UPLOAD_MB=int(os.getenv('MAX_UPLOAD_MB','100'))
 PDF_RENDER_DPI=int(os.getenv('PDF_RENDER_DPI','220'))
@@ -42,6 +42,9 @@ STRICT RULES:
 3. One physical listing row = one record even when several rows share the same contact.
 4. If a visible section/category/locality heading applies to rows below, capture it in section_heading and inherit only what the page visibly supports.
 5. Ignore editorial content, headers, footers and unrelated ads.
+5A. DO NOT return broker, realtor, agency or company profile advertisements as property records.
+5B. A broker office address, agency office address, email, website, multiple agent names/phones, or generic SALE-PURCHASE-RENTING-COLLABORATION language describes the broker business, not a property.
+5C. Return a record only when the page visibly describes a specific property offering. A contact card with no property-specific area, floor, price, unit or property description is NOT a property listing.
 6. transaction_type should be RENT/LEASE/SALE only when visible or clearly inherited from a visible heading.
 7. area_unit should be SQFT, SQYD, SQM or ACRE only when visible.
 8. exact_address must be an actual property/building/unit/address reference, not merely the locality heading.
@@ -107,10 +110,38 @@ def _extract_page(client,jpg):
     env=FreshEnvelope.model_validate(r.parsed) if getattr(r,'parsed',None) is not None else FreshEnvelope.model_validate_json(r.text)
     return env.properties
 
+def _property_purity(x):
+    raw=re.sub(r'\s+',' ',str(getattr(x,'original_description','') or '')).strip()
+    up=raw.upper()
+    address=str(getattr(x,'exact_address',None) or '').strip()
+    ptype=str(getattr(x,'property_type',None) or '').strip()
+    floor=str(getattr(x,'floor',None) or '').strip()
+    amount=str(getattr(x,'amount_raw',None) or '').strip()
+    area=getattr(x,'area_value',None)
+    unit=str(getattr(x,'area_unit',None) or '').strip()
+    evidence=0
+    if area is not None and unit: evidence+=2
+    if floor: evidence+=1
+    if amount: evidence+=1
+    if ptype: evidence+=1
+    if address and evidence: evidence+=1
+    terms=['REALTORS','PROPERTY DEALER','REAL ESTATE CONSULTANT','SALE-PURCHASE-RENTING','SALE | PURCHASE | RENTING','SALE PURCHASE RENTING','COLLABORATION DEALS','COLLABORATION IN','SOUTH DELHI EXPERTS','WE SPL. IN','EMAIL :','EMAIL:']
+    hits=sum(1 for t in terms if t in up)
+    compact=re.sub(r'[\s-]','',raw)
+    phones=len(set(re.findall(r'(?<!\d)[6-9]\d{9}(?!\d)',compact)))
+    has_email=bool(re.search(r'\b[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}\b',raw))
+    contact_card=(hits>=2) or (has_email and phones>=2 and hits>=1)
+    if contact_card and evidence<2: return False,'BROKER_OR_AGENCY_AD'
+    if address and evidence==0 and hits>=1: return False,'AGENCY_OFFICE_ADDRESS_NOT_PROPERTY'
+    if evidence==0 and not address: return False,'NO_PROPERTY_SPECIFIC_EVIDENCE'
+    return True,'PROPERTY_LISTING'
+
 def _save(e,uid,page,rows):
     made=review=0
     with e.begin() as c:
         for x in rows:
+            accepted,purity_reason=_property_purity(x)
+            if not accepted: continue
             original=re.sub(r'\s+',' ',x.original_description or '').strip()
             if not original: continue
             h=hashlib.sha256(original.lower().encode()).hexdigest()
@@ -141,7 +172,10 @@ def _gateway_extract(gw,jpg):
         if not isinstance(item,dict):continue
         if "original_description" not in item and item.get("raw_line"):
             item=dict(item);item["original_description"]=item.get("raw_line")
-        try:rows.append(FreshProperty.model_validate(item))
+        try:
+            row=FreshProperty.model_validate(item)
+            accepted,purity_reason=_property_purity(row)
+            if accepted: rows.append(row)
         except Exception:continue
     return rows,meta
 
@@ -178,7 +212,7 @@ def _process(core,uid):
         with e.begin() as c:c.execute(text("UPDATE pi_magazine_fresh_uploads SET status='PAUSED_ERROR',error_message=:x WHERE upload_id=CAST(:u AS UUID)"),{'x':f'{type(exc).__name__}: {exc}'[:4000],'u':uid})
 
 def _page():
-    return '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">\n<title>Alliance Magazine Resume</title><style>body{font-family:Arial;background:#f4f7fb;margin:0;color:#172437}.top{background:#102235;color:white;padding:20px}.wrap{max-width:1180px;margin:auto;padding:20px}.card{background:white;padding:18px;border-radius:14px;margin-bottom:14px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}.num{font-size:28px;font-weight:800}.muted{color:#66758a}.btn{background:#1266f1;color:white;border:0;border-radius:9px;padding:11px 18px;font-weight:700;cursor:pointer}.good{color:#16833c}.bad{color:#bd2f2f}a{color:#1266f1;text-decoration:none}table{width:100%;border-collapse:collapse}td,th{padding:8px;border-bottom:1px solid #e5eaf0;text-align:left}</style></head>\n<body><div class="top"><b>Fresh Magazine PDF Database · CRE OS 8.3.1</b><br><small>Gemini -> Groq Vision -> OpenRouter · real-page validation · checkpoint resume</small></div>\n<div class="wrap"><div class="card"><a href="/workspace">← Dashboard</a> · <a href="/magazine-fresh/records">New Magazine Records</a></div>\n<div class="card"><h2>Current / Previous Magazine</h2><p id="name" class="muted">Checking stored jobs...</p><div id="stats" class="grid"></div><p id="state" class="muted"></p><button id="resume" class="btn" style="display:none">Resume Extraction</button></div>\n<div class="card"><h3>Recent Magazine Jobs</h3><div id="jobs">Loading...</div></div>\n<div class="card"><h3>New Magazine</h3><p class="muted">For a genuinely new magazine, use the existing upload page after the current database is validated.</p></div></div>\n<script>\nlet active=null,timer=null;\nfunction esc(x){return String(x??\'\').replace(/[&<>"\']/g,m=>({\'&\':\'&amp;\',\'<\':\'&lt;\',\'>\':\'&gt;\',\'"\':\'&quot;\',"\'":\'&#39;\'}[m]))}\nfunction render(d){active=d.upload_id;name.innerHTML=\'<b>\'+esc(d.filename)+\'</b> · \'+esc(d.status);stats.innerHTML=\'<div class="card"><div class="muted">Pages</div><div class="num">\'+d.processed_pages+\'/\'+d.page_count+\'</div></div><div class="card"><div class="muted">Records</div><div class="num">\'+d.created_records+\'</div></div><div class="card"><div class="muted">Needs review</div><div class="num">\'+d.review_records+\'</div></div><div class="card"><div class="muted">Status</div><b>\'+esc(d.status)+\'</b></div>\';state.textContent=d.error_message||\'Ready.\';resume.style.display=[\'ERROR\',\'PAUSED_ERROR\',\'WAITING_FOR_PROVIDER\',\'STORED\'].includes(d.status)?\'inline-block\':\'none\'}\nasync function load(){let r=await fetch(\'/api/magazine-fresh/latest\');if(!r.ok){state.textContent=\'Unable to read stored jobs.\';return}let d=await r.json();if(d.latest)render(d.latest);else{name.textContent=\'No stored Magazine PDF found.\'}jobs.innerHTML=(d.uploads||[]).length?\'<table><tr><th>PDF</th><th>Status</th><th>Pages</th><th>Records</th></tr>\'+d.uploads.map(x=>\'<tr><td>\'+esc(x.filename)+\'</td><td>\'+esc(x.status)+\'</td><td>\'+x.processed_pages+\'/\'+x.page_count+\'</td><td>\'+x.created_records+\'</td></tr>\').join(\'\')+\'</table>\':\'No previous jobs.\'}\nresume.onclick=async()=>{if(!active)return;resume.disabled=true;let r=await fetch(\'/api/magazine-fresh/resume/\'+active,{method:\'POST\'});let d=await r.json();state.textContent=d.status||d.detail||\'Resume requested\';resume.disabled=false;setTimeout(load,1000)}\nload();timer=setInterval(load,4000);\n</script></body></html>'
+    return '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">\n<title>Alliance Magazine Resume</title><style>body{font-family:Arial;background:#f4f7fb;margin:0;color:#172437}.top{background:#102235;color:white;padding:20px}.wrap{max-width:1180px;margin:auto;padding:20px}.card{background:white;padding:18px;border-radius:14px;margin-bottom:14px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}.num{font-size:28px;font-weight:800}.muted{color:#66758a}.btn{background:#1266f1;color:white;border:0;border-radius:9px;padding:11px 18px;font-weight:700;cursor:pointer}.good{color:#16833c}.bad{color:#bd2f2f}a{color:#1266f1;text-decoration:none}table{width:100%;border-collapse:collapse}td,th{padding:8px;border-bottom:1px solid #e5eaf0;text-align:left}</style></head>\n<body><div class="top"><b>Fresh Magazine PDF Database · CRE OS 8.3.2</b><br><small>Gemini -> Groq Vision -> OpenRouter · real-page validation · checkpoint resume</small></div>\n<div class="wrap"><div class="card"><a href="/workspace">← Dashboard</a> · <a href="/magazine-fresh/records">New Magazine Records</a></div>\n<div class="card"><h2>Current / Previous Magazine</h2><p id="name" class="muted">Checking stored jobs...</p><div id="stats" class="grid"></div><p id="state" class="muted"></p><button id="resume" class="btn" style="display:none">Resume Extraction</button></div>\n<div class="card"><h3>Recent Magazine Jobs</h3><div id="jobs">Loading...</div></div>\n<div class="card"><h3>New Magazine</h3><p class="muted">For a genuinely new magazine, use the existing upload page after the current database is validated.</p></div></div>\n<script>\nlet active=null,timer=null;\nfunction esc(x){return String(x??\'\').replace(/[&<>"\']/g,m=>({\'&\':\'&amp;\',\'<\':\'&lt;\',\'>\':\'&gt;\',\'"\':\'&quot;\',"\'":\'&#39;\'}[m]))}\nfunction render(d){active=d.upload_id;name.innerHTML=\'<b>\'+esc(d.filename)+\'</b> · \'+esc(d.status);stats.innerHTML=\'<div class="card"><div class="muted">Pages</div><div class="num">\'+d.processed_pages+\'/\'+d.page_count+\'</div></div><div class="card"><div class="muted">Records</div><div class="num">\'+d.created_records+\'</div></div><div class="card"><div class="muted">Needs review</div><div class="num">\'+d.review_records+\'</div></div><div class="card"><div class="muted">Status</div><b>\'+esc(d.status)+\'</b></div>\';state.textContent=d.error_message||\'Ready.\';resume.style.display=[\'ERROR\',\'PAUSED_ERROR\',\'WAITING_FOR_PROVIDER\',\'STORED\'].includes(d.status)?\'inline-block\':\'none\'}\nasync function load(){let r=await fetch(\'/api/magazine-fresh/latest\');if(!r.ok){state.textContent=\'Unable to read stored jobs.\';return}let d=await r.json();if(d.latest)render(d.latest);else{name.textContent=\'No stored Magazine PDF found.\'}jobs.innerHTML=(d.uploads||[]).length?\'<table><tr><th>PDF</th><th>Status</th><th>Pages</th><th>Records</th></tr>\'+d.uploads.map(x=>\'<tr><td>\'+esc(x.filename)+\'</td><td>\'+esc(x.status)+\'</td><td>\'+x.processed_pages+\'/\'+x.page_count+\'</td><td>\'+x.created_records+\'</td></tr>\').join(\'\')+\'</table>\':\'No previous jobs.\'}\nresume.onclick=async()=>{if(!active)return;resume.disabled=true;let r=await fetch(\'/api/magazine-fresh/resume/\'+active,{method:\'POST\'});let d=await r.json();state.textContent=d.status||d.detail||\'Resume requested\';resume.disabled=false;setTimeout(load,1000)}\nload();timer=setInterval(load,4000);\n</script></body></html>'
 
 def register(core):
     app=_app(core); e=_engine(core)
@@ -325,6 +359,24 @@ def register(core):
                                 'extraction_confidence':rec.get('extraction_confidence')
                             })
                 item['preview']=preview
+                purity_preview=[]
+                accepted_count=0
+                if isinstance(raw,list):
+                    for rec in raw[:10]:
+                        if not isinstance(rec,dict): continue
+                        try:
+                            candidate=dict(rec)
+                            if 'original_description' not in candidate and candidate.get('raw_line'):
+                                candidate['original_description']=candidate.get('raw_line')
+                            obj=FreshProperty.model_validate(candidate)
+                            ok,reason=_property_purity(obj)
+                            if ok: accepted_count+=1
+                            purity_preview.append({'accepted':ok,'purity_reason':reason,'original_description':obj.original_description,'exact_address':obj.exact_address,'locality':obj.locality,'property_type':obj.property_type,'transaction_type':obj.transaction_type,'area_value':obj.area_value,'area_unit':obj.area_unit,'floor':obj.floor,'amount_raw':obj.amount_raw,'contact_name':obj.contact_name,'contact_number':obj.contact_number})
+                        except Exception as exc:
+                            purity_preview.append({'accepted':False,'purity_reason':'SCHEMA_REJECTED','detail':str(exc)[:300]})
+                item['purity_preview']=purity_preview
+                item['accepted_property_count']=accepted_count
+                item['rejected_by_purity_count']=(len(raw)-accepted_count) if isinstance(raw,list) else 0
                 item['result']='OK' if isinstance(raw,list) else 'JSON_SCHEMA_MISMATCH'
             except Exception as exc:
                 raw=str(exc)
@@ -349,7 +401,7 @@ def register(core):
             results.append(item)
         return {
             'status':'OK',
-            'version':'8.2.9',
+            'version':'8.3.2',
             'page':page,
             'render_dpi':PDF_RENDER_DPI,
             'image_bytes':len(jpg),

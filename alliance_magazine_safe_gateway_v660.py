@@ -199,7 +199,7 @@ class ProviderGateway:
 
     def _call_groq(self,p,img,prompt):
         b64=base64.b64encode(img).decode("ascii")
-        payload={"model":p["model"],"temperature":0,"reasoning_effort":"none","response_format":{"type":"json_object"},"messages":[{"role":"user","content":[{"type":"text","text":prompt},{"type":"image_url","image_url":{"url":"data:image/jpeg;base64,"+b64}}]}]}
+        payload={"model":p["model"],"temperature":0,"reasoning_effort":"none","max_completion_tokens":900,"response_format":{"type":"json_object"},"messages":[{"role":"user","content":[{"type":"text","text":prompt},{"type":"image_url","image_url":{"url":"data:image/jpeg;base64,"+b64}}]}]}
         with httpx.Client(timeout=120.0) as h:
             r=h.post("https://api.groq.com/openai/v1/chat/completions",headers={"Authorization":"Bearer "+p["api_key"],"Content-Type":"application/json"},json=payload)
             if r.status_code==429: raise RuntimeError("429 GROQ_QUOTA "+r.text[:1000])
