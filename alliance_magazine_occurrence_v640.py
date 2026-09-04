@@ -10,8 +10,8 @@ from sqlalchemy import text
 import alliance_magazine_field_v610 as frozen_v2
 import alliance_magazine_challenger_v514 as semantic_student
 
-VERSION="6.4.0-ALLIANCE-MAGAZINE-OCCURRENCE-AWARE-FULL-PAGE-BATCH-REPAIR"
-MODE="LOCK_199_FROM_631_TRANSCRIBE_ALL_ROWS_IN_ORDER_MATCH_BY_REF_OCCURRENCE_PARSE_ONLY_11_FAILURES_NO_FRESH_EXAM"
+VERSION="6.4.1-ALLIANCE-MAGAZINE-OCCURRENCE-AWARE-FULL-PAGE-BATCH-REPAIR-FORMAT-FIX"
+MODE="SAME_640_OCCURRENCE_LOGIC_ESCAPE_VERIFY_JSON_BRACES_NO_SEMANTIC_CHANGE_NO_FRESH_EXAM"
 
 EXPECTED_EXAM="MAGAZINE_PIXEL_FIELD_V2_610_AUG2026_PAGES_36_38"
 EXPECTED_FREEZE="ad68a70bcf5ac3ecc73858b16825487e845820dfd5c78768cc0252309d4849d3"
@@ -69,7 +69,7 @@ OCCURRENCE: {occurrence}
 Occurrence means counting matching printed property references from top to bottom on this page, starting at 1.
 
 Return JSON exactly:
-{"found":true|false,"ref":"","occurrence":0,"raw_line":""}
+{{"found":true|false,"ref":"","occurrence":0,"raw_line":""}}
 
 Rules:
 - If the same reference occurs more than once, return only the requested occurrence.
