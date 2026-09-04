@@ -6,7 +6,7 @@ from fastapi import Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import text
 
-VERSION="7.3.4-ALLIANCE-UNIVERSAL-RECORD-STANDARD"
+VERSION="7.3.5-ALLIANCE-MAGAZINE-LOSSLESS-TRAINING"
 MODE="V721_CERTIFIED_PRIMARY_TEAM_WORKSPACE_VERIFY_ASSIGN_MATCH_ALTERNATIVES_REVIEW_CLIENT_SAFE_DRAFT_FOLLOWUP_SOURCE_EVIDENCE_NO_CANONICAL_MUTATION"
 STATE={"status":"STARTING","started_at":datetime.now(timezone.utc).isoformat(),"result":None,"last_error":None}
 _LOCK=threading.Lock()
@@ -137,7 +137,7 @@ form.inline{{display:flex;gap:7px;flex-wrap:wrap;align-items:center}}.muted{{col
 details.admin{{background:#fff;border:1px solid #dfe6ee;padding:8px 12px}}details.admin a{{margin:5px;display:inline-block}}
 .actions{{display:flex;gap:5px;flex-wrap:wrap}}.right{{text-align:right}}
 </style></head><body>
-<header><div><b>Alliance CRE Operating System · 7.3.4</b><br><small>Capture Evidence → Structure → Assign → Verify → Match → Review → Follow-up</small></div>
+<header><div><b>Alliance CRE Operating System · 7.3.5</b><br><small>Capture Evidence → Structure → Assign → Verify → Match → Review → Follow-up</small></div>
 <div>{html.escape(str(role))} · <a href="/logout" style="color:white">Logout</a></div></header>
 <nav>{nav}</nav>{admin}<div class="wrap"><h2>{html.escape(title)}</h2>{body}</div></body></html>"""
 
@@ -664,13 +664,14 @@ def register(core):
             trs.append(f"""<tr>
               <td>{actions}</td><td>{u['date_time']}</td><td>{u['source']}</td><td>{u['source_name']}</td>
               <td>{u['name']}</td><td>{u['contact']}</td><td style='min-width:300px'>{u['description']}</td>
+              <td>{html.escape(str(_v733_pick_any(p,["address","property_address","unit_address","building_address"]) or "Not captured"))}</td>
               <td>{html.escape(str(p.get('locality') or ''))}</td><td>{html.escape(str(p.get('transaction_type') or ''))}</td>
               <td>{html.escape(str(p.get('area_sqft_display') or ''))}</td><td>{html.escape(str(p.get('area_sqyd') or ''))}</td><td>{html.escape(str(p.get('area_sqm') or ''))}</td>
               <td>{html.escape(str(p.get('sale_amount') or ''))}</td><td>{html.escape(str(p.get('rent_amount') or ''))}</td>
               <td>{u['verification']}</td><td>{u['assigned_to']}</td></tr>""")
         table=f"""<div class='card'><p><b>Universal record rule:</b> Date/time, source, source name, name, contact and original description remain visible with every master record. Original evidence is never replaced by AI interpretation.</p></div>
         <div class='card tablebox'><table><tr><th>Actions</th><th>Date & Time</th><th>Source</th><th>Source Name</th><th>Name</th><th>Contact No.</th><th>Original Description / Message</th>
-        <th>Locality</th><th>Transaction</th><th>Sq Ft</th><th>Sq Yd</th><th>Sq M</th><th>Sale Amount</th><th>Rent Amount</th><th>Verification</th><th>Assigned To</th></tr>{''.join(trs)}</table></div>"""
+        <th>Address</th><th>Locality</th><th>Transaction</th><th>Sq Ft</th><th>Sq Yd</th><th>Sq M</th><th>Sale Amount</th><th>Rent Amount</th><th>Verification</th><th>Assigned To</th></tr>{''.join(trs)}</table></div>"""
         return HTMLResponse(_shell(core,req,f"Master Properties · {len(trs)} shown",form+table))
 
     @app.get("/alliance/primary/property/{cid}",response_class=HTMLResponse)
@@ -683,7 +684,7 @@ def register(core):
         log_html="".join(f"<tr><td>{html.escape(str(x['created_at']))}</td><td>{html.escape(str(x['action']))}</td><td>{html.escape(str(x['actor'] or ''))}</td><td>{html.escape(json.dumps(x['details'],ensure_ascii=False) if isinstance(x['details'],dict) else str(x['details']))}</td></tr>" for x in logs)
         body=_v734_universal_header(engine,cid,p,"PROPERTY")+f"""<div class='grid'>
         <div class='card'><h3>{html.escape(str(p.get('locality') or cid))}</h3>
-        <p><b>ID:</b> {html.escape(cid)}<br><b>Transaction:</b> {html.escape(str(p.get('transaction_type') or ''))}<br>
+        <p><b>ID:</b> {html.escape(cid)}<br><b>Address:</b> {html.escape(str(_v733_pick_any(p,["address","property_address","unit_address","building_address"]) or "Not captured"))}<br><b>Transaction:</b> {html.escape(str(p.get('transaction_type') or ''))}<br>
         <b>Area:</b> {p.get('area_sqft_display') or ''} sq ft · {p.get('area_sqyd') or ''} sq yd · {p.get('area_sqm') or ''} sq m · {p.get('area_acre') or ''} acre<br>
         <b>Sale:</b> {html.escape(str(p.get('sale_amount') or ''))}<br><b>Rent:</b> {html.escape(str(p.get('rent_amount') or ''))}<br>
         <b>Internal contact:</b> {html.escape(phones)}<br><b>Verification:</b> {html.escape(str(p.get('verification_status') or ''))}<br>
@@ -936,3 +937,6 @@ def start(core):
     except Exception as exc:
         STATE.update(status="ERROR",last_error=f"{type(exc).__name__}: {exc}")
         return STATE
+
+
+# 7.3.5 MAGAZINE LOSSLESS EXTRACTION TRAINING
