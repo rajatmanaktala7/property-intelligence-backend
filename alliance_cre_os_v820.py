@@ -611,15 +611,14 @@ def register(core):
     if app is None or e is None:
         raise RuntimeError("Alliance CRE OS 8.2 requires core app + engine")
 
-    try:
-        recovery = _backfill_magazine(e)
-    except Exception as exc:
-        recovery = {
-            "scanned": 0,
-            "updated": 0,
-            "unresolved": 0,
-            "error": f"{type(exc).__name__}: {exc}",
-        }
+    # Historical Magazine recovery is deliberately deferred from production boot.
+    # _backfill_magazine(e) remains available for controlled repair.
+    recovery = {
+        "scanned": 0,
+        "updated": 0,
+        "unresolved": 0,
+        "status": "SKIPPED_ON_BOOT",
+    }
 
     _remove_get(app, "/alliance/primary/database/{source}")
     _remove_get(app, "/alliance/primary/databases")
