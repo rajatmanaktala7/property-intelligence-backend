@@ -17212,3 +17212,12 @@ try:
     print("Alliance Unified Master Database Integration 7.2: registered")
 except Exception as _v720_exc:
     print("Alliance 7.2 registration warning:",_v720_exc)
+
+# FOUNDATION_7_2_1_AUTOMATED_END_TO_END_ACCEPTANCE
+try:
+    import sys as _v721_sys
+    import alliance_acceptance_v721 as _v721
+    _v721.start(_v721_sys.modules[__name__])
+    print("Alliance Automated End-to-End Acceptance 7.2.1: registered")
+except Exception as _v721_exc:
+    print("Alliance 7.2.1 registration warning:",_v721_exc)
