@@ -17140,3 +17140,12 @@ try:
     print("Alliance Magazine Occurrence-Aware Repair 6.4: registered")
 except Exception as _v640_exc:
     print("Alliance Magazine Occurrence 6.4 registration warning:",_v640_exc)
+
+# FOUNDATION_6_5_MAGAZINE_BROAD_SECTION_FORENSIC_REPAIR
+try:
+    import sys as _v650_sys
+    import alliance_magazine_section_v650 as _v650
+    _v650.start(_v650_sys.modules[__name__])
+    print("Alliance Magazine Broad-Section Forensic Repair 6.5: registered")
+except Exception as _v650_exc:
+    print("Alliance Magazine 6.5 registration warning:",_v650_exc)
