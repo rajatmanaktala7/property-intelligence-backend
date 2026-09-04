@@ -1,0 +1,26 @@
+Alliance CRE OS 8.0.1 - Final Property Working Database
+
+Main Property Database columns:
+Property ID | Description / Address | Area dropdown | Rent/Sale | Amount | Contact Name | Contact Number | Date & Time | Status | Verify | History | Assigned To | Source | Edit | Delete
+
+Verify form:
+Status | Verified With | Verified By team member dropdown | Remarks | Next Verification Date | Save
+
+History dropdown:
+Entry Date & Time | Last Verified | Verified By | Verified With | status | remarks | next verification | full verification history
+
+Area dropdown:
+Sq Ft / Sq Yd / Sq M / Acre. One value, converted live.
+
+Edit:
+Description, exact address, locality, city, property type, transaction, area+unit, amount, floor, contact, assignment.
+Original source message is preserved and never overwritten.
+
+Delete:
+Safe archive from working database. Canonical ID and source evidence are preserved for audit.
+
+Address policy:
+Display exact address when retained/recovered/edited. Never invent an address. If unavailable, show available locality/source description and allow team correction through Edit.
+
+Existing Matcher, Availability, Follow-ups and detailed record routes are retained.
+Dockerfile is not modified.
