@@ -518,6 +518,18 @@ def _load_core():
             stabilization = dict(stabilization or {})
             stabilization["business_os_v820_final"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","fail_safe":True}
             print("[business-os-v820-final] warning:", type(exc).__name__, str(exc))
+        # ALLIANCE_MAGAZINE_FRESH_V822_FINAL_ROUTE
+        try:
+            import alliance_magazine_fresh_v822 as magazine_fresh_v822
+            magazine_fresh_result = magazine_fresh_v822.register(wrapped.core)
+            stabilization = dict(stabilization or {})
+            stabilization["magazine_fresh_v822"] = magazine_fresh_result
+            print("[magazine-fresh-v822]", magazine_fresh_result)
+        except Exception as exc:
+            stabilization = dict(stabilization or {})
+            stabilization["magazine_fresh_v822"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","fail_safe":True}
+            print("[magazine-fresh-v822] warning:", type(exc).__name__, str(exc))
+
         CORE_APP = wrapped.app
         try:
             import alliance_whatsapp_safe_ingest_v5 as safe_wa
