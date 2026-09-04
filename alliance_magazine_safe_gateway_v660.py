@@ -14,7 +14,7 @@ import alliance_magazine_challenger_v514 as semantic_student
 import alliance_magazine_lossless_extraction_v670 as lossless_v670
 import alliance_magazine_section_context_v680 as section_v680
 
-VERSION="6.6.0-ALLIANCE-MAGAZINE-SAFE-VISION-GATEWAY"
+VERSION="6.6.1-ALLIANCE-MAGAZINE-MULTIMODEL-OPENROUTER-GATEWAY"
 MODE="LOCK_199_QUOTA_AWARE_PROVIDER_FAILOVER_CIRCUIT_BREAKER_LOW_CALL_MULTI_TARGET_NO_FALSE_TRAINING_FAILURE"
 
 EXPECTED_EXAM="MAGAZINE_PIXEL_FIELD_V2_610_AUG2026_PAGES_36_38"
@@ -148,7 +148,7 @@ class ProviderGateway:
         models=[]
         primary=(os.getenv("GEMINI_MODEL") or "gemini-3.1-flash-lite").strip()
         models.append(primary)
-        extra=(os.getenv("GEMINI_FALLBACK_MODELS") or "").strip()
+        extra=(os.getenv("GEMINI_FALLBACK_MODELS") or "gemini-3.7-flash").strip()
         for m in [x.strip() for x in extra.split(",") if x.strip()]:
             if m not in models:models.append(m)
 
@@ -233,6 +233,9 @@ class ProviderGateway:
         if attempted==0:
             return None,{"status":"ALL_PROVIDERS_COOLDOWN","events":self.events[-20:]}
         return None,{"status":"ALL_PROVIDERS_FAILED","events":self.events[-20:]}
+
+    def public_summary(self):
+        return [{"provider":p.get("label"),"kind":p.get("kind"),"available":self._available(p)} for p in self.providers]
 
     def next_retry(self):
         futures=[x for x in self.cooldown.values() if x>datetime.now(timezone.utc)]
