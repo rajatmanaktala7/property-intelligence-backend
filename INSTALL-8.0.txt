@@ -1,0 +1,17 @@
+Alliance CRE OS 8.0 Business Production Consolidation
+
+Locked business rules:
+- Keep yesterday's approved Add Property fields and /property-manual form.
+- Date + Time visible in primary Property and Requirement databases.
+- Source Date/Time and Updated Date/Time visible where available.
+- Source, Source Name and Original Description/Message preserved.
+- Owner/Broker contacts remain internal.
+- Historical recovered evidence may be surfaced, but missing facts are never invented.
+- Same operational dashboard structure.
+- Technical Data Repair and Source Recovery moved under Admin / Data & System.
+- Existing Matcher, Verification, Availability and Follow-up routes retained.
+- Canonical IDs and source lineage preserved.
+- No delete. No new master property. Dockerfile unchanged.
+
+After deployment open:
+https://app.allianceinfrastructure.co.in/alliance/primary

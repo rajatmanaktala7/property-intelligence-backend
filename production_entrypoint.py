@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 import threading
@@ -226,7 +226,7 @@ code{{background:#f5eee5;padding:4px 6px;border-radius:5px}}
 <p>The health service is online while the main application loads independently.</p>
 <p><b>Boot state:</b> <code>{BOOT["state"]}</code></p>
 <p><b>Detail:</b> <code>{err}</code></p>
-<p><a href="/healthz">Health</a> Â· <a href="/boot-status">Boot Status</a></p>
+<p><a href="/healthz">Health</a> Ã‚Â· <a href="/boot-status">Boot Status</a></p>
 </main>
 </body>
 </html>""",
@@ -445,6 +445,20 @@ def _load_core():
             }
             print("[source-recovery-v738] warning:", type(exc).__name__, str(exc))
 
+        # ALLIANCE_BUSINESS_OS_V800
+        try:
+            import alliance_business_os_v800 as alliance_business_os_v800
+            business_v800_result = alliance_business_os_v800.register(wrapped.core)
+            stabilization = dict(stabilization or {})
+            stabilization["business_os_v800"] = business_v800_result
+        except Exception as exc:
+            stabilization = dict(stabilization or {})
+            stabilization["business_os_v800"] = {
+                "status": "ERROR",
+                "error": f"{type(exc).__name__}: {exc}",
+                "fail_safe": True,
+            }
+            print("[business-os-v800] warning:", type(exc).__name__, str(exc))
         import alliance_live_feed_purity as live_feed_purity
         live_feed_purity.register(wrapped)
 
@@ -683,4 +697,5 @@ app = HealthFirstDispatcher()
 
 
 # 7.3.7 HISTORICAL EVIDENCE REPAIR REGISTRATION
+
 
