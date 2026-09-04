@@ -122,6 +122,7 @@ def _safe(v):
     return str(v)
 def _jsonable(row):
     return {str(k):_safe(v) for k,v in row.items()}
+    return {str(k):_safe(v) for k,v in row.items()}
 def _norm_text(v):
     s=re.sub(r"\s+"," ",str(v or "")).strip()
     return "" if s.lower() in BAD_VALUES else s
