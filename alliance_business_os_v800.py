@@ -5,14 +5,21 @@ from fastapi import Form, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import text
 
-VERSION='8.0.1-ALLIANCE-FINAL-PROPERTY-WORKING'
-MODE='CLEAN_PROPERTY_TABLE_VERIFY_HISTORY_TEAM_DROPDOWN_AREA_CONVERSION_EDIT_SOFT_DELETE_ADDRESS'
+VERSION='8.1.0-ALLIANCE-FINAL-CLEAN-DASHBOARD-MAGAZINE-RESTORE'
+MODE='CLEAN_DASHBOARD_5_PROPERTY_VIEWS_5_REQUIREMENT_VIEWS_MAGAZINE_EVIDENCE_RESTORE'
 
 NAV=[
-('Command Centre','/alliance/primary'),('Properties','/alliance/primary/properties'),('Add Property','/property-manual'),
-('Requirements','/alliance/primary/requirements'),('Matcher','/alliance/primary/matcher'),('Verification','/alliance/primary/availability'),
-('Follow-ups','/alliance/primary/followups'),('Contacts','/contacts-directory'),('Hospitality','/workspace#hospitality'),
-('Retail Expansion','/retail-expansion'),('Reports','/alliance/primary/reports')]
+('Command Centre','/alliance/primary'),
+('Master Properties','/alliance/primary/properties'),
+('Master Requirements','/alliance/primary/requirements'),
+('Databases','/alliance/primary/databases'),
+('Requirement Sources','/alliance/primary/requirements-hub'),
+('Matcher','/alliance/primary/matcher'),
+('Verification','/alliance/primary/availability'),
+('Follow-ups','/alliance/primary/followups'),
+('Add Property','/property-manual'),
+('Add / Manage Requirement','/requirements-workbench'),
+('Reports','/alliance/primary/reports')]
 
 VERIFY_STATUSES=['AVAILABLE','NOT_AVAILABLE','CALL_BACK','SOLD','RENTED','HOLD','WRONG_NUMBER']
 VERIFIED_WITH=['OWNER','BROKER','OTHER']
@@ -63,7 +70,7 @@ def _shell(core,req,title,body):
 *{{box-sizing:border-box}}body{{margin:0;background:#f4f7fb;font-family:Arial;color:#172033}}header{{background:#0d2238;color:white;padding:18px 22px;display:flex;justify-content:space-between;flex-wrap:wrap}}nav{{background:white;border-bottom:1px solid #dfe6ee;padding:10px;display:flex;gap:7px;flex-wrap:wrap;position:sticky;top:0;z-index:5}}nav a,.btn,button,.summarybtn{{background:#0d2238;color:white;text-decoration:none;border:0;border-radius:8px;padding:8px 10px;display:inline-block;cursor:pointer;font-size:12px}}.btn.good,.good{{background:#067647}}.danger{{background:#b42318}}.warn{{background:#b54708}}.light{{background:#475467}}.wrap{{max-width:1900px;margin:auto;padding:18px}}.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:10px}}.card{{background:white;border:1px solid #e1e7ee;border-radius:12px;padding:14px;margin-bottom:12px}}.num{{font-size:28px;font-weight:800}}.muted{{color:#667085}}.tablebox{{overflow:auto;max-height:74vh}}table{{border-collapse:collapse;width:100%;font-size:12px;min-width:1450px}}th,td{{padding:8px;border-bottom:1px solid #edf0f4;text-align:left;vertical-align:top}}th{{position:sticky;top:0;background:#f8fafc;z-index:2}}input,select,textarea{{padding:7px;border:1px solid #cfd8e3;border-radius:7px;max-width:100%}}form.inline{{display:flex;gap:6px;flex-wrap:wrap;align-items:center}}details.admin{{background:white;border:1px solid #dfe6ee;padding:8px 12px}}details.admin a{{margin:5px;display:inline-block}}details.pop{{position:relative}}details.pop>div{{position:absolute;z-index:9;background:white;border:1px solid #d0d5dd;border-radius:10px;padding:10px;min-width:340px;max-width:520px;box-shadow:0 8px 24px #0002}}details.pop summary{{list-style:none}}.desc{{min-width:260px;max-width:420px;white-space:normal}}.addr{{font-weight:700}}.tiny{{font-size:11px}}.status{{font-weight:700}}.history{{max-height:280px;overflow:auto}}.historyitem{{border-bottom:1px solid #eee;padding:7px 0}}.editgrid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px}}label{{font-size:12px;font-weight:700}}label input,label select,label textarea{{display:block;width:100%;margin-top:4px}}textarea{{min-height:80px}}
 </style><script>
 function areaChange(id,sqft){{const s=document.getElementById('u_'+id);const o=document.getElementById('a_'+id);let v=Number(sqft||0),u=s.value;if(u==='SQYD')v=v/9;else if(u==='SQM')v=v*0.092903;else if(u==='ACRE')v=v/43560;o.textContent=(u==='ACRE'?v.toFixed(4):v.toFixed(2))+' '+u.replace('SQFT','Sq Ft').replace('SQYD','Sq Yd').replace('SQM','Sq M').replace('ACRE','Acre')}}
-</script></head><body><header><div><b>Alliance CRE Operating System · 8.0</b><br><small>Property → Verify → Match → Follow-up → Deal</small></div><div>{_e(role)} · <a href="/logout" style="color:white">Logout</a></div></header><nav>{nav}</nav>{admin}<div class="wrap"><h2>{_e(title)}</h2>{body}</div></body></html>'''
+</script></head><body><header><div><b>Alliance CRE Operating System · 8.1</b><br><small>Capture → Master → Verify → Match → Follow-up → Deal</small></div><div>{_e(role)} · <a href="/logout" style="color:white">Logout</a></div></header><nav>{nav}</nav>{admin}<div class="wrap"><h2>{_e(title)}</h2>{body}</div></body></html>'''
 
 def _counts(e):
     with e.connect() as c:
@@ -148,6 +155,186 @@ def _history_html(entry_dt,items):
     hist=''.join(f'''<div class="historyitem"><b>{_e(_fmt_dt(x.get('created_at')))}</b> · {_e(x.get('status'))}<br>Verified by: {_e(x.get('verified_by'))} · With: {_e(x.get('verified_with'))}<br>Remarks: {_e(x.get('remarks') or '—')}<br>Next verification: {_e(_fmt_dt(x.get('next_verification_at')) or '—')}</div>''' for x in items)
     return top+f'<div class="history">{hist or "<div class=\"muted\">No verification history yet.</div>"}</div>'
 
+# 8.1 FINAL SOURCE DATABASE + MAGAZINE DETAIL RECOVERY HELPERS
+def _v810_source_pattern(source):
+    s=(source or 'MASTER').upper().strip()
+    return {'NEWSPAPER':'%NEWSPAPER%','WHATSAPP':'%WHATSAPP%','MAGAZINE':'%MAGAZINE%','MANUAL':'%MANUAL%'}.get(s)
+
+def _v810_magazine_detail_recovery(e):
+    """Evidence-safe recovery. Fill only blank Magazine fields from retained original row text."""
+    try:
+        import alliance_magazine_section_context_v680 as mag680
+    except Exception:
+        return {'scanned':0,'updated':0,'skipped':0,'error':'magazine parser unavailable'}
+
+    scanned=updated=skipped=0
+    with e.connect() as c:
+        rows=c.execute(text("""
+            SELECT DISTINCT p.canonical_id,p.clean_record,p.locality,p.city,p.transaction_type,p.area_sqft,p.phones
+            FROM pi_master_properties_v711 p
+            JOIN pi_master_source_links_v711 l ON l.canonical_id=p.canonical_id
+            WHERE l.master_entity_type='PROPERTY'
+              AND (UPPER(COALESCE(l.source_type,'')) LIKE '%MAGAZINE%'
+                   OR UPPER(COALESCE(l.source_table,'')) LIKE '%MAGAZINE%')
+        """)).mappings().all()
+
+    for row in rows:
+        scanned+=1
+        cid=str(row['canonical_id'])
+        cr=_dict(row.get('clean_record'))
+
+        raw=_first(cr,'original_description','original_message','raw_line','source_text','description') or ''
+        section=_first(cr,'section_heading') or ''
+        if not raw:
+            try:
+                with e.connect() as c:
+                    rr=c.execute(text("""
+                        SELECT original_text,section_heading
+                        FROM pi_source_recovery_candidates_v738
+                        WHERE canonical_id=:id
+                          AND original_text IS NOT NULL AND original_text<>''
+                        ORDER BY id DESC LIMIT 1
+                    """),{'id':cid}).mappings().first()
+                if rr:
+                    raw=rr.get('original_text') or ''
+                    section=section or rr.get('section_heading') or ''
+            except Exception:
+                pass
+
+        if not raw:
+            skipped+=1
+            continue
+
+        try:
+            rec=mag680.enrich_record(
+                {'raw_line':str(raw),'section_heading':str(section or '')},
+                inherited_locality=str(row.get('locality') or ''),
+                inherited_transaction=str(row.get('transaction_type') or '')
+            )
+        except Exception:
+            skipped+=1
+            continue
+
+        patch={}
+        def put_blank(key,val,*aliases):
+            if val in (None,'',[],{}): return
+            existing=_first(cr,key,*aliases)
+            if existing in (None,'',[],{}):
+                patch[key]=val
+
+        put_blank('address',rec.get('address'),'exact_address','property_address')
+        if rec.get('address') and not _first(cr,'exact_address'):
+            patch['exact_address']=rec.get('address')
+        put_blank('property_category',rec.get('property_category'),'property_type','category')
+        put_blank('transaction_type',rec.get('transaction_type'),'rent_or_sale','transaction')
+        put_blank('area_sqft',rec.get('area_sqft'),'available_area_sqft')
+        put_blank('area_raw',rec.get('area_raw'))
+        put_blank('floor_codes',rec.get('floor_codes'))
+        put_blank('floors',rec.get('floors'),'floor')
+        put_blank('contact_name',rec.get('contact_name'),'owner_name','broker_name','sender_name','name')
+        if rec.get('phones') and not _first(cr,'contact_number','contact_phone','owner_phone','broker_phone','phone','mobile'):
+            patch['contact_number']=rec.get('phones')[0]
+        if rec.get('phones') and not cr.get('phones'):
+            patch['phones']=rec.get('phones')
+        if not _first(cr,'original_description','original_message','raw_line','source_text'):
+            patch['original_description']=str(raw)
+            patch['raw_line']=str(raw)
+        if rec.get('section_heading') and not _first(cr,'section_heading'):
+            patch['section_heading']=rec.get('section_heading')
+
+        if not patch:
+            skipped+=1
+            continue
+
+        top_tx = rec.get('transaction_type') if not row.get('transaction_type') else None
+        top_area = rec.get('area_sqft') if not row.get('area_sqft') else None
+        top_phones = rec.get('phones') if (not row.get('phones')) else None
+
+        with e.begin() as c:
+            c.execute(text("""
+                UPDATE pi_master_properties_v711
+                SET clean_record=COALESCE(clean_record,'{}'::jsonb) || CAST(:p AS JSONB),
+                    transaction_type=COALESCE(transaction_type,:tx),
+                    area_sqft=COALESCE(area_sqft,:area),
+                    area_value=COALESCE(area_value,:area),
+                    area_unit=COALESCE(area_unit,CASE WHEN :area IS NULL THEN NULL ELSE 'SQFT' END),
+                    phones=CASE WHEN (phones IS NULL OR phones='[]'::jsonb) AND :ph IS NOT NULL
+                               THEN CAST(:ph AS JSONB) ELSE phones END,
+                    updated_at=NOW()
+                WHERE canonical_id=:id
+            """),{
+                'id':cid,'p':json.dumps(patch,ensure_ascii=False),
+                'tx':top_tx,'area':top_area,
+                'ph':json.dumps(top_phones,ensure_ascii=False) if top_phones else None
+            })
+            c.execute(text("""
+                INSERT INTO pi_business_os_v800_audit(action,actor,details)
+                VALUES('MAGAZINE_DETAILS_RESTORED','SYSTEM',CAST(:d AS JSONB))
+            """),{'d':json.dumps({'canonical_id':cid,'restored_fields':sorted(patch.keys()),'evidence_text':str(raw)[:700]},ensure_ascii=False)})
+        updated+=1
+    return {'scanned':scanned,'updated':updated,'skipped':skipped}
+
+def _v810_source_counts(e,entity='PROPERTY'):
+    table='pi_master_properties_v711' if entity=='PROPERTY' else 'pi_master_requirements_v711'
+    out={}
+    with e.connect() as c:
+        out['MASTER']=c.execute(text(f'SELECT COUNT(*) FROM {table}')).scalar_one()
+        for name,pat in [('NEWSPAPER','%NEWSPAPER%'),('WHATSAPP','%WHATSAPP%'),('MAGAZINE','%MAGAZINE%'),('MANUAL','%MANUAL%')]:
+            out[name]=c.execute(text(f"""
+                SELECT COUNT(DISTINCT m.canonical_id) FROM {table} m
+                JOIN pi_master_source_links_v711 l ON l.canonical_id=m.canonical_id
+                WHERE l.master_entity_type=:et
+                  AND (UPPER(COALESCE(l.source_type,'')) LIKE :pat
+                       OR UPPER(COALESCE(l.source_table,'')) LIKE :pat)
+            """),{'et':entity,'pat':pat}).scalar_one()
+    return out
+
+def _v810_property_source_rows(e,source='MASTER',q='',transaction='',address_missing=False,limit=1000):
+    pat=_v810_source_pattern(source)
+    source_clause=''
+    if pat:
+        source_clause="""AND EXISTS(SELECT 1 FROM pi_master_source_links_v711 l
+        WHERE l.canonical_id=p.canonical_id AND l.master_entity_type='PROPERTY'
+          AND (UPPER(COALESCE(l.source_type,'')) LIKE :pat OR UPPER(COALESCE(l.source_table,'')) LIKE :pat))"""
+    missing_clause="""AND COALESCE(p.clean_record->>'address',p.clean_record->>'exact_address',p.clean_record->>'property_address','')=''""" if address_missing else ''
+    with e.connect() as c:
+        rows=c.execute(text(f"""
+            SELECT p.*,COALESCE(w.verification_status,'UNVERIFIED') verification_status,
+            COALESCE(w.availability_status,'UNKNOWN') availability_status,
+            COALESCE(w.assigned_to,a.assigned_to) assigned_to
+            FROM pi_master_properties_v711 p
+            LEFT JOIN pi_master_workflow_v720 w ON w.canonical_id=p.canonical_id
+            LEFT JOIN pi_master_action_state_v730 a ON a.canonical_id=p.canonical_id
+            WHERE NOT EXISTS(SELECT 1 FROM pi_property_archive_v801 ar WHERE ar.canonical_id=p.canonical_id AND ar.restored_at IS NULL)
+            {source_clause} {missing_clause}
+            AND (:tx='' OR UPPER(COALESCE(p.transaction_type,''))=:tx)
+            AND (:q='%%' OR p.canonical_id ILIKE :q OR COALESCE(p.locality,'') ILIKE :q OR COALESCE(p.city,'') ILIKE :q OR COALESCE(p.clean_record::text,'') ILIKE :q)
+            ORDER BY p.updated_at DESC NULLS LAST,p.created_at DESC NULLS LAST LIMIT :n
+        """),{'q':f'%{q.strip()}%','tx':transaction.upper().strip(),'n':limit,'pat':pat or ''}).mappings().all()
+    return [dict(x) for x in rows]
+
+def _v810_requirement_source_rows(e,source='MASTER',q='',transaction='',limit=1000):
+    pat=_v810_source_pattern(source)
+    source_clause=''
+    if pat:
+        source_clause="""AND EXISTS(SELECT 1 FROM pi_master_source_links_v711 l
+        WHERE l.canonical_id=r.canonical_id AND l.master_entity_type='REQUIREMENT'
+          AND (UPPER(COALESCE(l.source_type,'')) LIKE :pat OR UPPER(COALESCE(l.source_table,'')) LIKE :pat))"""
+    with e.connect() as c:
+        rows=c.execute(text(f"""
+            SELECT r.*,COALESCE(w.verification_status,'UNVERIFIED') verification_status,
+            COALESCE(w.assigned_to,a.assigned_to) assigned_to
+            FROM pi_master_requirements_v711 r
+            LEFT JOIN pi_master_workflow_v720 w ON w.canonical_id=r.canonical_id
+            LEFT JOIN pi_master_action_state_v730 a ON a.canonical_id=r.canonical_id
+            WHERE 1=1 {source_clause}
+            AND (:tx='' OR UPPER(COALESCE(r.transaction_type,''))=:tx)
+            AND (:q='%%' OR r.canonical_id ILIKE :q OR COALESCE(r.locality,'') ILIKE :q OR COALESCE(r.city,'') ILIKE :q OR COALESCE(r.clean_record::text,'') ILIKE :q)
+            ORDER BY r.updated_at DESC NULLS LAST,r.created_at DESC NULLS LAST LIMIT :n
+        """),{'q':f'%{q.strip()}%','tx':transaction.upper().strip(),'n':limit,'pat':pat or ''}).mappings().all()
+    return [dict(x) for x in rows]
+
+
 def register(core):
     app=_app(core); e=_engine(core)
     if app is None or e is None: raise RuntimeError('Alliance 8.0.1 requires core app + engine')
@@ -158,12 +345,87 @@ def register(core):
         c.execute(text("""CREATE TABLE IF NOT EXISTS pi_property_edit_audit_v801(id BIGSERIAL PRIMARY KEY,canonical_id TEXT NOT NULL,actor TEXT,changes JSONB NOT NULL DEFAULT '{}'::jsonb,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())"""))
         c.execute(text("""CREATE TABLE IF NOT EXISTS pi_property_archive_v801(id BIGSERIAL PRIMARY KEY,canonical_id TEXT NOT NULL,archived_by TEXT,reason TEXT,archived_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),restored_at TIMESTAMPTZ)"""))
         c.execute(text("INSERT INTO pi_business_os_v800_audit(action,actor,details) VALUES('REGISTERED','SYSTEM',CAST(:d AS JSONB))"),{'d':json.dumps({'version':VERSION,'mode':MODE})})
+    _v810_magazine_detail_recovery(e)
     removed={p:_remove_get(app,p) for p in ['/alliance/primary','/alliance/primary/properties','/alliance/primary/requirements','/alliance/primary/reports']}
 
     @app.get('/alliance/primary',response_class=HTMLResponse)
     def command(req:Request):
-        c=_counts(e); cards=''.join(f'<div class="card"><div class="muted">{_e(k)}</div><div class="num">{v}</div></div>' for k,v in [('Properties',c['properties']),('Requirements',c['requirements']),('Verified',c['verified']),('Available',c['available']),('Matches',c['matches']),('Follow-ups',c['followups'])])
-        return HTMLResponse(_shell(core,req,'Command Centre',f'<div class="grid">{cards}</div><div class="card"><b>PROPERTY → VERIFY → REQUIREMENT → MATCH → CLIENT → FOLLOW-UP → DEAL</b></div>'))
+        _role(core,req)
+        c=_counts(e); pc=_v810_source_counts(e,'PROPERTY'); rc=_v810_source_counts(e,'REQUIREMENT')
+        op=''.join(f'<div class="card"><div class="muted">{label}</div><div class="num">{value}</div><a class="btn" href="{url}">Open</a></div>' for label,value,url in [
+            ('Master Properties',c['properties'],'/alliance/primary/properties'),
+            ('Master Requirements',c['requirements'],'/alliance/primary/requirements'),
+            ('Verified',c['verified'],'/alliance/primary/availability'),
+            ('Available',c['available'],'/alliance/primary/availability'),
+            ('Matches',c['matches'],'/alliance/primary/matcher'),
+            ('Follow-ups',c['followups'],'/alliance/primary/followups')])
+        ps=''.join(f'<div><b>{k.title()}</b><br>{pc.get(k,0)}<br><a href="/alliance/primary/database/{k.lower()}">Open</a></div>' for k in ['MASTER','NEWSPAPER','WHATSAPP','MAGAZINE','MANUAL'])
+        rs=''.join(f'<div><b>{k.title()}</b><br>{rc.get(k,0)}<br><a href="/alliance/primary/requirements/source/{k.lower()}">Open</a></div>' for k in ['MASTER','NEWSPAPER','WHATSAPP','MAGAZINE','MANUAL'])
+        body=f'<div class="grid">{op}</div><div class="card"><h3>Property Databases</h3><div class="grid">{ps}</div></div><div class="card"><h3>Requirement Databases</h3><div class="grid">{rs}</div></div>'
+        body+='<div class="card"><b>Daily Flow:</b> Capture -> Master -> Verify -> Requirement -> Match -> Review -> Follow-up -> Deal.<br><br><a class="btn good" href="/property-manual">Add Property</a> <a class="btn good" href="/requirements-workbench">Add / Manage Requirement</a> <a class="btn" href="/alliance/primary/matcher">Run Matcher</a></div>'
+        return HTMLResponse(_shell(core,req,'Alliance Command Centre',body))
+
+    @app.get('/alliance/primary/databases',response_class=HTMLResponse)
+    def databases_hub(req:Request):
+        _role(core,req); counts=_v810_source_counts(e,'PROPERTY')
+        labels={'MASTER':'Master Database','NEWSPAPER':'Newspaper Database','WHATSAPP':'WhatsApp Database','MAGAZINE':'Magazine Database','MANUAL':'Manual Database'}
+        cards=''.join(f'<div class="card"><div class="muted">{labels[k]}</div><div class="num">{counts.get(k,0)}</div><a class="btn good" href="/alliance/primary/database/{k.lower()}">Open</a></div>' for k in ['MASTER','NEWSPAPER','WHATSAPP','MAGAZINE','MANUAL'])
+        return HTMLResponse(_shell(core,req,'Property Databases',f'<div class="grid">{cards}</div><div class="card"><b>Matcher rule:</b> all source databases feed one Master Database. Matcher searches Master only.</div>'))
+
+    @app.get('/alliance/primary/database/{source}',response_class=HTMLResponse)
+    def source_database(req:Request,source:str,q:str=Query('',max_length=160),transaction:str=Query(''),address_missing:str=Query(''),limit:int=Query(500,ge=1,le=1500)):
+        _role(core,req); src=source.upper().strip()
+        if src not in {'MASTER','NEWSPAPER','WHATSAPP','MAGAZINE','MANUAL'}: return HTMLResponse('Unknown database',404)
+        rows=_v810_property_source_rows(e,src,q,transaction,bool(address_missing),limit)
+        trs=[]
+        for r in rows:
+            v=_property_view(e,r); cr=v['clean']
+            address=v['address'] or 'ADDRESS NOT CAPTURED'
+            original=_first(cr,'original_description','original_message','raw_line','source_text') or v['original'] or ''
+            floors=_first(cr,'floors','floor_codes','floor') or v['floor'] or ''
+            if isinstance(floors,list): floors=', '.join(map(str,floors))
+            status=v['availability'] if v['availability'] not in ('','UNKNOWN') else v['verification']
+            vals=[
+                f'<a href="/alliance/primary/property/{_e(v["cid"])}">{_e(v["cid"])}</a>',
+                _e(address),_e(v['locality']),_e(v['ptype']),_e(v['transaction']),
+                _e(f"{v['sqft']:.2f}" if v['sqft'] else ''),_e(floors),_e(v['amount']),
+                _e(v['contact_name']),_e(v['contact_phone']),_e(v['entry_dt']),
+                _e(status),_e(v['source']),_e(original),
+                f'<a class="btn light" href="/alliance/primary/property/{_e(v["cid"])}">Open / History</a>'
+            ]
+            trs.append('<tr>'+''.join('<td>'+x+'</td>' for x in vals)+'</tr>')
+        headers=['Property ID','Exact Address','Locality','Property Type','Rent/Sale','Area Sq Ft','Floor(s)','Amount','Contact Name','Contact Number','Date & Time','Status','Source','Original Description','Open']
+        form=f'<div class="card"><form class="inline"><input name="q" value="{_e(q)}" placeholder="Search address, locality, contact, original description"><select name="transaction"><option value="">All Rent/Sale</option><option value="RENT" {"selected" if transaction.upper()=="RENT" else ""}>Rent</option><option value="SALE" {"selected" if transaction.upper()=="SALE" else ""}>Sale</option><option value="LEASE" {"selected" if transaction.upper()=="LEASE" else ""}>Lease</option></select><label style="display:flex;align-items:center;gap:5px;font-weight:normal"><input type="checkbox" name="address_missing" value="1" {"checked" if address_missing else ""}> Address Missing</label><input type="number" name="limit" value="{limit}"><button>Search</button></form></div>'
+        note='<div class="card"><b>Magazine restoration:</b> address, area, floor, contact name/number, category, transaction and original row are restored only where retained Magazine evidence supports them. Nothing is invented.</div>' if src=='MAGAZINE' else ''
+        table=f'<div class="card tablebox"><table><thead><tr>{"".join("<th>"+x+"</th>" for x in headers)}</tr></thead><tbody>{"".join(trs) if trs else "<tr><td colspan=15>No records found</td></tr>"}</tbody></table></div>'
+        return HTMLResponse(_shell(core,req,f'{src.title()} Property Database - {len(rows)}',form+note+table))
+
+    @app.get('/alliance/primary/requirements-hub',response_class=HTMLResponse)
+    def requirements_hub(req:Request):
+        _role(core,req); counts=_v810_source_counts(e,'REQUIREMENT')
+        labels={'MASTER':'Master Requirements','NEWSPAPER':'Newspaper Requirements','WHATSAPP':'WhatsApp Requirements','MAGAZINE':'Magazine Requirements','MANUAL':'Manual Requirements'}
+        cards=''.join(f'<div class="card"><div class="muted">{labels[k]}</div><div class="num">{counts.get(k,0)}</div><a class="btn good" href="/alliance/primary/requirements/source/{k.lower()}">Open</a></div>' for k in ['MASTER','NEWSPAPER','WHATSAPP','MAGAZINE','MANUAL'])
+        return HTMLResponse(_shell(core,req,'Requirement Databases',f'<div class="grid">{cards}</div><div class="card"><a class="btn good" href="/requirements-workbench">Add / Manage Requirement</a> <a class="btn" href="/alliance/primary/matcher">Matcher</a></div>'))
+
+    @app.get('/alliance/primary/requirements/source/{source}',response_class=HTMLResponse)
+    def requirement_source_database(req:Request,source:str,q:str=Query('',max_length=160),transaction:str=Query(''),limit:int=Query(500,ge=1,le=1500)):
+        _role(core,req); src=source.upper().strip()
+        if src not in {'MASTER','NEWSPAPER','WHATSAPP','MAGAZINE','MANUAL'}: return HTMLResponse('Unknown requirement database',404)
+        rows=_v810_requirement_source_rows(e,src,q,transaction,limit)
+        trs=[]
+        for r in rows:
+            cr=_dict(r.get('clean_record')); sl=_source(e,r['canonical_id'])
+            desc=_first(cr,'original_message','original_description','requirement_text','additional_points','description') or ''
+            area=_first(cr,'required_area_sqft','minimum_area_sqft','maximum_area_sqft') or r.get('area_sqft') or ''
+            contact=_first(cr,'contact_name','client_name','name') or ''; phone=_first(cr,'contact_phone','phone','mobile') or ''
+            budget=_first(cr,'budget','rent_budget','sale_budget') or r.get('budget_raw') or ''; tx=r.get('transaction_type') or _first(cr,'transaction_type','rent_or_sale') or ''
+            vals=[f'<a href="/alliance/primary/requirement/{_e(r["canonical_id"])}">{_e(r["canonical_id"])}</a>',_e(desc),_e(r.get('locality') or ''),_e(area),_e(tx),_e(budget),_e(contact),_e(phone),_e(_fmt_dt(r.get('created_at'))),_e(sl.get('source_type') or r.get('source_type') or '')]
+            trs.append('<tr>'+''.join('<td>'+x+'</td>' for x in vals)+'</tr>')
+        headers=['Requirement ID','Requirement / Original Message','Location','Area Sq Ft','Rent/Sale','Budget','Contact Name','Contact Number','Date & Time','Source']
+        form=f'<div class="card"><form class="inline"><input name="q" value="{_e(q)}" placeholder="Search requirement, location, contact"><select name="transaction"><option value="">All Rent/Sale</option><option value="RENT" {"selected" if transaction.upper()=="RENT" else ""}>Rent</option><option value="SALE" {"selected" if transaction.upper()=="SALE" else ""}>Sale</option><option value="LEASE" {"selected" if transaction.upper()=="LEASE" else ""}>Lease</option></select><input type="number" name="limit" value="{limit}"><button>Search</button></form></div>'
+        table=f'<div class="card tablebox"><table><thead><tr>{"".join("<th>"+x+"</th>" for x in headers)}</tr></thead><tbody>{"".join(trs) if trs else "<tr><td colspan=10>No requirements found</td></tr>"}</tbody></table></div>'
+        return HTMLResponse(_shell(core,req,f'{src.title()} Requirements - {len(rows)}',form+table))
+
 
     @app.get('/alliance/primary/properties',response_class=HTMLResponse)
     def props(req:Request,q:str=Query('',max_length=120),limit:int=Query(500,ge=1,le=1500)):

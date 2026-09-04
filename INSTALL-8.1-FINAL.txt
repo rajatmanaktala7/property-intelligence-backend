@@ -1,0 +1,18 @@
+Alliance CRE OS 8.1 Final
+
+What changes:
+- Clean working dashboard.
+- Main navigation keeps confirmed operational links and removes uncertain/dummy business shortcuts.
+- Property databases: Master, Newspaper, WhatsApp, Magazine, Manual.
+- Requirement databases: Master, Newspaper, WhatsApp, Magazine, Manual.
+- Search + Rent/Sale filter on source databases.
+- Address Missing filter on property source views.
+- Matcher continues to search Master Property Database only.
+
+Magazine restoration is evidence-safe. For blank fields, it can restore from retained original Magazine row:
+Exact Address, Property Type/Category, Rent/Sale, Area, Floor(s), Contact Name,
+Contact Number/Phones, Original Description/Raw Row and Section Heading.
+
+Existing nonblank values are retained. No address or detail is invented.
+No Dockerfile or production_entrypoint change.
+No canonical or source evidence deletion.
