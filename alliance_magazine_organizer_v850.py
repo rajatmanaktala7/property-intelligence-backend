@@ -1,10 +1,10 @@
 from __future__ import annotations
 import html, json, re
-from fastapi import Query, Request
-from fastapi.responses import HTMLResponse
+from fastapi import Body, HTTPException, Query, Request
+from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import text
 
-VERSION="8.5-DATA-ORGANIZER-ZERO-COST"
+VERSION="8.5.1-DATABASE-CONTROLS"
 MOBILE_RE=re.compile(r"(?<!\d)([6-9]\d{9})(?!\d)")
 LANDLINE_RE=re.compile(r"(?<!\d)(0?11[-\s]?\d{7,8}(?:/\d(?:/\d)*)?)(?!\d)")
 PHONE_ANY_RE=re.compile(r"(?<!\d)(?:[6-9]\d{9}|0?11[-\s]?\d{7,8}(?:/\d(?:/\d)*)?)(?!\d)")
@@ -29,8 +29,21 @@ def _setup(e):
           landline_numbers JSONB NOT NULL DEFAULT '[]'::jsonb,contact_role TEXT,transaction_type TEXT,property_type TEXT,
           area_value TEXT,area_unit TEXT,floor TEXT,amount_raw TEXT,organizer_status TEXT NOT NULL,reject_reason TEXT,
           duplicate_key TEXT,needs_review BOOLEAN NOT NULL DEFAULT TRUE,created_at TIMESTAMPTZ DEFAULT NOW(),updated_at TIMESTAMPTZ DEFAULT NOW())"""))
+        for ddl in [
+            "ALTER TABLE pi_magazine_organized_v850 ADD COLUMN IF NOT EXISTS assigned_to TEXT",
+            "ALTER TABLE pi_magazine_organized_v850 ADD COLUMN IF NOT EXISTS verification_status TEXT NOT NULL DEFAULT 'UNVERIFIED'",
+            "ALTER TABLE pi_magazine_organized_v850 ADD COLUMN IF NOT EXISTS verified_by TEXT",
+            "ALTER TABLE pi_magazine_organized_v850 ADD COLUMN IF NOT EXISTS verified_at TIMESTAMPTZ",
+            "ALTER TABLE pi_magazine_organized_v850 ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ",
+            "ALTER TABLE pi_magazine_organized_v850 ADD COLUMN IF NOT EXISTS archived_by TEXT",
+            "ALTER TABLE pi_magazine_organized_v850 ADD COLUMN IF NOT EXISTS source_name TEXT DEFAULT 'Magazine'",
+        ]: c.execute(text(ddl))
+        c.execute(text("""CREATE TABLE IF NOT EXISTS pi_magazine_organized_history_v851(
+          id BIGSERIAL PRIMARY KEY,source_record_id TEXT NOT NULL,action TEXT NOT NULL,actor TEXT,
+          before_json JSONB,after_json JSONB,note TEXT,created_at TIMESTAMPTZ DEFAULT NOW())"""))
         c.execute(text("CREATE INDEX IF NOT EXISTS idx_magorg_upload_page ON pi_magazine_organized_v850(upload_id,page_number)"))
         c.execute(text("CREATE INDEX IF NOT EXISTS idx_magorg_status ON pi_magazine_organized_v850(organizer_status)"))
+        c.execute(text("CREATE INDEX IF NOT EXISTS idx_magorg_verify ON pi_magazine_organized_v850(verification_status)"))
 
 def _phones(s):
     mobiles=list(dict.fromkeys(MOBILE_RE.findall(s or "")))
@@ -38,11 +51,9 @@ def _phones(s):
     return mobiles,lands
 
 def _contact_block(s):
-    s=s or ""
-    phones=list(PHONE_ANY_RE.finditer(s))
+    s=s or ""; phones=list(PHONE_ANY_RE.finditer(s))
     if not phones:return None
-    pm=phones[-1]
-    left=s.rfind("(",0,pm.start())
+    pm=phones[-1]; left=s.rfind("(",0,pm.start())
     if left<0:return None
     right=s.find(")",pm.end())
     if right<0:return None
@@ -51,24 +62,16 @@ def _contact_block(s):
 def _contact_name_role(original):
     b=_contact_block(original)
     if not b:return None,None
-    block=b[2]
-    rm=ROLE_RE.search(block)
-    role=rm.group(1).upper() if rm else None
-    name=PHONE_ANY_RE.sub(" ",block)
-    name=ROLE_RE.sub(" ",name)
-    name=re.sub(r"[()/,:;|]+"," ",name)
-    name=re.sub(r"\s+"," ",name).strip(" -")
+    block=b[2]; rm=ROLE_RE.search(block); role=rm.group(1).upper() if rm else None
+    name=PHONE_ANY_RE.sub(" ",block); name=ROLE_RE.sub(" ",name)
+    name=re.sub(r"[()/,:;|]+"," ",name); name=re.sub(r"\s+"," ",name).strip(" -")
     return (name or None),role
 
 def _clean(original):
-    s=(original or "").strip()
-    b=_contact_block(s)
+    s=(original or "").strip(); b=_contact_block(s)
     if b:s=(s[:b[0]]+" "+s[b[1]:]).strip()
-    s=PHONE_ANY_RE.sub(" ",s)
-    s=URL_RE.sub(" ",s)
-    s=EMAIL_RE.sub(" ",s)
-    s=re.sub(r"\(\s*\)"," ",s)
-    s=re.sub(r"\s+"," ",s).strip(" ,;|-")
+    s=PHONE_ANY_RE.sub(" ",s); s=URL_RE.sub(" ",s); s=EMAIL_RE.sub(" ",s)
+    s=re.sub(r"\(\s*\)"," ",s); s=re.sub(r"\s+"," ",s).strip(" ,;|-")
     return s
 
 def _noise(original,clean,mobiles,lands,score):
@@ -84,10 +87,8 @@ def _dup(section,clean,area,unit,floor):
     return "|".join(re.sub(r"[^A-Z0-9]","",v.upper()) for v in vals)[:240]
 
 def _organize(r):
-    original=r["original_description"] or ""
-    clean=_clean(original)
-    mobiles,lands=_phones(original)
-    name,role=_contact_name_role(original)
+    original=r["original_description"] or ""; clean=_clean(original)
+    mobiles,lands=_phones(original); name,role=_contact_name_role(original)
     noise,reason=_noise(original,clean,mobiles,lands,r["signal_score"])
     return dict(source_record_id=r["record_id"],upload_id=str(r["upload_id"]),page_number=r["page_number"],
       section_heading=r["section_heading"],original_description=original,clean_description=clean,contact_name=name,
@@ -107,8 +108,8 @@ def _run(e,upload_id=None):
     clean=rejected=review=0
     with e.begin() as c:
         for r in rows:
-            x=_organize(r)
-            db=dict(x);db["contacts"]=json.dumps(x["contact_numbers"]);db["mobiles"]=json.dumps(x["mobile_numbers"]);db["lands"]=json.dumps(x["landline_numbers"])
+            x=_organize(r); db=dict(x)
+            db["contacts"]=json.dumps(x["contact_numbers"]);db["mobiles"]=json.dumps(x["mobile_numbers"]);db["lands"]=json.dumps(x["landline_numbers"])
             c.execute(text("""INSERT INTO pi_magazine_organized_v850(source_record_id,upload_id,page_number,section_heading,original_description,
             clean_description,contact_name,contact_numbers,mobile_numbers,landline_numbers,contact_role,transaction_type,property_type,
             area_value,area_unit,floor,amount_raw,organizer_status,reject_reason,duplicate_key,needs_review)
@@ -123,37 +124,135 @@ def _run(e,upload_id=None):
             duplicate_key=EXCLUDED.duplicate_key,needs_review=EXCLUDED.needs_review,updated_at=NOW()"""),db)
             clean+=x["organizer_status"]=="CLEAN";rejected+=x["organizer_status"]!="CLEAN";review+=x["needs_review"]
         c.execute(text("""WITH ranked AS (SELECT id,ROW_NUMBER() OVER(PARTITION BY upload_id,duplicate_key ORDER BY page_number,id) rn
-        FROM pi_magazine_organized_v850 WHERE organizer_status='CLEAN' AND duplicate_key IS NOT NULL AND duplicate_key<>'')
+        FROM pi_magazine_organized_v850 WHERE organizer_status='CLEAN' AND archived_at IS NULL AND duplicate_key IS NOT NULL AND duplicate_key<>'')
         UPDATE pi_magazine_organized_v850 o SET organizer_status='DUPLICATE_EXACT',needs_review=TRUE,updated_at=NOW()
         FROM ranked r WHERE o.id=r.id AND r.rn>1"""))
     return {"processed":len(rows),"clean_before_duplicate_mark":int(clean),"rejected_noise":int(rejected),"needs_review":int(review)}
+
+def _actor(core,req):
+    try:return str(_login(core,req) or "team")
+    except Exception:return "team"
 
 def register(core):
     app=_app(core);e=_engine(core)
     if app is None or e is None:raise RuntimeError("Organizer requires app + engine")
     _setup(e)
+
     @app.post("/api/magazine-organizer/run")
     def run(req:Request,upload_id:str|None=Query(None)):
         _login(core,req);return {"status":"ORGANIZED","version":VERSION,"cost":0,"external_api_calls":0,**_run(e,upload_id)}
+
+    @app.post("/api/magazine-organizer/edit/{record_id}")
+    def edit(record_id:str,req:Request,payload:dict=Body(...)):
+        actor=_actor(core,req)
+        allowed={"clean_description","contact_name","contact_numbers","transaction_type","amount_raw","assigned_to","verification_status","needs_review"}
+        changes={k:payload[k] for k in allowed if k in payload}
+        if not changes:raise HTTPException(400,"No editable fields supplied")
+        with e.begin() as c:
+            before=c.execute(text("SELECT * FROM pi_magazine_organized_v850 WHERE source_record_id=:r AND archived_at IS NULL"),{"r":record_id}).mappings().first()
+            if not before:raise HTTPException(404,"Record not found")
+            sets=[];params={"r":record_id}
+            for i,(k,v) in enumerate(changes.items()):
+                key=f"v{i}"
+                if k=="contact_numbers":
+                    sets.append(f"{k}=CAST(:{key} AS JSONB)");params[key]=json.dumps(v if isinstance(v,list) else [x.strip() for x in str(v).split(",") if x.strip()])
+                else:
+                    sets.append(f"{k}=:{key}");params[key]=v
+            sets.append("updated_at=NOW()")
+            c.execute(text("UPDATE pi_magazine_organized_v850 SET "+",".join(sets)+" WHERE source_record_id=:r"),params)
+            after=c.execute(text("SELECT * FROM pi_magazine_organized_v850 WHERE source_record_id=:r"),{"r":record_id}).mappings().first()
+            c.execute(text("""INSERT INTO pi_magazine_organized_history_v851(source_record_id,action,actor,before_json,after_json)
+            VALUES(:r,'EDIT',:a,CAST(:b AS JSONB),CAST(:n AS JSONB))"""),{"r":record_id,"a":actor,"b":json.dumps(dict(before),default=str),"n":json.dumps(dict(after),default=str)})
+        return {"status":"UPDATED","record_id":record_id}
+
+    @app.post("/api/magazine-organizer/verify/{record_id}")
+    def verify(record_id:str,req:Request,payload:dict=Body(...)):
+        actor=_actor(core,req); status=str(payload.get("status","UNVERIFIED")).upper()
+        if status not in {"UNVERIFIED","VERIFICATION DUE","AVAILABLE","NOT AVAILABLE","FOLLOW-UP","CLOSED/REMOVED"}:
+            raise HTTPException(400,"Invalid verification status")
+        with e.begin() as c:
+            before=c.execute(text("SELECT * FROM pi_magazine_organized_v850 WHERE source_record_id=:r AND archived_at IS NULL"),{"r":record_id}).mappings().first()
+            if not before:raise HTTPException(404,"Record not found")
+            c.execute(text("""UPDATE pi_magazine_organized_v850 SET verification_status=:s,verified_by=:a,
+            verified_at=CASE WHEN :s='AVAILABLE' THEN NOW() ELSE verified_at END,updated_at=NOW() WHERE source_record_id=:r"""),
+            {"s":status,"a":actor,"r":record_id})
+            after=c.execute(text("SELECT * FROM pi_magazine_organized_v850 WHERE source_record_id=:r"),{"r":record_id}).mappings().first()
+            c.execute(text("""INSERT INTO pi_magazine_organized_history_v851(source_record_id,action,actor,before_json,after_json,note)
+            VALUES(:r,'VERIFY',:a,CAST(:b AS JSONB),CAST(:n AS JSONB),:note)"""),
+            {"r":record_id,"a":actor,"b":json.dumps(dict(before),default=str),"n":json.dumps(dict(after),default=str),"note":status})
+        return {"status":"UPDATED","record_id":record_id,"verification_status":status}
+
+    @app.post("/api/magazine-organizer/delete/{record_id}")
+    def delete(record_id:str,req:Request):
+        actor=_actor(core,req)
+        with e.begin() as c:
+            before=c.execute(text("SELECT * FROM pi_magazine_organized_v850 WHERE source_record_id=:r AND archived_at IS NULL"),{"r":record_id}).mappings().first()
+            if not before:raise HTTPException(404,"Record not found")
+            c.execute(text("""UPDATE pi_magazine_organized_v850 SET archived_at=NOW(),archived_by=:a,organizer_status='ARCHIVED',
+            updated_at=NOW() WHERE source_record_id=:r"""),{"a":actor,"r":record_id})
+            c.execute(text("""INSERT INTO pi_magazine_organized_history_v851(source_record_id,action,actor,before_json,note)
+            VALUES(:r,'SOFT_DELETE',:a,CAST(:b AS JSONB),'Archived, not hard deleted')"""),
+            {"r":record_id,"a":actor,"b":json.dumps(dict(before),default=str)})
+        return {"status":"ARCHIVED","record_id":record_id}
+
+    @app.get("/api/magazine-organizer/history/{record_id}")
+    def history(record_id:str,req:Request):
+        _login(core,req)
+        with e.connect() as c:rows=c.execute(text("""SELECT action,actor,note,created_at FROM pi_magazine_organized_history_v851
+        WHERE source_record_id=:r ORDER BY id DESC LIMIT 100"""),{"r":record_id}).mappings().all()
+        return {"record_id":record_id,"history":[dict(x) for x in rows]}
+
     @app.get("/api/magazine-organizer/status")
     def status(req:Request):
         _login(core,req)
-        with e.connect() as c:r=c.execute(text("""SELECT COUNT(*) total,COUNT(*) FILTER(WHERE organizer_status='CLEAN') clean,
-        COUNT(*) FILTER(WHERE organizer_status='REJECTED_NOISE') rejected,COUNT(*) FILTER(WHERE organizer_status='DUPLICATE_EXACT') duplicates,
-        COUNT(*) FILTER(WHERE needs_review) review FROM pi_magazine_organized_v850""")).mappings().first()
+        with e.connect() as c:r=c.execute(text("""SELECT COUNT(*) FILTER(WHERE archived_at IS NULL) total,
+        COUNT(*) FILTER(WHERE organizer_status='CLEAN' AND archived_at IS NULL) clean,
+        COUNT(*) FILTER(WHERE organizer_status='REJECTED_NOISE' AND archived_at IS NULL) rejected,
+        COUNT(*) FILTER(WHERE organizer_status='DUPLICATE_EXACT' AND archived_at IS NULL) duplicates,
+        COUNT(*) FILTER(WHERE needs_review AND archived_at IS NULL) review,
+        COUNT(*) FILTER(WHERE verification_status='AVAILABLE' AND archived_at IS NULL) available
+        FROM pi_magazine_organized_v850""")).mappings().first()
         return {"status":"OK","version":VERSION,"cost":0,"external_api_calls":0,**dict(r)}
+
     @app.get("/magazine-organizer",response_class=HTMLResponse)
     def page(req:Request,limit:int=Query(1500,ge=1,le=5000)):
         _login(core,req)
-        with e.connect() as c:rows=c.execute(text("""SELECT page_number,section_heading,clean_description,contact_name,contact_numbers,contact_role,
-        area_value,area_unit,floor,organizer_status,needs_review,original_description FROM pi_magazine_organized_v850 ORDER BY page_number,id LIMIT :n"""),{"n":limit}).mappings().all()
-        heads=["Page","Section","Clean Description","Contact Name","Contact No.","Role","Area","Floor","Status","Review","Original Evidence"]
+        with e.connect() as c:rows=c.execute(text("""SELECT source_record_id,page_number,section_heading,clean_description,contact_name,contact_numbers,
+        transaction_type,area_value,area_unit,amount_raw,verification_status,assigned_to,source_name,created_at,updated_at,organizer_status,
+        needs_review FROM pi_magazine_organized_v850 WHERE archived_at IS NULL ORDER BY page_number,id LIMIT :n"""),{"n":limit}).mappings().all()
+        heads=["Property ID","Description / Address","Area","Rent/Sale","Amount","Contact Name","Contact No.","Date & Time","Status","Verify","History","Assigned To","Source","Edit","Delete"]
         body=[]
         for r in rows:
-            vals=[r["page_number"],r["section_heading"],r["clean_description"],r["contact_name"],", ".join(r["contact_numbers"] or []),r["contact_role"],
-            " ".join(x for x in [str(r["area_value"] or ""),str(r["area_unit"] or "")] if x),r["floor"],r["organizer_status"],"YES" if r["needs_review"] else "NO",r["original_description"]]
-            body.append("<tr>"+"".join("<td>"+_esc(v)+"</td>" for v in vals)+"</tr>")
-        table="<table><tr>"+"".join("<th>"+h+"</th>" for h in heads)+"</tr>"+("".join(body) if body else "<tr><td colspan=11>No organized records yet.</td></tr>")+"</table>"
-        page_html="""<!doctype html><html><head><meta charset='utf-8'><style>body{font-family:Arial;padding:20px;background:#f6f7f9}button{padding:11px 16px;background:#125bc5;color:white;border:0;border-radius:8px;font-weight:bold}table{width:100%;border-collapse:collapse;background:white;font-size:12px}th,td{padding:7px;border-bottom:1px solid #ddd;text-align:left;vertical-align:top}th{background:#eef2f6;position:sticky;top:0}</style></head><body><h2>Alliance Magazine Data Organizer · 8.5</h2><p><b>Original Description remains untouched.</b> Clean Description removes the contact block and numbers. Contacts are separate. Noise/duplicates are flagged, never deleted.</p><button onclick="go()">Organize FastLane Data — Free</button> <span id="s"></span><p><a href="/magazine-fastlane/records">Raw FastLane Records</a></p>"""+table+"""<script>async function go(){s.textContent=' Organizing...';let d=await (await fetch('/api/magazine-organizer/run',{method:'POST'})).json();s.textContent=' '+JSON.stringify(d);setTimeout(()=>location.reload(),700)}</script></body></html>"""
+            area=" ".join(x for x in [str(r["area_value"] or ""),str(r["area_unit"] or "")] if x)
+            dt=(str(r["created_at"])[:19] if r["created_at"] else "")
+            rid=_esc(r["source_record_id"])
+            status=r["verification_status"] or ("Needs Review" if r["needs_review"] else r["organizer_status"])
+            vals=[
+                rid,_esc(r["clean_description"]),_esc(area),_esc(r["transaction_type"]),_esc(r["amount_raw"]),
+                _esc(r["contact_name"]),_esc(", ".join(r["contact_numbers"] or [])),_esc(dt),_esc(status)
+            ]
+            tr="<tr>"+"".join("<td>"+v+"</td>" for v in vals)
+            tr+=f"""<td><button class='mini' onclick="verifyRec('{rid}')">Verify</button></td>
+            <td><button class='mini' onclick="historyRec('{rid}')">History</button></td>
+            <td>{_esc(r["assigned_to"])}</td><td>Magazine · p.{_esc(r["page_number"])}</td>
+            <td><button class='mini' onclick="editRec('{rid}')">Edit</button></td>
+            <td><button class='del' onclick="deleteRec('{rid}')">Delete</button></td></tr>"""
+            body.append(tr)
+        table="<table><tr>"+"".join("<th>"+h+"</th>" for h in heads)+"</tr>"+("".join(body) if body else "<tr><td colspan=15>No organized records yet.</td></tr>")+"</table>"
+        page_html="""<!doctype html><html><head><meta charset='utf-8'><style>
+        body{font-family:Arial;padding:20px;background:#f6f7f9;color:#17212b}.top{background:white;padding:16px;border-radius:12px;margin-bottom:14px}
+        button{padding:9px 13px;background:#125bc5;color:white;border:0;border-radius:7px;font-weight:bold}.mini{padding:5px 8px}.del{padding:5px 8px;background:#a21d1d}
+        table{width:100%;border-collapse:collapse;background:white;font-size:12px}th,td{padding:7px;border-bottom:1px solid #ddd;text-align:left;vertical-align:top}
+        th{background:#eef2f6;position:sticky;top:0}td:nth-child(2){min-width:280px}</style></head><body>
+        <div class='top'><h2>Alliance Magazine Database · 8.5.1</h2>
+        <p><b>Original evidence remains immutable.</b> Delete = soft archive. Edit/Verify actions are written to append-only history.</p>
+        <button onclick="organize()">Organize FastLane Data — Free</button> <span id='msg'></span></div>"""+table+"""
+        <script>
+        async function organize(){msg.textContent=' Organizing...';let d=await (await fetch('/api/magazine-organizer/run',{method:'POST'})).json();msg.textContent=' '+JSON.stringify(d);setTimeout(()=>location.reload(),700)}
+        async function verifyRec(id){let s=prompt('Status: UNVERIFIED, VERIFICATION DUE, AVAILABLE, NOT AVAILABLE, FOLLOW-UP, CLOSED/REMOVED','AVAILABLE');if(!s)return;await fetch('/api/magazine-organizer/verify/'+id,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({status:s})});location.reload()}
+        async function editRec(id){let desc=prompt('New Clean Description (Original Description will NOT change)');if(desc===null)return;let name=prompt('Contact Name (optional)');let phones=prompt('Contact No(s), comma separated (optional)');let assigned=prompt('Assigned To (optional)');let body={clean_description:desc};if(name!==null)body.contact_name=name;if(phones!==null)body.contact_numbers=phones;if(assigned!==null)body.assigned_to=assigned;await fetch('/api/magazine-organizer/edit/'+id,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});location.reload()}
+        async function deleteRec(id){if(!confirm('Archive this property? It will NOT be hard deleted.'))return;await fetch('/api/magazine-organizer/delete/'+id,{method:'POST'});location.reload()}
+        async function historyRec(id){let d=await (await fetch('/api/magazine-organizer/history/'+id)).json();alert(JSON.stringify(d.history,null,2))}
+        </script></body></html>"""
         return HTMLResponse(page_html,headers={"Cache-Control":"no-store"})
-    return {"status":"REGISTERED","version":VERSION,"routes":["/magazine-organizer","/api/magazine-organizer/run","/api/magazine-organizer/status"]}
+    return {"status":"REGISTERED","version":VERSION,"routes":["/magazine-organizer","/api/magazine-organizer/run","/api/magazine-organizer/edit/{record_id}","/api/magazine-organizer/verify/{record_id}","/api/magazine-organizer/delete/{record_id}","/api/magazine-organizer/history/{record_id}"]}
