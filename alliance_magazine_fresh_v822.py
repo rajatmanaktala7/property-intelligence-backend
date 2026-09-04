@@ -178,10 +178,10 @@ def register(core):
     _setup(e); _remove(app,'/magazine-master-import','GET')
 
     @app.get('/magazine-master-import',response_class=HTMLResponse)
-    def page(req:Request): _login(core,req); return HTMLResponse(_page())
+    def page(req:Request): _login(core,req); return HTMLResponse(_page(),headers={'Cache-Control':'no-store, no-cache, must-revalidate, max-age=0','Pragma':'no-cache','Expires':'0'})
 
     @app.get('/magazine-fresh',response_class=HTMLResponse)
-    def alias(req:Request): _login(core,req); return HTMLResponse(_page())
+    def alias(req:Request): _login(core,req); return HTMLResponse(_page(),headers={'Cache-Control':'no-store, no-cache, must-revalidate, max-age=0','Pragma':'no-cache','Expires':'0'})
 
     @app.post('/api/magazine-fresh/init')
     async def init(req:Request):

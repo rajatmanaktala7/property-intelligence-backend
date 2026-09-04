@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import asyncio
 import threading
@@ -525,6 +525,23 @@ def _load_core():
             stabilization = dict(stabilization or {})
             stabilization["magazine_fresh_v822"] = magazine_fresh_result
             print("[magazine-fresh-v822]", magazine_fresh_result)
+            # CRE OS 8.2.7.1: authoritative Magazine page route takeover.
+            magazine_routes = [
+                r for r in list(wrapped.app.router.routes)
+                if getattr(r, "path", None) == "/magazine-master-import"
+                and "GET" in set(getattr(r, "methods", set()) or set())
+                and getattr(getattr(r, "endpoint", None), "__module__", "") == "alliance_magazine_fresh_v822"
+            ]
+            if not magazine_routes:
+                raise RuntimeError("8.2.7 Magazine GET route was not registered")
+            chosen = magazine_routes[-1]
+            wrapped.app.router.routes.remove(chosen)
+            wrapped.app.router.routes.insert(0, chosen)
+            stabilization["magazine_route_takeover_v8271"] = {
+                "status": "AUTHORITATIVE",
+                "path": "/magazine-master-import",
+                "module": "alliance_magazine_fresh_v822",
+            }
         except Exception as exc:
             stabilization = dict(stabilization or {})
             stabilization["magazine_fresh_v822"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","fail_safe":True}
