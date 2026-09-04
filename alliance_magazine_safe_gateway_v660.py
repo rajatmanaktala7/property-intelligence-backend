@@ -14,7 +14,7 @@ import alliance_magazine_challenger_v514 as semantic_student
 import alliance_magazine_lossless_extraction_v670 as lossless_v670
 import alliance_magazine_section_context_v680 as section_v680
 
-VERSION="6.6.1-ALLIANCE-MAGAZINE-MULTIMODEL-OPENROUTER-GATEWAY"
+VERSION="6.6.2-ALLIANCE-MAGAZINE-SCHEMA-TRANSIENT-RETRY-GATEWAY"
 MODE="LOCK_199_QUOTA_AWARE_PROVIDER_FAILOVER_CIRCUIT_BREAKER_LOW_CALL_MULTI_TARGET_NO_FALSE_TRAINING_FAILURE"
 
 EXPECTED_EXAM="MAGAZINE_PIXEL_FIELD_V2_610_AUG2026_PAGES_36_38"
@@ -226,6 +226,21 @@ class ProviderGateway:
             except Exception as exc:
                 if _is_quota(exc):
                     self._mark_quota(p,exc);continue
+                raw=str(exc)
+                if "503" in raw and ("UNAVAILABLE" in raw.upper() or "HIGH DEMAND" in raw.upper()):
+                    self.events.append({"provider":p["label"],"event":"TRANSIENT_503","error":raw[:1200]})
+                    for delay in (3,8):
+                        if self.calls>=self.max_calls: break
+                        time.sleep(delay); self.calls+=1
+                        try:
+                            data=self._call_gemini(p,img,prompt) if p["kind"]=="gemini" else self._call_openrouter(p,img,prompt)
+                            self.events.append({"provider":p["label"],"event":"SUCCESS_AFTER_RETRY"})
+                            return data,{"status":"OK","provider":p["label"],"retried":True}
+                        except Exception as retry_exc:
+                            if _is_quota(retry_exc):
+                                self._mark_quota(p,retry_exc); break
+                            self.events.append({"provider":p["label"],"event":"RETRY_ERROR","error":f"{type(retry_exc).__name__}: {retry_exc}"[:1200]})
+                    continue
                 self.events.append({"provider":p["label"],"event":"ERROR","error":f"{type(exc).__name__}: {exc}"[:1200]})
                 continue
         if not self.providers:
