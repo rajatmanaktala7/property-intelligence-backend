@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 import threading
@@ -7,7 +7,7 @@ import traceback
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 
 
@@ -226,7 +226,7 @@ code{{background:#f5eee5;padding:4px 6px;border-radius:5px}}
 <p>The health service is online while the main application loads independently.</p>
 <p><b>Boot state:</b> <code>{BOOT["state"]}</code></p>
 <p><b>Detail:</b> <code>{err}</code></p>
-<p><a href="/healthz">Health</a> Ãƒâ€šÃ‚Â· <a href="/boot-status">Boot Status</a></p>
+<p><a href="/healthz">Health</a> ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â· <a href="/boot-status">Boot Status</a></p>
 </main>
 </body>
 </html>""",
@@ -642,13 +642,13 @@ def _load_core():
                     keep.append(r)
                 wrapped.app.router.routes[:]=keep
                 if "{source}" in old_path:
-                    async def _redir_source(request, source:str, _target=target):
+                    async def _redir_source(request: Request, source:str, _target=target):
                         qs=request.url.query
                         url=_target.replace("{source}",source)
                         return RedirectResponse(url+("?" + qs if qs else ""),status_code=307)
                     wrapped.app.add_api_route(old_path,_redir_source,methods=["GET"],include_in_schema=False)
                 else:
-                    async def _redir(request, _target=target):
+                    async def _redir(request: Request, _target=target):
                         qs=request.url.query
                         return RedirectResponse(_target+("?" + qs if qs else ""),status_code=307)
                     wrapped.app.add_api_route(old_path,_redir,methods=["GET"],include_in_schema=False)
@@ -864,6 +864,7 @@ app = HealthFirstDispatcher()
 
 
 # 7.3.7 HISTORICAL EVIDENCE REPAIR REGISTRATION
+
 
 
 
