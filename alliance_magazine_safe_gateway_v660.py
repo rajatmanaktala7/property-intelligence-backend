@@ -14,7 +14,7 @@ import alliance_magazine_challenger_v514 as semantic_student
 import alliance_magazine_lossless_extraction_v670 as lossless_v670
 import alliance_magazine_section_context_v680 as section_v680
 
-VERSION="8.3.3-ALLIANCE-MAGAZINE-LOSSLESS-CAPTURE"
+VERSION="8.3.4-ALLIANCE-MAGAZINE-DENSE-REGION-CAPTURE"
 MODE="LOCK_199_QUOTA_AWARE_PROVIDER_FAILOVER_CIRCUIT_BREAKER_LOW_CALL_MULTI_TARGET_NO_FALSE_TRAINING_FAILURE"
 
 EXPECTED_EXAM="MAGAZINE_PIXEL_FIELD_V2_610_AUG2026_PAGES_36_38"
@@ -81,8 +81,29 @@ def _route_exists(a,p):
 
 def _json_text(s):
     s=(s or "").strip()
-    s=re.sub(r"^```(?:json)?\s*","",s); s=re.sub(r"\s*```$","",s)
-    return json.loads(s)
+    s=re.sub(r"^```(?:json)?\s*","",s,flags=re.I)
+    s=re.sub(r"\s*```$","",s)
+    try:return json.loads(s)
+    except Exception:pass
+    for start,c0 in enumerate(s):
+        if c0 not in "{[":continue
+        opener=c0;closer="}" if opener=="{" else "]"
+        depth=0;quoted=False;esc=False
+        for i in range(start,len(s)):
+            c=s[i]
+            if quoted:
+                if esc:esc=False
+                elif c=="\\":esc=True
+                elif c=='"':quoted=False
+                continue
+            if c=='"':quoted=True;continue
+            if c==opener:depth+=1
+            elif c==closer:
+                depth-=1
+                if depth==0:
+                    try:return json.loads(s[start:i+1])
+                    except Exception:break
+    raise ValueError("No valid JSON object/array found in provider response")
 
 def _norm_ref(x): return re.sub(r"[^A-Z0-9/-]+","",str(x or "").upper())
 
@@ -199,7 +220,7 @@ class ProviderGateway:
 
     def _call_groq(self,p,img,prompt):
         b64=base64.b64encode(img).decode("ascii")
-        payload={"model":p["model"],"temperature":0,"reasoning_effort":"none","max_completion_tokens":900,"response_format":{"type":"json_object"},"messages":[{"role":"user","content":[{"type":"text","text":prompt},{"type":"image_url","image_url":{"url":"data:image/jpeg;base64,"+b64}}]}]}
+        payload={"model":p["model"],"temperature":0,"reasoning_effort":"none","max_completion_tokens":450,"response_format":{"type":"json_object"},"messages":[{"role":"user","content":[{"type":"text","text":prompt},{"type":"image_url","image_url":{"url":"data:image/jpeg;base64,"+b64}}]}]}
         with httpx.Client(timeout=120.0) as h:
             r=h.post("https://api.groq.com/openai/v1/chat/completions",headers={"Authorization":"Bearer "+p["api_key"],"Content-Type":"application/json"},json=payload)
             if r.status_code==429: raise RuntimeError("429 GROQ_QUOTA "+r.text[:1000])

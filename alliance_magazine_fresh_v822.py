@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import text
 import alliance_magazine_safe_gateway_v660 as safe_gateway
 
-VERSION='8.3.3-LOSSLESS-PROPERTY-CAPTURE'
+VERSION='8.3.4-DENSE-REGION-CAPTURE'
 CHUNK_SIZE=4*1024*1024
 MAX_UPLOAD_MB=int(os.getenv('MAX_UPLOAD_MB','100'))
 PDF_RENDER_DPI=int(os.getenv('PDF_RENDER_DPI','220'))
@@ -175,6 +175,46 @@ def _save(e,uid,page,rows):
     return made,review
 
 
+def _dense_regions(page):
+    rect=page.rect
+    w=float(rect.width);h=float(rect.height)
+    overlap=w*0.025
+    cuts=[0.0,0.25,0.50,0.75,1.0]
+    out=[];scale=PDF_RENDER_DPI/72.0
+    for n in range(4):
+        x0=max(0.0,w*cuts[n]-overlap);x1=min(w,w*cuts[n+1]+overlap)
+        clip=fitz.Rect(x0,0,x1,h)
+        jpg=page.get_pixmap(matrix=fitz.Matrix(scale,scale),clip=clip,alpha=False).tobytes('jpeg')
+        out.append((n+1,jpg))
+    return out
+
+def _row_key(x):
+    raw=re.sub(r'\s+',' ',str(getattr(x,'original_description','') or '')).strip().upper()
+    return re.sub(r'[^A-Z0-9]+','',raw)
+
+def _merge_region_rows(groups):
+    out=[];seen=set()
+    for rows in groups:
+        for x in rows:
+            k=_row_key(x)
+            if not k or k in seen:continue
+            seen.add(k);out.append(x)
+    return out
+
+def _extract_dense_page(gw,page):
+    groups=[];meta={'status':'OK','regions':[]}
+    for region_no,jpg in _dense_regions(page):
+        rows,rmeta=_gateway_extract(gw,jpg)
+        meta['regions'].append({'region':region_no,'status':rmeta.get('status'),'provider':rmeta.get('provider'),'records':None if rows is None else len(rows)})
+        if rows is None:
+            if not groups:
+                return None,{'status':rmeta.get('status','VISION_PROVIDER_UNAVAILABLE'),'regions':meta['regions']}
+            continue
+        groups.append(rows)
+    merged=_merge_region_rows(groups)
+    meta['records']=len(merged);meta['provider']='REGION_WATERFALL'
+    return merged,meta
+
 def _gateway_extract(gw,jpg):
     data,meta=gw.ask(jpg,PROMPT)
     if data is None:return None,meta
@@ -212,9 +252,8 @@ def _process(core,uid):
         tm=int(counts[0] or 0);tr=int(counts[1] or 0)
         with e.begin() as c:c.execute(text("UPDATE pi_magazine_fresh_uploads SET status='PROCESSING',page_count=:p,created_records=:m,review_records=:r,error_message=NULL WHERE upload_id=CAST(:u AS UUID)"),{'p':pages,'m':tm,'r':tr,'u':uid})
         for i in range(start,pages):
-            page=doc.load_page(i);scale=PDF_RENDER_DPI/72.0
-            jpg=page.get_pixmap(matrix=fitz.Matrix(scale,scale),alpha=False).tobytes('jpeg')
-            rows,meta=_gateway_extract(gw,jpg)
+            page=doc.load_page(i)
+            rows,meta=_extract_dense_page(gw,page)
             if rows is None:
                 retry=gw.next_retry();reason=meta.get("status","VISION_PROVIDER_UNAVAILABLE")
                 msg="AI provider unavailable. The PDF is safe and extraction can resume from page "+str(i)+"."
@@ -230,7 +269,7 @@ def _process(core,uid):
         with e.begin() as c:c.execute(text("UPDATE pi_magazine_fresh_uploads SET status='PAUSED_ERROR',error_message=:x WHERE upload_id=CAST(:u AS UUID)"),{'x':f'{type(exc).__name__}: {exc}'[:4000],'u':uid})
 
 def _page():
-    return '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">\n<title>Alliance Magazine Resume</title><style>body{font-family:Arial;background:#f4f7fb;margin:0;color:#172437}.top{background:#102235;color:white;padding:20px}.wrap{max-width:1180px;margin:auto;padding:20px}.card{background:white;padding:18px;border-radius:14px;margin-bottom:14px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}.num{font-size:28px;font-weight:800}.muted{color:#66758a}.btn{background:#1266f1;color:white;border:0;border-radius:9px;padding:11px 18px;font-weight:700;cursor:pointer}.good{color:#16833c}.bad{color:#bd2f2f}a{color:#1266f1;text-decoration:none}table{width:100%;border-collapse:collapse}td,th{padding:8px;border-bottom:1px solid #e5eaf0;text-align:left}</style></head>\n<body><div class="top"><b>Fresh Magazine PDF Database · CRE OS 8.3.3</b><br><small>Gemini -> OpenRouter -> Groq Vision · real-page validation · checkpoint resume</small></div>\n<div class="wrap"><div class="card"><a href="/workspace">← Dashboard</a> · <a href="/magazine-fresh/records">New Magazine Records</a></div>\n<div class="card"><h2>Current / Previous Magazine</h2><p id="name" class="muted">Checking stored jobs...</p><div id="stats" class="grid"></div><p id="state" class="muted"></p><button id="resume" class="btn" style="display:none">Resume Extraction</button></div>\n<div class="card"><h3>Recent Magazine Jobs</h3><div id="jobs">Loading...</div></div>\n<div class="card"><h3>New Magazine</h3><p class="muted">For a genuinely new magazine, use the existing upload page after the current database is validated.</p></div></div>\n<script>\nlet active=null,timer=null;\nfunction esc(x){return String(x??\'\').replace(/[&<>"\']/g,m=>({\'&\':\'&amp;\',\'<\':\'&lt;\',\'>\':\'&gt;\',\'"\':\'&quot;\',"\'":\'&#39;\'}[m]))}\nfunction render(d){active=d.upload_id;name.innerHTML=\'<b>\'+esc(d.filename)+\'</b> · \'+esc(d.status);stats.innerHTML=\'<div class="card"><div class="muted">Pages</div><div class="num">\'+d.processed_pages+\'/\'+d.page_count+\'</div></div><div class="card"><div class="muted">Records</div><div class="num">\'+d.created_records+\'</div></div><div class="card"><div class="muted">Needs review</div><div class="num">\'+d.review_records+\'</div></div><div class="card"><div class="muted">Status</div><b>\'+esc(d.status)+\'</b></div>\';state.textContent=d.error_message||\'Ready.\';resume.style.display=[\'ERROR\',\'PAUSED_ERROR\',\'WAITING_FOR_PROVIDER\',\'STORED\'].includes(d.status)?\'inline-block\':\'none\'}\nasync function load(){let r=await fetch(\'/api/magazine-fresh/latest\');if(!r.ok){state.textContent=\'Unable to read stored jobs.\';return}let d=await r.json();if(d.latest)render(d.latest);else{name.textContent=\'No stored Magazine PDF found.\'}jobs.innerHTML=(d.uploads||[]).length?\'<table><tr><th>PDF</th><th>Status</th><th>Pages</th><th>Records</th></tr>\'+d.uploads.map(x=>\'<tr><td>\'+esc(x.filename)+\'</td><td>\'+esc(x.status)+\'</td><td>\'+x.processed_pages+\'/\'+x.page_count+\'</td><td>\'+x.created_records+\'</td></tr>\').join(\'\')+\'</table>\':\'No previous jobs.\'}\nresume.onclick=async()=>{if(!active)return;resume.disabled=true;let r=await fetch(\'/api/magazine-fresh/resume/\'+active,{method:\'POST\'});let d=await r.json();state.textContent=d.status||d.detail||\'Resume requested\';resume.disabled=false;setTimeout(load,1000)}\nload();timer=setInterval(load,4000);\n</script></body></html>'
+    return '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">\n<title>Alliance Magazine Resume</title><style>body{font-family:Arial;background:#f4f7fb;margin:0;color:#172437}.top{background:#102235;color:white;padding:20px}.wrap{max-width:1180px;margin:auto;padding:20px}.card{background:white;padding:18px;border-radius:14px;margin-bottom:14px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}.num{font-size:28px;font-weight:800}.muted{color:#66758a}.btn{background:#1266f1;color:white;border:0;border-radius:9px;padding:11px 18px;font-weight:700;cursor:pointer}.good{color:#16833c}.bad{color:#bd2f2f}a{color:#1266f1;text-decoration:none}table{width:100%;border-collapse:collapse}td,th{padding:8px;border-bottom:1px solid #e5eaf0;text-align:left}</style></head>\n<body><div class="top"><b>Fresh Magazine PDF Database · CRE OS 8.3.4</b><br><small>Gemini -> OpenRouter -> Groq Vision · real-page validation · checkpoint resume</small></div>\n<div class="wrap"><div class="card"><a href="/workspace">← Dashboard</a> · <a href="/magazine-fresh/records">New Magazine Records</a></div>\n<div class="card"><h2>Current / Previous Magazine</h2><p id="name" class="muted">Checking stored jobs...</p><div id="stats" class="grid"></div><p id="state" class="muted"></p><button id="resume" class="btn" style="display:none">Resume Extraction</button></div>\n<div class="card"><h3>Recent Magazine Jobs</h3><div id="jobs">Loading...</div></div>\n<div class="card"><h3>New Magazine</h3><p class="muted">For a genuinely new magazine, use the existing upload page after the current database is validated.</p></div></div>\n<script>\nlet active=null,timer=null;\nfunction esc(x){return String(x??\'\').replace(/[&<>"\']/g,m=>({\'&\':\'&amp;\',\'<\':\'&lt;\',\'>\':\'&gt;\',\'"\':\'&quot;\',"\'":\'&#39;\'}[m]))}\nfunction render(d){active=d.upload_id;name.innerHTML=\'<b>\'+esc(d.filename)+\'</b> · \'+esc(d.status);stats.innerHTML=\'<div class="card"><div class="muted">Pages</div><div class="num">\'+d.processed_pages+\'/\'+d.page_count+\'</div></div><div class="card"><div class="muted">Records</div><div class="num">\'+d.created_records+\'</div></div><div class="card"><div class="muted">Needs review</div><div class="num">\'+d.review_records+\'</div></div><div class="card"><div class="muted">Status</div><b>\'+esc(d.status)+\'</b></div>\';state.textContent=d.error_message||\'Ready.\';resume.style.display=[\'ERROR\',\'PAUSED_ERROR\',\'WAITING_FOR_PROVIDER\',\'STORED\'].includes(d.status)?\'inline-block\':\'none\'}\nasync function load(){let r=await fetch(\'/api/magazine-fresh/latest\');if(!r.ok){state.textContent=\'Unable to read stored jobs.\';return}let d=await r.json();if(d.latest)render(d.latest);else{name.textContent=\'No stored Magazine PDF found.\'}jobs.innerHTML=(d.uploads||[]).length?\'<table><tr><th>PDF</th><th>Status</th><th>Pages</th><th>Records</th></tr>\'+d.uploads.map(x=>\'<tr><td>\'+esc(x.filename)+\'</td><td>\'+esc(x.status)+\'</td><td>\'+x.processed_pages+\'/\'+x.page_count+\'</td><td>\'+x.created_records+\'</td></tr>\').join(\'\')+\'</table>\':\'No previous jobs.\'}\nresume.onclick=async()=>{if(!active)return;resume.disabled=true;let r=await fetch(\'/api/magazine-fresh/resume/\'+active,{method:\'POST\'});let d=await r.json();state.textContent=d.status||d.detail||\'Resume requested\';resume.disabled=false;setTimeout(load,1000)}\nload();timer=setInterval(load,4000);\n</script></body></html>'
 
 def register(core):
     app=_app(core); e=_engine(core)
@@ -323,7 +362,7 @@ def register(core):
 
 
     @app.post('/api/magazine-fresh/real-page-test/{upload_id}')
-    def real_page_test(upload_id:str,req:Request,page:int=Query(1,ge=1)):
+    def real_page_test(upload_id:str,req:Request,page:int=Query(1,ge=1),dense:int=Query(0,ge=0,le=1)):
         _login(core,req)
         with e.connect() as c:
             row=c.execute(text("SELECT pdf_content,page_count FROM pi_magazine_fresh_uploads WHERE upload_id=CAST(:u AS UUID)"),{'u':upload_id}).first()
@@ -331,9 +370,25 @@ def register(core):
         if row[0] is None: raise HTTPException(409,'Stored PDF not found')
         pdf=bytes(row[0])
         doc=fitz.open(stream=pdf,filetype='pdf')
+        if page>len(doc):
+            doc.close()
+            raise HTTPException(400,f'Page out of range: {page}/{len(doc)}')
+        p=doc.load_page(page-1)
+
+        if dense:
+            gw=safe_gateway.ProviderGateway()
+            gw.max_calls=int(os.getenv("ALLIANCE_MAGAZINE_V823_MAX_CALLS","1000"))
+            try:
+                rows,meta=_extract_dense_page(gw,p)
+            finally:
+                doc.close()
+            preview=[]
+            for x in (rows or [])[:80]:
+                ok,reason=_property_purity(x)
+                preview.append({'accepted':ok,'purity_reason':reason,'original_description':x.original_description,'exact_address':x.exact_address,'locality':x.locality,'property_type':x.property_type,'transaction_type':x.transaction_type,'area_value':x.area_value,'area_unit':x.area_unit,'floor':x.floor,'amount_raw':x.amount_raw,'contact_name':x.contact_name,'contact_number':x.contact_number})
+            return {'status':'OK' if rows is not None else 'PROVIDER_UNAVAILABLE','version':'8.3.4','mode':'DENSE_4_REGION','page':page,'region_results':meta.get('regions',[]),'merged_record_count':len(rows or []),'preview':preview,'note':'Dense canary only. No records written and no checkpoint advanced.'}
+
         try:
-            if page>len(doc): raise HTTPException(400,f'Page out of range: {page}/{len(doc)}')
-            p=doc.load_page(page-1)
             scale=PDF_RENDER_DPI/72.0
             jpg=p.get_pixmap(matrix=fitz.Matrix(scale,scale),alpha=False).tobytes('jpeg')
         finally:
@@ -419,7 +474,7 @@ def register(core):
             results.append(item)
         return {
             'status':'OK',
-            'version':'8.3.3',
+            'version':'8.3.4',
             'page':page,
             'render_dpi':PDF_RENDER_DPI,
             'image_bytes':len(jpg),
