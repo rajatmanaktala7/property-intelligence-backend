@@ -17194,3 +17194,12 @@ try:
     print("Alliance Safe Master Promotion 7.1: registered")
 except Exception as _v710_exc:
     print("Alliance Safe Master Promotion 7.1 registration warning:",_v710_exc)
+
+# FOUNDATION_7_1_1_PROMOTION_INTEGRITY_CLOSURE
+try:
+    import sys as _v711_sys
+    import alliance_promotion_integrity_v711 as _v711
+    _v711.start(_v711_sys.modules[__name__])
+    print("Alliance Promotion Integrity Closure 7.1.1: registered")
+except Exception as _v711_exc:
+    print("Alliance Promotion Integrity Closure 7.1.1 registration warning:",_v711_exc)
