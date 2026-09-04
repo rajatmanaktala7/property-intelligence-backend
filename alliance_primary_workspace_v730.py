@@ -6,7 +6,7 @@ from fastapi import Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import text
 
-VERSION="7.3.3-ALLIANCE-REQUIREMENT-OPERATIONS"
+VERSION="7.3.4-ALLIANCE-UNIVERSAL-RECORD-STANDARD"
 MODE="V721_CERTIFIED_PRIMARY_TEAM_WORKSPACE_VERIFY_ASSIGN_MATCH_ALTERNATIVES_REVIEW_CLIENT_SAFE_DRAFT_FOLLOWUP_SOURCE_EVIDENCE_NO_CANONICAL_MUTATION"
 STATE={"status":"STARTING","started_at":datetime.now(timezone.utc).isoformat(),"result":None,"last_error":None}
 _LOCK=threading.Lock()
@@ -137,7 +137,7 @@ form.inline{{display:flex;gap:7px;flex-wrap:wrap;align-items:center}}.muted{{col
 details.admin{{background:#fff;border:1px solid #dfe6ee;padding:8px 12px}}details.admin a{{margin:5px;display:inline-block}}
 .actions{{display:flex;gap:5px;flex-wrap:wrap}}.right{{text-align:right}}
 </style></head><body>
-<header><div><b>Alliance CRE Operating System · 7.3.3</b><br><small>Capture Requirement → Assign → Verify Availability → Match → Review → Client-safe draft → Follow-up</small></div>
+<header><div><b>Alliance CRE Operating System · 7.3.4</b><br><small>Capture Evidence → Structure → Assign → Verify → Match → Review → Follow-up</small></div>
 <div>{html.escape(str(role))} · <a href="/logout" style="color:white">Logout</a></div></header>
 <nav>{nav}</nav>{admin}<div class="wrap"><h2>{html.escape(title)}</h2>{body}</div></body></html>"""
 
@@ -495,6 +495,108 @@ def _v733_requirement_card(r, action=None, source=None):
 def _v733_property_value(p, names):
     return _v733_pick_any(p, names)
 
+# 7.3.4 UNIVERSAL RECORD STANDARD
+# One master entity. Every source/evidence event remains preserved underneath it.
+# Original description/message is evidence and must never be replaced by AI structured fields.
+def _v734_first_evidence(engine, cid):
+    try:
+        ev = _v732_evidence(engine, cid)
+    except Exception:
+        ev = []
+    return ev[0] if ev else {}
+
+def _v734_universal_record(engine, cid, row=None, entity_type="RECORD"):
+    row = row or {}
+    action = _get_action(engine, cid) or {}
+    ev = _v734_first_evidence(engine, cid)
+    display = ev.get("display") or {}
+    link = ev.get("link") or {}
+
+    source_type = display.get("source_type") or link.get("source_type") or "SOURCE NOT LINKED"
+    source_name = display.get("group") or _v733_pick_any(
+        row, ["source_name","group_name","chat_name","newspaper_name","magazine_name","website","source"]
+    ) or ""
+    person_name = display.get("sender") or _v733_pick_any(
+        row, ["contact_name","sender_name","owner_name","broker_name","client_name","name"]
+    ) or ""
+    contact = display.get("sender_phone") or _v733_pick_any(
+        row, ["contact_phone","phone","mobile","phone_number","owner_phone","broker_phone"]
+    ) or ""
+    if not contact:
+        phones = row.get("phones") if isinstance(row, dict) else None
+        if isinstance(phones, (list, tuple)) and phones:
+            contact = ", ".join(str(x) for x in phones if x not in (None, ""))
+    email = _v733_pick_any(row, ["email","contact_email","sender_email","owner_email","broker_email"]) or ""
+    company = _v733_pick_any(row, ["company_name","brand_name","retailer_name","operator_name","business_name"]) or ""
+    role = _v733_pick_any(row, ["role","contact_role","sender_role","party_role"]) or ""
+    dt = display.get("message_timestamp") or _v733_pick_any(
+        row, ["source_datetime","received_at","posted_at","created_at","date_time","datetime"]
+    ) or ""
+    description = display.get("full_message") or ""
+    if not description and "MANUAL" in str(source_type).upper():
+        description = _v733_pick_any(
+            row, ["original_description","original_message","message","description","raw_text","source_text"]
+        ) or ""
+    verification = row.get("verification_status") or "UNVERIFIED"
+    verified_at = row.get("verified_at") or ""
+    verified_by = row.get("verified_by") or ""
+    assigned_to = action.get("assigned_to") or row.get("workflow_assigned_to") or ""
+    updated_at = row.get("updated_at") or action.get("updated_at") or ""
+    created_at = row.get("created_at") or ""
+    source_record_id = link.get("source_pk") or ""
+    source_table = link.get("source_table") or ""
+    return {
+        "record_id": cid, "entity_type": entity_type, "date_time": dt,
+        "source": source_type, "source_name": source_name, "name": person_name,
+        "contact": contact, "email": email, "company": company, "role": role,
+        "description": description, "assigned_to": assigned_to,
+        "verification_status": verification, "verified_at": verified_at,
+        "verified_by": verified_by, "source_record_id": source_record_id,
+        "source_table": source_table, "created_at": created_at, "updated_at": updated_at,
+    }
+
+def _v734_short(v, n=180):
+    s = _v733_display_value(v)
+    return s if len(s) <= n else s[:n-1] + "…"
+
+def _v734_universal_header(engine, cid, row=None, entity_type="RECORD"):
+    u = _v734_universal_record(engine, cid, row or {}, entity_type)
+    desc = u.get("description") or "Original description/message not captured in linked source evidence."
+    return f"""<div class='card'>
+      <h3>Original Source & Evidence</h3>
+      <div class='grid'>
+        <div><b>Date & Time</b><br>{html.escape(str(u.get('date_time') or 'Not captured'))}</div>
+        <div><b>Source</b><br>{html.escape(str(u.get('source') or 'Not captured'))}</div>
+        <div><b>Source Name</b><br>{html.escape(str(u.get('source_name') or 'Not captured'))}</div>
+        <div><b>Name</b><br>{html.escape(str(u.get('name') or 'Not captured'))}</div>
+        <div><b>Contact No.</b><br>{html.escape(str(u.get('contact') or 'Not captured'))}</div>
+        <div><b>Email</b><br>{html.escape(str(u.get('email') or 'Not captured'))}</div>
+        <div><b>Company / Brand</b><br>{html.escape(str(u.get('company') or 'Not captured'))}</div>
+        <div><b>Role</b><br>{html.escape(str(u.get('role') or 'Not captured'))}</div>
+        <div><b>Assigned To</b><br>{html.escape(str(u.get('assigned_to') or 'UNASSIGNED'))}</div>
+        <div><b>Verification</b><br>{html.escape(str(u.get('verification_status') or 'UNVERIFIED'))}</div>
+        <div><b>Verified Date & Time</b><br>{html.escape(str(u.get('verified_at') or 'Not verified'))}</div>
+        <div><b>Verified By</b><br>{html.escape(str(u.get('verified_by') or 'Not verified'))}</div>
+        <div><b>Record ID</b><br>{html.escape(str(u.get('record_id') or ''))}</div>
+        <div><b>Source Record ID</b><br>{html.escape(str(u.get('source_record_id') or 'Not captured'))}</div>
+      </div>
+      <h4>Original Description / Message</h4>
+      <pre style='font-size:14px;background:#f8fafc;border:1px solid #e1e7ee;padding:14px;border-radius:9px'>{html.escape(str(desc))}</pre>
+      <p class='muted'><b>Rule:</b> this text is source evidence. AI structured fields are displayed separately and never overwrite it.</p>
+    </div>"""
+
+def _v734_queue_cells(engine, cid, row=None, entity_type="RECORD"):
+    u = _v734_universal_record(engine, cid, row or {}, entity_type)
+    return {
+        "date_time": html.escape(str(u.get("date_time") or "Not captured")),
+        "source": html.escape(str(u.get("source") or "Not captured")),
+        "source_name": html.escape(str(u.get("source_name") or "Not captured")),
+        "name": html.escape(str(u.get("name") or "Not captured")),
+        "contact": html.escape(str(u.get("contact") or "Not captured")),
+        "description": html.escape(_v734_short(u.get("description") or "Original message not captured", 220)),
+        "assigned_to": html.escape(str(u.get("assigned_to") or "UNASSIGNED")),
+        "verification": html.escape(str(u.get("verification_status") or "UNVERIFIED")),
+    }
 def _button(url,label,cls="mini"):
     return f'<a class="{cls}" href="{html.escape(url,quote=True)}">{html.escape(label)}</a>'
 
@@ -531,7 +633,7 @@ def register(core):
         _role(core,req);c=_counts(engine)
         cards="".join(f"<div class='card'><div class='muted'>{html.escape(k.replace('_',' ').title())}</div><div class='num'>{v}</div></div>" for k,v in c.items())
         body=f"""<div class='grid'>{cards}</div>
-        <div class='card'><h3>Daily Operating Flow</h3><p><b>1.</b> Open Properties and verify availability. <b>2.</b> Open Requirements and run Match.
+        <div class='card'><h3>Alliance Universal Record Standard</h3><p><b>Every master record:</b> Date & Time · Source · Source Name · Name · Contact No. · Original Description/Message · Assignment · Verification · permanent Record ID · source evidence lineage. AI extraction is separate and never overwrites the original message.</p></div><div class='card'><h3>Daily Operating Flow</h3><p><b>1.</b> Open Properties and verify availability. <b>2.</b> Open Requirements and run Match.
         <b>3.</b> Review exact and alternative options. <b>4.</b> Approve only suitable verified properties.
         <b>5.</b> Generate client-safe draft. <b>6.</b> Assign follow-up.</p></div>
         <div class='grid'>
@@ -542,24 +644,34 @@ def register(core):
 
     @app.get("/alliance/primary/properties",response_class=HTMLResponse)
     def properties(req:Request,q:str=Query(""),transaction:str=Query(""),verification:str=Query("")):
-        _role(core,req);rows=v720._search_properties(engine,q,transaction,1000)
+        _role(core,req);rows=v720._search_properties(engine,"",transaction,1000)
         if verification: rows=[x for x in rows if x.get("verification_status")==verification.upper()]
-        form=f"""<form class='inline'><input name='q' value='{html.escape(q,quote=True)}' placeholder='Locality, city, property'>
+        form=f"""<form class='inline'><input name='q' value='{html.escape(q,quote=True)}' placeholder='Search message, name, contact, source, locality'>
         <select name='transaction'><option value=''>All transactions</option><option {'selected' if transaction=='SALE' else ''}>SALE</option><option {'selected' if transaction=='RENT' else ''}>RENT</option></select>
         <select name='verification'><option value=''>All verification</option><option {'selected' if verification=='VERIFIED' else ''}>VERIFIED</option><option {'selected' if verification=='UNVERIFIED' else ''}>UNVERIFIED</option></select>
         <button class='btn'>Search</button></form>"""
         trs=[]
+        ql=q.strip().lower()
         for p in rows:
-            cid=p["canonical_id"];phones=", ".join(map(str,p.get("phones") or []))
+            cid=p["canonical_id"];u=_v734_queue_cells(engine,cid,p,"PROPERTY")
+            if ql:
+                blob=" ".join([u["date_time"],u["source"],u["source_name"],u["name"],u["contact"],u["description"],str(p.get("locality") or "")]).lower()
+                if ql not in blob: continue
             actions=f"<div class='actions'>{_button('/alliance/primary/property/'+cid,'Open')}"
-            if p.get("verification_status")!="VERIFIED": actions+=f"""<form method='post' action='/alliance/primary/property/{html.escape(cid,quote=True)}/verify' style='display:inline'><button class='mini good'>Verify</button></form>"""
+            if p.get("verification_status")!="VERIFIED":
+                actions+=f"""<form method='post' action='/alliance/primary/property/{html.escape(cid,quote=True)}/verify' style='display:inline'><button class='mini good'>Verify</button></form>"""
             actions+="</div>"
-            trs.append("<tr>"+f"<td>{actions}</td><td>{html.escape(str(p.get('locality') or ''))}</td><td>{html.escape(str(p.get('transaction_type') or ''))}</td>"+
-                       f"<td>{html.escape(str(p.get('area_sqft_display') or ''))}</td><td>{html.escape(str(p.get('area_sqyd') or ''))}</td><td>{html.escape(str(p.get('area_sqm') or ''))}</td>"+
-                       f"<td>{html.escape(str(p.get('sale_amount') or ''))}</td><td>{html.escape(str(p.get('rent_amount') or ''))}</td>"+
-                       f"<td>{html.escape(phones)}</td><td>{html.escape(str(p.get('verification_status') or ''))}</td></tr>")
-        table=f"<div class='card tablebox'><table><tr><th>Actions</th><th>Locality</th><th>Transaction</th><th>Sq Ft</th><th>Sq Yd</th><th>Sq M</th><th>Sale Amount</th><th>Rent Amount</th><th>Internal Contact</th><th>Verification</th></tr>{''.join(trs)}</table></div>"
-        return HTMLResponse(_shell(core,req,f"Master Properties · {len(rows)} shown",form+table))
+            trs.append(f"""<tr>
+              <td>{actions}</td><td>{u['date_time']}</td><td>{u['source']}</td><td>{u['source_name']}</td>
+              <td>{u['name']}</td><td>{u['contact']}</td><td style='min-width:300px'>{u['description']}</td>
+              <td>{html.escape(str(p.get('locality') or ''))}</td><td>{html.escape(str(p.get('transaction_type') or ''))}</td>
+              <td>{html.escape(str(p.get('area_sqft_display') or ''))}</td><td>{html.escape(str(p.get('area_sqyd') or ''))}</td><td>{html.escape(str(p.get('area_sqm') or ''))}</td>
+              <td>{html.escape(str(p.get('sale_amount') or ''))}</td><td>{html.escape(str(p.get('rent_amount') or ''))}</td>
+              <td>{u['verification']}</td><td>{u['assigned_to']}</td></tr>""")
+        table=f"""<div class='card'><p><b>Universal record rule:</b> Date/time, source, source name, name, contact and original description remain visible with every master record. Original evidence is never replaced by AI interpretation.</p></div>
+        <div class='card tablebox'><table><tr><th>Actions</th><th>Date & Time</th><th>Source</th><th>Source Name</th><th>Name</th><th>Contact No.</th><th>Original Description / Message</th>
+        <th>Locality</th><th>Transaction</th><th>Sq Ft</th><th>Sq Yd</th><th>Sq M</th><th>Sale Amount</th><th>Rent Amount</th><th>Verification</th><th>Assigned To</th></tr>{''.join(trs)}</table></div>"""
+        return HTMLResponse(_shell(core,req,f"Master Properties · {len(trs)} shown",form+table))
 
     @app.get("/alliance/primary/property/{cid}",response_class=HTMLResponse)
     def property_detail(cid:str,req:Request):
@@ -569,7 +681,7 @@ def register(core):
         phones=", ".join(map(str,p.get("phones") or []))
         source_html="".join(f"<tr><td>{html.escape(str(x['source_type']))}</td><td>{html.escape(str(x['source_table']))}</td><td>{html.escape(str(x['source_pk']))}</td><td>{html.escape(str(x['source_row_hash']))}</td></tr>" for x in links)
         log_html="".join(f"<tr><td>{html.escape(str(x['created_at']))}</td><td>{html.escape(str(x['action']))}</td><td>{html.escape(str(x['actor'] or ''))}</td><td>{html.escape(json.dumps(x['details'],ensure_ascii=False) if isinstance(x['details'],dict) else str(x['details']))}</td></tr>" for x in logs)
-        body=f"""<div class='grid'>
+        body=_v734_universal_header(engine,cid,p,"PROPERTY")+f"""<div class='grid'>
         <div class='card'><h3>{html.escape(str(p.get('locality') or cid))}</h3>
         <p><b>ID:</b> {html.escape(cid)}<br><b>Transaction:</b> {html.escape(str(p.get('transaction_type') or ''))}<br>
         <b>Area:</b> {p.get('area_sqft_display') or ''} sq ft · {p.get('area_sqyd') or ''} sq yd · {p.get('area_sqm') or ''} sq m · {p.get('area_acre') or ''} acre<br>
@@ -615,57 +727,43 @@ def register(core):
     @app.get("/alliance/primary/requirements",response_class=HTMLResponse)
     def requirements(req:Request,q:str=Query(""),transaction:str=Query(""),source:str=Query(""),assignment:str=Query("")):
         _role(core,req)
-        rows=v720._search_requirements(engine,q,transaction,500)
+        rows=v720._search_requirements(engine,"",transaction,500)
         actions=_v733_action_map(engine,"REQUIREMENT")
-        enriched=[]
+        enriched=[];ql=q.strip().lower()
         for r in rows:
-            cid=r["canonical_id"]
-            src=_v733_source_summary(engine,cid)
-            act=actions.get(cid) or {}
-            source_text=" ".join(str(x) for x in [src.get("source_type"),src.get("group"),src.get("sender")] if x).lower()
-            if source and source.lower() not in source_text:
-                continue
-            if assignment=="UNASSIGNED" and act.get("assigned_to"):
-                continue
-            if assignment=="ASSIGNED" and not act.get("assigned_to"):
-                continue
-            enriched.append((r,src,act))
+            cid=r["canonical_id"];act=actions.get(cid) or {};u=_v734_queue_cells(engine,cid,r,"REQUIREMENT")
+            source_text=" ".join([u["source"],u["source_name"],u["name"],u["contact"],u["description"]]).lower()
+            if source and source.lower() not in source_text: continue
+            if assignment=="UNASSIGNED" and act.get("assigned_to"): continue
+            if assignment=="ASSIGNED" and not act.get("assigned_to"): continue
+            if ql:
+                blob=" ".join([source_text,str(r.get("locality") or ""),str(r.get("transaction_type") or ""),str(r.get("sale_budget") or ""),str(r.get("rent_budget") or "")]).lower()
+                if ql not in blob: continue
+            enriched.append((r,act,u))
         form=f"""<div class='card'><form class='inline'>
-        <input name='q' value='{html.escape(q,quote=True)}' placeholder='Location, client, company, requirement'>
+        <input name='q' value='{html.escape(q,quote=True)}' placeholder='Search message, name, contact, source, location'>
         <select name='transaction'><option value=''>All transactions</option><option {'selected' if transaction=='SALE' else ''}>SALE</option><option {'selected' if transaction=='RENT' else ''}>RENT</option></select>
-        <input name='source' value='{html.escape(source,quote=True)}' placeholder='Source or WhatsApp group'>
+        <input name='source' value='{html.escape(source,quote=True)}' placeholder='Source / WhatsApp group'>
         <select name='assignment'><option value=''>All assignments</option><option value='UNASSIGNED' {'selected' if assignment=='UNASSIGNED' else ''}>UNASSIGNED</option><option value='ASSIGNED' {'selected' if assignment=='ASSIGNED' else ''}>ASSIGNED</option></select>
         <button class='btn'>Search</button></form></div>"""
         trs=[]
-        for r,src,act in enriched:
+        for r,act,u in enriched:
             cid=r["canonical_id"]
-            phones=", ".join(map(str,r.get("phones") or []))
             acts=_button("/alliance/primary/requirement/"+cid,"Full Requirement")+" "+_button("/alliance/primary/availability?requirement_id="+cid,"Availability","mini good")
-            source_bits=[str(src.get("source_type") or "")]
-            if src.get("group"):source_bits.append("Group: "+str(src.get("group")))
-            if src.get("sender"):source_bits.append("From: "+str(src.get("sender")))
-            if src.get("message_timestamp"):source_bits.append(str(src.get("message_timestamp")))
-            source_html="<br>".join(html.escape(x) for x in source_bits if x)
             stage=str(act.get("stage") or "NEW")
             assign=f"""<form method='post' action='/alliance/primary/action/{html.escape(cid,quote=True)}/REQUIREMENT'>
               <input name='assigned_to' value='{html.escape(str(act.get("assigned_to") or ""),quote=True)}' placeholder='Team member' style='width:125px'>
-              <input type='hidden' name='stage' value='{html.escape(stage,quote=True)}'>
-              <input type='hidden' name='next_followup_at' value=''>
+              <input type='hidden' name='stage' value='{html.escape(stage,quote=True)}'><input type='hidden' name='next_followup_at' value=''>
               <input type='hidden' name='internal_notes' value='{html.escape(str(act.get("internal_notes") or ""),quote=True)}'>
               <button class='mini'>Assign</button></form><small>{html.escape(stage)}</small>"""
-            trs.append(f"""<tr>
-              <td>{acts}</td>
-              <td>{source_html}</td>
-              <td>{html.escape(str(r.get('locality') or ''))}</td>
-              <td>{html.escape(str(r.get('transaction_type') or ''))}</td>
-              <td>{html.escape(str(r.get('area_sqft_display') or ''))}</td>
-              <td>{html.escape(str(r.get('sale_budget') or ''))}</td>
-              <td>{html.escape(str(r.get('rent_budget') or ''))}</td>
-              <td>{html.escape(phones)}</td>
-              <td>{assign}</td>
-            </tr>""")
-        table=f"""<div class='card'><p><b>Operating rule:</b> Every requirement stays tied to its original source. WhatsApp group/chat, sender and timestamp are shown when captured. Missing source facts stay marked as not captured.</p></div>
-        <div class='card tablebox'><table><tr><th>Actions</th><th>Source</th><th>Location</th><th>Transaction</th><th>Sq Ft</th><th>Sale Budget</th><th>Rent Budget</th><th>Requirement Contact</th><th>Team Assignment</th></tr>{''.join(trs)}</table></div>"""
+            trs.append(f"""<tr><td>{acts}</td><td>{u['date_time']}</td><td>{u['source']}</td><td>{u['source_name']}</td>
+              <td>{u['name']}</td><td>{u['contact']}</td><td style='min-width:340px'>{u['description']}</td>
+              <td>{html.escape(str(r.get('locality') or ''))}</td><td>{html.escape(str(r.get('transaction_type') or ''))}</td>
+              <td>{html.escape(str(r.get('area_sqft_display') or ''))}</td><td>{html.escape(str(r.get('sale_budget') or ''))}</td><td>{html.escape(str(r.get('rent_budget') or ''))}</td>
+              <td>{u['verification']}</td><td>{assign}</td></tr>""")
+        table=f"""<div class='card'><p><b>Universal record rule:</b> Requirement Message is the actual original source message when recoverable. AI extracted fields stay separate.</p></div>
+        <div class='card tablebox'><table><tr><th>Actions</th><th>Date & Time</th><th>Source</th><th>Source Name</th><th>Name</th><th>Contact No.</th><th>Original Requirement Message</th>
+        <th>Location</th><th>Transaction</th><th>Sq Ft</th><th>Sale Budget</th><th>Rent Budget</th><th>Verification</th><th>Team Assignment</th></tr>{''.join(trs)}</table></div>"""
         return HTMLResponse(_shell(core,req,f"Requirement Intelligence · {len(enriched)}",form+table))
 
     @app.get("/alliance/primary/requirement/{cid}",response_class=HTMLResponse)
@@ -677,7 +775,7 @@ def register(core):
         source=_v733_source_summary(engine,cid)
         fields=_v733_requirement_fields(r)
         field_html="".join(f"<div><b>{html.escape(str(k))}</b><br>{html.escape(str(v))}</div>" for k,v in fields)
-        body=_v733_requirement_card(r,action,source)
+        body=_v734_universal_header(engine,cid,r,"REQUIREMENT")+_v733_requirement_card(r,action,source)
         body+=f"""<div class='grid'>
         <div class='card'><h3>Team Ownership & Next Action</h3>
         <form method='post' action='/alliance/primary/action/{html.escape(cid,quote=True)}/REQUIREMENT'>
