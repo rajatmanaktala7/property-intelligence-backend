@@ -604,6 +604,19 @@ def _load_core():
                 "fail_safe":True
             }
             print("[magazine-complete-v860] warning:", type(exc).__name__, str(exc))
+
+        # ALLIANCE_FINAL_DATABASE_GRID_V870
+        try:
+            import alliance_final_database_grid_v870 as alliance_final_database_grid_v870
+            grid_result = alliance_final_database_grid_v870.register(wrapped.core)
+            stabilization = dict(stabilization or {})
+            stabilization["final_database_grid_v870"] = grid_result
+            print("[final-database-grid-v870]", grid_result)
+        except Exception as exc:
+            stabilization = dict(stabilization or {})
+            stabilization["final_database_grid_v870"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","fail_safe":True}
+            print("[final-database-grid-v870] warning:", type(exc).__name__, str(exc))
+
         CORE_APP = wrapped.app
         try:
             import alliance_whatsapp_safe_ingest_v5 as safe_wa
