@@ -4,7 +4,7 @@ from fastapi import Body, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
 from sqlalchemy import text
 
-VERSION="8.6.0-COMPLETE-MAGAZINE-DATABASE"
+VERSION="8.6.1-COMPLETE-MAGAZINE-DATABASE-TAKEOVER"
 
 MOBILE_RE=re.compile(r"(?<!\d)([6-9]\d{9})(?!\d)")
 LANDLINE_RE=re.compile(r"(?<!\d)(0?11[-\s]?\d{7,8}(?:/\d(?:/\d)*)?)(?!\d)")
@@ -238,6 +238,19 @@ def register(core):
         with e.connect() as c:rows=c.execute(text("SELECT action,actor,note,created_at FROM pi_magazine_complete_history_v860 WHERE property_id=:p ORDER BY id DESC LIMIT 100"),{"p":pid}).mappings().all()
         return {"property_id":pid,"history":[dict(x) for x in rows]}
 
+    @app.get("/api/magazine-complete/status")
+    def complete_status(req:Request):
+        _login(core,req)
+        with e.connect() as c:
+            r=c.execute(text("""SELECT
+            COUNT(*) FILTER(WHERE archived_at IS NULL AND record_status='ACTIVE') AS active,
+            COUNT(*) FILTER(WHERE location IS NULL OR BTRIM(location)='') AS missing_location,
+            COUNT(*) FILTER(WHERE property_category IS NULL OR BTRIM(property_category)='') AS missing_category,
+            COUNT(*) FILTER(WHERE needs_review AND archived_at IS NULL) AS needs_review
+            FROM pi_magazine_complete_v860""")).mappings().first()
+        return {"status":"OK","version":VERSION,**dict(r)}
+
+    @app.get("/magazine-complete",response_class=HTMLResponse)
     @app.get("/magazine-organizer",response_class=HTMLResponse)
     def page(req:Request,limit:int=Query(2500,ge=1,le=5000)):
         _login(core,req)
@@ -275,4 +288,4 @@ def register(core):
         async function historyRec(id){let d=await (await fetch('/api/magazine-complete/history/'+id)).json();alert(JSON.stringify(d.history,null,2))}
         </script></body></html>""",headers={"Cache-Control":"no-store"})
 
-    return {"status":"REGISTERED","version":VERSION,"page":"/magazine-organizer"}
+    return {"status":"REGISTERED","version":VERSION,"page":"/magazine-organizer","alias":"/magazine-complete","status_api":"/api/magazine-complete/status"}

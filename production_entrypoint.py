@@ -574,9 +574,36 @@ def _load_core():
         # ALLIANCE_MAGAZINE_COMPLETE_V860
         try:
             import alliance_magazine_complete_v860 as magazine_complete_v860
-            wrapped.stabilization["magazine_complete_v860"] = magazine_complete_v860.register(wrapped.core)
+            complete_result = magazine_complete_v860.register(wrapped.core)
+            stabilization = dict(stabilization or {})
+            stabilization["magazine_complete_v860"] = complete_result
+
+            complete_routes = [
+                r for r in list(wrapped.app.router.routes)
+                if getattr(r, "path", None) == "/magazine-organizer"
+                and "GET" in set(getattr(r, "methods", set()) or set())
+                and getattr(getattr(r, "endpoint", None), "__module__", "") == "alliance_magazine_complete_v860"
+            ]
+            if not complete_routes:
+                raise RuntimeError("8.6 complete Magazine GET route was not registered")
+            chosen = complete_routes[-1]
+            wrapped.app.router.routes.remove(chosen)
+            wrapped.app.router.routes.insert(0, chosen)
+            stabilization["magazine_complete_v860_takeover"] = {
+                "status":"AUTHORITATIVE",
+                "path":"/magazine-organizer",
+                "alias":"/magazine-complete",
+                "module":"alliance_magazine_complete_v860",
+            }
+            print("[magazine-complete-v860]", complete_result)
         except Exception as exc:
-            wrapped.stabilization["magazine_complete_v860"] = {"status":"ERROR","error":str(exc)}
+            stabilization = dict(stabilization or {})
+            stabilization["magazine_complete_v860"] = {
+                "status":"ERROR",
+                "error":f"{type(exc).__name__}: {exc}",
+                "fail_safe":True
+            }
+            print("[magazine-complete-v860] warning:", type(exc).__name__, str(exc))
         CORE_APP = wrapped.app
         try:
             import alliance_whatsapp_safe_ingest_v5 as safe_wa
