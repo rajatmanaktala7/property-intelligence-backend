@@ -14,7 +14,7 @@ import alliance_magazine_challenger_v514 as semantic_student
 import alliance_magazine_lossless_extraction_v670 as lossless_v670
 import alliance_magazine_section_context_v680 as section_v680
 
-VERSION="8.3.0-ALLIANCE-MAGAZINE-GROQ-VISION-WATERFALL"
+VERSION="8.3.3-ALLIANCE-MAGAZINE-LOSSLESS-CAPTURE"
 MODE="LOCK_199_QUOTA_AWARE_PROVIDER_FAILOVER_CIRCUIT_BREAKER_LOW_CALL_MULTI_TARGET_NO_FALSE_TRAINING_FAILURE"
 
 EXPECTED_EXAM="MAGAZINE_PIXEL_FIELD_V2_610_AUG2026_PAGES_36_38"
@@ -160,13 +160,7 @@ class ProviderGateway:
                     "client":client,"model":model
                 })
 
-        # Groq vision fallback using Groq OpenAI-compatible HTTPS API.
-        gk=(os.getenv("GROQ_API_KEY") or "").strip()
-        gm=(os.getenv("GROQ_VISION_MODEL") or "qwen/qwen3.6-27b").strip()
-        if gk and gm:
-            self.providers.append({"kind":"groq","label":f"GROQ:{gm}","api_key":gk,"model":gm})
-
-        # Optional OpenRouter multimodal fallback. No dependency change: httpx already exists.
+        # OpenRouter first for dense magazine pages; page-23 canary showed materially better row coverage.
         ork=(os.getenv("OPENROUTER_API_KEY") or "").strip()
         orm=(os.getenv("OPENROUTER_VISION_MODEL") or "").strip()
         if ork and orm:
@@ -174,6 +168,12 @@ class ProviderGateway:
                 "kind":"openrouter","label":f"OPENROUTER:{orm}",
                 "api_key":ork,"model":orm
             })
+
+        # Groq remains a vision fallback / verifier.
+        gk=(os.getenv("GROQ_API_KEY") or "").strip()
+        gm=(os.getenv("GROQ_VISION_MODEL") or "qwen/qwen3.6-27b").strip()
+        if gk and gm:
+            self.providers.append({"kind":"groq","label":f"GROQ:{gm}","api_key":gk,"model":gm})
 
     def _available(self,p):
         until=self.cooldown.get(p["label"])

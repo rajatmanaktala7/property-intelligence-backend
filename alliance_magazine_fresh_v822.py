@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import text
 import alliance_magazine_safe_gateway_v660 as safe_gateway
 
-VERSION='8.3.2-PROPERTY-PURITY-GROQ-900'
+VERSION='8.3.3-LOSSLESS-PROPERTY-CAPTURE'
 CHUNK_SIZE=4*1024*1024
 MAX_UPLOAD_MB=int(os.getenv('MAX_UPLOAD_MB','100'))
 PDF_RENDER_DPI=int(os.getenv('PDF_RENDER_DPI','220'))
@@ -23,7 +23,7 @@ class FreshProperty(BaseModel):
     city: Optional[str]=None
     property_type: Optional[str]=None
     transaction_type: Optional[str]=None
-    area_value: Optional[float]=None
+    area_value: Optional[object]=None
     area_unit: Optional[str]=None
     floor: Optional[str]=None
     amount_raw: Optional[str]=None
@@ -49,6 +49,9 @@ STRICT RULES:
 7. area_unit should be SQFT, SQYD, SQM or ACRE only when visible.
 8. exact_address must be an actual property/building/unit/address reference, not merely the locality heading.
 9. If unclear, return null rather than guessing.
+9A. CAPTURE FIRST, PARSE SECOND: if a genuine property row has a complex area such as 2200FT+200FT GARAGE, preserve the complete expression in original_description and return area_value as the visible expression if a single numeric value is impossible.
+9B. Never omit a genuine property row merely because area, amount, floor, contact, address or another structured field is missing or complex. Keep the row and use null for fields that cannot be safely normalized.
+9C. A genuine classified property row may be short. Missing price or missing area does NOT make it an advertisement.
 10. extraction_confidence is 0-100.
 OUTPUT CONTRACT:
 Return JSON only. No markdown and no commentary.
@@ -96,10 +99,18 @@ def _setup(e):
     with e.begin() as c:
         for q in ddls: c.execute(text(q))
 
-def _sqft(value,unit):
+def _area_number(value):
     if value is None: return None
-    try: v=float(value)
-    except: return None
+    if isinstance(value,(int,float)): return float(value)
+    s=str(value).strip().replace(',','')
+    if re.fullmatch(r'\d+(?:\.\d+)?',s):
+        try:return float(s)
+        except:return None
+    return None
+
+def _sqft(value,unit):
+    v=_area_number(value)
+    if v is None: return None
     u=str(unit or '').upper().replace(' ','')
     return {'SQFT':v,'SQYD':v*9,'SQM':v*10.7639104167,'ACRE':v*43560}.get(u)
 
@@ -112,28 +123,28 @@ def _extract_page(client,jpg):
 
 def _property_purity(x):
     raw=re.sub(r'\s+',' ',str(getattr(x,'original_description','') or '')).strip()
+    if not raw:return False,'EMPTY_ROW'
     up=raw.upper()
-    address=str(getattr(x,'exact_address',None) or '').strip()
-    ptype=str(getattr(x,'property_type',None) or '').strip()
+    area=getattr(x,'area_value',None)
     floor=str(getattr(x,'floor',None) or '').strip()
     amount=str(getattr(x,'amount_raw',None) or '').strip()
-    area=getattr(x,'area_value',None)
-    unit=str(getattr(x,'area_unit',None) or '').strip()
-    evidence=0
-    if area is not None and unit: evidence+=2
-    if floor: evidence+=1
-    if amount: evidence+=1
-    if ptype: evidence+=1
-    if address and evidence: evidence+=1
-    terms=['REALTORS','PROPERTY DEALER','REAL ESTATE CONSULTANT','SALE-PURCHASE-RENTING','SALE | PURCHASE | RENTING','SALE PURCHASE RENTING','COLLABORATION DEALS','COLLABORATION IN','SOUTH DELHI EXPERTS','WE SPL. IN','EMAIL :','EMAIL:']
-    hits=sum(1 for t in terms if t in up)
+    address=str(getattr(x,'exact_address',None) or '').strip()
+    locality=str(getattr(x,'locality',None) or '').strip()
+    ptype=str(getattr(x,'property_type',None) or '').strip()
+    tx=str(getattr(x,'transaction_type',None) or '').strip()
+    property_signal=bool(area is not None or floor or amount or ptype or tx)
+    if re.search(r'\b(?:BHK|BR|GF|FF|SF|TF|BMT|BASEMENT|FLOOR|FLR|APT|APARTMENT|FLAT|KOTHI|PLOT|SHOP|OFFICE|SHOWROOM|SQFT|SQYD|SQM|ACRE|\d+\s*Y\b|\d+\s*FT\b)\b',up):
+        property_signal=True
+    if address and locality and address.upper()!=locality.upper(): property_signal=True
+    agency_terms=['REALTORS','PROPERTY DEALER','REAL ESTATE CONSULTANT','REALTY','SALE-PURCHASE-RENTING','SALE | PURCHASE | RENTING','SALE PURCHASE RENTING','COLLABORATION DEALS','COLLABORATION IN','WE SPL. IN','WE SPECIALISE IN','WE SPECIALIZE IN']
+    agency_hits=sum(1 for t in agency_terms if t in up)
     compact=re.sub(r'[\s-]','',raw)
     phones=len(set(re.findall(r'(?<!\d)[6-9]\d{9}(?!\d)',compact)))
     has_email=bool(re.search(r'\b[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}\b',raw))
-    contact_card=(hits>=2) or (has_email and phones>=2 and hits>=1)
-    if contact_card and evidence<2: return False,'BROKER_OR_AGENCY_AD'
-    if address and evidence==0 and hits>=1: return False,'AGENCY_OFFICE_ADDRESS_NOT_PROPERTY'
-    if evidence==0 and not address: return False,'NO_PROPERTY_SPECIFIC_EVIDENCE'
+    has_web=bool(re.search(r'\b(?:WWW\.|HTTPS?://)',up))
+    if not property_signal and (agency_hits>=2 or (agency_hits>=1 and (has_email or has_web or phones>=2))):
+        return False,'BROKER_OR_AGENCY_AD'
+    if not property_signal:return True,'PROPERTY_CANDIDATE_NEEDS_REVIEW'
     return True,'PROPERTY_LISTING'
 
 def _save(e,uid,page,rows):
@@ -145,10 +156,12 @@ def _save(e,uid,page,rows):
             original=re.sub(r'\s+',' ',x.original_description or '').strip()
             if not original: continue
             h=hashlib.sha256(original.lower().encode()).hexdigest()
-            nr=not x.exact_address or not x.contact_number or x.extraction_confidence is None or float(x.extraction_confidence)<80
+            area_num=_area_number(x.area_value)
+            complex_area=(x.area_value is not None and area_num is None)
+            nr=complex_area or not x.exact_address or not x.contact_number or x.extraction_confidence is None or float(x.extraction_confidence)<80
             p=dict(record_id='MAGNEW-'+uuid.uuid4().hex[:16].upper(),uid=uid,page=page,section=x.section_heading,
               original=original,address=x.exact_address,locality=x.locality,city=x.city,ptype=x.property_type,tx=x.transaction_type,
-              area=x.area_value,unit=x.area_unit,sqft=_sqft(x.area_value,x.area_unit),floor=x.floor,amount=x.amount_raw,
+              area=area_num,unit=x.area_unit,sqft=_sqft(x.area_value,x.area_unit),floor=x.floor,amount=x.amount_raw,
               cname=x.contact_name,cphone=x.contact_number,confidence=x.extraction_confidence,review=nr,h=h,
               raw=json.dumps(x.model_dump(),ensure_ascii=False))
             z=c.execute(text('''INSERT INTO pi_magazine_fresh_records(record_id,upload_id,page_number,section_heading,original_description,
@@ -190,6 +203,11 @@ def _process(core,uid):
         with e.connect() as c:row=c.execute(text("SELECT pdf_content,processed_pages FROM pi_magazine_fresh_uploads WHERE upload_id=CAST(:u AS UUID)"),{'u':uid}).first()
         if not row or row[0] is None:raise RuntimeError("Stored PDF not found")
         pdf=bytes(row[0]);start=int(row[1] or 0);doc=fitz.open(stream=pdf,filetype='pdf');pages=len(doc)
+        requested_start=max(1,int(os.getenv("MAGAZINE_START_PAGE","23")))
+        if start < requested_start-1:
+            start=requested_start-1
+            with e.begin() as c:
+                c.execute(text("UPDATE pi_magazine_fresh_uploads SET processed_pages=:d,error_message=:x WHERE upload_id=CAST(:u AS UUID)"),{'d':start,'x':"Skipped non-property front matter through page "+str(start),'u':uid})
         with e.connect() as c:counts=c.execute(text("SELECT COUNT(*),COUNT(*) FILTER(WHERE needs_review) FROM pi_magazine_fresh_records WHERE upload_id=CAST(:u AS UUID)"),{'u':uid}).first()
         tm=int(counts[0] or 0);tr=int(counts[1] or 0)
         with e.begin() as c:c.execute(text("UPDATE pi_magazine_fresh_uploads SET status='PROCESSING',page_count=:p,created_records=:m,review_records=:r,error_message=NULL WHERE upload_id=CAST(:u AS UUID)"),{'p':pages,'m':tm,'r':tr,'u':uid})
@@ -212,7 +230,7 @@ def _process(core,uid):
         with e.begin() as c:c.execute(text("UPDATE pi_magazine_fresh_uploads SET status='PAUSED_ERROR',error_message=:x WHERE upload_id=CAST(:u AS UUID)"),{'x':f'{type(exc).__name__}: {exc}'[:4000],'u':uid})
 
 def _page():
-    return '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">\n<title>Alliance Magazine Resume</title><style>body{font-family:Arial;background:#f4f7fb;margin:0;color:#172437}.top{background:#102235;color:white;padding:20px}.wrap{max-width:1180px;margin:auto;padding:20px}.card{background:white;padding:18px;border-radius:14px;margin-bottom:14px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}.num{font-size:28px;font-weight:800}.muted{color:#66758a}.btn{background:#1266f1;color:white;border:0;border-radius:9px;padding:11px 18px;font-weight:700;cursor:pointer}.good{color:#16833c}.bad{color:#bd2f2f}a{color:#1266f1;text-decoration:none}table{width:100%;border-collapse:collapse}td,th{padding:8px;border-bottom:1px solid #e5eaf0;text-align:left}</style></head>\n<body><div class="top"><b>Fresh Magazine PDF Database · CRE OS 8.3.2</b><br><small>Gemini -> Groq Vision -> OpenRouter · real-page validation · checkpoint resume</small></div>\n<div class="wrap"><div class="card"><a href="/workspace">← Dashboard</a> · <a href="/magazine-fresh/records">New Magazine Records</a></div>\n<div class="card"><h2>Current / Previous Magazine</h2><p id="name" class="muted">Checking stored jobs...</p><div id="stats" class="grid"></div><p id="state" class="muted"></p><button id="resume" class="btn" style="display:none">Resume Extraction</button></div>\n<div class="card"><h3>Recent Magazine Jobs</h3><div id="jobs">Loading...</div></div>\n<div class="card"><h3>New Magazine</h3><p class="muted">For a genuinely new magazine, use the existing upload page after the current database is validated.</p></div></div>\n<script>\nlet active=null,timer=null;\nfunction esc(x){return String(x??\'\').replace(/[&<>"\']/g,m=>({\'&\':\'&amp;\',\'<\':\'&lt;\',\'>\':\'&gt;\',\'"\':\'&quot;\',"\'":\'&#39;\'}[m]))}\nfunction render(d){active=d.upload_id;name.innerHTML=\'<b>\'+esc(d.filename)+\'</b> · \'+esc(d.status);stats.innerHTML=\'<div class="card"><div class="muted">Pages</div><div class="num">\'+d.processed_pages+\'/\'+d.page_count+\'</div></div><div class="card"><div class="muted">Records</div><div class="num">\'+d.created_records+\'</div></div><div class="card"><div class="muted">Needs review</div><div class="num">\'+d.review_records+\'</div></div><div class="card"><div class="muted">Status</div><b>\'+esc(d.status)+\'</b></div>\';state.textContent=d.error_message||\'Ready.\';resume.style.display=[\'ERROR\',\'PAUSED_ERROR\',\'WAITING_FOR_PROVIDER\',\'STORED\'].includes(d.status)?\'inline-block\':\'none\'}\nasync function load(){let r=await fetch(\'/api/magazine-fresh/latest\');if(!r.ok){state.textContent=\'Unable to read stored jobs.\';return}let d=await r.json();if(d.latest)render(d.latest);else{name.textContent=\'No stored Magazine PDF found.\'}jobs.innerHTML=(d.uploads||[]).length?\'<table><tr><th>PDF</th><th>Status</th><th>Pages</th><th>Records</th></tr>\'+d.uploads.map(x=>\'<tr><td>\'+esc(x.filename)+\'</td><td>\'+esc(x.status)+\'</td><td>\'+x.processed_pages+\'/\'+x.page_count+\'</td><td>\'+x.created_records+\'</td></tr>\').join(\'\')+\'</table>\':\'No previous jobs.\'}\nresume.onclick=async()=>{if(!active)return;resume.disabled=true;let r=await fetch(\'/api/magazine-fresh/resume/\'+active,{method:\'POST\'});let d=await r.json();state.textContent=d.status||d.detail||\'Resume requested\';resume.disabled=false;setTimeout(load,1000)}\nload();timer=setInterval(load,4000);\n</script></body></html>'
+    return '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">\n<title>Alliance Magazine Resume</title><style>body{font-family:Arial;background:#f4f7fb;margin:0;color:#172437}.top{background:#102235;color:white;padding:20px}.wrap{max-width:1180px;margin:auto;padding:20px}.card{background:white;padding:18px;border-radius:14px;margin-bottom:14px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}.num{font-size:28px;font-weight:800}.muted{color:#66758a}.btn{background:#1266f1;color:white;border:0;border-radius:9px;padding:11px 18px;font-weight:700;cursor:pointer}.good{color:#16833c}.bad{color:#bd2f2f}a{color:#1266f1;text-decoration:none}table{width:100%;border-collapse:collapse}td,th{padding:8px;border-bottom:1px solid #e5eaf0;text-align:left}</style></head>\n<body><div class="top"><b>Fresh Magazine PDF Database · CRE OS 8.3.3</b><br><small>Gemini -> OpenRouter -> Groq Vision · real-page validation · checkpoint resume</small></div>\n<div class="wrap"><div class="card"><a href="/workspace">← Dashboard</a> · <a href="/magazine-fresh/records">New Magazine Records</a></div>\n<div class="card"><h2>Current / Previous Magazine</h2><p id="name" class="muted">Checking stored jobs...</p><div id="stats" class="grid"></div><p id="state" class="muted"></p><button id="resume" class="btn" style="display:none">Resume Extraction</button></div>\n<div class="card"><h3>Recent Magazine Jobs</h3><div id="jobs">Loading...</div></div>\n<div class="card"><h3>New Magazine</h3><p class="muted">For a genuinely new magazine, use the existing upload page after the current database is validated.</p></div></div>\n<script>\nlet active=null,timer=null;\nfunction esc(x){return String(x??\'\').replace(/[&<>"\']/g,m=>({\'&\':\'&amp;\',\'<\':\'&lt;\',\'>\':\'&gt;\',\'"\':\'&quot;\',"\'":\'&#39;\'}[m]))}\nfunction render(d){active=d.upload_id;name.innerHTML=\'<b>\'+esc(d.filename)+\'</b> · \'+esc(d.status);stats.innerHTML=\'<div class="card"><div class="muted">Pages</div><div class="num">\'+d.processed_pages+\'/\'+d.page_count+\'</div></div><div class="card"><div class="muted">Records</div><div class="num">\'+d.created_records+\'</div></div><div class="card"><div class="muted">Needs review</div><div class="num">\'+d.review_records+\'</div></div><div class="card"><div class="muted">Status</div><b>\'+esc(d.status)+\'</b></div>\';state.textContent=d.error_message||\'Ready.\';resume.style.display=[\'ERROR\',\'PAUSED_ERROR\',\'WAITING_FOR_PROVIDER\',\'STORED\'].includes(d.status)?\'inline-block\':\'none\'}\nasync function load(){let r=await fetch(\'/api/magazine-fresh/latest\');if(!r.ok){state.textContent=\'Unable to read stored jobs.\';return}let d=await r.json();if(d.latest)render(d.latest);else{name.textContent=\'No stored Magazine PDF found.\'}jobs.innerHTML=(d.uploads||[]).length?\'<table><tr><th>PDF</th><th>Status</th><th>Pages</th><th>Records</th></tr>\'+d.uploads.map(x=>\'<tr><td>\'+esc(x.filename)+\'</td><td>\'+esc(x.status)+\'</td><td>\'+x.processed_pages+\'/\'+x.page_count+\'</td><td>\'+x.created_records+\'</td></tr>\').join(\'\')+\'</table>\':\'No previous jobs.\'}\nresume.onclick=async()=>{if(!active)return;resume.disabled=true;let r=await fetch(\'/api/magazine-fresh/resume/\'+active,{method:\'POST\'});let d=await r.json();state.textContent=d.status||d.detail||\'Resume requested\';resume.disabled=false;setTimeout(load,1000)}\nload();timer=setInterval(load,4000);\n</script></body></html>'
 
 def register(core):
     app=_app(core); e=_engine(core)
@@ -401,7 +419,7 @@ def register(core):
             results.append(item)
         return {
             'status':'OK',
-            'version':'8.3.2',
+            'version':'8.3.3',
             'page':page,
             'render_dpi':PDF_RENDER_DPI,
             'image_bytes':len(jpg),
