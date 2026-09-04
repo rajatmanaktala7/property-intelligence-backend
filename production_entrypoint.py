@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import asyncio
 import threading
@@ -459,6 +459,22 @@ def _load_core():
                 "fail_safe": True,
             }
             print("[business-os-v800] warning:", type(exc).__name__, str(exc))
+
+        # ALLIANCE_CRE_OS_V820
+        try:
+            import alliance_cre_os_v820 as alliance_cre_os_v820
+            business_v820_result = alliance_cre_os_v820.register(wrapped.core)
+            stabilization = dict(stabilization or {})
+            stabilization["business_os_v820"] = business_v820_result
+        except Exception as exc:
+            stabilization = dict(stabilization or {})
+            stabilization["business_os_v820"] = {
+                "status": "ERROR",
+                "error": f"{type(exc).__name__}: {exc}",
+                "fail_safe": True,
+            }
+            print("[business-os-v820] warning:", type(exc).__name__, str(exc))
+
         import alliance_live_feed_purity as live_feed_purity
         live_feed_purity.register(wrapped)
 
