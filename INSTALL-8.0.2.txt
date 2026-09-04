@@ -1,0 +1,21 @@
+Alliance CRE OS 8.0.2 — Master Matcher Source Visibility
+
+This upgrade keeps one Alliance Master Property Database and makes the Matcher visibly show
+the linked source(s) for every result.
+
+Matcher columns:
+Match % / Tier | Property Description / Address | Area | Rent/Sale | Amount |
+Verification + Last Verified + Verified By | Source + Source Name | Assigned To |
+Why Matched | Actions
+
+Sources can include Newspaper, WhatsApp Live, Magazine, Manual Entry and any other source
+already linked through pi_master_source_links_v711.
+
+Important safety rules:
+- One canonical property remains one row even when several sources mention it.
+- Multiple sources are shown together, e.g. Magazine + WhatsApp + Newspaper.
+- VERIFIED + AVAILABLE is clearly marked as confirmed.
+- Unverified stock is visible but not presented as confirmed.
+- Existing source history remains accessible from the property.
+- Owner/broker/source contacts remain internal and are not added to client-safe drafts.
+- No canonical record is created or deleted by this installer.

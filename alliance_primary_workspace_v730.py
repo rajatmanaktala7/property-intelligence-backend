@@ -1,4 +1,5 @@
 from __future__ import annotations
+# 8.0.2 MASTER MATCHER SOURCE VISIBILITY INSTALLED
 import html, json, re, threading, time
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -860,27 +861,157 @@ def register(core):
         table=f"""<div class='card tablebox'><table><tr><th>Score / Tier</th><th>Action</th><th>Property / Location</th><th>Sq Ft</th><th>Rent / Charges</th><th>Sale</th><th>Physical Details</th><th>Possession</th><th>Availability</th><th>Internal Verification Contact</th><th>Why Matched</th></tr>{''.join(rows)}</table></div>"""
         return HTMLResponse(_shell(core,req,f"Availability Verification · {len(rows)} options",form+summary+rule+table))
 
+    # 8.0.2 MASTER MATCHER — one master inventory, transparent source lineage.
     @app.get("/alliance/primary/matcher",response_class=HTMLResponse)
     def matcher(req:Request,requirement_id:str=Query("")):
         _role(core,req)
-        reqs=v720._search_requirements(engine,limit=100)
-        options="".join(f"<option value='{html.escape(x['canonical_id'],quote=True)}' {'selected' if requirement_id==x['canonical_id'] else ''}>{html.escape((x.get('locality') or 'Requirement')+' · '+x['canonical_id'])}</option>" for x in reqs)
-        form=f"<form class='inline'><select name='requirement_id'><option value=''>Choose requirement</option>{options}</select><button class='btn good'>Run Full Master Match</button></form>"
-        if not requirement_id:return HTMLResponse(_shell(core,req,"AI Property Matcher",form+"<div class='card'>The matcher searches the complete Master inventory. Exact locality is ranked first; if unavailable it transparently shows same-city and transaction/area alternatives.</div>"))
-        rr,matches=_match_full(engine,requirement_id,50)
+        reqs=v720._search_requirements(engine,limit=300)
+        options="".join(
+            f"<option value='{html.escape(x['canonical_id'],quote=True)}' "
+            f"{'selected' if requirement_id==x['canonical_id'] else ''}>"
+            f"{html.escape((x.get('locality') or 'Requirement')+' · '+x['canonical_id'])}</option>"
+            for x in reqs
+        )
+        form=f"""<div class='card'><form class='inline'>
+        <select name='requirement_id'><option value=''>Choose requirement</option>{options}</select>
+        <button class='btn good'>Run Master Match</button>
+        </form>
+        <p class='muted'>Searches the single Alliance Master Property Database fed by Newspaper, WhatsApp Live, Magazine and Manual Entry. Duplicate source mentions stay one canonical property and all linked sources remain visible.</p></div>"""
+        if not requirement_id:
+            return HTMLResponse(_shell(
+                core,req,"AI Property Matcher",
+                form+"""<div class='card'>
+                <b>Matching flow:</b> Requirement → one Master Property inventory → ranked matches → source visibility → verification → team approval → client-safe draft.
+                <br><br><b>Client safety:</b> owner/broker/source contacts remain internal and are never inserted into the client-safe draft.
+                </div>"""
+            ))
+
+        rr,matches=_match_full(engine,requirement_id,100)
         trs=[]
         for m in matches:
-            p=m["property"];cid=p["canonical_id"]
+            p=m["property"]; cid=p["canonical_id"]
+
             with engine.connect() as c:
-                rv=c.execute(text("""SELECT review_status FROM pi_match_reviews_v730 WHERE requirement_canonical_id=:r AND property_canonical_id=:p"""),{"r":requirement_id,"p":cid}).scalar() or "READY_FOR_REVIEW"
+                rv=c.execute(text("""SELECT review_status FROM pi_match_reviews_v730
+                  WHERE requirement_canonical_id=:r AND property_canonical_id=:p"""),
+                  {"r":requirement_id,"p":cid}).scalar() or "READY_FOR_REVIEW"
+
+            links=_source_links(engine,cid)
+            source_types=[]; source_names=[]; seen_t=set(); seen_n=set()
+            for link in links:
+                st=str(link.get("source_type") or "").strip()
+                sn=str(link.get("source_table") or "").strip()
+                if st and st not in seen_t:
+                    seen_t.add(st); source_types.append(st)
+                if sn and sn not in seen_n:
+                    seen_n.add(sn); source_names.append(sn)
+
+            try:
+                evs=_v732_evidence(engine,cid)
+            except Exception:
+                evs=[]
+            human_names=[]; seen_h=set()
+            for ev in evs:
+                d=(ev.get("display") or {})
+                n=d.get("group")
+                if n:
+                    n=str(n).strip()
+                    if n and n not in seen_h:
+                        seen_h.add(n); human_names.append(n)
+            if human_names:
+                source_names=human_names + [x for x in source_names if x not in seen_h]
+
+            source_text=" + ".join(source_types) if source_types else str(p.get("source_type") or "SOURCE NOT LINKED")
+            source_name_text=" · ".join(source_names[:4]) if source_names else "Not captured"
+            if len(source_names)>4:
+                source_name_text += f" +{len(source_names)-4} more"
+
+            verification=str(p.get("verification_status") or "UNVERIFIED")
+            availability=str(p.get("availability_status") or "UNKNOWN")
+            verified_at=p.get("verified_at") or ""
+            verified_by=p.get("verified_by") or ""
+            assigned=_get_action(engine,cid).get("assigned_to") or p.get("workflow_assigned_to") or ""
+
+            confirmed=(verification=="VERIFIED" and availability=="AVAILABLE")
+            if confirmed:
+                status_html="<span class='ok'>VERIFIED · AVAILABLE</span>"
+            elif availability=="UNAVAILABLE":
+                status_html="<span class='bad'>UNAVAILABLE</span>"
+            else:
+                status_html=f"<span class='warntext'>{html.escape(verification)} · {html.escape(availability)}</span>"
+
+            address=_v733_pick_any(p,["address","exact_address","property_address","unit_address","building_address"]) or ""
+            building=_v733_pick_any(p,["property_name","building_name","building","project_name","complex_name"]) or ""
+            locality=str(p.get("locality") or "")
+            desc_parts=[str(x).strip() for x in [address,building,locality] if x not in (None,"")]
+            description=" · ".join(dict.fromkeys(desc_parts)) or locality or cid
+
+            amount=""
+            tx=str(p.get("transaction_type") or "")
+            if tx=="SALE":
+                amount=str(p.get("sale_amount") or "")
+            elif tx in {"RENT","LEASE"}:
+                amount=str(p.get("rent_amount") or "")
+            else:
+                amount=str(p.get("rent_amount") or p.get("sale_amount") or "")
+
+            why=m.get("reasons") or []
+            why_text=", ".join(str(x) for x in why) if isinstance(why,(list,tuple)) else str(why)
+
             approve=f"""<form method='post' action='/alliance/primary/match-review' style='display:inline'>
-            <input type='hidden' name='requirement_id' value='{html.escape(requirement_id,quote=True)}'><input type='hidden' name='property_id' value='{html.escape(cid,quote=True)}'>
-            <button class='mini good' name='decision' value='APPROVED'>Approve</button><button class='mini alt' name='decision' value='REJECTED'>Reject</button></form>"""
-            trs.append(f"<tr><td>{m['score']}</td><td>{html.escape(m['tier'])}</td><td>{_button('/alliance/primary/property/'+cid,'Open')}</td><td>{html.escape(str(p.get('locality') or ''))}</td><td>{html.escape(str(p.get('area_sqft_display') or ''))}</td><td>{html.escape(str(p.get('sale_amount') or ''))}</td><td>{html.escape(str(p.get('rent_amount') or ''))}</td><td>{html.escape(str(p.get('verification_status') or ''))}</td><td>{html.escape(str(rv))}<br>{approve}</td></tr>")
-        body=form+f"<div class='card'><b>Requirement:</b> {html.escape(str(rr.get('locality') or requirement_id))} · {html.escape(str(rr.get('transaction_type') or ''))} · {rr.get('area_sqft_display') or ''} sq ft<br><small>Tier is explicit. Alternatives are never presented as exact-locality matches.</small></div>"
-        body+=f"<div class='card tablebox'><table><tr><th>Score</th><th>Tier</th><th>Property</th><th>Locality</th><th>Sq Ft</th><th>Sale</th><th>Rent</th><th>Verification</th><th>Review</th></tr>{''.join(trs)}</table></div>"
+            <input type='hidden' name='requirement_id' value='{html.escape(requirement_id,quote=True)}'>
+            <input type='hidden' name='property_id' value='{html.escape(cid,quote=True)}'>
+            <button class='mini good' name='decision' value='APPROVED'>Approve</button>
+            <button class='mini alt' name='decision' value='REJECTED'>Reject</button>
+            </form>"""
+
+            verify_btn=""
+            if not confirmed:
+                verify_btn=f"""<form method='post' action='/alliance/primary/property/{html.escape(cid,quote=True)}/verify' style='display:inline'>
+                <button class='mini good'>Verify</button></form>"""
+
+            source_detail=_button('/alliance/primary/property/'+cid,'View / Source History','mini alt')
+
+            trs.append(f"""<tr>
+              <td><b>{html.escape(str(m.get('score') or ''))}%</b><br><span class='pill'>{html.escape(str(m.get('tier') or ''))}</span></td>
+              <td style='min-width:280px'><b>{html.escape(description)}</b><br><small>{html.escape(cid)}</small></td>
+              <td>{html.escape(str(p.get('area_sqft_display') or ''))}</td>
+              <td>{html.escape(tx)}</td>
+              <td>{html.escape(amount)}</td>
+              <td>{status_html}<br><small>Last verified: {html.escape(str(verified_at or 'Never'))}</small><br><small>By: {html.escape(str(verified_by or 'Not verified'))}</small></td>
+              <td><b>{html.escape(source_text)}</b><br><small>{html.escape(source_name_text)}</small></td>
+              <td>{html.escape(str(assigned or 'UNASSIGNED'))}</td>
+              <td style='min-width:220px'>{html.escape(why_text)}</td>
+              <td>{_button('/alliance/primary/property/'+cid,'Open','mini')} {verify_btn} {approve}<br>{source_detail}<br><small>{html.escape(str(rv))}</small></td>
+            </tr>""")
+
+        req_source=_v733_source_summary(engine,requirement_id)
+        requirement_summary=f"""<div class='card'>
+        <h3>Requirement being matched</h3>
+        <div class='grid'>
+          <div><b>Location</b><br>{html.escape(str(rr.get('locality') or ''))}</div>
+          <div><b>Transaction</b><br>{html.escape(str(rr.get('transaction_type') or ''))}</div>
+          <div><b>Area</b><br>{html.escape(str(rr.get('area_sqft_display') or ''))} sq ft</div>
+          <div><b>Requirement Source</b><br>{html.escape(str(req_source.get('source_type') or ''))}</div>
+          <div><b>Source Name</b><br>{html.escape(str(req_source.get('group') or 'Not captured'))}</div>
+        </div></div>"""
+
+        legend="""<div class='card'>
+        <b>Result rule:</b> all sources feed one canonical property. A property seen in Magazine + WhatsApp + Newspaper is shown once, with all source types listed.
+        <b>VERIFIED + AVAILABLE</b> is client-ready stock. Unverified matches remain visible for team verification but should not be treated as confirmed.
+        </div>"""
+
+        table=f"""<div class='card tablebox'><table>
+        <tr>
+          <th>Match % / Tier</th><th>Property Description / Address</th><th>Area Sq Ft</th>
+          <th>Rent/Sale</th><th>Amount</th><th>Verification / Last Verified</th>
+          <th>Source / Source Name</th><th>Assigned To</th><th>Why Matched</th><th>Actions</th>
+        </tr>{''.join(trs)}</table></div>"""
+
+        body=form+requirement_summary+legend+table
         body+=_button("/alliance/primary/client-draft/"+requirement_id,"Generate Client-Safe Draft","btn good")
-        return HTMLResponse(_shell(core,req,f"Matcher · {len(matches)} options",body))
+        return HTMLResponse(_shell(core,req,f"Master Matcher · {len(matches)} options",body))
+
 
     @app.post("/alliance/primary/match-review")
     def match_review(req:Request,requirement_id:str=Form(...),property_id:str=Form(...),decision:str=Form(...)):
