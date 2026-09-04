@@ -14,7 +14,7 @@ import alliance_magazine_challenger_v514 as semantic_student
 import alliance_magazine_lossless_extraction_v670 as lossless_v670
 import alliance_magazine_section_context_v680 as section_v680
 
-VERSION="6.6.2-ALLIANCE-MAGAZINE-SCHEMA-TRANSIENT-RETRY-GATEWAY"
+VERSION="8.3.0-ALLIANCE-MAGAZINE-GROQ-VISION-WATERFALL"
 MODE="LOCK_199_QUOTA_AWARE_PROVIDER_FAILOVER_CIRCUIT_BREAKER_LOW_CALL_MULTI_TARGET_NO_FALSE_TRAINING_FAILURE"
 
 EXPECTED_EXAM="MAGAZINE_PIXEL_FIELD_V2_610_AUG2026_PAGES_36_38"
@@ -160,6 +160,12 @@ class ProviderGateway:
                     "client":client,"model":model
                 })
 
+        # Groq vision fallback using Groq OpenAI-compatible HTTPS API.
+        gk=(os.getenv("GROQ_API_KEY") or "").strip()
+        gm=(os.getenv("GROQ_VISION_MODEL") or "qwen/qwen3.6-27b").strip()
+        if gk and gm:
+            self.providers.append({"kind":"groq","label":f"GROQ:{gm}","api_key":gk,"model":gm})
+
         # Optional OpenRouter multimodal fallback. No dependency change: httpx already exists.
         ork=(os.getenv("OPENROUTER_API_KEY") or "").strip()
         orm=(os.getenv("OPENROUTER_VISION_MODEL") or "").strip()
@@ -191,6 +197,21 @@ class ProviderGateway:
         )
         return _json_text(resp.text or "")
 
+    def _call_groq(self,p,img,prompt):
+        b64=base64.b64encode(img).decode("ascii")
+        payload={"model":p["model"],"temperature":0,"reasoning_effort":"none","response_format":{"type":"json_object"},"messages":[{"role":"user","content":[{"type":"text","text":prompt},{"type":"image_url","image_url":{"url":"data:image/jpeg;base64,"+b64}}]}]}
+        with httpx.Client(timeout=120.0) as h:
+            r=h.post("https://api.groq.com/openai/v1/chat/completions",headers={"Authorization":"Bearer "+p["api_key"],"Content-Type":"application/json"},json=payload)
+            if r.status_code==429: raise RuntimeError("429 GROQ_QUOTA "+r.text[:1000])
+            r.raise_for_status()
+            return _json_text(r.json()["choices"][0]["message"]["content"])
+
+    def _call_provider(self,p,img,prompt):
+        if p["kind"]=="gemini": return self._call_gemini(p,img,prompt)
+        if p["kind"]=="groq": return self._call_groq(p,img,prompt)
+        if p["kind"]=="openrouter": return self._call_openrouter(p,img,prompt)
+        raise RuntimeError("Unsupported vision provider: "+str(p.get("kind")))
+
     def _call_openrouter(self,p,img,prompt):
         b64=base64.b64encode(img).decode("ascii")
         payload={
@@ -220,7 +241,7 @@ class ProviderGateway:
             if self.calls>=self.max_calls:break
             attempted+=1;self.calls+=1
             try:
-                data=self._call_gemini(p,img,prompt) if p["kind"]=="gemini" else self._call_openrouter(p,img,prompt)
+                data=self._call_provider(p,img,prompt)
                 self.events.append({"provider":p["label"],"event":"SUCCESS"})
                 return data,{"status":"OK","provider":p["label"]}
             except Exception as exc:
@@ -233,7 +254,7 @@ class ProviderGateway:
                         if self.calls>=self.max_calls: break
                         time.sleep(delay); self.calls+=1
                         try:
-                            data=self._call_gemini(p,img,prompt) if p["kind"]=="gemini" else self._call_openrouter(p,img,prompt)
+                            data=self._call_provider(p,img,prompt)
                             self.events.append({"provider":p["label"],"event":"SUCCESS_AFTER_RETRY"})
                             return data,{"status":"OK","provider":p["label"],"retried":True}
                         except Exception as retry_exc:
