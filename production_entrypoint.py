@@ -415,6 +415,21 @@ def _load_core():
 
         stabilization = production_surface.register(wrapped)
 
+        # 7.3.7 Historical evidence repair is fail-safe and dry-run by default.
+        try:
+            import alliance_historical_repair_v737 as historical_repair_v737
+            repair_result = historical_repair_v737.register(wrapped)
+            stabilization = dict(stabilization or {})
+            stabilization["historical_repair_v737"] = repair_result
+        except Exception as exc:
+            stabilization = dict(stabilization or {})
+            stabilization["historical_repair_v737"] = {
+                "status": "ERROR",
+                "error": f"{type(exc).__name__}: {exc}",
+                "fail_safe": True,
+            }
+            print("[historical-repair-v737] warning:", type(exc).__name__, str(exc))
+
         import alliance_live_feed_purity as live_feed_purity
         live_feed_purity.register(wrapped)
 
@@ -650,3 +665,6 @@ class HealthFirstDispatcher:
 
 
 app = HealthFirstDispatcher()
+
+
+# 7.3.7 HISTORICAL EVIDENCE REPAIR REGISTRATION

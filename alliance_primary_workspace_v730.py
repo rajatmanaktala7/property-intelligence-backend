@@ -6,7 +6,7 @@ from fastapi import Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import text
 
-VERSION="7.3.6-ALLIANCE-MAGAZINE-SECTION-CONTEXT"
+VERSION="7.3.7-ALLIANCE-HISTORICAL-EVIDENCE-REPAIR"
 MODE="V721_CERTIFIED_PRIMARY_TEAM_WORKSPACE_VERIFY_ASSIGN_MATCH_ALTERNATIVES_REVIEW_CLIENT_SAFE_DRAFT_FOLLOWUP_SOURCE_EVIDENCE_NO_CANONICAL_MUTATION"
 STATE={"status":"STARTING","started_at":datetime.now(timezone.utc).isoformat(),"result":None,"last_error":None}
 _LOCK=threading.Lock()
@@ -106,6 +106,7 @@ PRIMARY_NAV=[
 ("Availability","/alliance/primary/availability"),
 ("Matcher","/alliance/primary/matcher"),
 ("Follow-ups","/alliance/primary/followups"),
+("Data Repair","/alliance/primary/data-repair"),
 ("Add Property","/property-manual"),
 ]
 
@@ -137,7 +138,7 @@ form.inline{{display:flex;gap:7px;flex-wrap:wrap;align-items:center}}.muted{{col
 details.admin{{background:#fff;border:1px solid #dfe6ee;padding:8px 12px}}details.admin a{{margin:5px;display:inline-block}}
 .actions{{display:flex;gap:5px;flex-wrap:wrap}}.right{{text-align:right}}
 </style></head><body>
-<header><div><b>Alliance CRE Operating System · 7.3.6</b><br><small>Capture Evidence → Structure → Assign → Verify → Match → Review → Follow-up</small></div>
+<header><div><b>Alliance CRE Operating System · 7.3.7</b><br><small>Capture Evidence → Structure → Assign → Verify → Match → Review → Follow-up</small></div>
 <div>{html.escape(str(role))} · <a href="/logout" style="color:white">Logout</a></div></header>
 <nav>{nav}</nav>{admin}<div class="wrap"><h2>{html.escape(title)}</h2>{body}</div></body></html>"""
 
