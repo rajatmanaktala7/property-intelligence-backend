@@ -17149,3 +17149,12 @@ try:
     print("Alliance Magazine Broad-Section Forensic Repair 6.5: registered")
 except Exception as _v650_exc:
     print("Alliance Magazine 6.5 registration warning:",_v650_exc)
+
+# FOUNDATION_6_6_MAGAZINE_SAFE_VISION_GATEWAY
+try:
+    import sys as _v660_sys
+    import alliance_magazine_safe_gateway_v660 as _v660
+    _v660.start(_v660_sys.modules[__name__])
+    print("Alliance Magazine Safe Vision Gateway 6.6: registered")
+except Exception as _v660_exc:
+    print("Alliance Magazine 6.6 registration warning:",_v660_exc)
