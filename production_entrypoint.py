@@ -617,6 +617,47 @@ def _load_core():
             stabilization["final_database_grid_v870"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","fail_safe":True}
             print("[final-database-grid-v870] warning:", type(exc).__name__, str(exc))
 
+
+        # ALLIANCE_FINAL_5X5_DATABASES_V910
+        try:
+            import alliance_final_5x5_databases_v910 as final_5x5_v910
+            final_5x5_result = final_5x5_v910.register(wrapped.core)
+            stabilization = dict(stabilization or {})
+            stabilization["final_5x5_databases_v910"] = final_5x5_result
+
+            from fastapi.responses import RedirectResponse
+            route_specs = [
+                ("/alliance/primary/databases","/alliance/final/databases"),
+                ("/alliance/primary/database/{source}","/alliance/final/database/{source}"),
+                ("/alliance/primary/properties","/alliance/final/database/master"),
+                ("/alliance/primary/requirements-hub","/alliance/final/requirements"),
+                ("/alliance/primary/requirements/source/{source}","/alliance/final/requirements/{source}"),
+                ("/alliance/primary/requirements","/alliance/final/requirements/master"),
+            ]
+            for old_path,target in route_specs:
+                keep=[]
+                for r in list(wrapped.app.router.routes):
+                    if getattr(r,"path",None)==old_path and "GET" in set(getattr(r,"methods",set()) or set()):
+                        continue
+                    keep.append(r)
+                wrapped.app.router.routes[:]=keep
+                if "{source}" in old_path:
+                    async def _redir_source(request, source:str, _target=target):
+                        qs=request.url.query
+                        url=_target.replace("{source}",source)
+                        return RedirectResponse(url+("?" + qs if qs else ""),status_code=307)
+                    wrapped.app.add_api_route(old_path,_redir_source,methods=["GET"],include_in_schema=False)
+                else:
+                    async def _redir(request, _target=target):
+                        qs=request.url.query
+                        return RedirectResponse(_target+("?" + qs if qs else ""),status_code=307)
+                    wrapped.app.add_api_route(old_path,_redir,methods=["GET"],include_in_schema=False)
+            print("[final-5x5-v910]", final_5x5_result)
+        except Exception as exc:
+            stabilization = dict(stabilization or {})
+            stabilization["final_5x5_databases_v910"]={"status":"ERROR","error":f"{type(exc).__name__}: {exc}","fail_safe":True}
+            print("[final-5x5-v910] warning:",type(exc).__name__,str(exc))
+
         CORE_APP = wrapped.app
         try:
             import alliance_whatsapp_safe_ingest_v5 as safe_wa
