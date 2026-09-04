@@ -17167,3 +17167,12 @@ try:
     print("Alliance Unified Newspaper + Magazine Data Repair 7.0: registered")
 except Exception as _v700_exc:
     print("Alliance Unified Data Repair 7.0 registration warning:",_v700_exc)
+
+# FOUNDATION_7_0_4_SOURCE_AWARE_NEWSPAPER_MAGAZINE_REPAIR
+try:
+    import sys as _v704_sys
+    import alliance_source_aware_repair_v704 as _v704
+    _v704.start(_v704_sys.modules[__name__])
+    print("Alliance Source-Aware Newspaper + Magazine Repair 7.0.4: registered")
+except Exception as _v704_exc:
+    print("Alliance Source-Aware Repair 7.0.4 registration warning:",_v704_exc)
