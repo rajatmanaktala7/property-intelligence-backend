@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 import threading
@@ -226,7 +226,7 @@ code{{background:#f5eee5;padding:4px 6px;border-radius:5px}}
 <p>The health service is online while the main application loads independently.</p>
 <p><b>Boot state:</b> <code>{BOOT["state"]}</code></p>
 <p><b>Detail:</b> <code>{err}</code></p>
-<p><a href="/healthz">Health</a> Ã‚Â· <a href="/boot-status">Boot Status</a></p>
+<p><a href="/healthz">Health</a> Ãƒâ€šÃ‚Â· <a href="/boot-status">Boot Status</a></p>
 </main>
 </body>
 </html>""",
@@ -507,6 +507,17 @@ def _load_core():
                 str(exc),
             )
 
+        # ALLIANCE_CRE_OS_V820_FINAL_ROUTE
+        try:
+            import alliance_cre_os_v820 as alliance_cre_os_v820
+            business_v820_final = alliance_cre_os_v820.register(wrapped.core)
+            stabilization = dict(stabilization or {})
+            stabilization["business_os_v820_final"] = business_v820_final
+            print("[business-os-v820-final]", business_v820_final)
+        except Exception as exc:
+            stabilization = dict(stabilization or {})
+            stabilization["business_os_v820_final"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","fail_safe":True}
+            print("[business-os-v820-final] warning:", type(exc).__name__, str(exc))
         CORE_APP = wrapped.app
         try:
             import alliance_whatsapp_safe_ingest_v5 as safe_wa
@@ -713,5 +724,6 @@ app = HealthFirstDispatcher()
 
 
 # 7.3.7 HISTORICAL EVIDENCE REPAIR REGISTRATION
+
 
 

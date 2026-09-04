@@ -11,8 +11,8 @@ from fastapi import Query, Request
 from fastapi.responses import HTMLResponse
 from sqlalchemy import text
 
-VERSION = "8.2.0-ALLIANCE-MAGAZINE-DATABASE-UNIVERSAL-STANDARD"
-MODE = "MAGAZINE_SOURCE_EVIDENCE_RECOVERY_UNIVERSAL_DATABASE_STATS"
+VERSION = "8.2.1-ALLIANCE-LATE-ROUTE-TAKEOVER-HOTFIX"
+MODE = "LATE_ROUTE_TAKEOVER_MAGAZINE_RECOVERY_UNIVERSAL_STATS"
 
 SOURCE_NAMES = ("MASTER", "NEWSPAPER", "WHATSAPP", "MAGAZINE", "MANUAL")
 SOURCE_PATTERNS = {
@@ -611,7 +611,15 @@ def register(core):
     if app is None or e is None:
         raise RuntimeError("Alliance CRE OS 8.2 requires core app + engine")
 
-    recovery = _backfill_magazine(e)
+    try:
+        recovery = _backfill_magazine(e)
+    except Exception as exc:
+        recovery = {
+            "scanned": 0,
+            "updated": 0,
+            "unresolved": 0,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
 
     _remove_get(app, "/alliance/primary/database/{source}")
     _remove_get(app, "/alliance/primary/databases")
