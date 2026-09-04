@@ -1,12 +1,12 @@
 from __future__ import annotations
-import html, json, threading, time
+import html, json, re, threading, time
 from datetime import datetime, timezone
 from decimal import Decimal
 from fastapi import Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import text
 
-VERSION="7.3.1-ALLIANCE-PRIMARY-WORKSPACE-ACTION-ENGINE-PERSISTED-CERT-BOOT-FIX"
+VERSION="7.3.2-ALLIANCE-PRIMARY-WORKSPACE-FULL-SOURCE-EVIDENCE"
 MODE="V721_CERTIFIED_PRIMARY_TEAM_WORKSPACE_VERIFY_ASSIGN_MATCH_ALTERNATIVES_REVIEW_CLIENT_SAFE_DRAFT_FOLLOWUP_SOURCE_EVIDENCE_NO_CANONICAL_MUTATION"
 STATE={"status":"STARTING","started_at":datetime.now(timezone.utc).isoformat(),"result":None,"last_error":None}
 _LOCK=threading.Lock()
@@ -260,6 +260,119 @@ def _draft(req,props):
     lines.append("Please let us know which option you would like to inspect or schedule a site visit for.")
     return "\n".join(lines)
 
+# 7.3.2 FULL SOURCE EVIDENCE
+def _v732_columns(engine,table):
+    if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$",table or ""): return []
+    with engine.connect() as c:
+        return [x[0] for x in c.execute(text("""SELECT column_name FROM information_schema.columns
+          WHERE table_schema=current_schema() AND table_name=:t ORDER BY ordinal_position"""),{"t":table}).all()]
+
+def _v732_fetch_row(engine,table,source_pk):
+    if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$",table or ""): return None
+    cols=_v732_columns(engine,table)
+    if not cols:return None
+    candidates=[x for x in ["id","source_id","message_id","listing_id","property_id","requirement_id","pk"] if x in cols]
+    for key in candidates:
+        try:
+            with engine.connect() as c:
+                row=c.execute(text(f'SELECT * FROM "{table}" WHERE CAST("{key}" AS TEXT)=:v LIMIT 1'),{"v":str(source_pk)}).mappings().first()
+            if row:return _safe(dict(row))
+        except Exception: pass
+    return None
+
+def _v732_pick(d,names):
+    low={str(k).lower():k for k in (d or {}).keys()}
+    for n in names:
+        if n.lower() in low:
+            v=d.get(low[n.lower()])
+            if v not in (None,"",[],{}):return v
+    return None
+
+def _v732_table_exists(engine,t):
+    try:
+        with engine.connect() as c:return bool(c.execute(text("SELECT to_regclass(:t) IS NOT NULL"),{"t":t}).scalar())
+    except Exception:return False
+
+def _v732_follow_whatsapp(engine,row):
+    if not isinstance(row,dict):return []
+    out=[];ids=[]
+    for k in ["source_message_id","raw_message_id","message_id","whatsapp_message_id"]:
+        v=_v732_pick(row,[k])
+        if v not in (None,""):ids.append(v)
+    if _v732_table_exists(engine,"wai_raw_messages"):
+        cols=_v732_columns(engine,"wai_raw_messages")
+        keys=[x for x in ["id","message_id"] if x in cols]
+        for mid in ids:
+            for key in keys:
+                try:
+                    with engine.connect() as c:
+                        rr=c.execute(text(f'SELECT * FROM "wai_raw_messages" WHERE CAST("{key}" AS TEXT)=:v LIMIT 1'),{"v":str(mid)}).mappings().first()
+                    if rr:
+                        out.append({"table":"wai_raw_messages","row":_safe(dict(rr))});break
+                except Exception:pass
+    lid=_v732_pick(row,["listing_id","wai_listing_id"])
+    if lid and _v732_table_exists(engine,"wai_listings"):
+        lr=_v732_fetch_row(engine,"wai_listings",lid)
+        if lr:
+            out.append({"table":"wai_listings","row":lr})
+            mid=_v732_pick(lr,["source_message_id","raw_message_id","message_id"])
+            if mid and _v732_table_exists(engine,"wai_raw_messages"):
+                rr=_v732_fetch_row(engine,"wai_raw_messages",mid)
+                if rr:out.append({"table":"wai_raw_messages","row":rr})
+    seen=set();ded=[]
+    for x in out:
+        sig=(x["table"],json.dumps(x["row"],sort_keys=True,default=str))
+        if sig not in seen:seen.add(sig);ded.append(x)
+    return ded
+
+def _v732_evidence(engine,cid):
+    links=_source_links(engine,cid);blocks=[]
+    for link in links:
+        table=str(link.get("source_table") or "");pk=link.get("source_pk")
+        row=_v732_fetch_row(engine,table,pk)
+        lineage=_v732_follow_whatsapp(engine,row) if row else []
+        candidates=([{"table":table,"row":row}] if row else [])+lineage
+        preferred=next((x for x in candidates if x.get("table")=="wai_raw_messages" and isinstance(x.get("row"),dict)),None)
+        if not preferred and candidates:preferred=candidates[0]
+        d=(preferred or {}).get("row") or {}
+        blocks.append({"link":link,"source_row":row,"lineage":lineage,"display":{
+          "source_type":link.get("source_type"),
+          "group":_v732_pick(d,["group_name","chat_name","conversation_name","source_group","group_title"]),
+          "sender":_v732_pick(d,["sender_name","push_name","contact_name","sender","author_name","name"]),
+          "sender_phone":_v732_pick(d,["sender_phone","phone","phone_number","sender_number","contact_phone","author_phone"]),
+          "sender_jid":_v732_pick(d,["sender_jid","jid","author","participant","remote_jid"]),
+          "message_timestamp":_v732_pick(d,["message_timestamp","timestamp","sent_at","message_date","datetime","created_at","received_at"]),
+          "full_message":_v732_pick(d,["message_text","text","body","content","message","raw_text","full_message","caption"])}})
+    return blocks
+
+def _v732_evidence_html(engine,cid):
+    ev=_v732_evidence(engine,cid)
+    if not ev:return "<div class='card'><h3>Original Source / WhatsApp Message</h3><p>No recoverable original-source row is linked to this canonical record yet.</p></div>"
+    out=[]
+    for i,e in enumerate(ev,1):
+        d=e["display"];link=e["link"];msg=d.get("full_message")
+        if isinstance(msg,(dict,list)):msg=json.dumps(msg,ensure_ascii=False,indent=2)
+        lineage_html=""
+        for ln in e.get("lineage") or []:
+            lineage_html+=f"<details><summary>{html.escape(str(ln.get('table')))} raw lineage</summary><pre>{html.escape(json.dumps(ln.get('row') or {},ensure_ascii=False,indent=2,default=str))}</pre></details>"
+        source_json=json.dumps(e.get("source_row") or {},ensure_ascii=False,indent=2,default=str)
+        out.append(f"""<div class='card'>
+        <h3>Original Source / WhatsApp Message · Evidence {i}</h3>
+        <div class='grid'>
+          <div><b>Source Type</b><br>{html.escape(str(d.get('source_type') or ''))}</div>
+          <div><b>WhatsApp Group / Chat</b><br>{html.escape(str(d.get('group') or 'Not captured'))}</div>
+          <div><b>Sender Name</b><br>{html.escape(str(d.get('sender') or 'Not captured'))}</div>
+          <div><b>Sender Phone</b><br>{html.escape(str(d.get('sender_phone') or 'Not captured'))}</div>
+          <div><b>Sender JID / Identity</b><br>{html.escape(str(d.get('sender_jid') or 'Not captured'))}</div>
+          <div><b>Message Date & Time</b><br>{html.escape(str(d.get('message_timestamp') or 'Not captured'))}</div>
+        </div>
+        <h4>Full Original Message</h4>
+        <pre style='font-size:14px;background:#f8fafc;border:1px solid #e1e7ee;padding:14px;border-radius:9px'>{html.escape(str(msg or 'Original message text not available in this source row'))}</pre>
+        <p class='muted'><b>Canonical evidence link:</b> {html.escape(str(link.get('source_table') or ''))} · PK {html.escape(str(link.get('source_pk') or ''))} · Hash {html.escape(str(link.get('source_row_hash') or ''))}</p>
+        <details><summary>All original source fields</summary><pre>{html.escape(source_json)}</pre></details>
+        {lineage_html}</div>""")
+    return "".join(out)
+
 def _button(url,label,cls="mini"):
     return f'<a class="{cls}" href="{html.escape(url,quote=True)}">{html.escape(label)}</a>'
 
@@ -349,6 +462,7 @@ def register(core):
         <label>Next Follow-up</label><br><input name='next_followup_at' type='datetime-local'><br><br>
         <label>Internal Notes</label><br><textarea name='internal_notes' rows='4'>{html.escape(str(action.get("internal_notes") or ""))}</textarea><br>
         <button class='btn'>Save Workflow</button></form></div></div>
+        {_v732_evidence_html(engine,cid)}
         <div class='card'><h3>Source Evidence Links</h3><div class='tablebox'><table><tr><th>Source</th><th>Table</th><th>Source PK</th><th>Evidence Hash</th></tr>{source_html}</table></div></div>
         <div class='card'><h3>Canonical Record</h3><pre>{html.escape(json.dumps(p.get('clean_record') or {},ensure_ascii=False,indent=2))}</pre></div>
         <div class='card'><h3>Action History</h3><table><tr><th>Time</th><th>Action</th><th>Actor</th><th>Detail</th></tr>{log_html}</table></div>"""
@@ -403,6 +517,7 @@ def register(core):
         <select name='stage'>{''.join(f"<option {'selected' if action.get('stage')==x else ''}>{x}</option>" for x in ['NEW','MATCHED','REVIEW','CONTACTED','FOLLOW_UP','SITE_VISIT','NEGOTIATION','CLOSED'])}</select><br><br>
         <input name='next_followup_at' type='datetime-local'><br><br><textarea name='internal_notes' rows='4'>{html.escape(str(action.get("internal_notes") or ""))}</textarea><br>
         <button class='btn'>Save Workflow</button></form></div></div>
+        {_v732_evidence_html(engine,cid)}
         <div class='card'><h3>Canonical Requirement</h3><pre>{html.escape(json.dumps(r.get('clean_record') or {},ensure_ascii=False,indent=2))}</pre></div>"""
         return HTMLResponse(_shell(core,req,"Requirement Detail",body))
 

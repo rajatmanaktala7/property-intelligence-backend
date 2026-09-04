@@ -17233,3 +17233,6 @@ except Exception as _v730_exc:
 
 # FOUNDATION_7_3_1_PERSISTED_CERTIFICATION_BOOT_FIX
 # 7.3 startup now recovers persisted 7.2.1 certification instead of racing delayed in-memory STATE.
+
+# FOUNDATION_7_3_2_FULL_SOURCE_EVIDENCE
+# Property and requirement details now surface original source and WhatsApp evidence.
