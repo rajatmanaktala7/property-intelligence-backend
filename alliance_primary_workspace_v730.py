@@ -6,7 +6,7 @@ from fastapi import Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import text
 
-VERSION="7.3.2-ALLIANCE-PRIMARY-WORKSPACE-FULL-SOURCE-EVIDENCE"
+VERSION="7.3.3-ALLIANCE-REQUIREMENT-OPERATIONS"
 MODE="V721_CERTIFIED_PRIMARY_TEAM_WORKSPACE_VERIFY_ASSIGN_MATCH_ALTERNATIVES_REVIEW_CLIENT_SAFE_DRAFT_FOLLOWUP_SOURCE_EVIDENCE_NO_CANONICAL_MUTATION"
 STATE={"status":"STARTING","started_at":datetime.now(timezone.utc).isoformat(),"result":None,"last_error":None}
 _LOCK=threading.Lock()
@@ -103,6 +103,7 @@ PRIMARY_NAV=[
 ("Command Centre","/alliance/primary"),
 ("Properties","/alliance/primary/properties"),
 ("Requirements","/alliance/primary/requirements"),
+("Availability","/alliance/primary/availability"),
 ("Matcher","/alliance/primary/matcher"),
 ("Follow-ups","/alliance/primary/followups"),
 ("Add Property","/property-manual"),
@@ -136,7 +137,7 @@ form.inline{{display:flex;gap:7px;flex-wrap:wrap;align-items:center}}.muted{{col
 details.admin{{background:#fff;border:1px solid #dfe6ee;padding:8px 12px}}details.admin a{{margin:5px;display:inline-block}}
 .actions{{display:flex;gap:5px;flex-wrap:wrap}}.right{{text-align:right}}
 </style></head><body>
-<header><div><b>Alliance CRE Operating System · 7.3</b><br><small>Verify → Match → Review → Client-safe draft → Follow-up</small></div>
+<header><div><b>Alliance CRE Operating System · 7.3.3</b><br><small>Capture Requirement → Assign → Verify Availability → Match → Review → Client-safe draft → Follow-up</small></div>
 <div>{html.escape(str(role))} · <a href="/logout" style="color:white">Logout</a></div></header>
 <nav>{nav}</nav>{admin}<div class="wrap"><h2>{html.escape(title)}</h2>{body}</div></body></html>"""
 
@@ -373,6 +374,127 @@ def _v732_evidence_html(engine,cid):
         {lineage_html}</div>""")
     return "".join(out)
 
+
+# 7.3.3 REQUIREMENT OPERATIONS
+def _v733_action_map(engine, entity_type="REQUIREMENT"):
+    try:
+        with engine.connect() as c:
+            rows = c.execute(text("""SELECT * FROM pi_master_action_state_v730
+              WHERE entity_type=:et ORDER BY updated_at DESC"""), {"et": entity_type}).mappings().all()
+        return {str(r["canonical_id"]): _safe(dict(r)) for r in rows}
+    except Exception:
+        return {}
+
+def _v733_source_summary(engine, cid):
+    try:
+        ev = _v732_evidence(engine, cid)
+    except Exception:
+        ev = []
+    if not ev:
+        return {"source_type":"SOURCE NOT LINKED","group":"","sender":"","sender_phone":"","message_timestamp":"","full_message":""}
+    d = (ev[0].get("display") or {})
+    return {
+        "source_type": d.get("source_type") or (ev[0].get("link") or {}).get("source_type") or "SOURCE",
+        "group": d.get("group") or "",
+        "sender": d.get("sender") or "",
+        "sender_phone": d.get("sender_phone") or "",
+        "message_timestamp": d.get("message_timestamp") or "",
+        "full_message": d.get("full_message") or "",
+    }
+
+def _v733_clean_record(row):
+    d = row.get("clean_record") if isinstance(row, dict) else None
+    return d if isinstance(d, dict) else {}
+
+def _v733_pick_any(row, names):
+    clean = _v733_clean_record(row)
+    for src in (row or {}, clean):
+        low = {str(k).lower(): k for k in src.keys()}
+        for name in names:
+            key = low.get(str(name).lower())
+            if key is not None:
+                v = src.get(key)
+                if v not in (None, "", [], {}):
+                    return v
+    return None
+
+def _v733_display_value(v):
+    if v in (None, "", [], {}):
+        return ""
+    if isinstance(v, (list, tuple, set)):
+        return ", ".join(str(x) for x in v if x not in (None, ""))
+    if isinstance(v, dict):
+        return json.dumps(v, ensure_ascii=False, default=str)
+    return str(v)
+
+def _v733_requirement_fields(r):
+    clean = _v733_clean_record(r)
+    preferred = [
+        ("Client / Contact", ["client_name","contact_name","name"]),
+        ("Company / Brand", ["company_name","brand_name","retailer_name","operator_name"]),
+        ("Requirement Type", ["requirement_type","demand_type"]),
+        ("Property Type", ["property_type","asset_type","category"]),
+        ("Use / Suitable Category", ["suitable_category","use_case","intended_use","business_category"]),
+        ("City", ["city"]),
+        ("Preferred Locations", ["preferred_locations","locations","location","locality"]),
+        ("Transaction", ["transaction_type","rent_or_sale","transaction"]),
+        ("Area Sq Ft", ["area_sqft","requirement_sqft","minimum_area_sqft","maximum_area_sqft"]),
+        ("Minimum Area", ["minimum_area_sqft","min_area_sqft"]),
+        ("Maximum Area", ["maximum_area_sqft","max_area_sqft"]),
+        ("Sale Budget", ["sale_budget","sale_amount","budget_sale"]),
+        ("Rent Budget", ["rent_budget","rent_amount","budget_rent"]),
+        ("Floor Preference", ["floor","floor_preference"]),
+        ("Frontage", ["frontage","frontage_ft"]),
+        ("Parking", ["parking","parking_requirement"]),
+        ("Possession / Timeline", ["possession","timeline","required_by","move_in"]),
+        ("Nearby Brands", ["nearby_brands"]),
+        ("Additional Points", ["additional_points","remarks","notes","requirement_notes"]),
+        ("Contact Phone", ["contact_phone","phone","mobile","phones"]),
+        ("Contact Email", ["contact_email","email"]),
+    ]
+    out = []
+    used = set()
+    low = {str(k).lower(): k for k in clean.keys()}
+    for label, names in preferred:
+        val = _v733_pick_any(r, names)
+        if val not in (None, "", [], {}):
+            out.append((label, _v733_display_value(val)))
+            for n in names:
+                if n.lower() in low:
+                    used.add(low[n.lower()])
+    for k, v in clean.items():
+        if k in used or v in (None, "", [], {}):
+            continue
+        if len(out) >= 36:
+            break
+        out.append((str(k).replace("_", " ").title(), _v733_display_value(v)))
+    return out
+
+def _v733_requirement_card(r, action=None, source=None):
+    action = action or {}
+    source = source or {}
+    phones = ", ".join(map(str, r.get("phones") or []))
+    return f"""<div class='card'>
+      <h3>Requirement Intelligence</h3>
+      <div class='grid'>
+        <div><b>Requirement ID</b><br>{html.escape(str(r.get('canonical_id') or ''))}</div>
+        <div><b>Source</b><br>{html.escape(str(source.get('source_type') or ''))}</div>
+        <div><b>WhatsApp Group / Chat</b><br>{html.escape(str(source.get('group') or 'Not captured'))}</div>
+        <div><b>Sender</b><br>{html.escape(str(source.get('sender') or 'Not captured'))}</div>
+        <div><b>Received</b><br>{html.escape(str(source.get('message_timestamp') or 'Not captured'))}</div>
+        <div><b>Assigned To</b><br>{html.escape(str(action.get('assigned_to') or 'UNASSIGNED'))}</div>
+        <div><b>Location</b><br>{html.escape(str(r.get('locality') or ''))}</div>
+        <div><b>Transaction</b><br>{html.escape(str(r.get('transaction_type') or ''))}</div>
+        <div><b>Area</b><br>{html.escape(str(r.get('area_sqft_display') or ''))} sq ft</div>
+        <div><b>Sale Budget</b><br>{html.escape(str(r.get('sale_budget') or ''))}</div>
+        <div><b>Rent Budget</b><br>{html.escape(str(r.get('rent_budget') or ''))}</div>
+        <div><b>Internal Requirement Contact</b><br>{html.escape(phones)}</div>
+      </div>
+    </div>"""
+
+def _v733_property_value(p, names):
+    return _v733_pick_any(p, names)
+
 def _button(url,label,cls="mini"):
     return f'<a class="{cls}" href="{html.escape(url,quote=True)}">{html.escape(label)}</a>'
 
@@ -491,35 +613,151 @@ def register(core):
         return RedirectResponse(target,status_code=303)
 
     @app.get("/alliance/primary/requirements",response_class=HTMLResponse)
-    def requirements(req:Request,q:str=Query(""),transaction:str=Query("")):
-        _role(core,req);rows=v720._search_requirements(engine,q,transaction,500)
-        form=f"""<form class='inline'><input name='q' value='{html.escape(q,quote=True)}' placeholder='Search requirement'>
-        <select name='transaction'><option value=''>All transactions</option><option {'selected' if transaction=='SALE' else ''}>SALE</option><option {'selected' if transaction=='RENT' else ''}>RENT</option></select>
-        <button class='btn'>Search</button></form>"""
-        trs=[]
+    def requirements(req:Request,q:str=Query(""),transaction:str=Query(""),source:str=Query(""),assignment:str=Query("")):
+        _role(core,req)
+        rows=v720._search_requirements(engine,q,transaction,500)
+        actions=_v733_action_map(engine,"REQUIREMENT")
+        enriched=[]
         for r in rows:
-            cid=r["canonical_id"];phones=", ".join(map(str,r.get("phones") or []))
-            acts=_button("/alliance/primary/requirement/"+cid,"Open")+" "+_button("/alliance/primary/matcher?requirement_id="+cid,"Match","mini good")
-            trs.append(f"<tr><td>{acts}</td><td>{html.escape(str(r.get('locality') or ''))}</td><td>{html.escape(str(r.get('transaction_type') or ''))}</td><td>{html.escape(str(r.get('area_sqft_display') or ''))}</td><td>{html.escape(str(r.get('sale_budget') or ''))}</td><td>{html.escape(str(r.get('rent_budget') or ''))}</td><td>{html.escape(phones)}</td></tr>")
-        return HTMLResponse(_shell(core,req,f"Master Requirements · {len(rows)}",form+f"<div class='card tablebox'><table><tr><th>Actions</th><th>Location</th><th>Transaction</th><th>Sq Ft</th><th>Sale Budget</th><th>Rent Budget</th><th>Internal Contact</th></tr>{''.join(trs)}</table></div>"))
+            cid=r["canonical_id"]
+            src=_v733_source_summary(engine,cid)
+            act=actions.get(cid) or {}
+            source_text=" ".join(str(x) for x in [src.get("source_type"),src.get("group"),src.get("sender")] if x).lower()
+            if source and source.lower() not in source_text:
+                continue
+            if assignment=="UNASSIGNED" and act.get("assigned_to"):
+                continue
+            if assignment=="ASSIGNED" and not act.get("assigned_to"):
+                continue
+            enriched.append((r,src,act))
+        form=f"""<div class='card'><form class='inline'>
+        <input name='q' value='{html.escape(q,quote=True)}' placeholder='Location, client, company, requirement'>
+        <select name='transaction'><option value=''>All transactions</option><option {'selected' if transaction=='SALE' else ''}>SALE</option><option {'selected' if transaction=='RENT' else ''}>RENT</option></select>
+        <input name='source' value='{html.escape(source,quote=True)}' placeholder='Source or WhatsApp group'>
+        <select name='assignment'><option value=''>All assignments</option><option value='UNASSIGNED' {'selected' if assignment=='UNASSIGNED' else ''}>UNASSIGNED</option><option value='ASSIGNED' {'selected' if assignment=='ASSIGNED' else ''}>ASSIGNED</option></select>
+        <button class='btn'>Search</button></form></div>"""
+        trs=[]
+        for r,src,act in enriched:
+            cid=r["canonical_id"]
+            phones=", ".join(map(str,r.get("phones") or []))
+            acts=_button("/alliance/primary/requirement/"+cid,"Full Requirement")+" "+_button("/alliance/primary/availability?requirement_id="+cid,"Availability","mini good")
+            source_bits=[str(src.get("source_type") or "")]
+            if src.get("group"):source_bits.append("Group: "+str(src.get("group")))
+            if src.get("sender"):source_bits.append("From: "+str(src.get("sender")))
+            if src.get("message_timestamp"):source_bits.append(str(src.get("message_timestamp")))
+            source_html="<br>".join(html.escape(x) for x in source_bits if x)
+            stage=str(act.get("stage") or "NEW")
+            assign=f"""<form method='post' action='/alliance/primary/action/{html.escape(cid,quote=True)}/REQUIREMENT'>
+              <input name='assigned_to' value='{html.escape(str(act.get("assigned_to") or ""),quote=True)}' placeholder='Team member' style='width:125px'>
+              <input type='hidden' name='stage' value='{html.escape(stage,quote=True)}'>
+              <input type='hidden' name='next_followup_at' value=''>
+              <input type='hidden' name='internal_notes' value='{html.escape(str(act.get("internal_notes") or ""),quote=True)}'>
+              <button class='mini'>Assign</button></form><small>{html.escape(stage)}</small>"""
+            trs.append(f"""<tr>
+              <td>{acts}</td>
+              <td>{source_html}</td>
+              <td>{html.escape(str(r.get('locality') or ''))}</td>
+              <td>{html.escape(str(r.get('transaction_type') or ''))}</td>
+              <td>{html.escape(str(r.get('area_sqft_display') or ''))}</td>
+              <td>{html.escape(str(r.get('sale_budget') or ''))}</td>
+              <td>{html.escape(str(r.get('rent_budget') or ''))}</td>
+              <td>{html.escape(phones)}</td>
+              <td>{assign}</td>
+            </tr>""")
+        table=f"""<div class='card'><p><b>Operating rule:</b> Every requirement stays tied to its original source. WhatsApp group/chat, sender and timestamp are shown when captured. Missing source facts stay marked as not captured.</p></div>
+        <div class='card tablebox'><table><tr><th>Actions</th><th>Source</th><th>Location</th><th>Transaction</th><th>Sq Ft</th><th>Sale Budget</th><th>Rent Budget</th><th>Requirement Contact</th><th>Team Assignment</th></tr>{''.join(trs)}</table></div>"""
+        return HTMLResponse(_shell(core,req,f"Requirement Intelligence · {len(enriched)}",form+table))
 
     @app.get("/alliance/primary/requirement/{cid}",response_class=HTMLResponse)
     def requirement_detail(cid:str,req:Request):
-        _role(core,req);r=_requirement(engine,cid)
+        _role(core,req)
+        r=_requirement(engine,cid)
         if not r:raise HTTPException(404,"Requirement not found")
-        action=_get_action(engine,cid);phones=", ".join(map(str,r.get("phones") or []))
-        body=f"""<div class='grid'><div class='card'><h3>Requirement</h3><p><b>ID:</b> {html.escape(cid)}<br><b>Location:</b> {html.escape(str(r.get('locality') or ''))}<br>
-        <b>Transaction:</b> {html.escape(str(r.get('transaction_type') or ''))}<br><b>Area:</b> {r.get('area_sqft_display') or ''} sq ft<br>
-        <b>Sale Budget:</b> {html.escape(str(r.get('sale_budget') or ''))}<br><b>Rent Budget:</b> {html.escape(str(r.get('rent_budget') or ''))}<br>
-        <b>Internal contact:</b> {html.escape(phones)}</p>{_button('/alliance/primary/matcher?requirement_id='+cid,'Run Full Inventory Match','btn good')}</div>
-        <div class='card'><h3>Assignment & Follow-up</h3><form method='post' action='/alliance/primary/action/{html.escape(cid,quote=True)}/REQUIREMENT'>
-        <input name='assigned_to' placeholder='Team member' value='{html.escape(str(action.get("assigned_to") or ""),quote=True)}'><br><br>
-        <select name='stage'>{''.join(f"<option {'selected' if action.get('stage')==x else ''}>{x}</option>" for x in ['NEW','MATCHED','REVIEW','CONTACTED','FOLLOW_UP','SITE_VISIT','NEGOTIATION','CLOSED'])}</select><br><br>
-        <input name='next_followup_at' type='datetime-local'><br><br><textarea name='internal_notes' rows='4'>{html.escape(str(action.get("internal_notes") or ""))}</textarea><br>
-        <button class='btn'>Save Workflow</button></form></div></div>
+        action=_get_action(engine,cid)
+        source=_v733_source_summary(engine,cid)
+        fields=_v733_requirement_fields(r)
+        field_html="".join(f"<div><b>{html.escape(str(k))}</b><br>{html.escape(str(v))}</div>" for k,v in fields)
+        body=_v733_requirement_card(r,action,source)
+        body+=f"""<div class='grid'>
+        <div class='card'><h3>Team Ownership & Next Action</h3>
+        <form method='post' action='/alliance/primary/action/{html.escape(cid,quote=True)}/REQUIREMENT'>
+        <label>Assigned To</label><br><input name='assigned_to' placeholder='Team member' value='{html.escape(str(action.get("assigned_to") or ""),quote=True)}'><br><br>
+        <label>Stage</label><br><select name='stage'>{''.join(f"<option {'selected' if action.get('stage')==x else ''}>{x}</option>" for x in ['NEW','VERIFY_REQUIREMENT','MATCHING','AVAILABILITY_CHECK','MATCHED','REVIEW','CONTACTED','FOLLOW_UP','SITE_VISIT','NEGOTIATION','CLOSED'])}</select><br><br>
+        <label>Next Follow-up</label><br><input name='next_followup_at' type='datetime-local'><br><br>
+        <label>Internal Notes</label><br><textarea name='internal_notes' rows='5'>{html.escape(str(action.get("internal_notes") or ""))}</textarea><br>
+        <button class='btn'>Save Workflow</button></form></div>
+        <div class='card'><h3>Requirement Actions</h3>
+        <p>Use Availability Verification before approving any property for client sharing.</p>
+        {_button('/alliance/primary/availability?requirement_id='+cid,'Open Availability Verification','btn good')}
+        {_button('/alliance/primary/matcher?requirement_id='+cid,'Open Matcher','btn alt')}</div></div>
+        <div class='card'><h3>All Captured Requirement Details</h3><div class='grid'>{field_html or '<div>No structured fields captured beyond the canonical summary.</div>'}</div></div>
         {_v732_evidence_html(engine,cid)}
-        <div class='card'><h3>Canonical Requirement</h3><pre>{html.escape(json.dumps(r.get('clean_record') or {},ensure_ascii=False,indent=2))}</pre></div>"""
-        return HTMLResponse(_shell(core,req,"Requirement Detail",body))
+        <div class='card'><h3>Canonical Requirement Record</h3><pre>{html.escape(json.dumps(r.get('clean_record') or {},ensure_ascii=False,indent=2))}</pre></div>"""
+        return HTMLResponse(_shell(core,req,"Full Requirement Detail",body))
+
+    @app.get("/alliance/primary/availability",response_class=HTMLResponse)
+    def availability(req:Request,requirement_id:str=Query(""),tier:str=Query(""),verified_only:str=Query("")):
+        _role(core,req)
+        reqs=v720._search_requirements(engine,limit=300)
+        options="".join(f"<option value='{html.escape(x['canonical_id'],quote=True)}' {'selected' if requirement_id==x['canonical_id'] else ''}>{html.escape((x.get('locality') or 'Requirement')+' · '+x['canonical_id'])}</option>" for x in reqs)
+        form=f"""<div class='card'><form class='inline'>
+          <select name='requirement_id'><option value=''>Choose requirement</option>{options}</select>
+          <select name='tier'><option value=''>All match tiers</option><option value='EXACT_LOCALITY' {'selected' if tier=='EXACT_LOCALITY' else ''}>EXACT LOCALITY</option><option value='SAME_CITY_ALTERNATIVE' {'selected' if tier=='SAME_CITY_ALTERNATIVE' else ''}>SAME CITY ALTERNATIVE</option><option value='TRANSACTION_AREA_ALTERNATIVE' {'selected' if tier=='TRANSACTION_AREA_ALTERNATIVE' else ''}>BROADER ALTERNATIVE</option></select>
+          <label><input type='checkbox' name='verified_only' value='1' {'checked' if verified_only else ''}> Verified + available only</label>
+          <button class='btn good'>Load Availability</button>
+        </form></div>"""
+        if not requirement_id:
+            body=form+"""<div class='card'><h3>Availability Verification Workspace</h3>
+            <p>Select a requirement. The screen checks the full master inventory, keeps exact-locality and alternative tiers separate, and shows internal verification contacts to the team.</p>
+            <p><b>Confirmed availability rule:</b> only properties marked VERIFIED and AVAILABLE are treated as confirmed. Unverified stock remains visible for verification but is not client-ready.</p></div>"""
+            return HTMLResponse(_shell(core,req,"Availability Verification",body))
+        rr,matches=_match_full(engine,requirement_id,120)
+        action=_get_action(engine,requirement_id)
+        source=_v733_source_summary(engine,requirement_id)
+        rows=[]
+        for m in matches:
+            if tier and m.get("tier")!=tier:
+                continue
+            p=m["property"]
+            if verified_only and not (p.get("verification_status")=="VERIFIED" and p.get("availability_status")=="AVAILABLE"):
+                continue
+            cid=p["canonical_id"]
+            phones=", ".join(map(str,p.get("phones") or []))
+            ptype=_v733_display_value(_v733_property_value(p,["property_type","asset_type","category"]))
+            floor=_v733_display_value(_v733_property_value(p,["floor","floor_no","floor_number"]))
+            frontage=_v733_display_value(_v733_property_value(p,["frontage","frontage_ft"]))
+            parking=_v733_display_value(_v733_property_value(p,["parking"]))
+            possession=_v733_display_value(_v733_property_value(p,["possession","possession_status","available_from"]))
+            cam=_v733_display_value(_v733_property_value(p,["cam","cam_per_sqft","maintenance"]))
+            deposit=_v733_display_value(_v733_property_value(p,["security_deposit","deposit"]))
+            verification=str(p.get("verification_status") or "UNVERIFIED")
+            avail=str(p.get("availability_status") or "UNKNOWN")
+            confirmed=verification=="VERIFIED" and avail=="AVAILABLE"
+            status="<span class='ok'>CONFIRMED AVAILABLE</span>" if confirmed else f"<span class='warntext'>{html.escape(verification)} · {html.escape(avail)}</span>"
+            verify_action=""
+            if not confirmed:
+                verify_action=f"""<form method='post' action='/alliance/primary/property/{html.escape(cid,quote=True)}/verify' style='display:inline'><button class='mini good'>Verify Available</button></form>"""
+            why=m.get("reasons") or []
+            why_text=", ".join(str(x) for x in why) if isinstance(why,(list,tuple)) else str(why)
+            physical=" · ".join(x for x in [("Floor "+floor) if floor else "",("Frontage "+frontage) if frontage else "",("Parking "+parking) if parking else ""] if x)
+            charges=" · ".join(x for x in [("Rent "+str(p.get('rent_amount'))) if p.get('rent_amount') else "",("CAM "+cam) if cam else "",("Deposit "+deposit) if deposit else ""] if x)
+            rows.append(f"""<tr>
+              <td><b>{m.get('score')}</b><br><span class='pill'>{html.escape(str(m.get('tier') or ''))}</span></td>
+              <td>{_button('/alliance/primary/property/'+cid,'Open Property')} {verify_action}</td>
+              <td><b>{html.escape(str(p.get('locality') or ''))}</b><br>{html.escape(ptype)}</td>
+              <td>{html.escape(str(p.get('area_sqft_display') or ''))}</td>
+              <td>{html.escape(charges)}</td>
+              <td>{html.escape(str(p.get('sale_amount') or ''))}</td>
+              <td>{html.escape(physical)}</td>
+              <td>{html.escape(possession)}</td>
+              <td>{status}</td>
+              <td>{html.escape(phones)}</td>
+              <td>{html.escape(why_text)}</td>
+            </tr>""")
+        summary=_v733_requirement_card(rr,action,source)
+        rule="""<div class='card'><b>Availability rule:</b> VERIFIED + AVAILABLE = confirmed stock. UNVERIFIED or UNKNOWN = team must call/check before client sharing. Alternatives remain explicitly labelled and are never presented as exact-locality matches.</div>"""
+        table=f"""<div class='card tablebox'><table><tr><th>Score / Tier</th><th>Action</th><th>Property / Location</th><th>Sq Ft</th><th>Rent / Charges</th><th>Sale</th><th>Physical Details</th><th>Possession</th><th>Availability</th><th>Internal Verification Contact</th><th>Why Matched</th></tr>{''.join(rows)}</table></div>"""
+        return HTMLResponse(_shell(core,req,f"Availability Verification · {len(rows)} options",form+summary+rule+table))
 
     @app.get("/alliance/primary/matcher",response_class=HTMLResponse)
     def matcher(req:Request,requirement_id:str=Query("")):
@@ -586,7 +824,7 @@ def register(core):
     @app.get("/api/v7.3/health")
     def health(req:Request):
         _role(core,req)
-        paths=["/alliance/primary","/alliance/primary/properties","/alliance/primary/requirements","/alliance/primary/matcher","/alliance/primary/followups","/alliance/primary/client-draft/{rid}"]
+        paths=["/alliance/primary","/alliance/primary/properties","/alliance/primary/requirements","/alliance/primary/availability","/alliance/primary/matcher","/alliance/primary/followups","/alliance/primary/client-draft/{rid}"]
         return {"status":"ok","version":VERSION,"counts":_counts(engine),"routes":{p:_route_exists(app,p) for p in paths},
                 "parent_certification":cert.get("certification"),
                 "safety":{"canonical_master_mutations":0,"raw_source_mutations":0,"gold_mutations":0,"champion_mutations":0}}
