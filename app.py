@@ -17131,3 +17131,12 @@ try:
     print("Alliance Magazine Line Strip Segmentation Repair 6.3.5: registered")
 except Exception as _v635_exc:
     print("Alliance Magazine Line Strip 6.3.5 registration warning:",_v635_exc)
+
+# FOUNDATION_6_4_MAGAZINE_OCCURRENCE_AWARE_FULL_PAGE_BATCH_REPAIR
+try:
+    import sys as _v640_sys
+    import alliance_magazine_occurrence_v640 as _v640
+    _v640.start(_v640_sys.modules[__name__])
+    print("Alliance Magazine Occurrence-Aware Repair 6.4: registered")
+except Exception as _v640_exc:
+    print("Alliance Magazine Occurrence 6.4 registration warning:",_v640_exc)
