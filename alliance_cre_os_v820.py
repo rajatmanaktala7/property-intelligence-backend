@@ -401,8 +401,8 @@ def _backfill_magazine(e) -> Dict[str, int]:
                     locality=COALESCE(locality,:loc),
                     area_sqft=COALESCE(area_sqft,:area),
                     area_value=COALESCE(area_value,:area),
-                    area_unit=COALESCE(area_unit,CASE WHEN :area IS NULL THEN NULL ELSE 'SQFT' END),
-                    phones=CASE WHEN (phones IS NULL OR phones='[]'::jsonb) AND :phones IS NOT NULL
+                    area_unit=COALESCE(area_unit,CASE WHEN CAST(:area AS DOUBLE PRECISION) IS NULL THEN NULL ELSE 'SQFT' END),
+                    phones=CASE WHEN (phones IS NULL OR phones='[]'::jsonb) AND CAST(:phones AS JSONB) IS NOT NULL
                                THEN CAST(:phones AS JSONB) ELSE phones END,
                     updated_at=NOW()
                 WHERE canonical_id=:cid
