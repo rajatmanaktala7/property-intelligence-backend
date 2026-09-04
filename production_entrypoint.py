@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 import threading
@@ -226,7 +226,7 @@ code{{background:#f5eee5;padding:4px 6px;border-radius:5px}}
 <p>The health service is online while the main application loads independently.</p>
 <p><b>Boot state:</b> <code>{BOOT["state"]}</code></p>
 <p><b>Detail:</b> <code>{err}</code></p>
-<p><a href="/healthz">Health</a> · <a href="/boot-status">Boot Status</a></p>
+<p><a href="/healthz">Health</a> Â· <a href="/boot-status">Boot Status</a></p>
 </main>
 </body>
 </html>""",
@@ -418,7 +418,7 @@ def _load_core():
         # 7.3.7 Historical evidence repair is fail-safe and dry-run by default.
         try:
             import alliance_historical_repair_v737 as historical_repair_v737
-            repair_result = historical_repair_v737.register(wrapped)
+            repair_result = historical_repair_v737.register(wrapped.core)
             stabilization = dict(stabilization or {})
             stabilization["historical_repair_v737"] = repair_result
         except Exception as exc:
@@ -668,3 +668,4 @@ app = HealthFirstDispatcher()
 
 
 # 7.3.7 HISTORICAL EVIDENCE REPAIR REGISTRATION
+
