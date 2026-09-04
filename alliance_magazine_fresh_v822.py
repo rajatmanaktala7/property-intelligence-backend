@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import text
 import alliance_magazine_safe_gateway_v660 as safe_gateway
 
-VERSION='8.3.5-LOSSLESS-REGION-CAPTURE'
+VERSION='8.3.5.1-QUICK-LOSSLESS-CANARY'
 CHUNK_SIZE=4*1024*1024
 MAX_UPLOAD_MB=int(os.getenv('MAX_UPLOAD_MB','100'))
 PDF_RENDER_DPI=int(os.getenv('PDF_RENDER_DPI','220'))
@@ -261,6 +261,29 @@ def _region_extract_with_retry(gw,region,max_attempts=3):
             active_gw.max_calls=int(os.getenv("ALLIANCE_MAGAZINE_V823_MAX_CALLS","1000"))
     return None,last_meta,max_attempts
 
+def _extract_lossless_page_quick(gw,page):
+    groups=[]; region_results=[]; failed=[]
+    for region in _lossless_regions(page):
+        rows,rmeta=_gateway_extract(gw,region['jpg'])
+        item={
+            'region':region['region'],'column':region['column'],'band':region['band'],
+            'bbox':region['bbox'],'status':rmeta.get('status'),
+            'provider':rmeta.get('provider'),'records':None if rows is None else len(rows),
+            'attempts':1
+        }
+        region_results.append(item)
+        if rows is None:
+            failed.append(region['region'])
+        else:
+            groups.append((region,rows))
+    merged,evidence=_merge_lossless_rows(groups)
+    return merged,{
+        'status':'OK' if not failed else 'PARTIAL_DIAGNOSTIC',
+        'failed_regions':failed,'regions':region_results,'records':len(merged),
+        'provider':'QUICK_6_REGION_CANARY','evidence':evidence
+    }
+
+
 def _extract_lossless_page(gw,page):
     groups=[]; region_results=[]; failed=[]
     for region in _lossless_regions(page):
@@ -346,7 +369,7 @@ def _process(core,uid):
         with e.begin() as c:c.execute(text("UPDATE pi_magazine_fresh_uploads SET status='PAUSED_ERROR',error_message=:x WHERE upload_id=CAST(:u AS UUID)"),{'x':f'{type(exc).__name__}: {exc}'[:4000],'u':uid})
 
 def _page():
-    return '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">\n<title>Alliance Magazine Resume</title><style>body{font-family:Arial;background:#f4f7fb;margin:0;color:#172437}.top{background:#102235;color:white;padding:20px}.wrap{max-width:1180px;margin:auto;padding:20px}.card{background:white;padding:18px;border-radius:14px;margin-bottom:14px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}.num{font-size:28px;font-weight:800}.muted{color:#66758a}.btn{background:#1266f1;color:white;border:0;border-radius:9px;padding:11px 18px;font-weight:700;cursor:pointer}.good{color:#16833c}.bad{color:#bd2f2f}a{color:#1266f1;text-decoration:none}table{width:100%;border-collapse:collapse}td,th{padding:8px;border-bottom:1px solid #e5eaf0;text-align:left}</style></head>\n<body><div class="top"><b>Fresh Magazine PDF Database · CRE OS 8.3.5</b><br><small>Gemini -> OpenRouter -> Groq Vision · real-page validation · checkpoint resume</small></div>\n<div class="wrap"><div class="card"><a href="/workspace">← Dashboard</a> · <a href="/magazine-fresh/records">New Magazine Records</a></div>\n<div class="card"><h2>Current / Previous Magazine</h2><p id="name" class="muted">Checking stored jobs...</p><div id="stats" class="grid"></div><p id="state" class="muted"></p><button id="resume" class="btn" style="display:none">Resume Extraction</button></div>\n<div class="card"><h3>Recent Magazine Jobs</h3><div id="jobs">Loading...</div></div>\n<div class="card"><h3>New Magazine</h3><p class="muted">For a genuinely new magazine, use the existing upload page after the current database is validated.</p></div></div>\n<script>\nlet active=null,timer=null;\nfunction esc(x){return String(x??\'\').replace(/[&<>"\']/g,m=>({\'&\':\'&amp;\',\'<\':\'&lt;\',\'>\':\'&gt;\',\'"\':\'&quot;\',"\'":\'&#39;\'}[m]))}\nfunction render(d){active=d.upload_id;name.innerHTML=\'<b>\'+esc(d.filename)+\'</b> · \'+esc(d.status);stats.innerHTML=\'<div class="card"><div class="muted">Pages</div><div class="num">\'+d.processed_pages+\'/\'+d.page_count+\'</div></div><div class="card"><div class="muted">Records</div><div class="num">\'+d.created_records+\'</div></div><div class="card"><div class="muted">Needs review</div><div class="num">\'+d.review_records+\'</div></div><div class="card"><div class="muted">Status</div><b>\'+esc(d.status)+\'</b></div>\';state.textContent=d.error_message||\'Ready.\';resume.style.display=[\'ERROR\',\'PAUSED_ERROR\',\'WAITING_FOR_PROVIDER\',\'STORED\'].includes(d.status)?\'inline-block\':\'none\'}\nasync function load(){let r=await fetch(\'/api/magazine-fresh/latest\');if(!r.ok){state.textContent=\'Unable to read stored jobs.\';return}let d=await r.json();if(d.latest)render(d.latest);else{name.textContent=\'No stored Magazine PDF found.\'}jobs.innerHTML=(d.uploads||[]).length?\'<table><tr><th>PDF</th><th>Status</th><th>Pages</th><th>Records</th></tr>\'+d.uploads.map(x=>\'<tr><td>\'+esc(x.filename)+\'</td><td>\'+esc(x.status)+\'</td><td>\'+x.processed_pages+\'/\'+x.page_count+\'</td><td>\'+x.created_records+\'</td></tr>\').join(\'\')+\'</table>\':\'No previous jobs.\'}\nresume.onclick=async()=>{if(!active)return;resume.disabled=true;let r=await fetch(\'/api/magazine-fresh/resume/\'+active,{method:\'POST\'});let d=await r.json();state.textContent=d.status||d.detail||\'Resume requested\';resume.disabled=false;setTimeout(load,1000)}\nload();timer=setInterval(load,4000);\n</script></body></html>'
+    return '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">\n<title>Alliance Magazine Resume</title><style>body{font-family:Arial;background:#f4f7fb;margin:0;color:#172437}.top{background:#102235;color:white;padding:20px}.wrap{max-width:1180px;margin:auto;padding:20px}.card{background:white;padding:18px;border-radius:14px;margin-bottom:14px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}.num{font-size:28px;font-weight:800}.muted{color:#66758a}.btn{background:#1266f1;color:white;border:0;border-radius:9px;padding:11px 18px;font-weight:700;cursor:pointer}.good{color:#16833c}.bad{color:#bd2f2f}a{color:#1266f1;text-decoration:none}table{width:100%;border-collapse:collapse}td,th{padding:8px;border-bottom:1px solid #e5eaf0;text-align:left}</style></head>\n<body><div class="top"><b>Fresh Magazine PDF Database · CRE OS 8.3.5.1</b><br><small>Gemini -> OpenRouter -> Groq Vision · real-page validation · checkpoint resume</small></div>\n<div class="wrap"><div class="card"><a href="/workspace">← Dashboard</a> · <a href="/magazine-fresh/records">New Magazine Records</a></div>\n<div class="card"><h2>Current / Previous Magazine</h2><p id="name" class="muted">Checking stored jobs...</p><div id="stats" class="grid"></div><p id="state" class="muted"></p><button id="resume" class="btn" style="display:none">Resume Extraction</button></div>\n<div class="card"><h3>Recent Magazine Jobs</h3><div id="jobs">Loading...</div></div>\n<div class="card"><h3>New Magazine</h3><p class="muted">For a genuinely new magazine, use the existing upload page after the current database is validated.</p></div></div>\n<script>\nlet active=null,timer=null;\nfunction esc(x){return String(x??\'\').replace(/[&<>"\']/g,m=>({\'&\':\'&amp;\',\'<\':\'&lt;\',\'>\':\'&gt;\',\'"\':\'&quot;\',"\'":\'&#39;\'}[m]))}\nfunction render(d){active=d.upload_id;name.innerHTML=\'<b>\'+esc(d.filename)+\'</b> · \'+esc(d.status);stats.innerHTML=\'<div class="card"><div class="muted">Pages</div><div class="num">\'+d.processed_pages+\'/\'+d.page_count+\'</div></div><div class="card"><div class="muted">Records</div><div class="num">\'+d.created_records+\'</div></div><div class="card"><div class="muted">Needs review</div><div class="num">\'+d.review_records+\'</div></div><div class="card"><div class="muted">Status</div><b>\'+esc(d.status)+\'</b></div>\';state.textContent=d.error_message||\'Ready.\';resume.style.display=[\'ERROR\',\'PAUSED_ERROR\',\'WAITING_FOR_PROVIDER\',\'STORED\'].includes(d.status)?\'inline-block\':\'none\'}\nasync function load(){let r=await fetch(\'/api/magazine-fresh/latest\');if(!r.ok){state.textContent=\'Unable to read stored jobs.\';return}let d=await r.json();if(d.latest)render(d.latest);else{name.textContent=\'No stored Magazine PDF found.\'}jobs.innerHTML=(d.uploads||[]).length?\'<table><tr><th>PDF</th><th>Status</th><th>Pages</th><th>Records</th></tr>\'+d.uploads.map(x=>\'<tr><td>\'+esc(x.filename)+\'</td><td>\'+esc(x.status)+\'</td><td>\'+x.processed_pages+\'/\'+x.page_count+\'</td><td>\'+x.created_records+\'</td></tr>\').join(\'\')+\'</table>\':\'No previous jobs.\'}\nresume.onclick=async()=>{if(!active)return;resume.disabled=true;let r=await fetch(\'/api/magazine-fresh/resume/\'+active,{method:\'POST\'});let d=await r.json();state.textContent=d.status||d.detail||\'Resume requested\';resume.disabled=false;setTimeout(load,1000)}\nload();timer=setInterval(load,4000);\n</script></body></html>'
 
 def register(core):
     app=_app(core); e=_engine(core)
@@ -456,7 +479,7 @@ def register(core):
             gw=safe_gateway.ProviderGateway()
             gw.max_calls=int(os.getenv("ALLIANCE_MAGAZINE_V823_MAX_CALLS","1000"))
             try:
-                rows,meta=_extract_lossless_page(gw,p)
+                rows,meta=_extract_lossless_page_quick(gw,p)
             finally:
                 doc.close()
             preview=[]
@@ -465,7 +488,7 @@ def register(core):
                 preview.append({'accepted':ok,'purity_reason':reason,'original_description':x.original_description,'exact_address':x.exact_address,'locality':x.locality,'property_type':x.property_type,'transaction_type':x.transaction_type,'area_value':x.area_value,'area_unit':x.area_unit,'floor':x.floor,'amount_raw':x.amount_raw,'contact_name':x.contact_name,'contact_number':x.contact_number})
             complete_rows=[x for x in (rows or []) if len(str(x.original_description or '').strip())>=35]
             with_phone=[x for x in (rows or []) if x.contact_number or re.search(r'(?<!\d)[6-9]\d{9}(?!\d)',re.sub(r'[\s-]','',str(x.original_description or '')))]
-            return {'status':'OK' if rows is not None else 'REGION_INCOMPLETE','version':'8.3.5','mode':'LOSSLESS_6_REGION','page':page,'region_results':meta.get('regions',[]),'failed_regions':meta.get('failed_regions',[]),'merged_record_count':len(rows or []),'complete_line_35plus_count':len(complete_rows),'phone_preserved_count':len(with_phone),'preview':preview,'note':'8.3.5 lossless canary only. All required regions must succeed. No records written and no checkpoint advanced.'}
+            return {'status':meta.get('status','UNKNOWN'),'version':'8.3.5.1','mode':'QUICK_LOSSLESS_6_REGION','page':page,'region_results':meta.get('regions',[]),'failed_regions':meta.get('failed_regions',[]),'merged_record_count':len(rows or []),'complete_line_35plus_count':len(complete_rows),'phone_preserved_count':len(with_phone),'preview':preview,'note':'8.3.5.1 quick canary: one attempt per region, no retry sleeps, partial results allowed for diagnosis only. No records written and no checkpoint advanced. Production Resume still requires all 6 regions to succeed.'}
 
         try:
             scale=PDF_RENDER_DPI/72.0
@@ -553,7 +576,7 @@ def register(core):
             results.append(item)
         return {
             'status':'OK',
-            'version':'8.3.5',
+            'version':'8.3.5.1',
             'page':page,
             'render_dpi':PDF_RENDER_DPI,
             'image_bytes':len(jpg),
