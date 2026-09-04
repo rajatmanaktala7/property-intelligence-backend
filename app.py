@@ -17176,3 +17176,12 @@ try:
     print("Alliance Source-Aware Newspaper + Magazine Repair 7.0.4: registered")
 except Exception as _v704_exc:
     print("Alliance Source-Aware Repair 7.0.4 registration warning:",_v704_exc)
+
+# FOUNDATION_7_0_5_CONTACT_PROVENANCE_CLOSURE
+try:
+    import sys as _v705_sys
+    import alliance_contact_provenance_v705 as _v705
+    _v705.start(_v705_sys.modules[__name__])
+    print("Alliance Contact Provenance Closure 7.0.5: registered")
+except Exception as _v705_exc:
+    print("Alliance Contact Provenance Closure 7.0.5 registration warning:",_v705_exc)
