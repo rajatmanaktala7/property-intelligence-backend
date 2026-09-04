@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import asyncio
 import threading
@@ -429,6 +429,21 @@ def _load_core():
                 "fail_safe": True,
             }
             print("[historical-repair-v737] warning:", type(exc).__name__, str(exc))
+
+        # 7.3.8 historical source recovery is audit-only and fail-safe.
+        try:
+            import alliance_source_recovery_v738 as source_recovery_v738
+            recovery_result = source_recovery_v738.register(wrapped.core)
+            stabilization = dict(stabilization or {})
+            stabilization["source_recovery_v738"] = recovery_result
+        except Exception as exc:
+            stabilization = dict(stabilization or {})
+            stabilization["source_recovery_v738"] = {
+                "status": "ERROR",
+                "error": f"{type(exc).__name__}: {exc}",
+                "fail_safe": True,
+            }
+            print("[source-recovery-v738] warning:", type(exc).__name__, str(exc))
 
         import alliance_live_feed_purity as live_feed_purity
         live_feed_purity.register(wrapped)
