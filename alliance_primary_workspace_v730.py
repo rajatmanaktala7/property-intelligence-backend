@@ -6,7 +6,7 @@ from fastapi import Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import text
 
-VERSION="7.3.0-ALLIANCE-PRIMARY-WORKSPACE-ACTION-ENGINE"
+VERSION="7.3.1-ALLIANCE-PRIMARY-WORKSPACE-ACTION-ENGINE-PERSISTED-CERT-BOOT-FIX"
 MODE="V721_CERTIFIED_PRIMARY_TEAM_WORKSPACE_VERIFY_ASSIGN_MATCH_ALTERNATIVES_REVIEW_CLIENT_SAFE_DRAFT_FOLLOWUP_SOURCE_EVIDENCE_NO_CANONICAL_MUTATION"
 STATE={"status":"STARTING","started_at":datetime.now(timezone.utc).isoformat(),"result":None,"last_error":None}
 _LOCK=threading.Lock()
@@ -268,9 +268,26 @@ def register(core):
     if engine is None: raise RuntimeError("Database engine unavailable")
     import alliance_master_integration_v720 as v720
     import alliance_acceptance_v721 as v721
+    # 7.3.1 BOOT FIX: v721 acceptance runs after startup, while 7.3 registers during import.
+    # Recover the already-certified PASS from persistent acceptance history when live STATE is not ready.
     cert=(v721.STATE.get("result") or {})
     if cert.get("certification")!="V7_2_OPERATIONAL_ACCEPTANCE_PASS":
-        raise RuntimeError("7.2.1 operational certification PASS required before 7.3")
+        persisted=None
+        try:
+            with engine.connect() as _c731:
+                _row731=_c731.execute(text("""SELECT result FROM pi_acceptance_runs_v721
+                  WHERE status='PASS' ORDER BY run_id DESC LIMIT 1""")).mappings().first()
+                if _row731:
+                    persisted=_safe(_row731.get("result"))
+        except Exception:
+            persisted=None
+        if isinstance(persisted,str):
+            try: persisted=json.loads(persisted)
+            except Exception: persisted=None
+        if isinstance(persisted,dict) and persisted.get("certification")=="V7_2_OPERATIONAL_ACCEPTANCE_PASS":
+            cert=persisted
+        else:
+            raise RuntimeError("7.2.1 certified PASS not found in memory or persisted acceptance history")
     with engine.begin() as c:
         for ddl in DDL:c.execute(text(ddl))
 

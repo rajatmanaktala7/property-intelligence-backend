@@ -17230,3 +17230,6 @@ try:
     print("Alliance Primary Workspace Action Engine 7.3: registered")
 except Exception as _v730_exc:
     print("Alliance 7.3 registration warning:",_v730_exc)
+
+# FOUNDATION_7_3_1_PERSISTED_CERTIFICATION_BOOT_FIX
+# 7.3 startup now recovers persisted 7.2.1 certification instead of racing delayed in-memory STATE.
