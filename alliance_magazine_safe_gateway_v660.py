@@ -12,6 +12,7 @@ from sqlalchemy import text
 import alliance_magazine_field_v610 as frozen_v2
 import alliance_magazine_challenger_v514 as semantic_student
 import alliance_magazine_lossless_extraction_v670 as lossless_v670
+import alliance_magazine_section_context_v680 as section_v680
 
 VERSION="6.6.0-ALLIANCE-MAGAZINE-SAFE-VISION-GATEWAY"
 MODE="LOCK_199_QUOTA_AWARE_PROVIDER_FAILOVER_CIRCUIT_BREAKER_LOW_CALL_MULTI_TARGET_NO_FALSE_TRAINING_FAILURE"
@@ -56,13 +57,20 @@ TARGET REFERENCES:
 {schema_prompt}
 
 Additional target rules:
-1. Return only target property rows visibly present on this page.
-2. One target reference = one complete property row.
-3. Preserve all digits exactly: address/unit, area, floor, BHK/BR, @price and row-owned phones.
-4. Never replace a specific address with only the parent locality.
-5. Do not use page header/footer/broker office address/advertisements/adjacent property rows.
-6. If a target is not confidently readable, omit it rather than inventing text.
-7. If the row visibly contains an address identifier but address is blank, mark needs_review=true.
+1. Read page hierarchy: category/transaction heading -> locality heading -> property row.
+2. Return only target property rows visibly present on this page.
+3. One target reference = one complete property row.
+4. Attach the governing section_heading to every returned row.
+5. COMMERCIAL - RENT means property_category=COMMERCIAL and transaction_type=RENT.
+6. COMMERCIAL - SALE means property_category=COMMERCIAL and transaction_type=SALE.
+7. RESIDENTIAL - RENT means property_category=RESIDENTIAL and transaction_type=RENT.
+8. RESIDENTIAL - SALE means property_category=RESIDENTIAL and transaction_type=SALE.
+9. Section context remains active until another visible heading changes it.
+10. Preserve all digits exactly: address/unit, area, floor, BHK/BR, @price and row-owned phones.
+11. Never replace a specific address with only the parent locality.
+12. Do not use page header/footer/broker office address/advertisements/adjacent property rows.
+13. If a target is not confidently readable, omit it rather than inventing text.
+14. If governing section context is visible but category/transaction is missing, mark needs_review=true.
 """
 
 def _engine(c): return getattr(c,"engine",None)
@@ -84,10 +92,13 @@ def _clean_records(data,provider_label):
         ref=str(rec.get("ref") or "").strip()
         raw=str(rec.get("raw_line") or rec.get("original_description") or "").strip()
         if not ref or not raw: continue
-        enriched=lossless_v670.enrich_record({
+        enriched=section_v680.enrich_record({
             "ref":ref,
+            "section_heading":rec.get("section_heading") or "",
             "raw_line":raw,
             "original_description":str(rec.get("original_description") or raw).strip(),
+            "property_category":rec.get("property_category") or "",
+            "transaction_type":rec.get("transaction_type") or "",
             "address":rec.get("address") or "",
             "locality":rec.get("locality") or "",
             "city":rec.get("city") or "",
@@ -97,7 +108,6 @@ def _clean_records(data,provider_label):
             "floors":rec.get("floors") or [],
             "contact_name":rec.get("contact_name") or "",
             "phones":rec.get("phones") or [],
-            "transaction_type":rec.get("transaction_type") or "",
             "confidence":rec.get("confidence"),
             "needs_review":rec.get("needs_review",False),
             "review_reason":rec.get("review_reason") or "",
@@ -335,7 +345,7 @@ def run_once(core):
             STATE["current_page"]=page
             refs=list(dict.fromkeys(str(e["ref"]) for e in errs))
             img=base64.b64decode(pages[str(page)])
-            prompt=PROMPT.format(refs=json.dumps(refs,ensure_ascii=False),training_rules=lossless_v670.TRAINING_RULES,schema_prompt=lossless_v670.VISION_SCHEMA_PROMPT)
+            prompt=PROMPT.format(refs=json.dumps(refs,ensure_ascii=False),training_rules=section_v680.TRAINING_RULES,schema_prompt=section_v680.VISION_SCHEMA_PROMPT)
 
             calls=[]
             # Two independent page reads are enough for consensus; gateway handles failover.
@@ -496,3 +506,6 @@ def start(core):
 
 
 # 7.3.5 MAGAZINE LOSSLESS EXTRACTION TRAINING
+
+
+# 7.3.6 MAGAZINE SECTION CONTEXT TRAINING
