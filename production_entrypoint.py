@@ -547,6 +547,18 @@ def _load_core():
             stabilization["magazine_fresh_v822"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","fail_safe":True}
             print("[magazine-fresh-v822] warning:", type(exc).__name__, str(exc))
 
+        # ALLIANCE_MAGAZINE_FASTLANE_V840
+        try:
+            import alliance_magazine_fastlane_v840 as magazine_fastlane_v840
+            fastlane_result = magazine_fastlane_v840.register(wrapped.core)
+            stabilization = dict(stabilization or {})
+            stabilization["magazine_fastlane_v840"] = fastlane_result
+            print("[magazine-fastlane-v840]", fastlane_result)
+        except Exception as exc:
+            stabilization = dict(stabilization or {})
+            stabilization["magazine_fastlane_v840"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","fail_safe":True}
+            print("[magazine-fastlane-v840] warning:", type(exc).__name__, str(exc))
+
         CORE_APP = wrapped.app
         try:
             import alliance_whatsapp_safe_ingest_v5 as safe_wa
