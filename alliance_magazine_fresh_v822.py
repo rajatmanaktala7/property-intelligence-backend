@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import text
 import alliance_magazine_safe_gateway_v660 as safe_gateway
 
-VERSION='8.2.4-RESUME-DASHBOARD-MAGAZINE-PDF'
+VERSION='8.2.4.1-RESUME-DASHBOARD-LATEST-API-FIX'
 CHUNK_SIZE=4*1024*1024
 MAX_UPLOAD_MB=int(os.getenv('MAX_UPLOAD_MB','100'))
 PDF_RENDER_DPI=int(os.getenv('PDF_RENDER_DPI','220'))
@@ -227,6 +227,35 @@ def register(core):
         if row[1]=='PROCESSING':return {'status':'ALREADY_PROCESSING','upload_id':upload_id}
         bg.add_task(_process,core,upload_id)
         return {'status':'RESUME_STARTED','upload_id':upload_id,'version':'8.2.3'}
+
+    @app.get('/api/magazine-fresh/latest')
+    def latest(req:Request):
+        _login(core,req)
+        try:
+            with e.connect() as c:
+                rows=c.execute(text("""
+                    SELECT upload_id::text AS upload_id,
+                           filename,
+                           COALESCE(status,'UNKNOWN') AS status,
+                           COALESCE(page_count,0) AS page_count,
+                           COALESCE(processed_pages,0) AS processed_pages,
+                           COALESCE(created_records,0) AS created_records,
+                           COALESCE(review_records,0) AS review_records,
+                           error_message,
+                           created_at
+                    FROM pi_magazine_fresh_uploads
+                    ORDER BY created_at DESC NULLS LAST
+                    LIMIT 10
+                """)).mappings().all()
+            items=[]
+            for x in rows:
+                d=dict(x)
+                if d.get('created_at') is not None:
+                    d['created_at']=d['created_at'].isoformat()
+                items.append(d)
+            return {'status':'OK','version':'8.2.4.1','latest':items[0] if items else None,'uploads':items}
+        except Exception as exc:
+            raise HTTPException(500,f'Latest Magazine lookup failed: {type(exc).__name__}: {exc}')
 
     @app.get('/api/magazine-fresh/status/{upload_id}')
     def status(upload_id:str,req:Request):
