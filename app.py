@@ -778,7 +778,7 @@ def create_job(sid,kind,summary):
 def login_page(req:Request):
     existing=get_role(req)
     if existing:
-        return RedirectResponse("/workspace",status_code=303)
+        return RedirectResponse("/alliance/primary",status_code=303)
 
     html="""<!doctype html>
 <html>
@@ -819,7 +819,7 @@ button{background:#111827;color:white;border:0;font-weight:700;cursor:pointer;ma
 def login_post(role:str=Form(...),code:str=Form(...)):
     ok=(role=="team" and hmac.compare_digest(code,TEAM_CODE)) or (role=="admin" and hmac.compare_digest(code,ADMIN_CODE))
     if not ok:return HTMLResponse("Invalid code",401)
-    resp=RedirectResponse("/workspace",303)
+    resp=RedirectResponse("/alliance/primary",303)
     resp.set_cookie(
         "pi_session",
         signed(role),
@@ -17221,3 +17221,12 @@ try:
     print("Alliance Automated End-to-End Acceptance 7.2.1: registered")
 except Exception as _v721_exc:
     print("Alliance 7.2.1 registration warning:",_v721_exc)
+
+# FOUNDATION_7_3_PRIMARY_WORKSPACE_ACTION_ENGINE
+try:
+    import sys as _v730_sys
+    import alliance_primary_workspace_v730 as _v730
+    _v730.start(_v730_sys.modules[__name__])
+    print("Alliance Primary Workspace Action Engine 7.3: registered")
+except Exception as _v730_exc:
+    print("Alliance 7.3 registration warning:",_v730_exc)

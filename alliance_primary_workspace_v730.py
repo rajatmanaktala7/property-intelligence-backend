@@ -1,0 +1,470 @@
+from __future__ import annotations
+import html, json, threading, time
+from datetime import datetime, timezone
+from decimal import Decimal
+from fastapi import Form, HTTPException, Query, Request
+from fastapi.responses import HTMLResponse, RedirectResponse
+from sqlalchemy import text
+
+VERSION="7.3.0-ALLIANCE-PRIMARY-WORKSPACE-ACTION-ENGINE"
+MODE="V721_CERTIFIED_PRIMARY_TEAM_WORKSPACE_VERIFY_ASSIGN_MATCH_ALTERNATIVES_REVIEW_CLIENT_SAFE_DRAFT_FOLLOWUP_SOURCE_EVIDENCE_NO_CANONICAL_MUTATION"
+STATE={"status":"STARTING","started_at":datetime.now(timezone.utc).isoformat(),"result":None,"last_error":None}
+_LOCK=threading.Lock()
+
+DDL=[
+"""CREATE TABLE IF NOT EXISTS pi_master_action_state_v730(
+ canonical_id TEXT PRIMARY KEY,
+ entity_type TEXT NOT NULL,
+ stage TEXT NOT NULL DEFAULT 'NEW',
+ assigned_to TEXT,
+ next_followup_at TIMESTAMPTZ,
+ followup_status TEXT NOT NULL DEFAULT 'NOT_SCHEDULED',
+ review_status TEXT NOT NULL DEFAULT 'READY_FOR_REVIEW',
+ internal_notes TEXT,
+ updated_at TIMESTAMPTZ DEFAULT NOW())""",
+"""CREATE TABLE IF NOT EXISTS pi_master_action_log_v730(
+ id BIGSERIAL PRIMARY KEY,
+ canonical_id TEXT NOT NULL,
+ entity_type TEXT NOT NULL,
+ action TEXT NOT NULL,
+ actor TEXT,
+ details JSONB NOT NULL DEFAULT '{}'::jsonb,
+ created_at TIMESTAMPTZ DEFAULT NOW())""",
+"""CREATE INDEX IF NOT EXISTS idx_v730_action_log_entity ON pi_master_action_log_v730(canonical_id,created_at DESC)""",
+"""CREATE TABLE IF NOT EXISTS pi_match_reviews_v730(
+ requirement_canonical_id TEXT NOT NULL,
+ property_canonical_id TEXT NOT NULL,
+ review_status TEXT NOT NULL DEFAULT 'READY_FOR_REVIEW',
+ reviewed_by TEXT,
+ reviewed_at TIMESTAMPTZ,
+ notes TEXT,
+ updated_at TIMESTAMPTZ DEFAULT NOW(),
+ PRIMARY KEY(requirement_canonical_id,property_canonical_id))"""
+]
+
+def _engine(core): return getattr(core,"engine",None)
+def _app(core): return getattr(core,"app",None) or core
+def _role(core,req):
+    fn=getattr(core,"need_login",None)
+    return fn(req) if fn else "team"
+def _actor(core,req):
+    fn=getattr(core,"actor_name",None)
+    return fn(req) if fn else "team"
+def _safe(v):
+    if v is None or isinstance(v,(str,int,float,bool)): return v
+    if isinstance(v,Decimal): return float(v)
+    if isinstance(v,datetime): return v.isoformat()
+    if isinstance(v,dict): return {str(k):_safe(x) for k,x in v.items()}
+    if isinstance(v,(list,tuple,set)): return [_safe(x) for x in v]
+    return str(v)
+def _rows(rs): return [{k:_safe(v) for k,v in dict(r._mapping).items()} for r in rs]
+def _route_exists(app,path):
+    return any(getattr(r,"path",None)==path for r in getattr(app,"routes",[]))
+def _audit_log(engine,cid,etype,action,actor,details=None):
+    with engine.begin() as c:
+        c.execute(text("""INSERT INTO pi_master_action_log_v730(canonical_id,entity_type,action,actor,details)
+          VALUES(:id,:et,:a,:by,CAST(:d AS JSONB))"""),
+          {"id":cid,"et":etype,"a":action,"by":actor,"d":json.dumps(details or {},ensure_ascii=False,default=str)})
+def _get_action(engine,cid):
+    with engine.connect() as c:
+        r=c.execute(text("SELECT * FROM pi_master_action_state_v730 WHERE canonical_id=:id"),{"id":cid}).mappings().first()
+    return _safe(dict(r)) if r else {}
+def _set_action(engine,cid,etype,actor,**fields):
+    allowed={"stage","assigned_to","next_followup_at","followup_status","review_status","internal_notes"}
+    clean={k:v for k,v in fields.items() if k in allowed}
+    with engine.begin() as c:
+        c.execute(text("""INSERT INTO pi_master_action_state_v730(canonical_id,entity_type,stage,assigned_to,next_followup_at,followup_status,review_status,internal_notes,updated_at)
+          VALUES(:id,:et,:stage,:assigned,:nextf,:fstatus,:rstatus,:notes,NOW())
+          ON CONFLICT(canonical_id) DO UPDATE SET
+          stage=COALESCE(EXCLUDED.stage,pi_master_action_state_v730.stage),
+          assigned_to=COALESCE(EXCLUDED.assigned_to,pi_master_action_state_v730.assigned_to),
+          next_followup_at=COALESCE(EXCLUDED.next_followup_at,pi_master_action_state_v730.next_followup_at),
+          followup_status=COALESCE(EXCLUDED.followup_status,pi_master_action_state_v730.followup_status),
+          review_status=COALESCE(EXCLUDED.review_status,pi_master_action_state_v730.review_status),
+          internal_notes=COALESCE(EXCLUDED.internal_notes,pi_master_action_state_v730.internal_notes),
+          updated_at=NOW()"""),
+          {"id":cid,"et":etype,"stage":clean.get("stage"),"assigned":clean.get("assigned_to"),
+           "nextf":clean.get("next_followup_at"),"fstatus":clean.get("followup_status"),
+           "rstatus":clean.get("review_status"),"notes":clean.get("internal_notes")})
+    _audit_log(engine,cid,etype,"WORKFLOW_UPDATED",actor,clean)
+
+def _counts(engine):
+    with engine.connect() as c:
+        return {
+          "properties":c.execute(text("SELECT COUNT(*) FROM pi_master_properties_v711")).scalar_one(),
+          "requirements":c.execute(text("SELECT COUNT(*) FROM pi_master_requirements_v711")).scalar_one(),
+          "verified":c.execute(text("SELECT COUNT(*) FROM pi_master_workflow_v720 WHERE verification_status='VERIFIED'")).scalar_one(),
+          "matches":c.execute(text("SELECT COUNT(*) FROM pi_master_matches_v720")).scalar_one(),
+          "followups":c.execute(text("SELECT COUNT(*) FROM pi_master_action_state_v730 WHERE followup_status='SCHEDULED'")).scalar_one(),
+          "assigned":c.execute(text("SELECT COUNT(*) FROM pi_master_action_state_v730 WHERE assigned_to IS NOT NULL AND assigned_to<>''")).scalar_one(),
+        }
+
+PRIMARY_NAV=[
+("Command Centre","/alliance/primary"),
+("Properties","/alliance/primary/properties"),
+("Requirements","/alliance/primary/requirements"),
+("Matcher","/alliance/primary/matcher"),
+("Follow-ups","/alliance/primary/followups"),
+("Add Property","/property-manual"),
+]
+
+def _shell(core,req,title,body):
+    role=_role(core,req)
+    nav="".join(f'<a href="{html.escape(p,quote=True)}">{html.escape(l)}</a>' for l,p in PRIMARY_NAV)
+    admin=""
+    if role=="admin":
+        admin="""<details class="admin"><summary>Admin / Legacy</summary>
+        <a href="/alliance">7.2 Command Centre</a>
+        <a href="/workspace">Legacy Workspace</a>
+        <a href="/database-page?table_name=properties">Legacy Property DB</a>
+        <a href="/database-page?table_name=requirements">Legacy Requirement DB</a>
+        <a href="/property-brain/acceptance-v721">7.2.1 Acceptance</a>
+        <a href="/status-page">System Status</a></details>"""
+    return f"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{html.escape(title)}</title><style>
+*{{box-sizing:border-box}}body{{font-family:Arial,sans-serif;margin:0;background:#f4f7fb;color:#172033}}
+header{{background:#0d2238;color:white;padding:18px 22px;display:flex;justify-content:space-between;gap:15px;flex-wrap:wrap}}
+nav{{background:white;border-bottom:1px solid #dfe6ee;padding:10px 14px;display:flex;gap:7px;flex-wrap:wrap;position:sticky;top:0;z-index:2}}
+nav a,.btn,.mini{{background:#0d2238;color:white;text-decoration:none;border:0;border-radius:8px;padding:9px 11px;cursor:pointer;display:inline-block}}
+.btn.alt,.mini.alt{{background:#475467}}.btn.good,.mini.good{{background:#067647}}.btn.warn,.mini.warn{{background:#b54708}}
+.wrap{{max-width:1800px;margin:auto;padding:18px}}.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:10px}}
+.card{{background:white;border:1px solid #e1e7ee;border-radius:12px;padding:14px;margin-bottom:12px}}.num{{font-size:28px;font-weight:800}}
+.tablebox{{overflow:auto;max-height:72vh}}table{{border-collapse:collapse;width:100%;font-size:12px}}th,td{{padding:8px;border-bottom:1px solid #edf0f4;text-align:left;vertical-align:top}}
+th{{position:sticky;top:0;background:#f8fafc}}input,select,textarea{{padding:8px;border:1px solid #cfd8e3;border-radius:7px;max-width:100%}}
+form.inline{{display:flex;gap:7px;flex-wrap:wrap;align-items:center}}.muted{{color:#667085}}.ok{{color:#08783e;font-weight:700}}.warntext{{color:#b54708;font-weight:700}}
+.bad{{color:#b42318;font-weight:700}}.pill{{padding:3px 7px;border-radius:999px;background:#eef2f6;white-space:nowrap}}pre{{white-space:pre-wrap;word-break:break-word}}
+details.admin{{background:#fff;border:1px solid #dfe6ee;padding:8px 12px}}details.admin a{{margin:5px;display:inline-block}}
+.actions{{display:flex;gap:5px;flex-wrap:wrap}}.right{{text-align:right}}
+</style></head><body>
+<header><div><b>Alliance CRE Operating System · 7.3</b><br><small>Verify → Match → Review → Client-safe draft → Follow-up</small></div>
+<div>{html.escape(str(role))} · <a href="/logout" style="color:white">Logout</a></div></header>
+<nav>{nav}</nav>{admin}<div class="wrap"><h2>{html.escape(title)}</h2>{body}</div></body></html>"""
+
+def _property(engine,cid):
+    import alliance_master_integration_v720 as v720
+    with engine.connect() as c:
+        r=c.execute(text("""SELECT p.*,COALESCE(w.verification_status,'UNVERIFIED') verification_status,
+          w.verified_at,w.verified_by,w.availability_status,w.assigned_to workflow_assigned_to,w.internal_notes workflow_notes
+          FROM pi_master_properties_v711 p LEFT JOIN pi_master_workflow_v720 w ON w.canonical_id=p.canonical_id
+          WHERE p.canonical_id=:id"""),{"id":cid}).mappings().first()
+    return v720._decorate_property(_safe(dict(r))) if r else None
+def _requirement(engine,cid):
+    import alliance_master_integration_v720 as v720
+    with engine.connect() as c:
+        r=c.execute(text("""SELECT r.*,COALESCE(w.verification_status,'UNVERIFIED') verification_status,
+          w.verified_at,w.verified_by,w.assigned_to workflow_assigned_to,w.internal_notes workflow_notes
+          FROM pi_master_requirements_v711 r LEFT JOIN pi_master_workflow_v720 w ON w.canonical_id=r.canonical_id
+          WHERE r.canonical_id=:id"""),{"id":cid}).mappings().first()
+    return v720._decorate_requirement(_safe(dict(r))) if r else None
+
+def _verify_property(engine,cid,actor):
+    if not _property(engine,cid): raise HTTPException(404,"Property not found")
+    with engine.begin() as c:
+        c.execute(text("""INSERT INTO pi_master_workflow_v720(canonical_id,entity_type,verification_status,verified_at,verified_by,availability_status,updated_at)
+          VALUES(:id,'PROPERTY','VERIFIED',NOW(),:by,'AVAILABLE',NOW())
+          ON CONFLICT(canonical_id) DO UPDATE SET verification_status='VERIFIED',verified_at=NOW(),verified_by=:by,
+          availability_status='AVAILABLE',updated_at=NOW()"""),{"id":cid,"by":actor})
+    _set_action(engine,cid,"PROPERTY",actor,stage="VERIFIED")
+    _audit_log(engine,cid,"PROPERTY","VERIFIED_AVAILABLE",actor,{})
+def _mark_unavailable(engine,cid,actor):
+    if not _property(engine,cid): raise HTTPException(404,"Property not found")
+    with engine.begin() as c:
+        c.execute(text("""INSERT INTO pi_master_workflow_v720(canonical_id,entity_type,verification_status,availability_status,updated_at)
+          VALUES(:id,'PROPERTY','UNVERIFIED','UNAVAILABLE',NOW())
+          ON CONFLICT(canonical_id) DO UPDATE SET availability_status='UNAVAILABLE',verification_status='UNVERIFIED',updated_at=NOW()"""),{"id":cid})
+    _set_action(engine,cid,"PROPERTY",actor,stage="UNAVAILABLE")
+    _audit_log(engine,cid,"PROPERTY","MARKED_UNAVAILABLE",actor,{})
+
+def _source_links(engine,cid):
+    with engine.connect() as c:
+        return _rows(c.execute(text("""SELECT source_type,source_table,source_pk,source_row_hash,created_at
+          FROM pi_master_source_links_v711 WHERE canonical_id=:id ORDER BY id"""),{"id":cid}))
+def _logs(engine,cid,limit=50):
+    with engine.connect() as c:
+        return _rows(c.execute(text("""SELECT action,actor,details,created_at FROM pi_master_action_log_v730
+          WHERE canonical_id=:id ORDER BY id DESC LIMIT :n"""),{"id":cid,"n":limit}))
+
+def _match_full(engine,rid,limit=50):
+    """Full master inventory. Exact locality first; then transparent same-city and broader transaction/area alternatives."""
+    import alliance_master_integration_v720 as v720
+    req=_requirement(engine,rid)
+    if not req: raise HTTPException(404,"Requirement not found")
+    tx=req.get("transaction_type") or ""
+    props=v720._search_properties(engine,tx=tx,limit=4000)
+    exact=[];same_city=[];broader=[]
+    rl=(req.get("locality") or "").strip().lower()
+    rc=(req.get("city") or "").strip().lower()
+    for p in props:
+        if p.get("availability_status")=="UNAVAILABLE": continue
+        score,reasons=v720._score(req,p)
+        pl=(p.get("locality") or "").strip().lower(); pc=(p.get("city") or "").strip().lower()
+        if rl and pl and (rl in pl or pl in rl):
+            tier="EXACT_LOCALITY"; bonus=10
+        elif rc and pc and rc==pc:
+            tier="SAME_CITY_ALTERNATIVE"; bonus=3
+        else:
+            tier="TRANSACTION_AREA_ALTERNATIVE"; bonus=0
+        # If v720 score is low because locality differs, preserve useful area-fit alternatives.
+        area_req=req.get("area_sqft");area_prop=p.get("area_sqft")
+        area_fit=False
+        if area_req and area_prop:
+            diff=abs(float(area_prop)-float(area_req))/max(float(area_req),1)
+            area_fit=diff<=0.50
+        if tier=="EXACT_LOCALITY" or score>=35 or (tier!="EXACT_LOCALITY" and area_fit and tx==p.get("transaction_type")):
+            item={"score":min(100,score+bonus),"base_score":score,"tier":tier,"reasons":reasons,"property":p}
+            (exact if tier=="EXACT_LOCALITY" else same_city if tier=="SAME_CITY_ALTERNATIVE" else broader).append(item)
+    for bucket in (exact,same_city,broader):
+        bucket.sort(key=lambda x:(x["score"], x["property"].get("verification_status")=="VERIFIED"),reverse=True)
+    combined=(exact+same_city+broader)[:limit]
+    with engine.begin() as c:
+        for m in combined:
+            p=m["property"]
+            c.execute(text("""INSERT INTO pi_master_matches_v720(requirement_canonical_id,property_canonical_id,match_score,match_reasons,status,updated_at)
+              VALUES(:r,:p,:s,CAST(:why AS JSONB),'READY_FOR_REVIEW',NOW())
+              ON CONFLICT(requirement_canonical_id,property_canonical_id) DO UPDATE SET
+              match_score=EXCLUDED.match_score,match_reasons=EXCLUDED.match_reasons,status='READY_FOR_REVIEW',updated_at=NOW()"""),
+              {"r":rid,"p":p["canonical_id"],"s":m["score"],"why":json.dumps([m["tier"]]+m["reasons"])})
+            c.execute(text("""INSERT INTO pi_match_reviews_v730(requirement_canonical_id,property_canonical_id,review_status)
+              VALUES(:r,:p,'READY_FOR_REVIEW') ON CONFLICT DO NOTHING"""),{"r":rid,"p":p["canonical_id"]})
+    return req,combined
+
+def _approved_matches(engine,rid):
+    import alliance_master_integration_v720 as v720
+    with engine.connect() as c:
+        rows=c.execute(text("""SELECT p.*,m.match_score,m.match_reasons,rv.review_status,
+          COALESCE(w.verification_status,'UNVERIFIED') verification_status,w.availability_status
+          FROM pi_master_matches_v720 m
+          JOIN pi_master_properties_v711 p ON p.canonical_id=m.property_canonical_id
+          LEFT JOIN pi_match_reviews_v730 rv ON rv.requirement_canonical_id=m.requirement_canonical_id AND rv.property_canonical_id=m.property_canonical_id
+          LEFT JOIN pi_master_workflow_v720 w ON w.canonical_id=p.canonical_id
+          WHERE m.requirement_canonical_id=:r
+          ORDER BY m.match_score DESC"""),{"r":rid}).mappings().all()
+    out=[]
+    for r in rows:
+        d=_safe(dict(r)); d=v720._decorate_property(d)
+        if d.get("review_status")=="APPROVED" and d.get("verification_status")=="VERIFIED" and d.get("availability_status")!="UNAVAILABLE":
+            out.append(d)
+    return out
+
+def _draft(req,props):
+    if not props:
+        return "No client draft available yet. Approve and verify at least one matched property first."
+    lines=["Property options matching your requirement:"]
+    for i,p in enumerate(props[:3],1):
+        bits=[f"{i}. {p.get('locality') or 'Property option'}"]
+        if p.get("area_sqft_display"):bits.append(f"{p['area_sqft_display']} sq ft")
+        if p.get("transaction_type"):bits.append(str(p["transaction_type"]))
+        if p.get("sale_amount"):bits.append("Sale: "+str(p["sale_amount"]))
+        if p.get("rent_amount"):bits.append("Rent: "+str(p["rent_amount"]))
+        lines.append(" | ".join(bits))
+    lines.append("Please let us know which option you would like to inspect or schedule a site visit for.")
+    return "\n".join(lines)
+
+def _button(url,label,cls="mini"):
+    return f'<a class="{cls}" href="{html.escape(url,quote=True)}">{html.escape(label)}</a>'
+
+def register(core):
+    app=_app(core);engine=_engine(core)
+    if engine is None: raise RuntimeError("Database engine unavailable")
+    import alliance_master_integration_v720 as v720
+    import alliance_acceptance_v721 as v721
+    cert=(v721.STATE.get("result") or {})
+    if cert.get("certification")!="V7_2_OPERATIONAL_ACCEPTANCE_PASS":
+        raise RuntimeError("7.2.1 operational certification PASS required before 7.3")
+    with engine.begin() as c:
+        for ddl in DDL:c.execute(text(ddl))
+
+    @app.get("/alliance/primary",response_class=HTMLResponse)
+    def primary(req:Request):
+        _role(core,req);c=_counts(engine)
+        cards="".join(f"<div class='card'><div class='muted'>{html.escape(k.replace('_',' ').title())}</div><div class='num'>{v}</div></div>" for k,v in c.items())
+        body=f"""<div class='grid'>{cards}</div>
+        <div class='card'><h3>Daily Operating Flow</h3><p><b>1.</b> Open Properties and verify availability. <b>2.</b> Open Requirements and run Match.
+        <b>3.</b> Review exact and alternative options. <b>4.</b> Approve only suitable verified properties.
+        <b>5.</b> Generate client-safe draft. <b>6.</b> Assign follow-up.</p></div>
+        <div class='grid'>
+        <div class='card'><h3>Property Team</h3><p>Search canonical inventory, view internal contact/evidence, verify availability and assign responsibility.</p>{_button('/alliance/primary/properties','Open Properties','btn good')}</div>
+        <div class='card'><h3>Leasing Team</h3><p>Open requirements, run full 3,507-property matching and review fallback alternatives if exact locality is unavailable.</p>{_button('/alliance/primary/requirements','Open Requirements','btn')}</div>
+        <div class='card'><h3>Follow-up</h3><p>One queue for assigned work and scheduled follow-ups.</p>{_button('/alliance/primary/followups','Open Follow-ups','btn alt')}</div></div>"""
+        return HTMLResponse(_shell(core,req,"Primary Command Centre",body))
+
+    @app.get("/alliance/primary/properties",response_class=HTMLResponse)
+    def properties(req:Request,q:str=Query(""),transaction:str=Query(""),verification:str=Query("")):
+        _role(core,req);rows=v720._search_properties(engine,q,transaction,1000)
+        if verification: rows=[x for x in rows if x.get("verification_status")==verification.upper()]
+        form=f"""<form class='inline'><input name='q' value='{html.escape(q,quote=True)}' placeholder='Locality, city, property'>
+        <select name='transaction'><option value=''>All transactions</option><option {'selected' if transaction=='SALE' else ''}>SALE</option><option {'selected' if transaction=='RENT' else ''}>RENT</option></select>
+        <select name='verification'><option value=''>All verification</option><option {'selected' if verification=='VERIFIED' else ''}>VERIFIED</option><option {'selected' if verification=='UNVERIFIED' else ''}>UNVERIFIED</option></select>
+        <button class='btn'>Search</button></form>"""
+        trs=[]
+        for p in rows:
+            cid=p["canonical_id"];phones=", ".join(map(str,p.get("phones") or []))
+            actions=f"<div class='actions'>{_button('/alliance/primary/property/'+cid,'Open')}"
+            if p.get("verification_status")!="VERIFIED": actions+=f"""<form method='post' action='/alliance/primary/property/{html.escape(cid,quote=True)}/verify' style='display:inline'><button class='mini good'>Verify</button></form>"""
+            actions+="</div>"
+            trs.append("<tr>"+f"<td>{actions}</td><td>{html.escape(str(p.get('locality') or ''))}</td><td>{html.escape(str(p.get('transaction_type') or ''))}</td>"+
+                       f"<td>{html.escape(str(p.get('area_sqft_display') or ''))}</td><td>{html.escape(str(p.get('area_sqyd') or ''))}</td><td>{html.escape(str(p.get('area_sqm') or ''))}</td>"+
+                       f"<td>{html.escape(str(p.get('sale_amount') or ''))}</td><td>{html.escape(str(p.get('rent_amount') or ''))}</td>"+
+                       f"<td>{html.escape(phones)}</td><td>{html.escape(str(p.get('verification_status') or ''))}</td></tr>")
+        table=f"<div class='card tablebox'><table><tr><th>Actions</th><th>Locality</th><th>Transaction</th><th>Sq Ft</th><th>Sq Yd</th><th>Sq M</th><th>Sale Amount</th><th>Rent Amount</th><th>Internal Contact</th><th>Verification</th></tr>{''.join(trs)}</table></div>"
+        return HTMLResponse(_shell(core,req,f"Master Properties · {len(rows)} shown",form+table))
+
+    @app.get("/alliance/primary/property/{cid}",response_class=HTMLResponse)
+    def property_detail(cid:str,req:Request):
+        _role(core,req);p=_property(engine,cid)
+        if not p:raise HTTPException(404,"Property not found")
+        action=_get_action(engine,cid);links=_source_links(engine,cid);logs=_logs(engine,cid)
+        phones=", ".join(map(str,p.get("phones") or []))
+        source_html="".join(f"<tr><td>{html.escape(str(x['source_type']))}</td><td>{html.escape(str(x['source_table']))}</td><td>{html.escape(str(x['source_pk']))}</td><td>{html.escape(str(x['source_row_hash']))}</td></tr>" for x in links)
+        log_html="".join(f"<tr><td>{html.escape(str(x['created_at']))}</td><td>{html.escape(str(x['action']))}</td><td>{html.escape(str(x['actor'] or ''))}</td><td>{html.escape(json.dumps(x['details'],ensure_ascii=False) if isinstance(x['details'],dict) else str(x['details']))}</td></tr>" for x in logs)
+        body=f"""<div class='grid'>
+        <div class='card'><h3>{html.escape(str(p.get('locality') or cid))}</h3>
+        <p><b>ID:</b> {html.escape(cid)}<br><b>Transaction:</b> {html.escape(str(p.get('transaction_type') or ''))}<br>
+        <b>Area:</b> {p.get('area_sqft_display') or ''} sq ft · {p.get('area_sqyd') or ''} sq yd · {p.get('area_sqm') or ''} sq m · {p.get('area_acre') or ''} acre<br>
+        <b>Sale:</b> {html.escape(str(p.get('sale_amount') or ''))}<br><b>Rent:</b> {html.escape(str(p.get('rent_amount') or ''))}<br>
+        <b>Internal contact:</b> {html.escape(phones)}<br><b>Verification:</b> {html.escape(str(p.get('verification_status') or ''))}<br>
+        <b>Availability:</b> {html.escape(str(p.get('availability_status') or 'UNKNOWN'))}</p>
+        <div class='actions'><form method='post' action='/alliance/primary/property/{html.escape(cid,quote=True)}/verify'><button class='btn good'>Verify Available Today</button></form>
+        <form method='post' action='/alliance/primary/property/{html.escape(cid,quote=True)}/unavailable'><button class='btn warn'>Mark Unavailable</button></form></div></div>
+        <div class='card'><h3>Assignment & Follow-up</h3><form method='post' action='/alliance/primary/action/{html.escape(cid,quote=True)}/PROPERTY'>
+        <label>Assigned To</label><br><input name='assigned_to' value='{html.escape(str(action.get("assigned_to") or ""),quote=True)}'><br><br>
+        <label>Stage</label><br><select name='stage'>{''.join(f"<option {'selected' if action.get('stage')==x else ''}>{x}</option>" for x in ['NEW','VERIFIED','MATCHED','REVIEW','CONTACTED','FOLLOW_UP','SITE_VISIT','CLOSED','UNAVAILABLE'])}</select><br><br>
+        <label>Next Follow-up</label><br><input name='next_followup_at' type='datetime-local'><br><br>
+        <label>Internal Notes</label><br><textarea name='internal_notes' rows='4'>{html.escape(str(action.get("internal_notes") or ""))}</textarea><br>
+        <button class='btn'>Save Workflow</button></form></div></div>
+        <div class='card'><h3>Source Evidence Links</h3><div class='tablebox'><table><tr><th>Source</th><th>Table</th><th>Source PK</th><th>Evidence Hash</th></tr>{source_html}</table></div></div>
+        <div class='card'><h3>Canonical Record</h3><pre>{html.escape(json.dumps(p.get('clean_record') or {},ensure_ascii=False,indent=2))}</pre></div>
+        <div class='card'><h3>Action History</h3><table><tr><th>Time</th><th>Action</th><th>Actor</th><th>Detail</th></tr>{log_html}</table></div>"""
+        return HTMLResponse(_shell(core,req,"Property Detail",body))
+
+    @app.post("/alliance/primary/property/{cid}/verify")
+    def property_verify(cid:str,req:Request):
+        _role(core,req);_verify_property(engine,cid,_actor(core,req))
+        return RedirectResponse("/alliance/primary/property/"+cid,status_code=303)
+
+    @app.post("/alliance/primary/property/{cid}/unavailable")
+    def property_unavailable(cid:str,req:Request):
+        _role(core,req);_mark_unavailable(engine,cid,_actor(core,req))
+        return RedirectResponse("/alliance/primary/property/"+cid,status_code=303)
+
+    @app.post("/alliance/primary/action/{cid}/{etype}")
+    def action_update(cid:str,etype:str,req:Request,assigned_to:str=Form(""),stage:str=Form("NEW"),
+                      next_followup_at:str=Form(""),internal_notes:str=Form("")):
+        _role(core,req);et=etype.upper()
+        if et not in {"PROPERTY","REQUIREMENT"}:raise HTTPException(400,"Invalid entity type")
+        nf=next_followup_at or None
+        _set_action(engine,cid,et,_actor(core,req),assigned_to=assigned_to or None,stage=stage,
+                    next_followup_at=nf,followup_status="SCHEDULED" if nf else "NOT_SCHEDULED",
+                    internal_notes=internal_notes or None)
+        target="/alliance/primary/property/"+cid if et=="PROPERTY" else "/alliance/primary/requirement/"+cid
+        return RedirectResponse(target,status_code=303)
+
+    @app.get("/alliance/primary/requirements",response_class=HTMLResponse)
+    def requirements(req:Request,q:str=Query(""),transaction:str=Query("")):
+        _role(core,req);rows=v720._search_requirements(engine,q,transaction,500)
+        form=f"""<form class='inline'><input name='q' value='{html.escape(q,quote=True)}' placeholder='Search requirement'>
+        <select name='transaction'><option value=''>All transactions</option><option {'selected' if transaction=='SALE' else ''}>SALE</option><option {'selected' if transaction=='RENT' else ''}>RENT</option></select>
+        <button class='btn'>Search</button></form>"""
+        trs=[]
+        for r in rows:
+            cid=r["canonical_id"];phones=", ".join(map(str,r.get("phones") or []))
+            acts=_button("/alliance/primary/requirement/"+cid,"Open")+" "+_button("/alliance/primary/matcher?requirement_id="+cid,"Match","mini good")
+            trs.append(f"<tr><td>{acts}</td><td>{html.escape(str(r.get('locality') or ''))}</td><td>{html.escape(str(r.get('transaction_type') or ''))}</td><td>{html.escape(str(r.get('area_sqft_display') or ''))}</td><td>{html.escape(str(r.get('sale_budget') or ''))}</td><td>{html.escape(str(r.get('rent_budget') or ''))}</td><td>{html.escape(phones)}</td></tr>")
+        return HTMLResponse(_shell(core,req,f"Master Requirements · {len(rows)}",form+f"<div class='card tablebox'><table><tr><th>Actions</th><th>Location</th><th>Transaction</th><th>Sq Ft</th><th>Sale Budget</th><th>Rent Budget</th><th>Internal Contact</th></tr>{''.join(trs)}</table></div>"))
+
+    @app.get("/alliance/primary/requirement/{cid}",response_class=HTMLResponse)
+    def requirement_detail(cid:str,req:Request):
+        _role(core,req);r=_requirement(engine,cid)
+        if not r:raise HTTPException(404,"Requirement not found")
+        action=_get_action(engine,cid);phones=", ".join(map(str,r.get("phones") or []))
+        body=f"""<div class='grid'><div class='card'><h3>Requirement</h3><p><b>ID:</b> {html.escape(cid)}<br><b>Location:</b> {html.escape(str(r.get('locality') or ''))}<br>
+        <b>Transaction:</b> {html.escape(str(r.get('transaction_type') or ''))}<br><b>Area:</b> {r.get('area_sqft_display') or ''} sq ft<br>
+        <b>Sale Budget:</b> {html.escape(str(r.get('sale_budget') or ''))}<br><b>Rent Budget:</b> {html.escape(str(r.get('rent_budget') or ''))}<br>
+        <b>Internal contact:</b> {html.escape(phones)}</p>{_button('/alliance/primary/matcher?requirement_id='+cid,'Run Full Inventory Match','btn good')}</div>
+        <div class='card'><h3>Assignment & Follow-up</h3><form method='post' action='/alliance/primary/action/{html.escape(cid,quote=True)}/REQUIREMENT'>
+        <input name='assigned_to' placeholder='Team member' value='{html.escape(str(action.get("assigned_to") or ""),quote=True)}'><br><br>
+        <select name='stage'>{''.join(f"<option {'selected' if action.get('stage')==x else ''}>{x}</option>" for x in ['NEW','MATCHED','REVIEW','CONTACTED','FOLLOW_UP','SITE_VISIT','NEGOTIATION','CLOSED'])}</select><br><br>
+        <input name='next_followup_at' type='datetime-local'><br><br><textarea name='internal_notes' rows='4'>{html.escape(str(action.get("internal_notes") or ""))}</textarea><br>
+        <button class='btn'>Save Workflow</button></form></div></div>
+        <div class='card'><h3>Canonical Requirement</h3><pre>{html.escape(json.dumps(r.get('clean_record') or {},ensure_ascii=False,indent=2))}</pre></div>"""
+        return HTMLResponse(_shell(core,req,"Requirement Detail",body))
+
+    @app.get("/alliance/primary/matcher",response_class=HTMLResponse)
+    def matcher(req:Request,requirement_id:str=Query("")):
+        _role(core,req)
+        reqs=v720._search_requirements(engine,limit=100)
+        options="".join(f"<option value='{html.escape(x['canonical_id'],quote=True)}' {'selected' if requirement_id==x['canonical_id'] else ''}>{html.escape((x.get('locality') or 'Requirement')+' · '+x['canonical_id'])}</option>" for x in reqs)
+        form=f"<form class='inline'><select name='requirement_id'><option value=''>Choose requirement</option>{options}</select><button class='btn good'>Run Full Master Match</button></form>"
+        if not requirement_id:return HTMLResponse(_shell(core,req,"AI Property Matcher",form+"<div class='card'>The matcher searches the complete Master inventory. Exact locality is ranked first; if unavailable it transparently shows same-city and transaction/area alternatives.</div>"))
+        rr,matches=_match_full(engine,requirement_id,50)
+        trs=[]
+        for m in matches:
+            p=m["property"];cid=p["canonical_id"]
+            with engine.connect() as c:
+                rv=c.execute(text("""SELECT review_status FROM pi_match_reviews_v730 WHERE requirement_canonical_id=:r AND property_canonical_id=:p"""),{"r":requirement_id,"p":cid}).scalar() or "READY_FOR_REVIEW"
+            approve=f"""<form method='post' action='/alliance/primary/match-review' style='display:inline'>
+            <input type='hidden' name='requirement_id' value='{html.escape(requirement_id,quote=True)}'><input type='hidden' name='property_id' value='{html.escape(cid,quote=True)}'>
+            <button class='mini good' name='decision' value='APPROVED'>Approve</button><button class='mini alt' name='decision' value='REJECTED'>Reject</button></form>"""
+            trs.append(f"<tr><td>{m['score']}</td><td>{html.escape(m['tier'])}</td><td>{_button('/alliance/primary/property/'+cid,'Open')}</td><td>{html.escape(str(p.get('locality') or ''))}</td><td>{html.escape(str(p.get('area_sqft_display') or ''))}</td><td>{html.escape(str(p.get('sale_amount') or ''))}</td><td>{html.escape(str(p.get('rent_amount') or ''))}</td><td>{html.escape(str(p.get('verification_status') or ''))}</td><td>{html.escape(str(rv))}<br>{approve}</td></tr>")
+        body=form+f"<div class='card'><b>Requirement:</b> {html.escape(str(rr.get('locality') or requirement_id))} · {html.escape(str(rr.get('transaction_type') or ''))} · {rr.get('area_sqft_display') or ''} sq ft<br><small>Tier is explicit. Alternatives are never presented as exact-locality matches.</small></div>"
+        body+=f"<div class='card tablebox'><table><tr><th>Score</th><th>Tier</th><th>Property</th><th>Locality</th><th>Sq Ft</th><th>Sale</th><th>Rent</th><th>Verification</th><th>Review</th></tr>{''.join(trs)}</table></div>"
+        body+=_button("/alliance/primary/client-draft/"+requirement_id,"Generate Client-Safe Draft","btn good")
+        return HTMLResponse(_shell(core,req,f"Matcher · {len(matches)} options",body))
+
+    @app.post("/alliance/primary/match-review")
+    def match_review(req:Request,requirement_id:str=Form(...),property_id:str=Form(...),decision:str=Form(...)):
+        _role(core,req);d=decision.upper()
+        if d not in {"APPROVED","REJECTED"}:raise HTTPException(400,"Invalid decision")
+        with engine.begin() as c:
+            c.execute(text("""INSERT INTO pi_match_reviews_v730(requirement_canonical_id,property_canonical_id,review_status,reviewed_by,reviewed_at,updated_at)
+              VALUES(:r,:p,:d,:by,NOW(),NOW()) ON CONFLICT(requirement_canonical_id,property_canonical_id) DO UPDATE SET
+              review_status=:d,reviewed_by=:by,reviewed_at=NOW(),updated_at=NOW()"""),
+              {"r":requirement_id,"p":property_id,"d":d,"by":_actor(core,req)})
+        _audit_log(engine,requirement_id,"REQUIREMENT","MATCH_"+d,_actor(core,req),{"property_id":property_id})
+        return RedirectResponse("/alliance/primary/matcher?requirement_id="+requirement_id,status_code=303)
+
+    @app.get("/alliance/primary/client-draft/{rid}",response_class=HTMLResponse)
+    def client_draft(rid:str,req:Request):
+        _role(core,req);r=_requirement(engine,rid)
+        if not r:raise HTTPException(404,"Requirement not found")
+        props=_approved_matches(engine,rid);msg=_draft(r,props)
+        # Hard privacy assertion against every internal phone in selected options.
+        leaked=[]
+        for p in props:
+            for ph in p.get("phones") or []:
+                if str(ph) and str(ph) in msg:leaked.append(str(ph))
+        if leaked:raise RuntimeError("Privacy gate blocked draft due to contact leakage")
+        body=f"""<div class='card'><h3>Client-Safe WhatsApp Draft</h3><p class='muted'>Only APPROVED + VERIFIED + AVAILABLE properties are included. Owner/broker/source contact numbers are never included.</p>
+        <textarea id='draft' rows='14' style='width:100%' readonly>{html.escape(msg)}</textarea><br><button class='btn good' onclick="navigator.clipboard.writeText(document.getElementById('draft').value)">Copy Draft</button>
+        <p><b>Eligible approved options:</b> {len(props)}</p></div>"""
+        return HTMLResponse(_shell(core,req,"Client-Safe Draft",body))
+
+    @app.get("/alliance/primary/followups",response_class=HTMLResponse)
+    def followups(req:Request):
+        _role(core,req)
+        with engine.connect() as c:
+            rows=_rows(c.execute(text("""SELECT * FROM pi_master_action_state_v730
+              WHERE followup_status='SCHEDULED' OR assigned_to IS NOT NULL ORDER BY next_followup_at NULLS LAST,updated_at DESC LIMIT 500""")))
+        trs=[]
+        for x in rows:
+            url=("/alliance/primary/property/" if x["entity_type"]=="PROPERTY" else "/alliance/primary/requirement/")+x["canonical_id"]
+            trs.append(f"<tr><td>{_button(url,'Open')}</td><td>{html.escape(str(x['entity_type']))}</td><td>{html.escape(str(x.get('assigned_to') or ''))}</td><td>{html.escape(str(x.get('stage') or ''))}</td><td>{html.escape(str(x.get('next_followup_at') or ''))}</td><td>{html.escape(str(x.get('followup_status') or ''))}</td></tr>")
+        return HTMLResponse(_shell(core,req,f"Follow-up Queue · {len(rows)}",f"<div class='card tablebox'><table><tr><th>Open</th><th>Type</th><th>Assigned</th><th>Stage</th><th>Next Follow-up</th><th>Status</th></tr>{''.join(trs)}</table></div>"))
+
+    @app.get("/api/v7.3/health")
+    def health(req:Request):
+        _role(core,req)
+        paths=["/alliance/primary","/alliance/primary/properties","/alliance/primary/requirements","/alliance/primary/matcher","/alliance/primary/followups","/alliance/primary/client-draft/{rid}"]
+        return {"status":"ok","version":VERSION,"counts":_counts(engine),"routes":{p:_route_exists(app,p) for p in paths},
+                "parent_certification":cert.get("certification"),
+                "safety":{"canonical_master_mutations":0,"raw_source_mutations":0,"gold_mutations":0,"champion_mutations":0}}
+
+    STATE.update(status="READY",result={"version":VERSION,"counts":_counts(engine),"primary":"/alliance/primary",
+                                      "parent_certification":cert.get("certification")})
+    return STATE
+
+def start(core):
+    try:return register(core)
+    except Exception as exc:
+        STATE.update(status="ERROR",last_error=f"{type(exc).__name__}: {exc}")
+        return STATE
