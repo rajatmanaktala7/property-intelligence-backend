@@ -17158,3 +17158,12 @@ try:
     print("Alliance Magazine Safe Vision Gateway 6.6: registered")
 except Exception as _v660_exc:
     print("Alliance Magazine 6.6 registration warning:",_v660_exc)
+
+# FOUNDATION_7_0_UNIFIED_NEWSPAPER_MAGAZINE_DATA_REPAIR
+try:
+    import sys as _v700_sys
+    import alliance_unified_data_repair_v700 as _v700
+    _v700.start(_v700_sys.modules[__name__])
+    print("Alliance Unified Newspaper + Magazine Data Repair 7.0: registered")
+except Exception as _v700_exc:
+    print("Alliance Unified Data Repair 7.0 registration warning:",_v700_exc)
