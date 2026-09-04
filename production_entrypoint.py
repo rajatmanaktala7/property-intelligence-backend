@@ -571,6 +571,12 @@ def _load_core():
             stabilization["magazine_organizer_v850"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","fail_safe":True}
             print("[magazine-organizer-v850] warning:", type(exc).__name__, str(exc))
 
+        # ALLIANCE_MAGAZINE_COMPLETE_V860
+        try:
+            import alliance_magazine_complete_v860 as magazine_complete_v860
+            wrapped.stabilization["magazine_complete_v860"] = magazine_complete_v860.register(wrapped.core)
+        except Exception as exc:
+            wrapped.stabilization["magazine_complete_v860"] = {"status":"ERROR","error":str(exc)}
         CORE_APP = wrapped.app
         try:
             import alliance_whatsapp_safe_ingest_v5 as safe_wa
