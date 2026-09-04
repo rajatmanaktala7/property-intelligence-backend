@@ -4,7 +4,7 @@ from fastapi import Body, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
 from sqlalchemy import text
 
-VERSION="8.6.1-COMPLETE-MAGAZINE-DATABASE-TAKEOVER"
+VERSION="8.6.2-PAGE-CONTEXT-CATEGORY-ENGINE"
 
 MOBILE_RE=re.compile(r"(?<!\d)([6-9]\d{9})(?!\d)")
 LANDLINE_RE=re.compile(r"(?<!\d)(0?11[-\s]?\d{7,8}(?:/\d(?:/\d)*)?)(?!\d)")
@@ -85,25 +85,99 @@ def _clean(s):
     x=re.sub(r"\(\s*\)"," ",x);x=re.sub(r"\s+"," ",x).strip(" ,;|-")
     return x
 
-def _category_context(section,original,existing_tx):
-    # Highest confidence: retained source section/category text.
-    blob=" | ".join(str(x or "") for x in [section,original])
+def _category_context(section,original,existing_tx,page_number=None,property_type=None):
+    """
+    Alliance magazine hierarchy-aware category classifier.
+    Priority:
+      1) explicit asset + transaction in row/source context
+      2) page/category continuity learned from high-confidence rows
+      3) property-type/description asset + inherited transaction
+    Important: LEASE HOLD / LEASEHOLD is tenure, not Rent.
+    """
+    blob=" | ".join(str(x or "") for x in [section,original,property_type])
     u=blob.upper()
+    tenure_clean=re.sub(r"\bLEASE[\s-]*HOLD\b|\bLEASEHOLD\b"," ",u)
+
     asset=None
-    if re.search(r"\bFARM\s*HOUSES?\b|\bFARMHOUSE\b|\bSAINIK FARM\b|\bDERA MANDI\b|\bGADIPUR FARMS?\b|\bSULTANPUR FARMS?\b",u):asset="Farmhouse"
-    elif re.search(r"\bINDUSTRIAL\b|\bFACTORY\b|\bINDUSTRIAL AREA\b",u):asset="Industrial"
-    elif re.search(r"\bCOMMERCIAL\b|\bOFFICE\b|\bSHOWROOM\b|\bSHOP\b|\bRETAIL\b|\bMALL\b",u):asset="Commercial"
-    elif re.search(r"\bRESIDENTIAL\b|\bBHK\b|\bAPARTMENT\b|\bAPT\b|\bFLAT\b|\bKOTHI\b|\bVILLA\b",u):asset="Residential"
+    if re.search(r"\bFARM\s*HOUSES?\b|\bFARMHOUSE\b|\bSAINIK FARM\b|\bDERA MANDI\b|\bGADIPUR FARMS?\b|\bSULTANPUR FARMS?\b",tenure_clean):
+        asset="Farmhouse"
+    elif re.search(r"\bINDUSTRIAL\b|\bFACTORY\b|\bWAREHOUSE\b|\bGODOWN\b|\bINDUSTRIAL AREA\b",tenure_clean):
+        asset="Industrial"
+    elif re.search(r"\bCOMMERCIAL\b|\bOFFICE\b|\bSHOWROOM\b|\bSHOP\b|\bRETAIL\b|\bMALL\b|\bMARKET\b|\bMKT\b",tenure_clean):
+        asset="Commercial"
+    elif re.search(r"\bRESIDENTIAL\b|\bBHK\b|\bAPARTMENT\b|\bAPT\b|\bFLAT\b|\bKOTHI\b|\bVILLA\b|\bBR\b",tenure_clean):
+        asset="Residential"
 
     tx=None
-    if re.search(r"\bRENT\b|\bLEASE\b|\bLEASING\b",u) or str(existing_tx or "").upper() in {"RENT","LEASE"}:tx="Rent"
-    elif re.search(r"\bSALE\b|\bRESALE\b|\bSELL\b",u) or str(existing_tx or "").upper()=="SALE":tx="Sale"
+    if re.search(r"\bRENT(?:ED)?\b|\bTO LET\b|\bLEASING\b",tenure_clean) or str(existing_tx or "").upper()=="RENT":
+        tx="Rent"
+    elif re.search(r"\bSALE\b|\bRESALE\b|\bSELL\b|\bBOOKING\b|\bBKG\b",tenure_clean) or str(existing_tx or "").upper()=="SALE":
+        tx="Sale"
 
-    # Explicit combined source text, including historical form "Rent | Commercial | locality".
     for a in ["Residential","Commercial","Industrial","Farmhouse"]:
-        if re.search(r"(?i)\bRENT\b\s*\|\s*"+a+r"\b|\b"+a+r"\b\s*[-| ]+\s*\bRENT\b",blob):return a+" Rent","SOURCE_CONTEXT",100
-        if re.search(r"(?i)\bSALE\b\s*\|\s*"+a+r"\b|\b"+a+r"\b\s*[-| ]+\s*\bSALE\b",blob):return a+" Sale","SOURCE_CONTEXT",100
-    if asset and tx:return asset+" "+tx,"DERIVED_CONTEXT",90
+        if re.search(r"(?i)\bRENT\b\s*\|\s*"+a+r"\b|\b"+a+r"\b\s*[-| ]+\s*\bRENT\b",blob):
+            return a+" Rent","EXPLICIT_SOURCE_CONTEXT",100
+        if re.search(r"(?i)\bSALE\b\s*\|\s*"+a+r"\b|\b"+a+r"\b\s*[-| ]+\s*\bSALE\b",blob):
+            return a+" Sale","EXPLICIT_SOURCE_CONTEXT",100
+
+    if asset and tx:
+        return asset+" "+tx,"ROW_EVIDENCE",96
+    return (asset,tx)
+
+def _page_category_map(rows):
+    """
+    Learn magazine page/section category from high-confidence rows, then carry
+    category across adjacent pages. This is necessary because individual
+    classified rows often omit the words Commercial/Residential and Sale/Rent.
+    """
+    from collections import defaultdict, Counter
+    votes=defaultdict(Counter)
+    for r in rows:
+        result=_category_context(r.get("section_heading"),r.get("original_description"),
+                                 r.get("transaction_type"),r.get("page_number"),r.get("property_type"))
+        if isinstance(result,tuple) and len(result)==3:
+            cat,_,conf=result
+            if cat and conf>=96:
+                votes[int(r["page_number"])][cat]+=1
+    direct={}
+    for pg,c in votes.items():
+        if c:
+            cat,n=c.most_common(1)[0]
+            direct[pg]=(cat,n)
+    pages=sorted({int(r["page_number"]) for r in rows if r.get("page_number") is not None})
+    resolved={}
+    last=None
+    for pg in pages:
+        if pg in direct:
+            last=direct[pg][0]
+            resolved[pg]=(last,"PAGE_DIRECT_EVIDENCE",94)
+        elif last:
+            resolved[pg]=(last,"PAGE_CONTEXT_CARRY",88)
+    # backward-fill pages before first direct category
+    nxt=None
+    for pg in reversed(pages):
+        if pg in direct:
+            nxt=direct[pg][0]
+        elif pg not in resolved and nxt:
+            resolved[pg]=(nxt,"PAGE_CONTEXT_BACKFILL",82)
+    return resolved
+
+def _final_category(r,page_map):
+    result=_category_context(r.get("section_heading"),r.get("original_description"),
+                             r.get("transaction_type"),r.get("page_number"),r.get("property_type"))
+    if isinstance(result,tuple) and len(result)==3:
+        return result
+    asset,tx=result
+    inherited=page_map.get(int(r["page_number"])) if r.get("page_number") is not None else None
+    if inherited:
+        base,source,conf=inherited
+        base_asset,base_tx=base.rsplit(" ",1)
+        # Explicit row transaction overrides inherited transaction.
+        final_asset=asset or base_asset
+        final_tx=tx or base_tx
+        return final_asset+" "+final_tx,source if not (asset or tx) else "ROW_PLUS_"+source,min(98,conf+2)
+    if asset and tx:
+        return asset+" "+tx,"ROW_EVIDENCE",96
     return None,"UNKNOWN",0
 
 def _setup(e):
@@ -130,7 +204,8 @@ def _build(e,upload_id=None):
     p={}
     if upload_id:q+=" WHERE upload_id=CAST(:u AS UUID)";p["u"]=upload_id
     q+=" ORDER BY page_number,id"
-    with e.connect() as c: rows=c.execute(text(q),p).mappings().all()
+    with e.connect() as c: rows=[dict(x) for x in c.execute(text(q),p).mappings().all()]
+    page_map=_page_category_map(rows)
 
     last_loc=None; built=review=noise=0
     with e.begin() as c:
@@ -142,7 +217,7 @@ def _build(e,upload_id=None):
             elif last_loc: loc,ls=last_loc,"CONTEXT_CARRY_FORWARD"
             else: loc,ls=None,"UNKNOWN"
 
-            cat,cs,cc=_category_context(r["section_heading"],original,r["transaction_type"])
+            cat,cs,cc=_final_category(r,page_map)
             mobiles,lands=_phones(original);name,role=_contact(original)
             contacts=list(dict.fromkeys(mobiles+lands))
             promo=(PROMO_RE.search((r["section_heading"] or "")) and not PROP_RE.search(clean))
@@ -277,9 +352,9 @@ def register(core):
         button{padding:8px 12px;background:#125bc5;color:white;border:0;border-radius:7px;font-weight:bold}.mini{padding:5px 8px}.del{padding:5px 8px;background:#a21d1d}
         table{width:100%;border-collapse:collapse;background:#fff;font-size:12px}th,td{padding:7px;border-bottom:1px solid #ddd;text-align:left;vertical-align:top}
         th{background:#eef2f6;position:sticky;top:0}td:nth-child(3){min-width:270px}</style></head><body>
-        <div class='top'><h2>Alliance Magazine Database · 8.6 Complete</h2>
+        <div class='top'><h2>Alliance Magazine Database · 8.6.2 Complete</h2>
         <p><b>All approved fields on one page.</b> Blank Location or Property Category is automatically Needs Review. Promotional noise stays out of the operational view. Original Description is immutable evidence.</p>
-        <button onclick="build()">Build / Refresh Complete Database — Free</button> <span id='msg'></span></div>"""+table+"""
+        <button onclick="build()">Rebuild Categories + Database — Free</button> <span id='msg'></span></div>"""+table+"""
         <script>
         async function build(){msg.textContent=' Building...';let d=await (await fetch('/api/magazine-complete/build',{method:'POST'})).json();msg.textContent=' '+JSON.stringify(d);setTimeout(()=>location.reload(),800)}
         async function verifyRec(id){let s=prompt('UNVERIFIED, VERIFICATION DUE, AVAILABLE, NOT AVAILABLE, FOLLOW-UP, CLOSED/REMOVED','AVAILABLE');if(!s)return;await fetch('/api/magazine-complete/verify/'+id,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({status:s})});location.reload()}
