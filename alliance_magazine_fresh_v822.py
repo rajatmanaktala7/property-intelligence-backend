@@ -7,8 +7,9 @@ from fastapi.responses import HTMLResponse
 from google.genai import types
 from pydantic import BaseModel, Field
 from sqlalchemy import text
+import alliance_magazine_safe_gateway_v660 as safe_gateway
 
-VERSION='8.2.2-FRESH-MAGAZINE-PDF'
+VERSION='8.2.3-RESILIENT-MAGAZINE-PDF'
 CHUNK_SIZE=4*1024*1024
 MAX_UPLOAD_MB=int(os.getenv('MAX_UPLOAD_MB','100'))
 PDF_RENDER_DPI=int(os.getenv('PDF_RENDER_DPI','220'))
@@ -121,28 +122,53 @@ def _save(e,uid,page,rows):
                 made+=1; review+=1 if nr else 0
     return made,review
 
+
+def _gateway_extract(gw,jpg):
+    data,meta=gw.ask(jpg,PROMPT)
+    if data is None:return None,meta
+    raw=data.get("properties") if isinstance(data,dict) else None
+    if raw is None and isinstance(data,dict):raw=data.get("records")
+    rows=[]
+    for item in (raw or []):
+        if not isinstance(item,dict):continue
+        if "original_description" not in item and item.get("raw_line"):
+            item=dict(item);item["original_description"]=item.get("raw_line")
+        try:rows.append(FreshProperty.model_validate(item))
+        except Exception:continue
+    return rows,meta
+
 def _process(core,uid):
-    e=_engine(core); client=_client(core)
-    if client is None:
-        with e.begin() as c:c.execute(text("UPDATE pi_magazine_fresh_uploads SET status='ERROR',error_message='GEMINI_API_KEY missing' WHERE upload_id=CAST(:u AS UUID)"),{'u':uid})
-        return
+    e=_engine(core)
     try:
-        with e.connect() as c: pdf=bytes(c.execute(text('SELECT pdf_content FROM pi_magazine_fresh_uploads WHERE upload_id=CAST(:u AS UUID)'),{'u':uid}).scalar_one())
-        doc=fitz.open(stream=pdf,filetype='pdf'); pages=len(doc)
-        with e.begin() as c:c.execute(text("UPDATE pi_magazine_fresh_uploads SET status='PROCESSING',page_count=:p,processed_pages=0,created_records=0,review_records=0,error_message=NULL WHERE upload_id=CAST(:u AS UUID)"),{'p':pages,'u':uid})
-        tm=tr=0
-        for i in range(pages):
-            page=doc.load_page(i); scale=PDF_RENDER_DPI/72.0
+        gw=safe_gateway.ProviderGateway()
+        gw.max_calls=int(os.getenv("ALLIANCE_MAGAZINE_V823_MAX_CALLS","1000"))
+        if not gw.providers:
+            with e.begin() as c:c.execute(text("UPDATE pi_magazine_fresh_uploads SET status='WAITING_FOR_PROVIDER',error_message='No configured vision provider' WHERE upload_id=CAST(:u AS UUID)"),{'u':uid})
+            return
+        with e.connect() as c:row=c.execute(text("SELECT pdf_content,processed_pages FROM pi_magazine_fresh_uploads WHERE upload_id=CAST(:u AS UUID)"),{'u':uid}).first()
+        if not row or row[0] is None:raise RuntimeError("Stored PDF not found")
+        pdf=bytes(row[0]);start=int(row[1] or 0);doc=fitz.open(stream=pdf,filetype='pdf');pages=len(doc)
+        with e.connect() as c:counts=c.execute(text("SELECT COUNT(*),COUNT(*) FILTER(WHERE needs_review) FROM pi_magazine_fresh_records WHERE upload_id=CAST(:u AS UUID)"),{'u':uid}).first()
+        tm=int(counts[0] or 0);tr=int(counts[1] or 0)
+        with e.begin() as c:c.execute(text("UPDATE pi_magazine_fresh_uploads SET status='PROCESSING',page_count=:p,created_records=:m,review_records=:r,error_message=NULL WHERE upload_id=CAST(:u AS UUID)"),{'p':pages,'m':tm,'r':tr,'u':uid})
+        for i in range(start,pages):
+            page=doc.load_page(i);scale=PDF_RENDER_DPI/72.0
             jpg=page.get_pixmap(matrix=fitz.Matrix(scale,scale),alpha=False).tobytes('jpeg')
-            m,r=_save(e,uid,i+1,_extract_page(client,jpg)); tm+=m; tr+=r
-            with e.begin() as c:c.execute(text('UPDATE pi_magazine_fresh_uploads SET processed_pages=:d,created_records=:m,review_records=:r WHERE upload_id=CAST(:u AS UUID)'),{'d':i+1,'m':tm,'r':tr,'u':uid})
+            rows,meta=_gateway_extract(gw,jpg)
+            if rows is None:
+                retry=gw.next_retry();msg=meta.get("status","VISION_PROVIDER_UNAVAILABLE")
+                if retry:msg+=" | retry_after="+retry.isoformat()
+                with e.begin() as c:c.execute(text("UPDATE pi_magazine_fresh_uploads SET status='WAITING_FOR_PROVIDER',error_message=:x WHERE upload_id=CAST(:u AS UUID)"),{'x':msg[:4000],'u':uid})
+                doc.close();return
+            m,r=_save(e,uid,i+1,rows);tm+=m;tr+=r
+            with e.begin() as c:c.execute(text("UPDATE pi_magazine_fresh_uploads SET processed_pages=:d,created_records=:m,review_records=:r,error_message=:x WHERE upload_id=CAST(:u AS UUID)"),{'d':i+1,'m':tm,'r':tr,'x':("provider="+str(meta.get("provider","UNKNOWN")))[:4000],'u':uid})
         doc.close()
-        with e.begin() as c:c.execute(text("UPDATE pi_magazine_fresh_uploads SET status='READY_FOR_REVIEW',completed_at=NOW() WHERE upload_id=CAST(:u AS UUID)"),{'u':uid})
+        with e.begin() as c:c.execute(text("UPDATE pi_magazine_fresh_uploads SET status='READY_FOR_REVIEW',error_message=NULL,completed_at=NOW() WHERE upload_id=CAST(:u AS UUID)"),{'u':uid})
     except Exception as exc:
-        with e.begin() as c:c.execute(text("UPDATE pi_magazine_fresh_uploads SET status='ERROR',error_message=:x WHERE upload_id=CAST(:u AS UUID)"),{'x':f'{type(exc).__name__}: {exc}'[:4000],'u':uid})
+        with e.begin() as c:c.execute(text("UPDATE pi_magazine_fresh_uploads SET status='PAUSED_ERROR',error_message=:x WHERE upload_id=CAST(:u AS UUID)"),{'x':f'{type(exc).__name__}: {exc}'[:4000],'u':uid})
 
 def _page():
-    return r'''<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Fresh Magazine PDF Database</title><style>body{font-family:Arial;background:#f4f7fb;margin:0;color:#172437}.top{background:#102235;color:white;padding:20px}.wrap{max-width:1180px;margin:auto;padding:20px}.card{background:white;padding:18px;border-radius:14px;margin-bottom:14px}.btn{background:#1266f1;color:white;border:0;border-radius:9px;padding:11px 18px;font-weight:700}.bar{height:18px;background:#e7edf5;border-radius:20px;overflow:hidden}.fill{height:100%;background:#1266f1;width:0}.muted{color:#66758a}.bad{color:#bd2f2f}.good{color:#16833c}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}.num{font-size:28px;font-weight:800}a{color:#1266f1;text-decoration:none}</style></head><body><div class="top"><b>Fresh Magazine PDF Database · CRE OS 8.2.2</b><br><small>Resumable PDF upload · original PDF retained · one printed property = one record</small></div><div class="wrap"><div class="card"><a href="/workspace">← Dashboard</a> · <a href="/magazine-fresh/records">New Magazine Records</a></div><div class="card"><h2>Upload New Magazine PDF</h2><p class="muted">Creates a NEW dataset. Old Magazine records remain untouched.</p><input id="file" type="file" accept="application/pdf,.pdf"><br><br><button id="go" class="btn">Upload Magazine PDF</button><p id="name"></p><div class="bar"><div id="fill" class="fill"></div></div><p id="msg" class="muted">Waiting for PDF.</p></div><div id="stats" class="grid"></div><div class="card"><h3>Processing</h3><p id="proc" class="muted">No active upload.</p></div></div><script>const CHUNK=4*1024*1024;let active=null,poller=null;function pct(n){fill.style.width=n+'%';msg.textContent='Upload '+n+'%'}async function retry(fn){let err;for(let i=0;i<5;i++){try{return await fn()}catch(e){err=e;await new Promise(r=>setTimeout(r,1000*(i+1)))}}throw err}async function status(){if(!active)return;let r=await fetch('/api/magazine-fresh/status/'+active);if(!r.ok)return;let d=await r.json();proc.textContent=`Status: ${d.status} · Pages ${d.processed_pages}/${d.page_count||'?'} · Records ${d.created_records} · Needs review ${d.review_records}`+(d.error_message?` · ERROR: ${d.error_message}`:'');stats.innerHTML=`<div class="card"><div class="muted">Chunks</div><div class="num">${d.received_chunks}/${d.total_chunks}</div></div><div class="card"><div class="muted">Pages</div><div class="num">${d.processed_pages}/${d.page_count||0}</div></div><div class="card"><div class="muted">New records</div><div class="num">${d.created_records}</div></div><div class="card"><div class="muted">Needs review</div><div class="num">${d.review_records}</div></div>`;if(['READY_FOR_REVIEW','ERROR'].includes(d.status)){clearInterval(poller);if(d.status==='READY_FOR_REVIEW')msg.innerHTML='<span class="good">PDF stored and extraction complete. New database is ready for review.</span>'}}go.onclick=async()=>{const f=file.files[0];if(!f){msg.textContent='Choose a PDF first.';return}if(!f.name.toLowerCase().endsWith('.pdf')){msg.textContent='PDF only.';return}go.disabled=true;name.textContent=f.name;try{let r=await fetch('/api/magazine-fresh/init',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({filename:f.name,file_size:f.size})});let d=await r.json();if(!r.ok)throw new Error(d.detail||'Init failed');active=d.upload_id;for(let i=0;i<d.total_chunks;i++){const b=f.slice(i*CHUNK,Math.min(f.size,(i+1)*CHUNK));await retry(async()=>{let x=await fetch(`/api/magazine-fresh/chunk/${active}?index=${i}`,{method:'POST',headers:{'Content-Type':'application/octet-stream'},body:b});if(!x.ok)throw new Error('Chunk failed');return x});pct(Math.round(((i+1)/d.total_chunks)*100))}msg.textContent='Upload 100% · Finalizing safely...';let c=await fetch('/api/magazine-fresh/complete/'+active,{method:'POST'});let z=await c.json();if(!c.ok)throw new Error(z.detail||'Complete failed');msg.textContent='PDF safely stored. AI extraction started.';poller=setInterval(status,2500);status()}catch(e){msg.innerHTML='<span class="bad">UPLOAD ERROR: '+e.message+'</span>'}finally{go.disabled=false}};</script></body></html>'''
+    return r'''<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Fresh Magazine PDF Database</title><style>body{font-family:Arial;background:#f4f7fb;margin:0;color:#172437}.top{background:#102235;color:white;padding:20px}.wrap{max-width:1180px;margin:auto;padding:20px}.card{background:white;padding:18px;border-radius:14px;margin-bottom:14px}.btn{background:#1266f1;color:white;border:0;border-radius:9px;padding:11px 18px;font-weight:700}.bar{height:18px;background:#e7edf5;border-radius:20px;overflow:hidden}.fill{height:100%;background:#1266f1;width:0}.muted{color:#66758a}.bad{color:#bd2f2f}.good{color:#16833c}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}.num{font-size:28px;font-weight:800}a{color:#1266f1;text-decoration:none}</style></head><body><div class="top"><b>Fresh Magazine PDF Database · CRE OS 8.2.3</b><br><small>Resumable PDF upload · original PDF retained · one printed property = one record</small></div><div class="wrap"><div class="card"><a href="/workspace">← Dashboard</a> · <a href="/magazine-fresh/records">New Magazine Records</a></div><div class="card"><h2>Upload New Magazine PDF</h2><p class="muted">Creates a NEW dataset. Old Magazine records remain untouched.</p><input id="file" type="file" accept="application/pdf,.pdf"><br><br><button id="go" class="btn">Upload Magazine PDF</button><p id="name"></p><div class="bar"><div id="fill" class="fill"></div></div><p id="msg" class="muted">Waiting for PDF.</p></div><div id="stats" class="grid"></div><div class="card"><h3>Processing</h3><p id="proc" class="muted">No active upload.</p></div></div><script>const CHUNK=4*1024*1024;let active=null,poller=null;function pct(n){fill.style.width=n+'%';msg.textContent='Upload '+n+'%'}async function retry(fn){let err;for(let i=0;i<5;i++){try{return await fn()}catch(e){err=e;await new Promise(r=>setTimeout(r,1000*(i+1)))}}throw err}async function status(){if(!active)return;let r=await fetch('/api/magazine-fresh/status/'+active);if(!r.ok)return;let d=await r.json();proc.textContent=`Status: ${d.status} · Pages ${d.processed_pages}/${d.page_count||'?'} · Records ${d.created_records} · Needs review ${d.review_records}`+(d.error_message?` · ERROR: ${d.error_message}`:'');stats.innerHTML=`<div class="card"><div class="muted">Chunks</div><div class="num">${d.received_chunks}/${d.total_chunks}</div></div><div class="card"><div class="muted">Pages</div><div class="num">${d.processed_pages}/${d.page_count||0}</div></div><div class="card"><div class="muted">New records</div><div class="num">${d.created_records}</div></div><div class="card"><div class="muted">Needs review</div><div class="num">${d.review_records}</div></div>`;if(['READY_FOR_REVIEW','ERROR'].includes(d.status)){clearInterval(poller);if(d.status==='READY_FOR_REVIEW')msg.innerHTML='<span class="good">PDF stored and extraction complete. New database is ready for review.</span>'}}go.onclick=async()=>{const f=file.files[0];if(!f){msg.textContent='Choose a PDF first.';return}if(!f.name.toLowerCase().endsWith('.pdf')){msg.textContent='PDF only.';return}go.disabled=true;name.textContent=f.name;try{let r=await fetch('/api/magazine-fresh/init',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({filename:f.name,file_size:f.size})});let d=await r.json();if(!r.ok)throw new Error(d.detail||'Init failed');active=d.upload_id;for(let i=0;i<d.total_chunks;i++){const b=f.slice(i*CHUNK,Math.min(f.size,(i+1)*CHUNK));await retry(async()=>{let x=await fetch(`/api/magazine-fresh/chunk/${active}?index=${i}`,{method:'POST',headers:{'Content-Type':'application/octet-stream'},body:b});if(!x.ok)throw new Error('Chunk failed');return x});pct(Math.round(((i+1)/d.total_chunks)*100))}msg.textContent='Upload 100% · Finalizing safely...';let c=await fetch('/api/magazine-fresh/complete/'+active,{method:'POST'});let z=await c.json();if(!c.ok)throw new Error(z.detail||'Complete failed');msg.textContent='PDF safely stored. AI extraction started.';poller=setInterval(status,2500);status()}catch(e){msg.innerHTML='<span class="bad">UPLOAD ERROR: '+e.message+'</span>'}finally{go.disabled=false}};</script></body></html>'''
 
 def register(core):
     app=_app(core); e=_engine(core)
@@ -190,6 +216,17 @@ def register(core):
             if not pdf.startswith(b'%PDF'): raise HTTPException(400,'Not a valid PDF')
             sha=hashlib.sha256(pdf).hexdigest(); c.execute(text("UPDATE pi_magazine_fresh_uploads SET pdf_content=:p,sha256=:s,status='STORED',received_chunks=total_chunks WHERE upload_id=CAST(:u AS UUID)"),{'p':pdf,'s':sha,'u':upload_id}); c.execute(text('DELETE FROM pi_magazine_fresh_chunks WHERE upload_id=CAST(:u AS UUID)'),{'u':upload_id})
         bg.add_task(_process,core,upload_id); return {'status':'STORED','upload_id':upload_id,'sha256':sha,'processing':'STARTED'}
+
+
+    @app.post('/api/magazine-fresh/resume/{upload_id}')
+    def resume(upload_id:str,req:Request,bg:BackgroundTasks):
+        _login(core,req)
+        with e.connect() as c:row=c.execute(text("SELECT pdf_content,status FROM pi_magazine_fresh_uploads WHERE upload_id=CAST(:u AS UUID)"),{'u':upload_id}).first()
+        if not row:raise HTTPException(404,'Upload not found')
+        if row[0] is None:raise HTTPException(409,'Stored PDF not found')
+        if row[1]=='PROCESSING':return {'status':'ALREADY_PROCESSING','upload_id':upload_id}
+        bg.add_task(_process,core,upload_id)
+        return {'status':'RESUME_STARTED','upload_id':upload_id,'version':'8.2.3'}
 
     @app.get('/api/magazine-fresh/status/{upload_id}')
     def status(upload_id:str,req:Request):
