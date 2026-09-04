@@ -17185,3 +17185,12 @@ try:
     print("Alliance Contact Provenance Closure 7.0.5: registered")
 except Exception as _v705_exc:
     print("Alliance Contact Provenance Closure 7.0.5 registration warning:",_v705_exc)
+
+# FOUNDATION_7_1_SAFE_MASTER_PROMOTION
+try:
+    import sys as _v710_sys
+    import alliance_safe_master_promotion_v710 as _v710
+    _v710.start(_v710_sys.modules[__name__])
+    print("Alliance Safe Master Promotion 7.1: registered")
+except Exception as _v710_exc:
+    print("Alliance Safe Master Promotion 7.1 registration warning:",_v710_exc)
