@@ -17203,3 +17203,12 @@ try:
     print("Alliance Promotion Integrity Closure 7.1.1: registered")
 except Exception as _v711_exc:
     print("Alliance Promotion Integrity Closure 7.1.1 registration warning:",_v711_exc)
+
+# FOUNDATION_7_2_UNIFIED_MASTER_DATABASE_INTEGRATION
+try:
+    import sys as _v720_sys
+    import alliance_master_integration_v720 as _v720
+    _v720.start(_v720_sys.modules[__name__])
+    print("Alliance Unified Master Database Integration 7.2: registered")
+except Exception as _v720_exc:
+    print("Alliance 7.2 registration warning:",_v720_exc)
