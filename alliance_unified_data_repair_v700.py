@@ -1,12 +1,13 @@
 from __future__ import annotations
 import hashlib, html, json, re, threading, time
+from collections import defaultdict, Counter
 from datetime import datetime, timezone
 from decimal import Decimal
 
 from fastapi.responses import HTMLResponse
 from sqlalchemy import text
 
-VERSION="7.0.0-ALLIANCE-UNIFIED-NEWSPAPER-MAGAZINE-DATA-REPAIR"
+VERSION="7.0.1-ALLIANCE-UNIFIED-NEWSPAPER-MAGAZINE-DATA-REPAIR-COLLECTIONS-FIX"
 MODE="SOURCE_IMMUTABLE_DETERMINISTIC_CLEAN_SHADOW_STRONG_DEDUPE_CANONICAL_DERIVED_NO_AI_QUOTA_REQUIRED"
 
 STATE={"status":"NOT_STARTED","phase":"WAITING","started_at":None,"finished_at":None,
