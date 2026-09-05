@@ -671,6 +671,18 @@ def _load_core():
             stabilization["final_workflow_v920"]={"status":"ERROR","error":f"{type(exc).__name__}: {exc}","fail_safe":True}
             print("[final-workflow-v920] warning:",type(exc).__name__,str(exc))
 
+        # ALLIANCE_ORGANIZED_MAIN_V930
+        try:
+            import alliance_organized_main_v930 as organized_main_v930
+            r930=organized_main_v930.register(wrapped.core)
+            stabilization=dict(stabilization or {})
+            stabilization["organized_main_v930"]=r930
+            print("[organized-main-v930]",r930)
+        except Exception as exc:
+            stabilization=dict(stabilization or {})
+            stabilization["organized_main_v930"]={"status":"ERROR","error":f"{type(exc).__name__}: {exc}","fail_safe":True}
+            print("[organized-main-v930] warning:",type(exc).__name__,str(exc))
+
         CORE_APP = wrapped.app
         try:
             import alliance_whatsapp_safe_ingest_v5 as safe_wa
