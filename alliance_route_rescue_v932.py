@@ -1,5 +1,5 @@
 from __future__ import annotations
-VERSION="11.5.0-MANUAL-RESTORE-NAV-STABILITY"
+VERSION="11.6.0-UNIFIED-PROPERTY-DATABASES"
 
 FINAL_PATHS=(
  "/team-dashboard-v376","/team-dashboard-live","/alliance/primary",
@@ -46,6 +46,12 @@ def register(wrapped):
         result["manual_restore"]=m.register(wrapped)
     except Exception as e:
         result["manual_restore_error"]=f"{type(e).__name__}: {e}"
+
+    try:
+        import alliance_unified_property_sources_v1160 as u
+        result["property_sources"]=u.register(wrapped)
+    except Exception as e:
+        result["property_sources_error"]=f"{type(e).__name__}: {e}"
 
     result["moved"]={p:_move_front(app,p) for p in reversed(FINAL_PATHS)}
     result["route_count"]=len(app.router.routes)
