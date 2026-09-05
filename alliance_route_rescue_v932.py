@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 VERSION="11.6.0-UNIFIED-PROPERTY-DATABASES"
 
 FINAL_PATHS=(
@@ -53,6 +53,7 @@ def register(wrapped):
     except Exception as e:
         result["property_sources_error"]=f"{type(e).__name__}: {e}"
 
-    result["moved"]={p:_move_front(app,p) for p in reversed(FINAL_PATHS)}
+    try:`r`n        import alliance_db_schema_probe_v117 as probe`r`n        result["schema_probe"]=probe.register(wrapped)`r`n    except Exception as e:`r`n        result["schema_probe_error"]=f"{type(e).__name__}: {e}"`r`n`r`n    result["moved"]={p:_move_front(app,p) for p in reversed(FINAL_PATHS)}
     result["route_count"]=len(app.router.routes)
     return result
+
