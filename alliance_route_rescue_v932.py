@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-VERSION="11.1.0-ROUTE-PRIORITY-RESCUE"
+VERSION="11.2.0-UNIFIED-ROUTE-PRIORITY"
 
 FINAL_PATHS=(
     "/team-dashboard-v376",
@@ -29,6 +29,8 @@ def register(wrapped):
     app=wrapped.app
     core=wrapped.core
 
+    # CRE10 is retained only as the proven underlying 5x5 data renderer.
+    # CRE11.2 registers AFTER it and owns every team-facing route.
     cre10=None
     cre10_error=None
     try:
@@ -36,7 +38,7 @@ def register(wrapped):
         cre10=os10.register(core)
     except Exception as exc:
         cre10_error=f"{type(exc).__name__}: {exc}"
-        print("[alliance-cre-os-v1000] warning:",cre10_error)
+        print("[cre10-data-layer] warning:",cre10_error)
 
     cre11=None
     cre11_error=None
@@ -45,7 +47,7 @@ def register(wrapped):
         cre11=os11.register(core)
     except Exception as exc:
         cre11_error=f"{type(exc).__name__}: {exc}"
-        print("[alliance-cre-os-v1100] warning:",cre11_error)
+        print("[cre11.2] warning:",cre11_error)
 
     moved={}
     for p in reversed(FINAL_PATHS):
@@ -54,10 +56,12 @@ def register(wrapped):
     return {
         "status":"REGISTERED",
         "version":VERSION,
-        "cre10":cre10,
+        "cre10_data_layer":cre10,
         "cre10_error":cre10_error,
-        "cre11":cre11,
+        "cre11_team_surface":cre11,
         "cre11_error":cre11_error,
         "moved":moved,
         "route_count":len(app.router.routes),
+        "team_surface":"CRE11_ONLY",
+        "cache_policy":"NO_STORE",
     }
