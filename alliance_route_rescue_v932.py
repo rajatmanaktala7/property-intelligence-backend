@@ -2,7 +2,7 @@ from __future__ import annotations
 from fastapi import Request
 from fastapi.responses import RedirectResponse, HTMLResponse
 
-VERSION="9.3.2-ROUTE-PRIORITY-RESCUE"
+VERSION="10.0.0-ROUTE-PRIORITY-RESCUE"
 
 FINAL_PATHS=(
     "/alliance/primary",
@@ -48,16 +48,29 @@ def register(wrapped):
     app=wrapped.app
     core=wrapped.core
 
-    # If 9.3 failed earlier, retry its registration once before route rescue.
-    if not _get_routes(app,"/alliance/primary"):
-        try:
-            import alliance_organized_main_v930 as organized
-            organized.register(core)
-        except Exception as exc:
-            print("[route-rescue-v932] retry warning:",type(exc).__name__,str(exc))
+    # Register final OS 10.0 LAST so the team dashboard owns the visible routes.
+    final_result=None
+    final_error=None
+    try:
+        import alliance_cre_os_v1000 as final_os
+        final_result=final_os.register(core)
+    except Exception as exc:
+        final_error=f"{type(exc).__name__}: {exc}"
+        print("[alliance-cre-os-v1000] warning:", final_error)
 
-    # Recreate stable aliases directly; do not depend on old redirect order.
+    # Stable aliases are recreated directly.
     for old,target in ALIASES:
+        if old in (
+            "/alliance/primary/databases",
+            "/alliance/primary/database/{source}",
+            "/alliance/primary/properties",
+            "/alliance/primary/requirements-hub",
+            "/alliance/primary/requirements/source/{source}",
+            "/alliance/primary/requirements",
+        ):
+            # OS 10.0 normally owns these already. Only create if still absent.
+            if _get_routes(app,old):
+                continue
         _remove_get(app,old)
         if "{source}" in old:
             async def _src(request:Request,source:str,_target=target):
@@ -71,18 +84,22 @@ def register(wrapped):
                 return RedirectResponse(_target+("?" + qs if qs else ""),status_code=307)
             app.add_api_route(old,_plain,methods=["GET"],include_in_schema=False)
 
-    # Put Alliance routes ahead of legacy catch-all/mount routes.
-    prioritized=list(FINAL_PATHS)+[x[0] for x in ALIASES]
+    prioritized=list(FINAL_PATHS)+[x[0] for x in ALIASES]+[
+        "/alliance/primary/contacts",
+        "/alliance/primary/ai-control",
+        "/alliance/primary/data-health",
+    ]
     moved={}
     for p in reversed(prioritized):
         moved[p]=_move_front(app,p)
 
-    # Last-resort visible route instead of JSON 404 if main route is still missing.
     if not _get_routes(app,"/alliance/primary"):
         async def _fallback(request:Request):
-            return HTMLResponse("""<!doctype html><html><body style="font-family:Arial">
+            detail = final_error or "Final dashboard route was not registered."
+            return HTMLResponse(f"""<!doctype html><html><body style="font-family:Arial">
             <h2>Alliance CRE Operating System</h2>
-            <p>Main dashboard route recovery is active.</p>
+            <p>Safe fallback is active.</p>
+            <p>{detail}</p>
             <p><a href="/alliance/final/databases">5 Property Databases</a></p>
             <p><a href="/alliance/final/requirements">5 Requirement Databases</a></p>
             <p><a href="/alliance/primary/matcher">Matcher</a> ·
@@ -93,4 +110,11 @@ def register(wrapped):
         _move_front(app,"/alliance/primary")
         moved["/alliance/primary"]="FALLBACK_ADDED"
 
-    return {"status":"REGISTERED","version":VERSION,"moved":moved,"route_count":len(app.router.routes)}
+    return {
+        "status":"REGISTERED",
+        "version":VERSION,
+        "final_os_v1000":final_result,
+        "final_os_error":final_error,
+        "moved":moved,
+        "route_count":len(app.router.routes),
+    }
