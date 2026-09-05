@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import asyncio
 import threading
@@ -694,6 +694,18 @@ def _load_core():
             stabilization=dict(stabilization or {})
             stabilization["route_rescue_v932"]={"status":"ERROR","error":f"{type(exc).__name__}: {exc}","fail_safe":True}
             print("[route-rescue-v932] warning:",type(exc).__name__,str(exc))
+
+        # ALLIANCE_CRE_OS_V1180_FINAL_UI_AUTHORITY
+        try:
+            import alliance_cre_os_v1180 as cre_v1180
+            cre1180_result = cre_v1180.register(wrapped)
+            stabilization = dict(stabilization or {})
+            stabilization["cre_v1180_final_ui"] = cre1180_result
+            print("[cre-v1180-final-ui]", cre1180_result)
+        except Exception as exc:
+            stabilization = dict(stabilization or {})
+            stabilization["cre_v1180_final_ui"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","fail_safe":True}
+            print("[cre-v1180-final-ui] warning:", type(exc).__name__, str(exc))
 
         CORE_APP = wrapped.app
         try:
