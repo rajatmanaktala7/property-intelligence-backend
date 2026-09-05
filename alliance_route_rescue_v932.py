@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
-VERSION="11.6.0-UNIFIED-PROPERTY-DATABASES"
+
+VERSION="11.6.1-SCHEMA-PROBE-CONNECTED"
 
 FINAL_PATHS=(
  "/team-dashboard-v376","/team-dashboard-live","/alliance/primary",
@@ -14,14 +15,22 @@ FINAL_PATHS=(
 def _move_front(app,path):
     found=[r for r in list(app.router.routes) if getattr(r,"path",None)==path]
     for r in found:
-        try: app.router.routes.remove(r)
-        except ValueError: pass
-    for r in reversed(found): app.router.routes.insert(0,r)
+        try:
+            app.router.routes.remove(r)
+        except ValueError:
+            pass
+    for r in reversed(found):
+        app.router.routes.insert(0,r)
     return len(found)
 
 def register(wrapped):
-    app=wrapped.app; core=wrapped.core
-    result={"status":"REGISTERED","version":VERSION}
+    app=wrapped.app
+    core=wrapped.core
+
+    result={
+        "status":"REGISTERED",
+        "version":VERSION
+    }
 
     try:
         import alliance_cre_os_v1000 as r
@@ -53,7 +62,16 @@ def register(wrapped):
     except Exception as e:
         result["property_sources_error"]=f"{type(e).__name__}: {e}"
 
-    try:`r`n        import alliance_db_schema_probe_v117 as probe`r`n        result["schema_probe"]=probe.register(wrapped)`r`n    except Exception as e:`r`n        result["schema_probe_error"]=f"{type(e).__name__}: {e}"`r`n`r`n    result["moved"]={p:_move_front(app,p) for p in reversed(FINAL_PATHS)}
+    try:
+        import alliance_db_schema_probe_v117 as probe
+        result["schema_probe"]=probe.register(wrapped)
+    except Exception as e:
+        result["schema_probe_error"]=f"{type(e).__name__}: {e}"
+
+    result["moved"]={
+        p:_move_front(app,p)
+        for p in reversed(FINAL_PATHS)
+    }
+
     result["route_count"]=len(app.router.routes)
     return result
-
