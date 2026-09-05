@@ -1,5 +1,5 @@
 from __future__ import annotations
-VERSION="11.4.0-STABLE-PRODUCTION-ROUTES"
+VERSION="11.5.0-MANUAL-RESTORE-NAV-STABILITY"
 
 FINAL_PATHS=(
  "/team-dashboard-v376","/team-dashboard-live","/alliance/primary",
@@ -40,6 +40,12 @@ def register(wrapped):
         result["auth"]=a.register(wrapped)
     except Exception as e:
         result["auth_error"]=f"{type(e).__name__}: {e}"
+
+    try:
+        import alliance_manual_database_restore_v1150 as m
+        result["manual_restore"]=m.register(wrapped)
+    except Exception as e:
+        result["manual_restore_error"]=f"{type(e).__name__}: {e}"
 
     result["moved"]={p:_move_front(app,p) for p in reversed(FINAL_PATHS)}
     result["route_count"]=len(app.router.routes)
