@@ -683,6 +683,18 @@ def _load_core():
             stabilization["organized_main_v930"]={"status":"ERROR","error":f"{type(exc).__name__}: {exc}","fail_safe":True}
             print("[organized-main-v930] warning:",type(exc).__name__,str(exc))
 
+        # ALLIANCE_ROUTE_RESCUE_V932
+        try:
+            import alliance_route_rescue_v932 as route_rescue_v932
+            rescue_result=route_rescue_v932.register(wrapped)
+            stabilization=dict(stabilization or {})
+            stabilization["route_rescue_v932"]=rescue_result
+            print("[route-rescue-v932]",rescue_result)
+        except Exception as exc:
+            stabilization=dict(stabilization or {})
+            stabilization["route_rescue_v932"]={"status":"ERROR","error":f"{type(exc).__name__}: {exc}","fail_safe":True}
+            print("[route-rescue-v932] warning:",type(exc).__name__,str(exc))
+
         CORE_APP = wrapped.app
         try:
             import alliance_whatsapp_safe_ingest_v5 as safe_wa
