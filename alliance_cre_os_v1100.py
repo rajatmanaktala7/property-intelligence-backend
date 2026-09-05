@@ -6,7 +6,7 @@ from fastapi import Request
 from fastapi.responses import HTMLResponse
 from sqlalchemy import text
 
-VERSION = "11.3.0-ROUTE-STABILITY-RESTORE"
+VERSION = "11.4.0-PRODUCTION-STABILITY"
 SOURCES = ("MASTER","NEWSPAPER","WHATSAPP","MAGAZINE","MANUAL")
 
 def _app(core):
@@ -115,6 +115,25 @@ def _restoration_snapshot(engine, entity="PROPERTY"):
             "gap":max(0,(legacy or 0)-canonical[source]) if legacy is not None else 0,
             "tables":tables,
         }
+    return out
+
+
+def _exact_source_inventory(engine):
+    tables = {
+        "CORE": "pi_properties",
+        "NEWSPAPER": "pi_newspaper_properties",
+        "WHATSAPP": "pi_whatsapp_property_master",
+        "MAGAZINE": "pi_magazine_master",
+        "OPERATIONAL": "pi_operational_properties",
+        "MASTER": "pi_master_properties_v711",
+    }
+    out={}
+    for label,table in tables.items():
+        try:
+            with engine.connect() as conn:
+                out[label]=int(conn.execute(text(f'SELECT COUNT(*) FROM "{table}"')).scalar() or 0)
+        except Exception:
+            out[label]=None
     return out
 
 def _metrics(engine):
@@ -328,17 +347,17 @@ def register(core):
     @app.get("/team-dashboard-v376",response_class=HTMLResponse,include_in_schema=False)
     def team_dashboard(req:Request):
         _login(core,req)
-        return HTMLResponse(_dashboard(engine), headers={"Cache-Control":"no-store, no-cache, must-revalidate, max-age=0","Pragma":"no-cache","Expires":"0","X-Alliance-CRE-Version":"11.3.0"})
+        return HTMLResponse(_dashboard(engine), headers={"Cache-Control":"no-store, no-cache, must-revalidate, max-age=0","Pragma":"no-cache","Expires":"0","X-Alliance-CRE-Version":"11.4.0"})
 
     @app.get("/alliance/primary",response_class=HTMLResponse,include_in_schema=False)
     def alliance_primary(req:Request):
         _login(core,req)
-        return HTMLResponse(_dashboard(engine), headers={"Cache-Control":"no-store, no-cache, must-revalidate, max-age=0","Pragma":"no-cache","Expires":"0","X-Alliance-CRE-Version":"11.3.0"})
+        return HTMLResponse(_dashboard(engine), headers={"Cache-Control":"no-store, no-cache, must-revalidate, max-age=0","Pragma":"no-cache","Expires":"0","X-Alliance-CRE-Version":"11.4.0"})
 
     @app.get("/team-dashboard-live",response_class=HTMLResponse,include_in_schema=False)
     def team_dashboard_live(req:Request):
         _login(core,req)
-        return HTMLResponse(_dashboard(engine), headers={"Cache-Control":"no-store, no-cache, must-revalidate, max-age=0","Pragma":"no-cache","Expires":"0","X-Alliance-CRE-Version":"11.3.0"})
+        return HTMLResponse(_dashboard(engine), headers={"Cache-Control":"no-store, no-cache, must-revalidate, max-age=0","Pragma":"no-cache","Expires":"0","X-Alliance-CRE-Version":"11.4.0"})
 
     for p in ("/team-dashboard-v376","/alliance/primary","/team-dashboard-live"):
         _move_front(app,p)
