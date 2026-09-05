@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-VERSION="11.0.0-ROUTE-PRIORITY-RESCUE"
+VERSION="11.1.0-ROUTE-PRIORITY-RESCUE"
 
 FINAL_PATHS=(
     "/team-dashboard-v376",

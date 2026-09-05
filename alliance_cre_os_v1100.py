@@ -6,7 +6,7 @@ from fastapi import Request
 from fastapi.responses import HTMLResponse
 from sqlalchemy import text
 
-VERSION = "11.0.0-RESTORED-TEAM-DASHBOARD-INTEGRATED-5X5"
+VERSION = "11.1.0-DATABASE-NUMBER-RESTORATION-VISIBILITY"
 SOURCES = ("MASTER","NEWSPAPER","WHATSAPP","MAGAZINE","MANUAL")
 
 def _app(core):
@@ -56,6 +56,66 @@ def _source_count(engine, entity, source):
     OR UPPER(COALESCE({alias}.clean_record->>'import_source','')) LIKE :pat
     """
     return int(_scalar(engine, sql, {"entity":entity,"pat":pat}, 0) or 0)
+
+
+def _table_exists(engine, table):
+    try:
+        with engine.connect() as conn:
+            return bool(conn.execute(text("SELECT to_regclass(:t) IS NOT NULL"), {"t":"public."+table}).scalar())
+    except Exception:
+        return False
+
+def _table_count(engine, table):
+    if not _table_exists(engine, table):
+        return None
+    try:
+        with engine.connect() as conn:
+            return int(conn.execute(text(f'SELECT COUNT(*) FROM "{table}"')).scalar() or 0)
+    except Exception:
+        return None
+
+LEGACY_SOURCE_TABLES = {
+    "NEWSPAPER": ("pi_newspaper_properties",),
+    "WHATSAPP": ("pi_whatsapp_property_master","pi_whatsapp_properties"),
+    "MAGAZINE": ("pi_magazine_master",),
+    "MANUAL": ("pi_manual_properties","pi_operational_properties"),
+}
+
+def _legacy_source_count(engine, source):
+    vals=[]
+    used=[]
+    for table in LEGACY_SOURCE_TABLES.get(source,()):
+        count=_table_count(engine,table)
+        if count is not None:
+            vals.append(count)
+            used.append((table,count))
+    if not vals:
+        return None, []
+    return max(vals), used
+
+def _restoration_snapshot(engine, entity="PROPERTY"):
+    canonical={s:_source_count(engine,entity,s) for s in SOURCES}
+    out={}
+    for source in SOURCES:
+        if source=="MASTER":
+            out[source]={
+                "canonical":canonical[source],
+                "legacy":None,
+                "restored_visible":canonical[source],
+                "gap":0,
+                "tables":[],
+            }
+            continue
+        legacy,tables=_legacy_source_count(engine,source) if entity=="PROPERTY" else (None,[])
+        visible=max(canonical[source],legacy or 0) if legacy is not None else canonical[source]
+        out[source]={
+            "canonical":canonical[source],
+            "legacy":legacy,
+            "restored_visible":visible,
+            "gap":max(0,(legacy or 0)-canonical[source]) if legacy is not None else 0,
+            "tables":tables,
+        }
+    return out
 
 def _metrics(engine):
     return {
@@ -110,15 +170,26 @@ def _db_card(label, count, url, note=""):
 
 def _dashboard(engine):
     m=_metrics(engine)
-    pc={s:_source_count(engine,"PROPERTY",s) for s in SOURCES}
+    ps=_restoration_snapshot(engine,"PROPERTY")
+    pc={s:ps[s]["restored_visible"] for s in SOURCES}
     rc={s:_source_count(engine,"REQUIREMENT",s) for s in SOURCES}
 
+    def _rest_note(source,label):
+        s=ps[source]
+        if source=="MASTER":
+            return "Canonical property database"
+        if s["legacy"] is None:
+            return f"{label} · linked to Master: {s['canonical']}"
+        if s["gap"]>0:
+            return f"{label} · linked: {s['canonical']} · awaiting lineage restoration: {s['gap']}"
+        return f"{label} · linked to Master: {s['canonical']} · fully reconciled"
+
     property_cards = "".join([
-        _db_card("Master Database",pc["MASTER"],"/alliance/final/database/master","Canonical property database"),
-        _db_card("Newspaper Database",pc["NEWSPAPER"],"/alliance/final/database/newspaper","Newspaper source view"),
-        _db_card("WhatsApp Database",pc["WHATSAPP"],"/alliance/final/database/whatsapp","WhatsApp source view"),
-        _db_card("Magazine Database",pc["MAGAZINE"],"/alliance/final/database/magazine","Magazine source view"),
-        _db_card("Manual Database",pc["MANUAL"],"/alliance/final/database/manual","Manual source view"),
+        _db_card("Master Database",pc["MASTER"],"/alliance/final/database/master",_rest_note("MASTER","Canonical")),
+        _db_card("Newspaper Database",pc["NEWSPAPER"],"/alliance/final/database/newspaper",_rest_note("NEWSPAPER","Restored source records")),
+        _db_card("WhatsApp Database",pc["WHATSAPP"],"/alliance/final/database/whatsapp",_rest_note("WHATSAPP","Restored source records")),
+        _db_card("Magazine Database",pc["MAGAZINE"],"/alliance/final/database/magazine",_rest_note("MAGAZINE","Restored source records")),
+        _db_card("Manual Database",pc["MANUAL"],"/alliance/final/database/manual",_rest_note("MANUAL","Restored source records")),
     ])
     requirement_cards = "".join([
         _db_card("Master Requirements",rc["MASTER"],"/alliance/final/requirements/master","Canonical demand database"),
@@ -216,6 +287,18 @@ header{{background:linear-gradient(135deg,var(--nav),var(--nav2));color:#fff;pad
 <section class="card">
 <div class="sectiontitle"><div><h2>Requirement Databases</h2><p>Five demand views feeding one canonical Master Requirements database.</p></div><a href="/alliance/final/requirements">Open Requirement Database Hub</a></div>
 <div class="dbgrid">{requirement_cards}</div>
+</section>
+
+<section class="card">
+<div class="sectiontitle"><div><h2>Database Restoration Status</h2><p>Live reconciliation between legacy source tables and canonical Master lineage. No data is deleted or duplicated.</p></div></div>
+<div class="dbgrid">
+{_db_card("Newspaper Source",ps["NEWSPAPER"]["legacy"] if ps["NEWSPAPER"]["legacy"] is not None else ps["NEWSPAPER"]["canonical"],"/alliance/final/database/newspaper",f"Master linked: {ps['NEWSPAPER']['canonical']} · Missing lineage: {ps['NEWSPAPER']['gap']}")}
+{_db_card("WhatsApp Source",ps["WHATSAPP"]["legacy"] if ps["WHATSAPP"]["legacy"] is not None else ps["WHATSAPP"]["canonical"],"/alliance/final/database/whatsapp",f"Master linked: {ps['WHATSAPP']['canonical']} · Missing lineage: {ps['WHATSAPP']['gap']}")}
+{_db_card("Magazine Source",ps["MAGAZINE"]["legacy"] if ps["MAGAZINE"]["legacy"] is not None else ps["MAGAZINE"]["canonical"],"/alliance/final/database/magazine",f"Master linked: {ps['MAGAZINE']['canonical']} · Missing lineage: {ps['MAGAZINE']['gap']}")}
+{_db_card("Manual Source",ps["MANUAL"]["legacy"] if ps["MANUAL"]["legacy"] is not None else ps["MANUAL"]["canonical"],"/alliance/final/database/manual",f"Master linked: {ps['MANUAL']['canonical']} · Missing lineage: {ps['MANUAL']['gap']}")}
+{_db_card("Master Properties",ps["MASTER"]["canonical"],"/alliance/final/database/master","Canonical unique properties")}
+</div>
+<div class="notice"><b>How to read this:</b> the large number is the live source-table count when an original source table still exists. “Master linked” is how many canonical properties currently carry that source lineage. “Missing lineage” shows records still requiring reconciliation before the source database is fully restored into Master.</div>
 </section>
 
 <section class="card">
