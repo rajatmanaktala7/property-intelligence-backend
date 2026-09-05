@@ -6,7 +6,7 @@ from fastapi import Request
 from fastapi.responses import HTMLResponse
 from sqlalchemy import text
 
-VERSION = "11.2.0-UNIFIED-ROUTES-CACHE-BUST"
+VERSION = "11.3.0-ROUTE-STABILITY-RESTORE"
 SOURCES = ("MASTER","NEWSPAPER","WHATSAPP","MAGAZINE","MANUAL")
 
 def _app(core):
@@ -328,17 +328,17 @@ def register(core):
     @app.get("/team-dashboard-v376",response_class=HTMLResponse,include_in_schema=False)
     def team_dashboard(req:Request):
         _login(core,req)
-        return HTMLResponse(_dashboard(engine))
+        return HTMLResponse(_dashboard(engine), headers={"Cache-Control":"no-store, no-cache, must-revalidate, max-age=0","Pragma":"no-cache","Expires":"0","X-Alliance-CRE-Version":"11.3.0"})
 
     @app.get("/alliance/primary",response_class=HTMLResponse,include_in_schema=False)
     def alliance_primary(req:Request):
         _login(core,req)
-        return HTMLResponse(_dashboard(engine))
+        return HTMLResponse(_dashboard(engine), headers={"Cache-Control":"no-store, no-cache, must-revalidate, max-age=0","Pragma":"no-cache","Expires":"0","X-Alliance-CRE-Version":"11.3.0"})
 
     @app.get("/team-dashboard-live",response_class=HTMLResponse,include_in_schema=False)
     def team_dashboard_live(req:Request):
         _login(core,req)
-        return HTMLResponse(_dashboard(engine))
+        return HTMLResponse(_dashboard(engine), headers={"Cache-Control":"no-store, no-cache, must-revalidate, max-age=0","Pragma":"no-cache","Expires":"0","X-Alliance-CRE-Version":"11.3.0"})
 
     for p in ("/team-dashboard-v376","/alliance/primary","/team-dashboard-live"):
         _move_front(app,p)
@@ -353,108 +353,3 @@ def register(core):
         "dummy_panels_removed":True,
         "route_count":len(app.router.routes),
     }
-
-
-def _rewrite_cre11_html(body: str) -> str:
-    if not isinstance(body, str):
-        return body
-    replacements = (
-        ("Alliance CRE Intelligence OS 10.0", "Alliance CRE Intelligence OS 11"),
-        ("Alliance CRE Intelligence OS 10", "Alliance CRE Intelligence OS 11"),
-        ("CRE Intelligence OS 10.0", "CRE Intelligence OS 11"),
-        ("CRE Intelligence OS 10", "CRE Intelligence OS 11"),
-        ("CRE OS 10.0", "CRE OS 11"),
-        ("CRE OS 10", "CRE OS 11"),
-    )
-    for old,new in replacements:
-        body=body.replace(old,new)
-    return body
-
-def _wrap_existing_get(app, path: str):
-    candidates=[
-        r for r in list(app.router.routes)
-        if getattr(r,"path",None)==path
-        and "GET" in set(getattr(r,"methods",set()) or set())
-        and getattr(r,"endpoint",None)
-    ]
-    if not candidates:
-        return False
-    original=candidates[0].endpoint
-    _remove_get(app,path)
-
-    if "{source}" in path:
-        async def unified_source(req:Request, source:str, _original=original):
-            result=_original(req,source)
-            if hasattr(result,"__await__"):
-                result=await result
-            if isinstance(result,HTMLResponse):
-                raw=result.body.decode("utf-8","replace")
-                return HTMLResponse(
-                    _rewrite_cre11_html(raw),
-                    status_code=result.status_code,
-                    headers={"Cache-Control":"no-store, no-cache, must-revalidate, max-age=0",
-                             "Pragma":"no-cache","Expires":"0",
-                             "X-Alliance-CRE-Version":"11.2.0"}
-                )
-            return result
-        app.add_api_route(path,unified_source,methods=["GET"],include_in_schema=False)
-    else:
-        async def unified(req:Request, _original=original):
-            result=_original(req)
-            if hasattr(result,"__await__"):
-                result=await result
-            if isinstance(result,HTMLResponse):
-                raw=result.body.decode("utf-8","replace")
-                return HTMLResponse(
-                    _rewrite_cre11_html(raw),
-                    status_code=result.status_code,
-                    headers={"Cache-Control":"no-store, no-cache, must-revalidate, max-age=0",
-                             "Pragma":"no-cache","Expires":"0",
-                             "X-Alliance-CRE-Version":"11.2.0"}
-                )
-            return result
-        app.add_api_route(path,unified,methods=["GET"],include_in_schema=False)
-    _move_front(app,path)
-    return True
-
-_ORIGINAL_REGISTER = register
-
-def register(core):
-    result=_ORIGINAL_REGISTER(core)
-    app=_app(core)
-
-    unified_paths=(
-        "/alliance/final/databases",
-        "/alliance/final/requirements",
-        "/alliance/final/database/{source}",
-        "/alliance/final/requirements/{source}",
-    )
-    wrapped={}
-    for path in unified_paths:
-        wrapped[path]=_wrap_existing_get(app,path)
-
-    # Re-register dashboard routes last so they also emit hard no-cache headers.
-    engine=_engine(core)
-    for path in ("/team-dashboard-v376","/alliance/primary","/team-dashboard-live"):
-        _remove_get(app,path)
-
-    async def _cre11_dashboard(req:Request):
-        _login(core,req)
-        return HTMLResponse(
-            _dashboard(engine),
-            headers={"Cache-Control":"no-store, no-cache, must-revalidate, max-age=0",
-                     "Pragma":"no-cache","Expires":"0",
-                     "X-Alliance-CRE-Version":"11.2.0"}
-        )
-
-    for path in ("/team-dashboard-v376","/alliance/primary","/team-dashboard-live"):
-        app.add_api_route(path,_cre11_dashboard,methods=["GET"],include_in_schema=False)
-        _move_front(app,path)
-
-    result.update({
-        "version":"11.2.0-UNIFIED-ROUTES-CACHE-BUST",
-        "unified_team_routes":wrapped,
-        "cache_policy":"NO_STORE",
-        "cre10_team_brand_removed":True,
-    })
-    return result

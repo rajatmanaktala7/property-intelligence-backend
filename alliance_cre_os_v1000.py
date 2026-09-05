@@ -11,7 +11,7 @@ from sqlalchemy import text
 
 import alliance_final_5x5_databases_v910 as v910
 
-VERSION = "10.0.0-FINAL-TEAM-OS"
+VERSION = "11.3.0-STABLE-5X5-DATA-RENDERER"
 SOURCES = ("MASTER", "NEWSPAPER", "WHATSAPP", "MAGAZINE", "MANUAL")
 CATEGORY_OPTIONS = (
     "Residential Sale", "Residential Rent", "Commercial Sale", "Commercial Rent",
@@ -211,7 +211,7 @@ def _nav() -> str:
 
 def _shell(title: str, body: str, subtitle: str = "PROPERTY → VERIFY → REQUIREMENT → MATCH → CLIENT → FOLLOW-UP → DEAL") -> str:
     return f"""<!doctype html>
-<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate"><meta http-equiv="Pragma" content="no-cache"><meta http-equiv="Expires" content="0">
 <title>{_e(title)} · Alliance CRE</title>
 <style>
 *{{box-sizing:border-box}}html,body{{margin:0;background:#f4f7fb;color:#172033;font-family:Arial,sans-serif;font-size:12px}}
@@ -236,7 +236,7 @@ tbody tr:nth-child(even) td{{background:#f8fafc}}tbody tr:hover td{{background:#
 .notice{{background:#fff7e6;border:1px solid #f79009;padding:8px;margin-bottom:8px}}
 @media(max-width:1100px){{.dbgrid,.flow{{grid-template-columns:1fr 1fr}}.searchgrid{{grid-template-columns:1fr 1fr}}}}
 </style></head>
-<body><header><b>Alliance CRE Intelligence OS 10.0</b><br><small>{_e(subtitle)}</small></header>
+<body><header><b>Alliance CRE Intelligence OS 11</b><br><small>{_e(subtitle)}</small></header>
 <nav>{_nav()}</nav><div class="wrap"><h2>{_e(title)}</h2>{body}</div></body></html>"""
 
 def _filter_form(q, location, category, transaction, status, assigned, limit):
