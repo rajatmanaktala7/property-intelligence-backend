@@ -836,6 +836,20 @@ def _load_core():
             }
             print("[magazine-evidence-promotion-gate-v120062] warning:", type(exc).__name__, str(exc))
 
+        # ALLIANCE_MAGAZINE_EVIDENCE_RECOVERY_V12007
+        try:
+            import alliance_magazine_evidence_recovery_v12007 as recovery12007
+            recovery12007_result = recovery12007.register(wrapped.core)
+            stabilization = dict(stabilization or {})
+            stabilization["magazine_evidence_recovery_v12007"] = recovery12007_result
+            print("[magazine-evidence-recovery-v12007]", recovery12007_result)
+        except Exception as exc:
+            stabilization = dict(stabilization or {})
+            stabilization["magazine_evidence_recovery_v12007"] = {
+                "status":"ERROR","error":f"{type(exc).__name__}: {exc}","fail_safe":True
+            }
+            print("[magazine-evidence-recovery-v12007] warning:", type(exc).__name__, str(exc))
+
         CORE_APP = wrapped.app
         try:
             import alliance_whatsapp_safe_ingest_v5 as safe_wa
