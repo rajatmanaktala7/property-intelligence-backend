@@ -10,7 +10,7 @@ from fastapi import Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy import text
 
-VERSION = "12.1.0-PRODUCTION-GOLDEN-CUTOVER"
+VERSION = "12.1.0.1-PRODUCTION-CUTOVER-DDL-FIX"
 SETTLED = "pi_magazine_settled_v12009"
 WORKABLE = "pi_magazine_workable_v12009"
 GOLD = "pi_magazine_golden_master_v12009"
@@ -226,14 +226,15 @@ def _promote_gold(e):
     return {"candidates":len(rows),"promoted":promoted,"skip_tx":skip_tx,"skip_loc":skip_loc}
 
 def _matcher_view(e):
-    # Keep normal master inventory. Remove legacy magazine-only master rows from matcher,
-    # but keep mixed-source master rows and the new settled 12.1.0 magazine rows.
+    # PostgreSQL CREATE VIEW cannot use the runtime bind parameter used previously.
+    # VERSION is a fixed application constant, so quote it once into the DDL.
+    ver_sql = str(VERSION).replace("'", "''")
     with e.begin() as c:
         c.execute(text(f"DROP VIEW IF EXISTS {MATCHER_VIEW}"))
         c.execute(text(f"""CREATE VIEW {MATCHER_VIEW} AS
           SELECT p.*
           FROM pi_master_properties_v711 p
-          WHERE p.source_version=:ver
+          WHERE p.source_version='{ver_sql}'
              OR NOT EXISTS (
                 SELECT 1 FROM pi_master_source_links_v711 lm
                 WHERE lm.canonical_id=p.canonical_id AND lm.source_table='pi_magazine_master'
@@ -242,7 +243,7 @@ def _matcher_view(e):
                 SELECT 1 FROM pi_master_source_links_v711 lo
                 WHERE lo.canonical_id=p.canonical_id AND lo.source_table<>'pi_magazine_master'
              )
-        """).bindparams(ver=VERSION))
+        """))
 
 def _install_matcher_patch(e):
     import alliance_master_integration_v720 as v720
