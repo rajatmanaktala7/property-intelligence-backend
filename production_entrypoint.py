@@ -821,6 +821,14 @@ def _load_core():
         except Exception as exc:
             print("[golden-data-v12001] warning:", type(exc).__name__, str(exc))
 
+        # 12.0.2 GOLDEN DATA STREAMING RECONCILIATION
+        try:
+            import alliance_golden_data_streaming_v12002 as gold12002
+            gold12002_result = gold12002.register(wrapped.core)
+            print("[golden-data-v12002]", gold12002_result)
+        except Exception as exc:
+            print("[golden-data-v12002] warning:", type(exc).__name__, str(exc))
+
         CORE_APP = wrapped.app
         try:
             import alliance_whatsapp_safe_ingest_v5 as safe_wa
