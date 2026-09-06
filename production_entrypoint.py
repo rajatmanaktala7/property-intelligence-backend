@@ -813,6 +813,14 @@ def _load_core():
         except Exception as exc:
             print("[golden-data-v12000] warning:", type(exc).__name__, str(exc))
 
+        # 12.0.1 GOLDEN DATA LIVE PROGRESS + BATCH RECONCILIATION
+        try:
+            import alliance_golden_data_progress_v12001 as gold12001
+            gold12001_result = gold12001.register(wrapped.core)
+            print("[golden-data-v12001]", gold12001_result)
+        except Exception as exc:
+            print("[golden-data-v12001] warning:", type(exc).__name__, str(exc))
+
         CORE_APP = wrapped.app
         try:
             import alliance_whatsapp_safe_ingest_v5 as safe_wa
