@@ -1,4 +1,5 @@
 from __future__ import annotations
+# 11.9.10 VERIFIED-ONLY REQUIREMENT MATCHER
 # 11.9.9 VERIFIED GATE MASTER FILTER
 import html, json, math, re, threading, time
 from datetime import datetime, timezone
@@ -168,7 +169,7 @@ def _search_properties(engine,q="",tx="",limit=500):
       WHERE {' AND '.join(wh)} ORDER BY p.updated_at DESC LIMIT :n"""
     with engine.connect() as c:return [_decorate_property(x) for x in _rows(c.execute(text(sql),params))]
 def _search_requirements(engine,q="",tx="",limit=500):
-    wh=["r.promotion_status='PROMOTED_VALIDATED'"];params={"n":limit}
+    wh=["r.promotion_status=\'PROMOTED_VALIDATED\'","COALESCE(w.verification_status,\'UNVERIFIED\')=\'VERIFIED\'"];params={"n":limit}
     if q:
         wh.append("(COALESCE(r.locality,'') ILIKE :q OR COALESCE(r.city,'') ILIKE :q OR COALESCE(r.clean_record::text,'') ILIKE :q)")
         params["q"]="%"+q+"%"
@@ -196,8 +197,13 @@ def _score(req,p):
 
 def _run_match(engine,rid):
     with engine.connect() as c:
-        rr=c.execute(text("SELECT * FROM pi_master_requirements_v711 WHERE canonical_id=:id"),{"id":rid}).mappings().first()
-    if not rr:raise HTTPException(404,"Requirement not found")
+        rr=c.execute(text("""SELECT r.* FROM pi_master_requirements_v711 r
+          JOIN pi_master_workflow_v720 w ON w.canonical_id=r.canonical_id
+          WHERE r.canonical_id=:id
+            AND r.promotion_status='PROMOTED_VALIDATED'
+            AND w.entity_type='REQUIREMENT'
+            AND w.verification_status='VERIFIED'"""),{"id":rid}).mappings().first()
+    if not rr:raise HTTPException(403,"Requirement is not human VERIFIED and cannot enter Matcher")
     req=_decorate_requirement(_safe(dict(rr)))
     props=_search_properties(engine,tx=req.get("transaction_type") or "",limit=3507)
     scored=[]

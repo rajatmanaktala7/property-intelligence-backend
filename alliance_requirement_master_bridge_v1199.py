@@ -7,7 +7,7 @@ from typing import Any, Dict, Optional
 from fastapi import HTTPException
 from sqlalchemy import text
 
-VERSION = "11.9.9-VERIFIED-MASTER-PROMOTION"
+VERSION = "11.9.10-MASTER-VERIFICATION-SYNC"
 
 DDL = [
     """CREATE TABLE IF NOT EXISTS pi_requirement_gate_master_map_v1199(
@@ -185,6 +185,21 @@ def _withdraw(conn, row: Dict[str, Any], actor: str, new_status: str):
                 {"cid": cid},
             )
 
+            conn.execute(
+                text("""INSERT INTO pi_master_workflow_v720(
+                            canonical_id,entity_type,verification_status,
+                            verified_at,verified_by,availability_status,updated_at)
+                        VALUES(:cid,'REQUIREMENT','UNVERIFIED',NULL,NULL,'INACTIVE',NOW())
+                        ON CONFLICT(canonical_id) DO UPDATE SET
+                            entity_type='REQUIREMENT',
+                            verification_status='UNVERIFIED',
+                            verified_at=NULL,
+                            verified_by=NULL,
+                            availability_status='INACTIVE',
+                            updated_at=NOW()"""),
+                {"cid": cid},
+            )
+
     return {
         "state": "WITHDRAWN",
         "canonical_id": cid,
@@ -279,7 +294,16 @@ def sync(conn, gid: int, actor: str, new_status: str) -> Dict[str, Any]:
             "verification_notes": row.get("verification_notes"),
             "bridge_version": VERSION,
         },
+        "original_message": row.get("original_message"),
+        "requirement_text": row.get("original_message"),
+        "requirement": row.get("original_message"),
+        "client_company": row.get("company_brand_person"),
+        "company_brand_person": row.get("company_brand_person"),
+        "contact_name": row.get("company_brand_person"),
+        "contact_no": phones[0] if phones else None,
+        "contact_numbers": phones,
         "intended_use": row.get("intended_use"),
+        "property_type": row.get("intended_use"),
         "property_category": row.get("property_category"),
         "floor_requirement": row.get("floor_requirement"),
         "area_min_sqft": _to_float(row.get("area_min_sqft")),
@@ -329,6 +353,22 @@ def sync(conn, gid: int, actor: str, new_status: str) -> Dict[str, Any]:
                 WHERE canonical_id=:cid"""),
         {"cid": cid},
     ).scalar_one())
+
+    # 11.9.10: Gate human verification becomes Master human verification.
+    conn.execute(
+        text("""INSERT INTO pi_master_workflow_v720(
+                    canonical_id,entity_type,verification_status,
+                    verified_at,verified_by,availability_status,updated_at)
+                VALUES(:cid,'REQUIREMENT','VERIFIED',NOW(),:actor,'ACTIVE',NOW())
+                ON CONFLICT(canonical_id) DO UPDATE SET
+                    entity_type='REQUIREMENT',
+                    verification_status='VERIFIED',
+                    verified_at=NOW(),
+                    verified_by=:actor,
+                    availability_status='ACTIVE',
+                    updated_at=NOW()"""),
+        {"cid": cid, "actor": row.get("verified_by") or actor},
+    )
 
     conn.execute(
         text("""INSERT INTO pi_master_source_links_v711(
@@ -421,7 +461,7 @@ def reconcile(engine) -> Dict[str, int]:
         stats["verified_seen"] += 1
         try:
             with engine.begin() as c:
-                sync(c, gid, "SYSTEM-11.9.9-RECONCILE", "VERIFIED ACTIVE")
+                sync(c, gid, "SYSTEM-11.9.10-RECONCILE", "VERIFIED ACTIVE")
             stats["synced"] += 1
         except Exception as exc:
             stats["blocked"] += 1
@@ -431,7 +471,7 @@ def reconcile(engine) -> Dict[str, int]:
                         text("""INSERT INTO pi_requirement_gate_audit_v1191(
                                     gate_id,action,actor,old_status,new_status,details)
                                 VALUES(:gid,'MASTER_PROMOTION_BLOCKED',
-                                       'SYSTEM-11.9.9-RECONCILE',
+                                       'SYSTEM-11.9.10-RECONCILE',
                                        'VERIFIED ACTIVE','VERIFIED ACTIVE',
                                        CAST(:d AS JSONB))"""),
                         {

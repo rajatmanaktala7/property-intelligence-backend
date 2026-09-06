@@ -28,7 +28,7 @@ from sqlalchemy import text
 
 import alliance_requirement_master_bridge_v1199 as _gate_master_bridge
 
-VERSION = "11.9.9-VERIFIED-MASTER-PROMOTION"
+VERSION = "11.9.10-MASTER-VERIFICATION-SYNC"
 STATUSES = (
     "RAW",
     "AI-QUALIFIED",

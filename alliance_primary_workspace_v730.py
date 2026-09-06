@@ -1,4 +1,5 @@
 from __future__ import annotations
+# 11.9.10 VERIFIED-ONLY MATCHER GUARD
 # 11.9.9 VERIFIED GATE MASTER BRIDGE
 # 8.0.2 MASTER MATCHER SOURCE VISIBILITY INSTALLED
 import html, json, re, threading, time
@@ -160,7 +161,8 @@ def _requirement(engine,cid):
           w.verified_at,w.verified_by,w.assigned_to workflow_assigned_to,w.internal_notes workflow_notes
           FROM pi_master_requirements_v711 r LEFT JOIN pi_master_workflow_v720 w ON w.canonical_id=r.canonical_id
           WHERE r.canonical_id=:id
-            AND r.promotion_status='PROMOTED_VALIDATED'"""),{"id":cid}).mappings().first()
+            AND r.promotion_status='PROMOTED_VALIDATED'
+            AND COALESCE(w.verification_status,\'UNVERIFIED\')=\'VERIFIED\'"""),{"id":cid}).mappings().first()
     return v720._decorate_requirement(_safe(dict(r))) if r else None
 
 def _verify_property(engine,cid,actor):
