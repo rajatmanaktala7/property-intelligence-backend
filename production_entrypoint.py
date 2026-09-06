@@ -864,6 +864,18 @@ def _load_core():
             }
             print("[magazine-rectifier-v12008] warning:", type(exc).__name__, str(exc))
 
+        # ALLIANCE_MAGAZINE_SETTLEMENT_V12009
+        try:
+            import alliance_magazine_settlement_v12009 as settlement12009
+            settlement12009_result = settlement12009.register(wrapped.core)
+            stabilization = dict(stabilization or {})
+            stabilization["magazine_settlement_v12009"] = settlement12009_result
+            print("[magazine-settlement-v12009]", settlement12009_result)
+        except Exception as exc:
+            stabilization = dict(stabilization or {})
+            stabilization["magazine_settlement_v12009"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","fail_safe":True}
+            print("[magazine-settlement-v12009] warning:", type(exc).__name__, str(exc))
+
         CORE_APP = wrapped.app
         try:
             import alliance_whatsapp_safe_ingest_v5 as safe_wa
