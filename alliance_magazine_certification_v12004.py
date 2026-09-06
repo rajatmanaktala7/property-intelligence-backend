@@ -14,7 +14,7 @@ from fastapi import Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from sqlalchemy import text
 
-VERSION = "12.0.4.1-CERTIFICATION-DEDUPE-VIEW-FIX"
+VERSION = "12.0.4.3-CERTIFICATION-FULL-VIEW-REBUILD-FIX"
 STAGE = "pi_magazine_golden_stage_v12003"
 CERT = "pi_magazine_certification_v12004"
 DUPS = "pi_magazine_duplicate_map_v12004"
@@ -290,7 +290,11 @@ def _build(core):
 
         STATE["phase"]="BUILDING_CERTIFIED_VIEWS"
         with e.begin() as c:
+            # Rebuild dependency-safe: child views first, then parent.
+            c.execute(text("DROP VIEW IF EXISTS pi_magazine_ai_training_v12004"))
+            c.execute(text("DROP VIEW IF EXISTS pi_magazine_operational_v12004"))
             c.execute(text("DROP VIEW IF EXISTS pi_magazine_certified_master_v12004"))
+
             c.execute(text(f"""
             CREATE VIEW pi_magazine_certified_master_v12004 AS
             SELECT
@@ -310,12 +314,11 @@ def _build(core):
             JOIN {STAGE} g ON g.source_id=CAST(m.source_id AS TEXT)
             JOIN {CERT} c ON c.source_id=CAST(m.source_id AS TEXT)
             LEFT JOIN {DUPS} d ON d.source_id=CAST(m.source_id AS TEXT)
-            WHERE c.decision IN ('AUTO_GOLD','HUMAN_APPROVED')
+            WHERE c.decision IN (\'AUTO_GOLD\',\'HUMAN_APPROVED\')
               AND COALESCE(d.duplicate_rank,1)=1
               AND g.conflict=FALSE
             """))
 
-            c.execute(text("DROP VIEW IF EXISTS pi_magazine_operational_v12004"))
             c.execute(text(f"""
             CREATE VIEW pi_magazine_operational_v12004 AS
             SELECT
@@ -333,12 +336,11 @@ def _build(core):
             JOIN {STAGE} g ON g.source_id=CAST(m.source_id AS TEXT)
             LEFT JOIN {CERT} c ON c.source_id=CAST(m.source_id AS TEXT)
             LEFT JOIN {DUPS} d ON d.source_id=CAST(m.source_id AS TEXT)
-            WHERE COALESCE(c.decision,'PENDING') <> 'HUMAN_REJECTED'
-              AND g.quality_status IN ('GOLD','SILVER')
+            WHERE COALESCE(c.decision,\'PENDING\') <> \'HUMAN_REJECTED\'
+              AND g.quality_status IN (\'GOLD\',\'SILVER\')
               AND COALESCE(d.duplicate_rank,1)=1
             """))
 
-            c.execute(text("DROP VIEW IF EXISTS pi_magazine_ai_training_v12004"))
             c.execute(text("""
             CREATE VIEW pi_magazine_ai_training_v12004 AS
             SELECT * FROM pi_magazine_certified_master_v12004
