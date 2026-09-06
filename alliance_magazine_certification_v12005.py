@@ -9,7 +9,7 @@ from fastapi import Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from sqlalchemy import text
 
-VERSION = "12.0.5.2-STARTUP-DEPENDENCY-GUARD"
+VERSION = "12.0.5.3-CERTIFICATION-PRESERVATION-FINAL-STAGE"
 STAGE = "pi_magazine_golden_stage_v12003"
 CERT = "pi_magazine_certification_v12004"
 DUPMAP = "pi_magazine_duplicate_map_v12005"
@@ -164,6 +164,130 @@ def _dup_key(row):
 
     return None, 0, ""
 
+def _wait_for_governance_complete(e, timeout_seconds=120):
+    """
+    Wait for the actual in-process 12.0.3 reconciliation to finish.
+    This prevents 12.0.5 from reading the stage while 12.0.3 has deleted it
+    and is repopulating it batch-by-batch.
+    """
+    deadline = time.time() + timeout_seconds
+    last = {}
+    while time.time() < deadline:
+        module_ready = False
+        try:
+            import alliance_golden_data_single_writer_v12003 as gov
+            s = dict(getattr(gov, "STATE", {}) or {})
+            last = s
+            total = int(s.get("rows_total") or 0)
+            scanned = int(s.get("rows_scanned") or 0)
+            module_ready = (
+                s.get("status") == "PASS"
+                and s.get("phase") == "COMPLETE"
+                and total > 0
+                and scanned == total
+            )
+        except Exception:
+            module_ready = False
+
+        db_ready = False
+        try:
+            with e.connect() as c:
+                latest = c.execute(text("""
+                    SELECT status, summary
+                    FROM pi_magazine_governance_runs_v12003
+                    ORDER BY id DESC LIMIT 1
+                """)).mappings().first()
+                master_count = int(c.execute(text("SELECT COUNT(*) FROM pi_magazine_master")).scalar() or 0)
+                stage_count = int(c.execute(text(
+                    "SELECT COUNT(*) FROM pi_magazine_golden_stage_v12003 "
+                    "WHERE version='12.0.3-SINGLE-WRITER-GOLDEN-DATA'"
+                )).scalar() or 0)
+            if latest and latest["status"] == "PASS":
+                summary = latest["summary"] or {}
+                if isinstance(summary, str):
+                    try:
+                        summary = json.loads(summary)
+                    except Exception:
+                        summary = {}
+                db_total = int(summary.get("rows_total") or 0)
+                db_scanned = int(summary.get("rows_scanned") or 0)
+                db_ready = (
+                    master_count > 0
+                    and stage_count == master_count
+                    and db_total == master_count
+                    and db_scanned == master_count
+                    and summary.get("phase") == "COMPLETE"
+                )
+        except Exception:
+            db_ready = False
+
+        if module_ready and db_ready:
+            return True
+
+        STATE["details"] = {
+            "startup_dependency": "WAITING_FOR_12.0.3_COMPLETE",
+            "governance_state": last,
+        }
+        time.sleep(2)
+
+    raise RuntimeError(
+        "12.0.5.3 governance completion guard timed out. "
+        "Refusing to certify from a partially rebuilt 12.0.3 stage."
+    )
+
+def _sync_cert_from_final_stage(e):
+    """
+    Recalculate SYSTEM certification only from the completed 12.0.3 stage.
+    Human APPROVED/REJECTED decisions are preserved exactly.
+    """
+    with e.begin() as c:
+        c.execute(text(f"""
+            INSERT INTO {CERT}
+            (source_id,decision,certified_location,decision_source,decided_at,updated_at)
+            SELECT
+              g.source_id,
+              CASE WHEN g.quality_status='GOLD' AND g.conflict=FALSE
+                   THEN 'AUTO_GOLD' ELSE 'PENDING' END,
+              g.canonical_location,
+              '12.0.3-FINAL-STAGE',
+              CASE WHEN g.quality_status='GOLD' AND g.conflict=FALSE THEN NOW() ELSE NULL END,
+              NOW()
+            FROM {STAGE} g
+            WHERE g.version='12.0.3-SINGLE-WRITER-GOLDEN-DATA'
+            ON CONFLICT(source_id) DO UPDATE SET
+              decision = CASE
+                WHEN {CERT}.decision IN ('HUMAN_APPROVED','HUMAN_REJECTED')
+                  THEN {CERT}.decision
+                ELSE EXCLUDED.decision
+              END,
+              certified_location = CASE
+                WHEN {CERT}.decision IN ('HUMAN_APPROVED','HUMAN_REJECTED')
+                  THEN {CERT}.certified_location
+                ELSE EXCLUDED.certified_location
+              END,
+              decision_source = CASE
+                WHEN {CERT}.decision IN ('HUMAN_APPROVED','HUMAN_REJECTED')
+                  THEN {CERT}.decision_source
+                ELSE EXCLUDED.decision_source
+              END,
+              decided_at = CASE
+                WHEN {CERT}.decision IN ('HUMAN_APPROVED','HUMAN_REJECTED')
+                  THEN {CERT}.decided_at
+                ELSE EXCLUDED.decided_at
+              END,
+              updated_at = NOW()
+        """))
+        stats = c.execute(text(f"""
+            SELECT
+              COUNT(*) FILTER (WHERE decision='AUTO_GOLD') AS auto_gold,
+              COUNT(*) FILTER (WHERE decision='PENDING') AS pending,
+              COUNT(*) FILTER (WHERE decision='HUMAN_APPROVED') AS human_approved,
+              COUNT(*) FILTER (WHERE decision='HUMAN_REJECTED') AS human_rejected
+            FROM {CERT}
+        """)).mappings().one()
+    return {k:int(v or 0) for k,v in dict(stats).items()}
+
+
 def _survivor_score(row):
     score = {"GOLD":1000,"SILVER":700,"REVIEW":300,"QUARANTINED":100}.get(row.get("quality_status"),0)
     score += int(row.get("quality_score") or 0) + int(row.get("location_confidence") or 0)
@@ -285,27 +409,16 @@ def _build(core):
             return
         with e.begin() as c:
             run_id = c.execute(text(f"INSERT INTO {RUNS}(version,status) VALUES(:v,'RUNNING') RETURNING id"),{"v":VERSION}).scalar()
-        STATE["phase"] = "WAITING_FOR_GOVERNED_ROWS"
-        rows = []
-        wait_attempts = 0
-        for wait_attempts in range(1, 31):
-            rows = _select_rows(e)
-            if rows:
-                break
-            STATE["details"] = {
-                "startup_dependency": "WAITING_FOR_12.0.3_STAGE",
-                "wait_attempt": wait_attempts,
-                "max_attempts": 30,
-            }
-            time.sleep(2)
+        STATE["phase"] = "WAITING_FOR_12.0.3_COMPLETE"
+        _wait_for_governance_complete(e, timeout_seconds=120)
 
-        if not rows:
-            raise RuntimeError(
-                "12.0.5.2 startup guard: governed stage returned 0 rows after 60 seconds. "
-                "Refusing to publish PASS with an empty certification dataset."
-            )
+        STATE["phase"] = "SYNCING_CERTIFICATION_FROM_FINAL_STAGE"
+        sync_stats = _sync_cert_from_final_stage(e)
 
         STATE["phase"] = "LOADING_GOVERNED_ROWS"
+        rows = _select_rows(e)
+        if not rows:
+            raise RuntimeError("12.0.5.3: final 12.0.3 stage is empty after governance PASS.")
         STATE["rows_total"] = len(rows)
         STATE["phase"] = "BUILDING_DUPLICATE_CANDIDATES"
         groups = defaultdict(list)
@@ -347,9 +460,9 @@ def _build(core):
                       "certified_unique":certified,"operational_rows":operational,"ai_training_rows":airows,
                       "details":{"raw_master_mutation":"NONE",
                                  "dedupe_policy":"CANDIDATE_ONLY_UNTIL_HUMAN_DECISION",
-                                 "slash_address_fix":True,"full_compound_address_identity":True,"missing_location_property5_blocked":True,"startup_dependency_guard":True,"zero_row_pass_blocked":True,
+                                 "slash_address_fix":True,"full_compound_address_identity":True,"missing_location_property5_blocked":True,"startup_dependency_guard":True,"zero_row_pass_blocked":True,"governance_completion_guard":True,"certification_resynced_from_final_stage":True,
                                  "human_approved_review_operational":True,
-                                 "human_approved_conflict_resolution":True,
+                                 "human_approved_conflict_resolution":True,"certification_sync":sync_stats,
                                  "certified_view":"pi_magazine_certified_master_v12005",
                                  "operational_view":"pi_magazine_operational_v12005",
                                  "ai_training_view":"pi_magazine_ai_training_v12005"}})
