@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import text
 import alliance_magazine_safe_gateway_v660 as safe_gateway
 
-VERSION='8.3.5.1-QUICK-LOSSLESS-CANARY'
+VERSION='8.3.6-HIERARCHICAL-CONTEXT-STUDENT'
 CHUNK_SIZE=4*1024*1024
 MAX_UPLOAD_MB=int(os.getenv('MAX_UPLOAD_MB','100'))
 PDF_RENDER_DPI=int(os.getenv('PDF_RENDER_DPI','220'))
@@ -40,7 +40,13 @@ STRICT RULES:
 1. original_description must copy the exact printed property listing text visible for that property. Preserve digits, address tokens, area, floor codes, amount and phone numbers. Never rewrite it into a summary.
 2. Never invent missing address, locality, area, floor, amount, contact name or phone.
 3. One physical listing row = one record even when several rows share the same contact.
-4. If a visible section/category/locality heading applies to rows below, capture it in section_heading and inherit only what the page visibly supports.
+4. HIERARCHY RULE: read the page as SECTION -> LOCALITY -> PROPERTY ROW. A section heading such as RESIDENTIAL SALE applies to every following property row until a new section heading. A locality heading such as CHITRANJAN PARK applies to every following property row until a new locality heading.
+4A. section_heading stores the governing category/transaction heading, e.g. RESIDENTIAL SALE.
+4B. locality stores the governing locality heading, e.g. CHITRANJAN PARK. Never use a row address as locality.
+4C. exact_address stores only the property address at the start of the row, e.g. B-319, J-1940 or 40/195.
+4D. A trailing bracket such as (ANSHIT GANGWANI 8587095020) means contact_name=ANSHIT GANGWANI and contact_number=8587095020 when visibly attached to that property row.
+4E. Approved example: B-319 160Y FF 4BHK LIFT NEW (ANSHIT GANGWANI 8587095020) under RESIDENTIAL SALE -> CHITRANJAN PARK means transaction_type=SALE, locality=CHITRANJAN PARK, exact_address=B-319, area_value=160, area_unit=SQYD, floor=FF, contact_name=ANSHIT GANGWANI, contact_number=8587095020.
+4F. Context inheritance is evidence, not guessing. If no visible governing heading exists, return null.
 5. Ignore editorial content, headers, footers and unrelated ads.
 5A. DO NOT return broker, realtor, agency or company profile advertisements as property records.
 5B. A broker office address, agency office address, email, website, multiple agent names/phones, or generic SALE-PURCHASE-RENTING-COLLABORATION language describes the broker business, not a property.

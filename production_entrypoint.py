@@ -719,6 +719,18 @@ def _load_core():
             stabilization["requirement_gate_v1191"]={"status":"ERROR","error":f"{type(exc).__name__}: {exc}","fail_safe":True}
             print("[requirement-gate-v1191] warning:",type(exc).__name__,str(exc))
 
+        # 11.9.11 SIMPLE REQUIREMENT MATCHER + MAGAZINE HIERARCHY
+        try:
+            import alliance_simple_match_magazine_hierarchy_v11911 as simple11911
+            simple11911_result = simple11911.register(wrapped.core)
+            stabilization = dict(stabilization or {})
+            stabilization["simple_match_magazine_hierarchy_v11911"] = simple11911_result
+            print("[simple-match-magazine-hierarchy-v11911]", simple11911_result)
+        except Exception as exc:
+            stabilization = dict(stabilization or {})
+            stabilization["simple_match_magazine_hierarchy_v11911"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","fail_safe":True}
+            print("[simple-match-magazine-hierarchy-v11911] warning:", type(exc).__name__, str(exc))
+
         CORE_APP = wrapped.app
         try:
             import alliance_whatsapp_safe_ingest_v5 as safe_wa
