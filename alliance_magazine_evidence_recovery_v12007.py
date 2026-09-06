@@ -9,7 +9,7 @@ from fastapi import Request, Form
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from sqlalchemy import text
 
-VERSION = "12.0.7-EVIDENCE-RECOVERY-CONFLICT-WORKBENCH"
+VERSION = "12.0.7.1-CONFLICT-GEOGRAPHY-FILTER"
 STAGE = "pi_magazine_golden_stage_v12003"
 CERT = "pi_magazine_certification_v12004"
 DUPMAP = "pi_magazine_duplicate_map_v12005"
@@ -66,8 +66,30 @@ def _floor(v):
 def _sig(v):
     a, ar, fl = _addr(v), _area(v), _floor(v)
     return "|".join((a,ar,fl)) if a and ar and fl else ""
+SECTION_WORD_RE = re.compile(
+    r"(?i)\b(?:RESIDENTIAL|COMMERCIAL|INDUSTRIAL|INSTITUTIONAL|HOSPITALITY|RETAIL|"
+    r"SALE|RENT|LEASE|PURCHASE|BUY|SELL|REQUIREMENT|REQUIREMENTS|PROPERTY|PROPERTIES)\b"
+)
+MONTH_YEAR_RE = re.compile(
+    r"(?i)\b(?:JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|SEPT|OCT|NOV|DEC)"
+    r"(?:EMBER|OBER|UARY|RUARY|CH|IL|E|Y|UST)?[-\s/]*20\d{2}\b"
+)
+
 def _valid_loc(v):
-    return _norm(v).upper() not in BAD
+    s = _norm(v)
+    if not s or s.upper() in BAD:
+        return False
+    if SECTION_WORD_RE.search(s):
+        return False
+    if MONTH_YEAR_RE.search(s):
+        return False
+    if re.search(r"\b20\d{2}\b", s):
+        return False
+    if PHONE_RE.search(s) or AREA_RE.search(s):
+        return False
+    if len(s) > 75:
+        return False
+    return True
 
 def _setup(e):
     with e.begin() as c:
@@ -351,6 +373,8 @@ def _build(core):
                 "raw_master_mutation":"NONE","stage_mutation":"NONE","certification_mutation":"NONE",
                 "duplicate_mutation":"NONE","recovery_policy":"CANDIDATE_ONLY",
                 "human_conflict_decisions":"SEPARATE_OVERLAY_ONLY",
+                "non_geographic_section_headings_rejected":True,
+                "conflict_candidates_geography_only":True,
                 "exact_recovery":"unique locality from retained layout/complete evidence",
                 "structural_recovery":"address+area+floor; must agree with existing geography; confidence 93/95",
                 "final_stage_readiness":readiness,
