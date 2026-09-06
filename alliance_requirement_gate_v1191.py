@@ -26,7 +26,7 @@ from fastapi import Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import text
 
-VERSION = "11.9.5-REQUIREMENT-GATE-HEADER-FIX"
+VERSION = "11.9.6-ROW-VERIFY-ACTIVATE-BUTTON"
 STATUSES = (
     "RAW",
     "AI-QUALIFIED",
@@ -886,6 +886,7 @@ th{background:#e9eef5;position:sticky;top:0;z-index:2;white-space:nowrap}
 .decision .wide{grid-column:1/-1}
 .decision textarea{min-height:52px;resize:vertical}
 .status-select{font-weight:700}
+.verify-activate{font-weight:800;border:2px solid currentColor}
 @media(max-width:900px){
   .msg{min-width:280px}
   .decision{min-width:300px}
@@ -943,6 +944,10 @@ def _decision_form(r: Dict[str, Any]) -> str:
         <input name="verified_by" value="" placeholder="Verified by">
         <textarea class="wide" name="notes" placeholder="Verification notes">{_e(r.get('verification_notes'))}</textarea>
         <button class="wide" type="submit">Save Review Decision</button>
+        <button class="wide verify-activate" type="submit" name="quick_action" value="verify_activate"
+                onclick="return confirm('Verify this requirement and activate it for Matcher?');">
+          ✓ VERIFY &amp; ACTIVATE MATCHER
+        </button>
       </form>
     </div>
     """
@@ -996,6 +1001,7 @@ def register(core):
         req: Request,
         gid: int,
         status: str = Form(...),
+        quick_action: str = Form(""),
         requirement_intent: str = Form(""),
         transaction_type: str = Form(""),
         intended_use: str = Form(""),
@@ -1009,6 +1015,11 @@ def register(core):
         notes: str = Form(""),
     ):
         _login(core, req)
+
+        # Dedicated per-row verification action.
+        if quick_action == "verify_activate":
+            status = "VERIFIED ACTIVE"
+
         if status not in STATUSES:
             raise HTTPException(400, "Invalid status")
 
@@ -1123,7 +1134,11 @@ def register(core):
                 },
             )
 
-        return RedirectResponse("/alliance/requirements-gate", 303)
+        if quick_action == "verify_activate":
+            return RedirectResponse(
+                f"/alliance/requirements-gate?verified={gid}", 303
+            )
+        return RedirectResponse("/alliance/requirements-gate?decision_saved=1", 303)
 
     @app.get("/alliance/requirements-gate", response_class=HTMLResponse)
     def page(
@@ -1133,6 +1148,8 @@ def register(core):
         limit: int = Query(200, ge=1, le=1000),
         recovered: str = Query(""),
         reprocessed: str = Query(""),
+        verified: str = Query(""),
+        decision_saved: str = Query(""),
     ):
         _login(core, req)
         cs = counts(engine)
@@ -1219,7 +1236,18 @@ def register(core):
             )
 
         notice = ""
-        if recovered:
+        if verified:
+            notice = (
+                "<div class='info'><b>Verification saved.</b> Requirement ID "
+                + _e(verified)
+                + " is VERIFIED ACTIVE and Matcher eligibility has been activated.</div>"
+            )
+        elif decision_saved:
+            notice = (
+                "<div class='info'><b>Review decision saved.</b> "
+                "The requirement staging record was updated successfully.</div>"
+            )
+        elif recovered:
             notice = (
                 "<div class='info'><b>Recovery completed.</b> Existing staging rows "
                 "were re-extracted first; historical source evidence was then recovered "
