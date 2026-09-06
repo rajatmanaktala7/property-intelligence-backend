@@ -904,6 +904,20 @@ def _load_core():
             }
             print("[smart-matcher-v1211] warning:", type(exc).__name__, str(exc))
 
+        # ALLIANCE_TEAM_OPERATING_DASHBOARD_V1220
+        try:
+            import alliance_team_dashboard_v1220 as teamdash1220
+            teamdash1220_result = teamdash1220.register(wrapped.core)
+            stabilization = dict(stabilization or {})
+            stabilization["team_dashboard_v1220"] = teamdash1220_result
+            print("[team-dashboard-v1220]", teamdash1220_result)
+        except Exception as exc:
+            stabilization = dict(stabilization or {})
+            stabilization["team_dashboard_v1220"] = {
+                "status":"ERROR","error":f"{type(exc).__name__}: {exc}","fail_safe":True
+            }
+            print("[team-dashboard-v1220] warning:", type(exc).__name__, str(exc))
+
         CORE_APP = wrapped.app
         try:
             import alliance_whatsapp_safe_ingest_v5 as safe_wa
