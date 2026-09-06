@@ -741,6 +741,16 @@ def _load_core():
         except Exception as exc:
             print("[legacy-magazine-hierarchy-v11913] warning:", type(exc).__name__, str(exc))
 
+        # 11.9.15 READ-ONLY MAGAZINE EVIDENCE ADMIN
+        try:
+            import alliance_magazine_evidence_admin_v11915 as mag_ev11915
+            mag_ev11915_result = mag_ev11915.register(wrapped.core)
+            stabilization = dict(stabilization or {})
+            stabilization["magazine_evidence_admin_v11915"] = mag_ev11915_result
+            print("[magazine-evidence-admin-v11915]", mag_ev11915_result)
+        except Exception as exc:
+            print("[magazine-evidence-admin-v11915] warning:", type(exc).__name__, str(exc))
+
         CORE_APP = wrapped.app
         try:
             import alliance_whatsapp_safe_ingest_v5 as safe_wa
