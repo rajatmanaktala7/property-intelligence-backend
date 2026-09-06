@@ -789,6 +789,14 @@ def _load_core():
         except Exception as exc:
             print("[magazine-ai-doctor-v11920] warning:", type(exc).__name__, str(exc))
 
+        # 11.9.21 MAGAZINE LAYOUT REBUILD + SOURCE-BACKED SYNC
+        try:
+            import alliance_magazine_layout_rebuild_v11921 as mag_layout11921
+            mag_layout11921_result = mag_layout11921.register(wrapped.core)
+            print("[magazine-layout-rebuild-v11921]", mag_layout11921_result)
+        except Exception as exc:
+            print("[magazine-layout-rebuild-v11921] warning:", type(exc).__name__, str(exc))
+
         CORE_APP = wrapped.app
         try:
             import alliance_whatsapp_safe_ingest_v5 as safe_wa
