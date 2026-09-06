@@ -7,7 +7,7 @@ Complete replacement for alliance_requirement_gate_v1191.py
 Safety invariants
 -----------------
 1. Historical recovery writes ONLY to pi_requirement_gate_v1191 staging.
-2. This module NEVER inserts/updates/deletes Master Requirements.
+2. Only human VERIFIED ACTIVE rows sync to the existing Master Requirements through 11.9.9.
 3. matcher_eligible is derived from human status:
       VERIFIED ACTIVE -> True
       every other status -> False
@@ -26,7 +26,9 @@ from fastapi import Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import text
 
-VERSION = "11.9.8-ACTION-RELIABILITY-FIX"
+import alliance_requirement_master_bridge_v1199 as _gate_master_bridge
+
+VERSION = "11.9.9-VERIFIED-MASTER-PROMOTION"
 STATUSES = (
     "RAW",
     "AI-QUALIFIED",
@@ -1029,6 +1031,9 @@ def register(core):
         for ddl in DDL:
             c.execute(text(ddl))
 
+    _gate_master_bridge.ensure_schema(engine)
+    _gate_master_bridge.reconcile(engine)
+
     @app.get("/api/cre1191/requirements/status")
     def status(req: Request):
         _login(core, req)
@@ -1100,6 +1105,8 @@ def register(core):
             if updated is None:
                 raise HTTPException(500, "Status update failed")
 
+            master_sync = _gate_master_bridge.sync(c, gid, actor, new_status)
+
             c.execute(
                 text("""
                     INSERT INTO pi_requirement_gate_audit_v1191(
@@ -1116,7 +1123,8 @@ def register(core):
                     "details": json.dumps({
                         "matcher_eligible": eligible,
                         "structured_fields_edited": False,
-                        "master_requirements_mutated": False,
+                        "master_requirements_synced": new_status == "VERIFIED ACTIVE",
+                        "master_sync": master_sync,
                         "confirmed_update": True,
                         "version": VERSION,
                     }),
@@ -1394,11 +1402,17 @@ def register(core):
             action_gid = parts[0] if parts else ""
             action_status = parts[1] if len(parts) > 1 else ""
             action_matcher = "YES" if action_status == "VERIFIED ACTIVE" else "NO"
+            master_note = (
+                " · Master Requirement <b>SYNCED</b>"
+                if action_status == "VERIFIED ACTIVE"
+                else " · Master Requirement <b>NOT ACTIVE</b>"
+            )
             notice = (
                 "<div class='info'><b>Action completed successfully.</b> Requirement ID <b>"
                 + _e(action_gid) + "</b> → <b>" + _e(action_status)
-                + "</b> · Matcher <b>" + action_matcher
-                + "</b>. Requirement details were preserved.</div>"
+                + "</b> · Matcher <b>" + action_matcher + "</b>"
+                + master_note
+                + ". Requirement details were preserved.</div>"
             )
         elif verified:
             notice = (

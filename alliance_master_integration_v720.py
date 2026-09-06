@@ -1,4 +1,5 @@
 from __future__ import annotations
+# 11.9.9 VERIFIED GATE MASTER FILTER
 import html, json, math, re, threading, time
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -167,7 +168,7 @@ def _search_properties(engine,q="",tx="",limit=500):
       WHERE {' AND '.join(wh)} ORDER BY p.updated_at DESC LIMIT :n"""
     with engine.connect() as c:return [_decorate_property(x) for x in _rows(c.execute(text(sql),params))]
 def _search_requirements(engine,q="",tx="",limit=500):
-    wh=["1=1"];params={"n":limit}
+    wh=["r.promotion_status='PROMOTED_VALIDATED'"];params={"n":limit}
     if q:
         wh.append("(COALESCE(r.locality,'') ILIKE :q OR COALESCE(r.city,'') ILIKE :q OR COALESCE(r.clean_record::text,'') ILIKE :q)")
         params["q"]="%"+q+"%"
