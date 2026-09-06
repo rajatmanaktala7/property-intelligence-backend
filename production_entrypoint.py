@@ -731,16 +731,8 @@ def _load_core():
             stabilization["simple_match_magazine_hierarchy_v11911"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","fail_safe":True}
             print("[simple-match-magazine-hierarchy-v11911] warning:", type(exc).__name__, str(exc))
 
-        # 11.9.13 LEGACY MAGAZINE HIERARCHY REPAIR
-        try:
-            import alliance_legacy_magazine_hierarchy_v11913 as legacy_mag11913
-            legacy_mag11913_result = legacy_mag11913.register(wrapped.core)
-            stabilization = dict(stabilization or {})
-            stabilization["legacy_magazine_hierarchy_v11913"] = legacy_mag11913_result
-            print("[legacy-magazine-hierarchy-v11913]", legacy_mag11913_result)
-        except Exception as exc:
-            print("[legacy-magazine-hierarchy-v11913] warning:", type(exc).__name__, str(exc))
-
+        # DISABLED BY 12.0.3: alliance_legacy_magazine_hierarchy_v11913
+        # Legacy magazine mutator disabled to enforce a single reconciliation writer.
         # 11.9.15 READ-ONLY MAGAZINE EVIDENCE ADMIN
         try:
             import alliance_magazine_evidence_admin_v11915 as mag_ev11915
@@ -751,83 +743,31 @@ def _load_core():
         except Exception as exc:
             print("[magazine-evidence-admin-v11915] warning:", type(exc).__name__, str(exc))
 
-        # 11.9.16 FINAL MAGAZINE HIERARCHY REPAIR
+        # DISABLED BY 12.0.3: alliance_magazine_hierarchy_repair_v11916
+        # Legacy magazine mutator disabled to enforce a single reconciliation writer.
+        # DISABLED BY 12.0.3: alliance_magazine_block_hierarchy_v11917
+        # Legacy magazine mutator disabled to enforce a single reconciliation writer.
+        # DISABLED BY 12.0.3: alliance_magazine_final_block_fill_v11918
+        # Legacy magazine mutator disabled to enforce a single reconciliation writer.
+        # DISABLED BY 12.0.3: alliance_magazine_ai_doctor_v11920
+        # Legacy magazine mutator disabled to enforce a single reconciliation writer.
+        # DISABLED BY 12.0.3: alliance_magazine_layout_rebuild_v11921
+        # Legacy magazine mutator disabled to enforce a single reconciliation writer.
+        # DISABLED BY 12.0.3: alliance_data_settlement_v11922
+        # Legacy magazine mutator disabled to enforce a single reconciliation writer.
+        # DISABLED BY 12.0.3: alliance_golden_data_foundation_v12000
+        # Legacy magazine mutator disabled to enforce a single reconciliation writer.
+        # DISABLED BY 12.0.3: alliance_golden_data_progress_v12001
+        # Legacy magazine mutator disabled to enforce a single reconciliation writer.
+        # DISABLED BY 12.0.3: alliance_golden_data_streaming_v12002
+        # Legacy magazine mutator disabled to enforce a single reconciliation writer.
+        # 12.0.3 SINGLE-WRITER GOLDEN DATA FOUNDATION
         try:
-            import alliance_magazine_hierarchy_repair_v11916 as mag_h11916
-            mag_h11916_result = mag_h11916.register(wrapped.core)
-            stabilization = dict(stabilization or {})
-            stabilization["magazine_hierarchy_repair_v11916"] = mag_h11916_result
-            print("[magazine-hierarchy-repair-v11916]", mag_h11916_result)
+            import alliance_golden_data_single_writer_v12003 as gold12003
+            gold12003_result = gold12003.register(wrapped.core)
+            print("[golden-data-v12003]", gold12003_result)
         except Exception as exc:
-            print("[magazine-hierarchy-repair-v11916] warning:", type(exc).__name__, str(exc))
-
-        # 11.9.17 MAGAZINE BLOCK HIERARCHY REPAIR
-        try:
-            import alliance_magazine_block_hierarchy_v11917 as mag_b11917
-            mag_b11917_result = mag_b11917.register(wrapped.core)
-            stabilization = dict(stabilization or {})
-            stabilization["magazine_block_hierarchy_v11917"] = mag_b11917_result
-            print("[magazine-block-hierarchy-v11917]", mag_b11917_result)
-        except Exception as exc:
-            print("[magazine-block-hierarchy-v11917] warning:", type(exc).__name__, str(exc))
-
-        # 11.9.18 FINAL MAGAZINE BLOCK FILL
-        try:
-            import alliance_magazine_final_block_fill_v11918 as mag_f11918
-            mag_f11918_result = mag_f11918.register(wrapped.core)
-            stabilization = dict(stabilization or {})
-            stabilization["magazine_final_block_fill_v11918"] = mag_f11918_result
-            print("[magazine-final-block-fill-v11918]", mag_f11918_result)
-        except Exception as exc:
-            print("[magazine-final-block-fill-v11918] warning:", type(exc).__name__, str(exc))
-
-        # 11.9.20 MAGAZINE AI DOCTOR - ALL LOCATIONS / WHOLE SYSTEM
-        try:
-            import alliance_magazine_ai_doctor_v11920 as mag_doc11920
-            mag_doc11920_result = mag_doc11920.register(wrapped.core)
-            print("[magazine-ai-doctor-v11920]", mag_doc11920_result)
-        except Exception as exc:
-            print("[magazine-ai-doctor-v11920] warning:", type(exc).__name__, str(exc))
-
-        # 11.9.21 MAGAZINE LAYOUT REBUILD + SOURCE-BACKED SYNC
-        try:
-            import alliance_magazine_layout_rebuild_v11921 as mag_layout11921
-            mag_layout11921_result = mag_layout11921.register(wrapped.core)
-            print("[magazine-layout-rebuild-v11921]", mag_layout11921_result)
-        except Exception as exc:
-            print("[magazine-layout-rebuild-v11921] warning:", type(exc).__name__, str(exc))
-
-        # 11.9.22 DATA SETTLEMENT ENGINE - DATA FIRST, AI SECOND
-        try:
-            import alliance_data_settlement_v11922 as settle11922
-            settle11922_result = settle11922.register(wrapped.core)
-            print("[data-settlement-v11922]", settle11922_result)
-        except Exception as exc:
-            print("[data-settlement-v11922] warning:", type(exc).__name__, str(exc))
-
-        # 12.0.0 GOLDEN DATA FOUNDATION - RAW -> RECONCILE -> CERTIFY -> AI
-        try:
-            import alliance_golden_data_foundation_v12000 as gold12000
-            gold12000_result = gold12000.register(wrapped.core)
-            print("[golden-data-v12000]", gold12000_result)
-        except Exception as exc:
-            print("[golden-data-v12000] warning:", type(exc).__name__, str(exc))
-
-        # 12.0.1 GOLDEN DATA LIVE PROGRESS + BATCH RECONCILIATION
-        try:
-            import alliance_golden_data_progress_v12001 as gold12001
-            gold12001_result = gold12001.register(wrapped.core)
-            print("[golden-data-v12001]", gold12001_result)
-        except Exception as exc:
-            print("[golden-data-v12001] warning:", type(exc).__name__, str(exc))
-
-        # 12.0.2 GOLDEN DATA STREAMING RECONCILIATION
-        try:
-            import alliance_golden_data_streaming_v12002 as gold12002
-            gold12002_result = gold12002.register(wrapped.core)
-            print("[golden-data-v12002]", gold12002_result)
-        except Exception as exc:
-            print("[golden-data-v12002] warning:", type(exc).__name__, str(exc))
+            print("[golden-data-v12003] warning:", type(exc).__name__, str(exc))
 
         CORE_APP = wrapped.app
         try:
