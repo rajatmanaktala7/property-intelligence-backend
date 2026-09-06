@@ -797,6 +797,14 @@ def _load_core():
         except Exception as exc:
             print("[magazine-layout-rebuild-v11921] warning:", type(exc).__name__, str(exc))
 
+        # 11.9.22 DATA SETTLEMENT ENGINE - DATA FIRST, AI SECOND
+        try:
+            import alliance_data_settlement_v11922 as settle11922
+            settle11922_result = settle11922.register(wrapped.core)
+            print("[data-settlement-v11922]", settle11922_result)
+        except Exception as exc:
+            print("[data-settlement-v11922] warning:", type(exc).__name__, str(exc))
+
         CORE_APP = wrapped.app
         try:
             import alliance_whatsapp_safe_ingest_v5 as safe_wa
