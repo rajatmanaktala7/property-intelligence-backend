@@ -26,7 +26,7 @@ from fastapi import Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import text
 
-VERSION = "11.9.2-REQUIREMENT-RECOVERY-INTELLIGENCE"
+VERSION = "11.9.3-REQUIREMENT-DECISION-SAVE-FIX"
 STATUSES = (
     "RAW",
     "AI-QUALIFIED",
@@ -1065,7 +1065,7 @@ def register(core):
                         transaction_type=:tx,
                         intended_use=:use,
                         property_category=CASE
-                            WHEN :use IS NOT NULL THEN COALESCE(property_category,'COMMERCIAL')
+                            WHEN CAST(:use AS TEXT) IS NOT NULL THEN COALESCE(property_category,'COMMERCIAL')
                             ELSE property_category
                         END,
                         locations=CAST(:locations AS JSONB),
