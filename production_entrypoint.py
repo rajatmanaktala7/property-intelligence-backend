@@ -890,6 +890,20 @@ def _load_core():
             }
             print("[production-golden-cutover-v1210] warning:", type(exc).__name__, str(exc))
 
+        # ALLIANCE_SMART_MATCHER_INTELLIGENCE_V1211
+        try:
+            import alliance_smart_matcher_v1211 as smartmatcher1211
+            smartmatcher1211_result = smartmatcher1211.register(wrapped.core)
+            stabilization = dict(stabilization or {})
+            stabilization["smart_matcher_v1211"] = smartmatcher1211_result
+            print("[smart-matcher-v1211]", smartmatcher1211_result)
+        except Exception as exc:
+            stabilization = dict(stabilization or {})
+            stabilization["smart_matcher_v1211"] = {
+                "status":"ERROR","error":f"{type(exc).__name__}: {exc}","fail_safe":True
+            }
+            print("[smart-matcher-v1211] warning:", type(exc).__name__, str(exc))
+
         CORE_APP = wrapped.app
         try:
             import alliance_whatsapp_safe_ingest_v5 as safe_wa
