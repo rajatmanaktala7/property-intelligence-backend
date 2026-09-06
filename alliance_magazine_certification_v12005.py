@@ -9,7 +9,7 @@ from fastapi import Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from sqlalchemy import text
 
-VERSION = "12.0.5-CERTIFICATION-HARDENING-SAFE-DEDUPE"
+VERSION = "12.0.5.1-DEDUPE-IDENTITY-FULL-ADDRESS-FIX"
 STAGE = "pi_magazine_golden_stage_v12003"
 CERT = "pi_magazine_certification_v12004"
 DUPMAP = "pi_magazine_duplicate_map_v12005"
@@ -21,8 +21,13 @@ LOCK_KEY = 120050001
 PHONE_RE = re.compile(r"(?<!\d)(?:[6-9]\d{9}|0?11[-\s]?\d{7,8})(?!\d)")
 AREA_RE = re.compile(r"(?i)\b(\d{2,7}(?:\.\d+)?)\s*(SQ\.?\s*FT|SQFT|FT|SQ\.?\s*YD|SQYD|YD|Y|SQ\.?\s*M|SQM|ACRE)\b")
 FLOOR_RE = re.compile(r"(?i)\b(BMT|BASEMENT|LGF|UGF|GF|GROUND\s*FLOOR|FF|FIRST\s*FLOOR|SF|SECOND\s*FLOOR|TF|THIRD\s*FLOOR|MEZZ|\d+(?:ST|ND|RD|TH)?\s*FLOOR)\b")
-# Slash-form addresses come first so 24/30 is not reduced to 24.
-ADDRESS_RE = re.compile(r"^\s*(\d+[A-Z]?/[0-9A-Z/-]+|[A-Z]{1,4}[-/]\d+[A-Z]?|[A-Z]{0,4}\d+[A-Z]?|\d+[A-Z]?)\b", re.I)
+# Full leading property token. Compound slash addresses must remain intact:
+# B-4/108 != B-4/28, K-1/113 != K-1/80, B-1/E-21 != B-1/A-6.
+ADDRESS_RE = re.compile(
+    r"^\s*(\d+[A-Z]?(?:/[0-9A-Z/-]+)+|[A-Z]{1,4}[-/]\d+[A-Z]?(?:/[0-9A-Z/-]+)*|[A-Z]{0,4}\d+[A-Z]?|\d+[A-Z]?)\b",
+    re.I,
+)
+INVALID_GOVERNED_LOCATIONS = {"", "MISSING", "UNKNOWN", "N/A", "NA", "NONE", "NULL", "UNSPECIFIED"}
 
 STATE = {
     "status":"IDLE","phase":"WAITING","started_at":None,"completed_at":None,
@@ -134,18 +139,29 @@ def _select_rows(e):
         return [dict(r) for r in c.execute(text(sql)).mappings().all()]
 
 def _dup_key(row):
-    loc = _key(row.get("canonical_location"))
+    raw_loc = _norm(row.get("canonical_location"))
+    loc = _key(raw_loc)
     desc = _norm(row.get("original_raw_text"))
     addr = _addr(desc)
     area = _area(desc) or _key(f'{row.get("area","")} {row.get("area_unit","")}')
     floor = _floor(desc) or _key(row.get("floor"))
     txn = _transaction(row)
     phone = _phone(row.get("phone",""))
-    if loc and addr and area and floor and txn:
-        return ("PROPERTY5",loc,addr,area,floor,txn), 96, "Governed locality + full address + area + floor + transaction"
+
+    # PROPERTY5 requires a real governed locality.
+    # MISSING/UNKNOWN must never receive 96% duplicate confidence.
+    usable_loc = bool(raw_loc) and raw_loc.upper() not in INVALID_GOVERNED_LOCATIONS
+
+    if usable_loc and loc and addr and area and floor and txn:
+        return (
+            "PROPERTY5", loc, addr, area, floor, txn
+        ), 96, "Governed locality + exact full leading address token + area + floor + transaction"
+
+    # Strict fallback: identical normalized ad plus the same phone.
     exact = _key(desc)
     if exact and phone:
         return ("TEXTPHONE",exact,phone), 94, "Exact normalized ad + same phone"
+
     return None, 0, ""
 
 def _survivor_score(row):
@@ -312,7 +328,7 @@ def _build(core):
                       "certified_unique":certified,"operational_rows":operational,"ai_training_rows":airows,
                       "details":{"raw_master_mutation":"NONE",
                                  "dedupe_policy":"CANDIDATE_ONLY_UNTIL_HUMAN_DECISION",
-                                 "slash_address_fix":True,
+                                 "slash_address_fix":True,"full_compound_address_identity":True,"missing_location_property5_blocked":True,
                                  "human_approved_review_operational":True,
                                  "human_approved_conflict_resolution":True,
                                  "certified_view":"pi_magazine_certified_master_v12005",
