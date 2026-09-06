@@ -10,7 +10,7 @@ from fastapi import Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy import text
 
-VERSION = "12.1.0.1-PRODUCTION-CUTOVER-DDL-FIX"
+VERSION = "12.1.0.2-ROUTE-FIRST-DEPENDENCY-GUARD"
 SETTLED = "pi_magazine_settled_v12009"
 WORKABLE = "pi_magazine_workable_v12009"
 GOLD = "pi_magazine_golden_master_v12009"
@@ -120,6 +120,27 @@ def _setup(e):
             started_at TIMESTAMPTZ DEFAULT NOW(),completed_at TIMESTAMPTZ,
             result JSONB NOT NULL DEFAULT '{{}}'::jsonb
         )"""))
+
+def _wait_dependencies(e, timeout=180):
+    required=(SETTLED,WORKABLE,GOLD,REVIEW,"pi_master_properties_v711",
+              "pi_master_source_links_v711","pi_master_workflow_v720")
+    end=time.monotonic()+timeout
+    last={}
+    while time.monotonic()<end:
+        missing=[]
+        for t in required:
+            try:
+                if not _table_exists(e,t):
+                    missing.append(t)
+            except Exception:
+                missing.append(t)
+        last={"missing":missing}
+        if not missing:
+            return last
+        STATE["phase"]="WAITING_FOR_DEPENDENCIES"
+        STATE["details"]={"dependency_guard":True,"missing_dependencies":missing}
+        time.sleep(2)
+    raise RuntimeError("Production cutover dependencies not ready: "+json.dumps(last))
 
 def _counts(e):
     with e.connect() as c:
@@ -362,7 +383,9 @@ def _run(core):
             "completed_at":None,"error":None})
     lc=None;run_id=None
     try:
-        _setup(e);lc=e.connect()
+        _wait_dependencies(e)
+        _setup(e)
+        lc=e.connect()
         if not bool(lc.execute(text("SELECT pg_try_advisory_lock(:k)"),{"k":LOCK_KEY}).scalar()):
             STATE.update({"status":"SKIPPED","phase":"ANOTHER_CUTOVER_RUNNING","completed_at":_now()});return
         ready=_wait(e)
@@ -420,7 +443,7 @@ def _run(core):
 def register(core):
     app=_app(core);e=_engine(core)
     if app is None or e is None:raise RuntimeError("12.1.0 requires app + engine")
-    _setup(e)
+    # ROUTE-FIRST: register diagnostics before transient database dependency checks.
     @app.get("/api/alliance/admin/production-cutover/status")
     def status():
         try:
