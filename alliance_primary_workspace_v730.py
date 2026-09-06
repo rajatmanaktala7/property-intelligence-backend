@@ -944,11 +944,21 @@ def register(core):
             else:
                 status_html=f"<span class='warntext'>{html.escape(verification)} · {html.escape(availability)}</span>"
 
+            # 11.9.12 PROPERTY DESCRIPTION DISPLAY FIX
+            universal=_v734_universal_record(engine,cid,p,"PROPERTY")
+            original_description=universal.get("description") or _v733_pick_any(
+                p,["original_description","original_message","message","description","raw_text","source_text","full_message"]
+            ) or ""
             address=_v733_pick_any(p,["address","exact_address","property_address","unit_address","building_address"]) or ""
             building=_v733_pick_any(p,["property_name","building_name","building","project_name","complex_name"]) or ""
             locality=str(p.get("locality") or "")
-            desc_parts=[str(x).strip() for x in [address,building,locality] if x not in (None,"")]
-            description=" · ".join(dict.fromkeys(desc_parts)) or locality or cid
+            identity_parts=[]
+            if address: identity_parts.append("Address: "+str(address).strip())
+            if building and str(building).strip() not in [str(address).strip(),locality.strip()]:
+                identity_parts.append("Building: "+str(building).strip())
+            if locality: identity_parts.append("Location: "+locality.strip())
+            identity=" | ".join(identity_parts)
+            description=str(original_description).strip() or identity or locality or cid
 
             amount=""
             tx=str(p.get("transaction_type") or "")
@@ -978,7 +988,7 @@ def register(core):
 
             trs.append(f"""<tr>
               <td><b>{html.escape(str(m.get('score') or ''))}%</b><br><span class='pill'>{html.escape(str(m.get('tier') or ''))}</span></td>
-              <td style='min-width:280px'><b>{html.escape(description)}</b><br><small>{html.escape(cid)}</small></td>
+              <td style='min-width:380px'><b>{html.escape(description)}</b>{("<br><span class='muted'>"+html.escape(identity)+"</span>") if identity and identity.lower() not in description.lower() else ""}<br><small>{html.escape(cid)}</small></td>
               <td>{html.escape(str(p.get('area_sqft_display') or ''))}</td>
               <td>{html.escape(tx)}</td>
               <td>{html.escape(amount)}</td>
