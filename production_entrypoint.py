@@ -820,6 +820,22 @@ def _load_core():
             }
             print("[magazine-certification-assistant-v120061] warning:", type(exc).__name__, str(exc))
 
+        # ALLIANCE_MAGAZINE_EVIDENCE_PROMOTION_GATE_V120062
+        try:
+            import alliance_magazine_evidence_promotion_gate_v120062 as promotion120062
+            promotion120062_result = promotion120062.register(wrapped.core)
+            stabilization = dict(stabilization or {})
+            stabilization["magazine_evidence_promotion_gate_v120062"] = promotion120062_result
+            print("[magazine-evidence-promotion-gate-v120062]", promotion120062_result)
+        except Exception as exc:
+            stabilization = dict(stabilization or {})
+            stabilization["magazine_evidence_promotion_gate_v120062"] = {
+                "status":"ERROR",
+                "error":f"{type(exc).__name__}: {exc}",
+                "fail_safe":True
+            }
+            print("[magazine-evidence-promotion-gate-v120062] warning:", type(exc).__name__, str(exc))
+
         CORE_APP = wrapped.app
         try:
             import alliance_whatsapp_safe_ingest_v5 as safe_wa
