@@ -14,7 +14,7 @@ from fastapi import Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from sqlalchemy import text
 
-VERSION = "12.0.4-CERTIFICATION-DEDUPE-WORKBENCH"
+VERSION = "12.0.4.1-CERTIFICATION-DEDUPE-VIEW-FIX"
 STAGE = "pi_magazine_golden_stage_v12003"
 CERT = "pi_magazine_certification_v12004"
 DUPS = "pi_magazine_duplicate_map_v12004"
@@ -303,9 +303,9 @@ def _build(core):
               g.location_rule,
               g.quality_status AS reconciliation_status,
               g.quality_score,
-              d.duplicate_group,
-              d.duplicate_rank,
-              d.survivor_source_id
+              d.duplicate_group AS dedupe_group,
+              d.duplicate_rank AS dedupe_rank,
+              d.survivor_source_id AS dedupe_survivor_source_id
             FROM pi_magazine_master m
             JOIN {STAGE} g ON g.source_id=CAST(m.source_id AS TEXT)
             JOIN {CERT} c ON c.source_id=CAST(m.source_id AS TEXT)
@@ -326,9 +326,9 @@ def _build(core):
               g.location_rule,
               g.quality_status AS reconciliation_status,
               g.quality_score,
-              d.duplicate_group,
-              d.duplicate_rank,
-              d.survivor_source_id
+              d.duplicate_group AS dedupe_group,
+              d.duplicate_rank AS dedupe_rank,
+              d.survivor_source_id AS dedupe_survivor_source_id
             FROM pi_magazine_master m
             JOIN {STAGE} g ON g.source_id=CAST(m.source_id AS TEXT)
             LEFT JOIN {CERT} c ON c.source_id=CAST(m.source_id AS TEXT)
