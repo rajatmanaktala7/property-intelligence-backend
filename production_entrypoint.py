@@ -707,6 +707,18 @@ def _load_core():
             stabilization["cre_v1180_final_ui"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","fail_safe":True}
             print("[cre-v1180-final-ui] warning:", type(exc).__name__, str(exc))
 
+        # ALLIANCE_CRE_11_9_1_GENUINE_REQUIREMENT_GATE
+        try:
+            import alliance_requirement_gate_v1191 as requirement_gate_v1191
+            req_gate_result=requirement_gate_v1191.register(wrapped.core)
+            stabilization=dict(stabilization or {})
+            stabilization["requirement_gate_v1191"]=req_gate_result
+            print("[requirement-gate-v1191]",req_gate_result)
+        except Exception as exc:
+            stabilization=dict(stabilization or {})
+            stabilization["requirement_gate_v1191"]={"status":"ERROR","error":f"{type(exc).__name__}: {exc}","fail_safe":True}
+            print("[requirement-gate-v1191] warning:",type(exc).__name__,str(exc))
+
         CORE_APP = wrapped.app
         try:
             import alliance_whatsapp_safe_ingest_v5 as safe_wa
