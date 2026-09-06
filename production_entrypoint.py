@@ -781,6 +781,14 @@ def _load_core():
         except Exception as exc:
             print("[magazine-final-block-fill-v11918] warning:", type(exc).__name__, str(exc))
 
+        # 11.9.20 MAGAZINE AI DOCTOR - ALL LOCATIONS / WHOLE SYSTEM
+        try:
+            import alliance_magazine_ai_doctor_v11920 as mag_doc11920
+            mag_doc11920_result = mag_doc11920.register(wrapped.core)
+            print("[magazine-ai-doctor-v11920]", mag_doc11920_result)
+        except Exception as exc:
+            print("[magazine-ai-doctor-v11920] warning:", type(exc).__name__, str(exc))
+
         CORE_APP = wrapped.app
         try:
             import alliance_whatsapp_safe_ingest_v5 as safe_wa
