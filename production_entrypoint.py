@@ -876,6 +876,20 @@ def _load_core():
             stabilization["magazine_settlement_v12009"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","fail_safe":True}
             print("[magazine-settlement-v12009] warning:", type(exc).__name__, str(exc))
 
+        # ALLIANCE_PRODUCTION_GOLDEN_CUTOVER_V1210
+        try:
+            import alliance_production_golden_cutover_v1210 as cutover1210
+            cutover1210_result = cutover1210.register(wrapped.core)
+            stabilization = dict(stabilization or {})
+            stabilization["production_golden_cutover_v1210"] = cutover1210_result
+            print("[production-golden-cutover-v1210]", cutover1210_result)
+        except Exception as exc:
+            stabilization = dict(stabilization or {})
+            stabilization["production_golden_cutover_v1210"] = {
+                "status":"ERROR","error":f"{type(exc).__name__}: {exc}","fail_safe":True
+            }
+            print("[production-golden-cutover-v1210] warning:", type(exc).__name__, str(exc))
+
         CORE_APP = wrapped.app
         try:
             import alliance_whatsapp_safe_ingest_v5 as safe_wa
