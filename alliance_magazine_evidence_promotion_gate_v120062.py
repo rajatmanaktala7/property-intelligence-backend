@@ -1,14 +1,14 @@
 
 from __future__ import annotations
 
-import html, json, threading, traceback
+import html, json, threading, traceback, time
 from datetime import datetime, timezone
 
 from fastapi import Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy import text
 
-VERSION = "12.0.6.2-EVIDENCE-PROVEN-PROMOTION-GATE"
+VERSION = "12.0.6.3-EVIDENCE-PROMOTION-GATE-DEPENDENCY-GUARD"
 STAGE = "pi_magazine_golden_stage_v12003"
 CERT = "pi_magazine_certification_v12004"
 DUPMAP = "pi_magazine_duplicate_map_v12005"
@@ -150,6 +150,78 @@ def _classify(r):
         blockers.append("Pending duplicate decision")
     return "NEEDS_EVIDENCE", reasons, blockers
 
+
+def _wait_for_final_stage(e, timeout_seconds=120):
+    """
+    Wait until the 12.0.3 governed stage is fully rebuilt and matches raw master.
+    """
+    deadline = time.monotonic() + timeout_seconds
+    last = {}
+
+    while time.monotonic() < deadline:
+        try:
+            with e.connect() as c:
+                raw_count = int(c.execute(text(
+                    "SELECT COUNT(*) FROM pi_magazine_master"
+                )).scalar() or 0)
+
+                stage_count = int(c.execute(text(f"""
+                    SELECT COUNT(*)
+                    FROM {STAGE}
+                    WHERE version='12.0.3-SINGLE-WRITER-GOLDEN-DATA'
+                """)).scalar() or 0)
+
+                row = c.execute(text("""
+                    SELECT status, summary
+                    FROM pi_magazine_governance_runs_v12003
+                    ORDER BY id DESC
+                    LIMIT 1
+                """)).mappings().first()
+
+            status = None
+            summary = {}
+            if row:
+                status = row.get("status")
+                summary = row.get("summary") or {}
+                if isinstance(summary, str):
+                    try:
+                        summary = json.loads(summary)
+                    except Exception:
+                        summary = {}
+
+            phase = str(summary.get("phase") or "")
+            rows_total = int(summary.get("rows_total") or 0)
+            rows_scanned = int(summary.get("rows_scanned") or 0)
+
+            last = {
+                "raw_count": raw_count,
+                "stage_count": stage_count,
+                "governance_status": status,
+                "governance_phase": phase,
+                "governance_rows_total": rows_total,
+                "governance_rows_scanned": rows_scanned,
+            }
+
+            if (
+                raw_count > 0
+                and stage_count == raw_count
+                and status == "PASS"
+                and phase == "COMPLETE"
+                and rows_total == raw_count
+                and rows_scanned == raw_count
+            ):
+                return last
+
+        except Exception as exc:
+            last = {"check_error": f"{type(exc).__name__}: {exc}"}
+
+        time.sleep(2)
+
+    raise RuntimeError(
+        "12.0.3 final governed stage was not ready within 120 seconds. "
+        + json.dumps(last, default=str)
+    )
+
 def _build(core):
     e = _engine(core)
     if e is None:
@@ -176,6 +248,9 @@ def _build(core):
         if not bool(lock_conn.execute(text("SELECT pg_try_advisory_lock(:k)"), {"k": LOCK_KEY}).scalar()):
             STATE.update({"status":"SKIPPED","phase":"ANOTHER_RUN_ACTIVE","completed_at":_now()})
             return
+
+        STATE["phase"] = "WAITING_FOR_12.0.3_FINAL_STAGE"
+        readiness = _wait_for_final_stage(e, timeout_seconds=120)
 
         with e.begin() as c:
             run_id = c.execute(text(f"""
@@ -284,6 +359,8 @@ def _build(core):
                 "minimum_proven_confidence":93,
                 "existing_valid_geography_is_not_certification_evidence":True,
                 "bulk_promotion_enabled":False,
+                "dependency_guard":True,
+                "final_stage_readiness":readiness,
                 "gate_table":GATE
             }
         })
