@@ -731,6 +731,16 @@ def _load_core():
             stabilization["simple_match_magazine_hierarchy_v11911"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","fail_safe":True}
             print("[simple-match-magazine-hierarchy-v11911] warning:", type(exc).__name__, str(exc))
 
+        # 11.9.13 LEGACY MAGAZINE HIERARCHY REPAIR
+        try:
+            import alliance_legacy_magazine_hierarchy_v11913 as legacy_mag11913
+            legacy_mag11913_result = legacy_mag11913.register(wrapped.core)
+            stabilization = dict(stabilization or {})
+            stabilization["legacy_magazine_hierarchy_v11913"] = legacy_mag11913_result
+            print("[legacy-magazine-hierarchy-v11913]", legacy_mag11913_result)
+        except Exception as exc:
+            print("[legacy-magazine-hierarchy-v11913] warning:", type(exc).__name__, str(exc))
+
         CORE_APP = wrapped.app
         try:
             import alliance_whatsapp_safe_ingest_v5 as safe_wa
