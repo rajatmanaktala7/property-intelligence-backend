@@ -805,6 +805,14 @@ def _load_core():
         except Exception as exc:
             print("[data-settlement-v11922] warning:", type(exc).__name__, str(exc))
 
+        # 12.0.0 GOLDEN DATA FOUNDATION - RAW -> RECONCILE -> CERTIFY -> AI
+        try:
+            import alliance_golden_data_foundation_v12000 as gold12000
+            gold12000_result = gold12000.register(wrapped.core)
+            print("[golden-data-v12000]", gold12000_result)
+        except Exception as exc:
+            print("[golden-data-v12000] warning:", type(exc).__name__, str(exc))
+
         CORE_APP = wrapped.app
         try:
             import alliance_whatsapp_safe_ingest_v5 as safe_wa
