@@ -777,6 +777,21 @@ def _load_core():
         except Exception as exc:
             print("[magazine-certification-v12004] warning:", type(exc).__name__, str(exc))
 
+        # ALLIANCE_MAGAZINE_CERTIFICATION_HARDENING_V12005
+        try:
+            import alliance_magazine_certification_v12005 as magazine_certification_v12005
+            hardening_result = magazine_certification_v12005.register(wrapped.core)
+            stabilization = dict(stabilization or {})
+            stabilization["magazine_certification_v12005"] = hardening_result
+        except Exception as exc:
+            stabilization = dict(stabilization or {})
+            stabilization["magazine_certification_v12005"] = {
+                "status": "ERROR",
+                "error": f"{type(exc).__name__}: {exc}",
+                "fail_safe": True,
+            }
+            print("[magazine-certification-v12005] warning:", type(exc).__name__, str(exc))
+
         CORE_APP = wrapped.app
         try:
             import alliance_whatsapp_safe_ingest_v5 as safe_wa
