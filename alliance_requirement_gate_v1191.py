@@ -26,7 +26,7 @@ from fastapi import Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import text
 
-VERSION = "11.9.4-REQUIREMENT-GATE-DYNAMIC-VERSION"
+VERSION = "11.9.5-REQUIREMENT-GATE-HEADER-FIX"
 STATUSES = (
     "RAW",
     "AI-QUALIFIED",
@@ -894,7 +894,7 @@ th{background:#e9eef5;position:sticky;top:0;z-index:2;white-space:nowrap}
 </head>
 <body>
 <header>
-  <b>Alliance Requirement Recovery Gate · CRE {_e(VERSION)}</b>
+  <b>Alliance Requirement Recovery Gate · CRE """ + _e(VERSION) + """</b>
   <div class="sub">Extract → Review → Verify → Matcher. Only VERIFIED ACTIVE is matcher eligible.</div>
 </header>
 <nav>
