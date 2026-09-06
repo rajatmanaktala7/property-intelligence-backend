@@ -769,6 +769,14 @@ def _load_core():
         except Exception as exc:
             print("[golden-data-v12003] warning:", type(exc).__name__, str(exc))
 
+        # 12.0.4 CERTIFICATION + DEDUPLICATION + HUMAN REVIEW WORKBENCH
+        try:
+            import alliance_magazine_certification_v12004 as cert12004
+            cert12004_result = cert12004.register(wrapped.core)
+            print("[magazine-certification-v12004]", cert12004_result)
+        except Exception as exc:
+            print("[magazine-certification-v12004] warning:", type(exc).__name__, str(exc))
+
         CORE_APP = wrapped.app
         try:
             import alliance_whatsapp_safe_ingest_v5 as safe_wa
