@@ -1,7 +1,7 @@
 
 from __future__ import annotations
 
-import hashlib, html, json, re, threading, traceback
+import hashlib, html, json, re, threading, traceback, time
 from collections import defaultdict
 from datetime import datetime, timezone
 
@@ -9,7 +9,7 @@ from fastapi import Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from sqlalchemy import text
 
-VERSION = "12.0.5.1-DEDUPE-IDENTITY-FULL-ADDRESS-FIX"
+VERSION = "12.0.5.2-STARTUP-DEPENDENCY-GUARD"
 STAGE = "pi_magazine_golden_stage_v12003"
 CERT = "pi_magazine_certification_v12004"
 DUPMAP = "pi_magazine_duplicate_map_v12005"
@@ -285,8 +285,27 @@ def _build(core):
             return
         with e.begin() as c:
             run_id = c.execute(text(f"INSERT INTO {RUNS}(version,status) VALUES(:v,'RUNNING') RETURNING id"),{"v":VERSION}).scalar()
+        STATE["phase"] = "WAITING_FOR_GOVERNED_ROWS"
+        rows = []
+        wait_attempts = 0
+        for wait_attempts in range(1, 31):
+            rows = _select_rows(e)
+            if rows:
+                break
+            STATE["details"] = {
+                "startup_dependency": "WAITING_FOR_12.0.3_STAGE",
+                "wait_attempt": wait_attempts,
+                "max_attempts": 30,
+            }
+            time.sleep(2)
+
+        if not rows:
+            raise RuntimeError(
+                "12.0.5.2 startup guard: governed stage returned 0 rows after 60 seconds. "
+                "Refusing to publish PASS with an empty certification dataset."
+            )
+
         STATE["phase"] = "LOADING_GOVERNED_ROWS"
-        rows = _select_rows(e)
         STATE["rows_total"] = len(rows)
         STATE["phase"] = "BUILDING_DUPLICATE_CANDIDATES"
         groups = defaultdict(list)
@@ -328,7 +347,7 @@ def _build(core):
                       "certified_unique":certified,"operational_rows":operational,"ai_training_rows":airows,
                       "details":{"raw_master_mutation":"NONE",
                                  "dedupe_policy":"CANDIDATE_ONLY_UNTIL_HUMAN_DECISION",
-                                 "slash_address_fix":True,"full_compound_address_identity":True,"missing_location_property5_blocked":True,
+                                 "slash_address_fix":True,"full_compound_address_identity":True,"missing_location_property5_blocked":True,"startup_dependency_guard":True,"zero_row_pass_blocked":True,
                                  "human_approved_review_operational":True,
                                  "human_approved_conflict_resolution":True,
                                  "certified_view":"pi_magazine_certified_master_v12005",
