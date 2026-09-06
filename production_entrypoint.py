@@ -761,6 +761,16 @@ def _load_core():
         except Exception as exc:
             print("[magazine-hierarchy-repair-v11916] warning:", type(exc).__name__, str(exc))
 
+        # 11.9.17 MAGAZINE BLOCK HIERARCHY REPAIR
+        try:
+            import alliance_magazine_block_hierarchy_v11917 as mag_b11917
+            mag_b11917_result = mag_b11917.register(wrapped.core)
+            stabilization = dict(stabilization or {})
+            stabilization["magazine_block_hierarchy_v11917"] = mag_b11917_result
+            print("[magazine-block-hierarchy-v11917]", mag_b11917_result)
+        except Exception as exc:
+            print("[magazine-block-hierarchy-v11917] warning:", type(exc).__name__, str(exc))
+
         CORE_APP = wrapped.app
         try:
             import alliance_whatsapp_safe_ingest_v5 as safe_wa
