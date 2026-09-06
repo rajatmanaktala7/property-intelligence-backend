@@ -26,7 +26,7 @@ from fastapi import Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import text
 
-VERSION = "11.9.6-ROW-VERIFY-ACTIVATE-BUTTON"
+VERSION = "11.9.7-TEAM-SAFE-COMPACT-GATE"
 STATUSES = (
     "RAW",
     "AI-QUALIFIED",
@@ -887,6 +887,58 @@ th{background:#e9eef5;position:sticky;top:0;z-index:2;white-space:nowrap}
 .decision textarea{min-height:52px;resize:vertical}
 .status-select{font-weight:700}
 .verify-activate{font-weight:800;border:2px solid currentColor}
+
+/* 11.9.7 compact team-safe gate */
+.wrap{padding:8px 10px}
+header{padding:10px 14px}
+header b{font-size:16px}
+header .sub{font-size:11px;margin-top:3px}
+nav{padding:6px 10px}
+nav a{padding:6px 9px;font-size:11px}
+.grid{grid-template-columns:repeat(7,minmax(90px,1fr));gap:5px;margin-bottom:7px}
+.card{padding:7px;border-radius:7px}
+.grid .card b{font-size:9px}
+.num{font-size:18px;margin-top:2px}
+.toolbar{gap:5px}
+.toolbar form{gap:4px}
+.toolbar input,.toolbar select,.toolbar button{padding:5px 7px;font-size:10px}
+.safety,.info{padding:7px;margin-top:6px;font-size:10px}
+.tablebox{overflow:auto;max-height:68vh}
+table.compact-table{width:100%;min-width:980px;table-layout:fixed;font-size:10px}
+.compact-table th,.compact-table td{padding:4px 5px;vertical-align:middle;line-height:1.2}
+.compact-table th{font-size:9px}
+.compact-table td{overflow-wrap:anywhere}
+.compact-table .c-id{width:34px;text-align:center}
+.compact-table .c-status{width:92px}
+.compact-table .c-req{width:220px}
+.compact-table .c-location{width:105px}
+.compact-table .c-area{width:78px}
+.compact-table .c-floor{width:82px}
+.compact-table .c-contact{width:92px}
+.compact-table .c-ai{width:54px;text-align:center}
+.compact-table .c-matcher{width:58px;text-align:center}
+.compact-table .c-actions{width:230px}
+.req-main{font-weight:700;font-size:10px}
+.req-sub{font-size:9px;color:#667085;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.row-actions{display:flex;gap:3px;align-items:center;flex-wrap:wrap}
+.row-actions form{display:inline;margin:0}
+.row-actions button{padding:4px 6px;font-size:9px;white-space:nowrap}
+.btn-verify{background:#067647}
+.btn-review{background:#b54708}
+.btn-reject{background:#b42318}
+.btn-edit{background:#344054;padding:4px 6px;border-radius:5px;color:#fff;cursor:pointer;font-size:9px;white-space:nowrap}
+.edit-panel{margin-top:5px;padding:6px;background:#f8fafc;border:1px solid #d0d5dd;border-radius:6px}
+.edit-panel form{display:grid;grid-template-columns:repeat(4,minmax(85px,1fr));gap:4px}
+.edit-panel input,.edit-panel select,.edit-panel textarea{padding:4px;font-size:9px;min-width:0;width:100%}
+.edit-panel textarea{grid-column:1/-1;min-height:38px}
+.edit-panel .edit-wide{grid-column:span 2}
+.edit-panel button{grid-column:1/-1;padding:5px;font-size:9px}
+.status-badge{display:inline-block;padding:3px 5px;border-radius:999px;font-weight:700;font-size:8px;background:#eef2f6}
+@media(max-width:1100px){
+  table.compact-table{min-width:900px}
+  .compact-table .c-req{width:190px}
+  .compact-table .c-actions{width:215px}
+}
 @media(max-width:900px){
   .msg{min-width:280px}
   .decision{min-width:300px}
@@ -923,32 +975,49 @@ def _decision_form(r: Dict[str, Any]) -> str:
     req_intent = fields.get("requirement_intent") or (
         "REQUIREMENT" if r.get("classification") != "REJECTED/EXPIRED" else ""
     )
+    gid = int(r["id"])
+    current_status = r.get("classification") or "RAW"
 
     return f"""
-    <div class="decision">
-      <form method="post" action="/alliance/requirements-gate/{int(r['id'])}/decision">
-        <select class="status-select wide" name="status">{_status_options(r.get('classification') or 'RAW')}</select>
-        <input name="requirement_intent" value="{_e(req_intent)}" placeholder="Intent">
-        <select name="transaction_type">
-          <option value="">Transaction unknown</option>
-          <option value="LEASE" {'selected' if r.get('transaction_type')=='LEASE' else ''}>LEASE</option>
-          <option value="PURCHASE" {'selected' if r.get('transaction_type')=='PURCHASE' else ''}>PURCHASE</option>
-        </select>
-        <input name="intended_use" value="{_e(r.get('intended_use'))}" placeholder="Use">
-        <input name="location" value="{_e(loc)}" placeholder="Location(s)">
-        <input name="area_min_sqft" value="{_e(r.get('area_min_sqft'))}" placeholder="Area min sqft">
-        <input name="area_max_sqft" value="{_e(r.get('area_max_sqft'))}" placeholder="Area max sqft">
-        <input name="budget_max" value="{_e(r.get('budget_max'))}" placeholder="Budget max ₹">
-        <input name="floor_requirement" value="{_e(r.get('floor_requirement'))}" placeholder="Floor">
-        <input class="wide" name="contact_numbers" value="{_e(phones)}" placeholder="Contact number(s)">
-        <input name="verified_by" value="" placeholder="Verified by">
-        <textarea class="wide" name="notes" placeholder="Verification notes">{_e(r.get('verification_notes'))}</textarea>
-        <button class="wide" type="submit">Save Review Decision</button>
-        <button class="wide verify-activate" type="submit" name="quick_action" value="verify_activate"
-                onclick="return confirm('Verify this requirement and activate it for Matcher?');">
-          ✓ VERIFY &amp; ACTIVATE MATCHER
-        </button>
+    <div class="row-actions">
+      <form method="post" action="/alliance/requirements-gate/{gid}/quick-status">
+        <input type="hidden" name="status" value="VERIFIED ACTIVE">
+        <button class="btn-verify" type="submit"
+                onclick="return confirm('Verify requirement {gid} and activate Matcher?');">✓ Verify</button>
       </form>
+      <form method="post" action="/alliance/requirements-gate/{gid}/quick-status">
+        <input type="hidden" name="status" value="NEEDS VERIFICATION">
+        <button class="btn-review" type="submit">⚠ Review</button>
+      </form>
+      <form method="post" action="/alliance/requirements-gate/{gid}/quick-status">
+        <input type="hidden" name="status" value="REJECTED/EXPIRED">
+        <button class="btn-reject" type="submit"
+                onclick="return confirm('Reject / expire requirement {gid}?');">✕ Reject</button>
+      </form>
+      <details>
+        <summary class="btn-edit">✎ Edit</summary>
+        <div class="edit-panel">
+          <form method="post" action="/alliance/requirements-gate/{gid}/decision">
+            <input type="hidden" name="status" value="{_e(current_status)}">
+            <input name="requirement_intent" value="{_e(req_intent)}" placeholder="Intent">
+            <select name="transaction_type">
+              <option value="">Transaction unknown</option>
+              <option value="LEASE" {'selected' if r.get('transaction_type')=='LEASE' else ''}>LEASE</option>
+              <option value="PURCHASE" {'selected' if r.get('transaction_type')=='PURCHASE' else ''}>PURCHASE</option>
+            </select>
+            <input name="intended_use" value="{_e(r.get('intended_use'))}" placeholder="Use">
+            <input name="location" value="{_e(loc)}" placeholder="Location">
+            <input name="area_min_sqft" value="{_e(r.get('area_min_sqft'))}" placeholder="Area min">
+            <input name="area_max_sqft" value="{_e(r.get('area_max_sqft'))}" placeholder="Area max">
+            <input name="budget_max" value="{_e(r.get('budget_max'))}" placeholder="Budget max ₹">
+            <input name="floor_requirement" value="{_e(r.get('floor_requirement'))}" placeholder="Floor">
+            <input class="edit-wide" name="contact_numbers" value="{_e(phones)}" placeholder="Contact number(s)">
+            <input class="edit-wide" name="verified_by" value="" placeholder="Edited / verified by">
+            <textarea name="notes" placeholder="Notes">{_e(r.get('verification_notes'))}</textarea>
+            <button type="submit">Save Details</button>
+          </form>
+        </div>
+      </details>
     </div>
     """
 
@@ -995,6 +1064,73 @@ def register(core):
         _login(core, req)
         reprocess_existing_gate(engine, max(1, min(limit, 100000)))
         return RedirectResponse("/alliance/requirements-gate?reprocessed=1", 303)
+
+    @app.post("/alliance/requirements-gate/{gid}/quick-status")
+    def quick_status(
+        req: Request,
+        gid: int,
+        status: str = Form(...),
+    ):
+        _login(core, req)
+
+        allowed = {"VERIFIED ACTIVE", "NEEDS VERIFICATION", "REJECTED/EXPIRED"}
+        if status not in allowed:
+            raise HTTPException(400, "Invalid quick status")
+
+        eligible = status == "VERIFIED ACTIVE"
+        actor = _actor(core, req)
+
+        with engine.begin() as c:
+            old_row = c.execute(
+                text("""
+                    SELECT classification
+                    FROM pi_requirement_gate_v1191
+                    WHERE id=:id
+                """),
+                {"id": gid},
+            ).mappings().first()
+            if old_row is None:
+                raise HTTPException(404, "Not found")
+
+            c.execute(
+                text("""
+                    UPDATE pi_requirement_gate_v1191
+                    SET classification=:status,
+                        matcher_eligible=:eligible,
+                        verified_by=CASE WHEN :eligible THEN :actor ELSE verified_by END,
+                        verified_at=CASE WHEN :eligible THEN NOW() ELSE verified_at END,
+                        updated_at=NOW()
+                    WHERE id=:id
+                """),
+                {"id": gid, "status": status, "eligible": eligible, "actor": actor},
+            )
+
+            c.execute(
+                text("""
+                    INSERT INTO pi_requirement_gate_audit_v1191(
+                        gate_id,action,actor,old_status,new_status,details
+                    )
+                    VALUES(
+                        :id,'QUICK_STATUS',:actor,:old,:new,CAST(:details AS JSONB)
+                    )
+                """),
+                {
+                    "id": gid,
+                    "actor": actor,
+                    "old": old_row["classification"],
+                    "new": status,
+                    "details": json.dumps({
+                        "matcher_eligible": eligible,
+                        "structured_fields_edited": False,
+                        "master_requirements_mutated": False,
+                        "version": VERSION,
+                    }),
+                },
+            )
+
+        return RedirectResponse(
+            f"/alliance/requirements-gate?quick_status={gid}:{status}", 303
+        )
 
     @app.post("/alliance/requirements-gate/{gid}/decision")
     def decision(
@@ -1150,6 +1286,7 @@ def register(core):
         reprocessed: str = Query(""),
         verified: str = Query(""),
         decision_saved: str = Query(""),
+        quick_status: str = Query(""),
     ):
         _login(core, req)
         cs = counts(engine)
@@ -1202,41 +1339,56 @@ def register(core):
             confidence = float(r.get("genuine_confidence") or 0)
             matcher = bool(r.get("matcher_eligible"))
 
-            vals = (
-                r.get("id"),
-                r.get("classification"),
-                r.get("source_table"),
-                r.get("original_message"),
-                req_intent,
-                r.get("transaction_type"),
-                r.get("intended_use"),
-                loc,
-                r.get("area_min_sqft"),
-                r.get("area_max_sqft"),
-                r.get("floor_requirement"),
-                _money_display(r.get("budget_max")),
-                ph,
-                f"{confidence:.0%}",
-            )
-            cells = "".join(
-                f"<td{' class=msg' if i == 3 else ''}>{_e(v)}</td>"
-                for i, v in enumerate(vals)
-            )
+            tx = _norm(r.get("transaction_type"))
+            use = _norm(r.get("intended_use"))
+            req_title = " • ".join(x for x in (tx, use) if x) or req_intent or "Requirement"
+            original = _norm(r.get("original_message"))
+            original_short = original if len(original) <= 70 else original[:67] + "..."
+
+            amin = r.get("area_min_sqft")
+            amax = r.get("area_max_sqft")
+            if amin is not None and amax is not None:
+                area = f"{float(amin):g}–{float(amax):g}"
+            elif amin is not None:
+                area = f"{float(amin):g}"
+            elif amax is not None:
+                area = f"≤ {float(amax):g}"
+            else:
+                area = "—"
+
             matcher_html = (
                 "<span class='badge matcher-yes'>YES</span>"
-                if matcher
-                else "<span class='badge matcher-no'>NO</span>"
+                if matcher else "<span class='badge matcher-no'>NO</span>"
             )
+            status_html = f"<span class='status-badge'>{_e(r.get('classification'))}</span>"
+            req_html = (
+                f"<div class='req-main'>{_e(req_title)}</div>"
+                f"<div class='req-sub' title='{_e(original)}'>{_e(original_short)}</div>"
+            )
+
             trs.append(
                 "<tr>"
-                + cells
-                + f"<td>{matcher_html}</td>"
-                + f"<td>{_decision_form(r)}</td>"
-                + "</tr>"
+                f"<td class='c-id'>{_e(r.get('id'))}</td>"
+                f"<td class='c-status'>{status_html}</td>"
+                f"<td class='c-req'>{req_html}</td>"
+                f"<td class='c-location'>{_e(loc or '—')}</td>"
+                f"<td class='c-area'>{_e(area)}</td>"
+                f"<td class='c-floor'>{_e(r.get('floor_requirement') or '—')}</td>"
+                f"<td class='c-contact'>{_e(ph or '—')}</td>"
+                f"<td class='c-ai'>{confidence:.0%}</td>"
+                f"<td class='c-matcher'>{matcher_html}</td>"
+                f"<td class='c-actions'>{_decision_form(r)}</td>"
+                "</tr>"
             )
 
         notice = ""
-        if verified:
+        if quick_status:
+            notice = (
+                "<div class='info'><b>Status updated.</b> Requirement "
+                + _e(quick_status.replace(":", " → "))
+                + ". Structured details were preserved.</div>"
+            )
+        elif verified:
             notice = (
                 "<div class='info'><b>Verification saved.</b> Requirement ID "
                 + _e(verified)
@@ -1301,25 +1453,19 @@ def register(core):
         </div>
 
         <div class="tablebox">
-          <table>
+          <table class="compact-table">
             <thead>
               <tr>
-                <th>ID</th>
-                <th>Status</th>
-                <th>Source</th>
-                <th>Original Message</th>
-                <th>Intent</th>
-                <th>Transaction</th>
-                <th>Use</th>
-                <th>Location</th>
-                <th>Area Min</th>
-                <th>Area Max</th>
-                <th>Floor</th>
-                <th>Budget</th>
-                <th>Contact</th>
-                <th>AI Confidence</th>
-                <th>Matcher</th>
-                <th>Review / Decision</th>
+                <th class="c-id">ID</th>
+                <th class="c-status">Status</th>
+                <th class="c-req">Requirement</th>
+                <th class="c-location">Location</th>
+                <th class="c-area">Area</th>
+                <th class="c-floor">Floor</th>
+                <th class="c-contact">Contact</th>
+                <th class="c-ai">AI</th>
+                <th class="c-matcher">Matcher</th>
+                <th class="c-actions">Actions</th>
               </tr>
             </thead>
             <tbody>{''.join(trs)}</tbody>
