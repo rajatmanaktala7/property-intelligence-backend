@@ -26,7 +26,7 @@ from fastapi import Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import text
 
-VERSION = "11.9.7-TEAM-SAFE-COMPACT-GATE"
+VERSION = "11.9.8-ACTION-RELIABILITY-FIX"
 STATUSES = (
     "RAW",
     "AI-QUALIFIED",
@@ -980,17 +980,14 @@ def _decision_form(r: Dict[str, Any]) -> str:
 
     return f"""
     <div class="row-actions">
-      <form method="post" action="/alliance/requirements-gate/{gid}/quick-status">
-        <input type="hidden" name="status" value="VERIFIED ACTIVE">
+      <form method="post" action="/alliance/requirements-gate/{gid}/verify" onsubmit="this.querySelector('button').disabled=true;">
         <button class="btn-verify" type="submit"
                 onclick="return confirm('Verify requirement {gid} and activate Matcher?');">✓ Verify</button>
       </form>
-      <form method="post" action="/alliance/requirements-gate/{gid}/quick-status">
-        <input type="hidden" name="status" value="NEEDS VERIFICATION">
+      <form method="post" action="/alliance/requirements-gate/{gid}/review" onsubmit="this.querySelector('button').disabled=true;">
         <button class="btn-review" type="submit">⚠ Review</button>
       </form>
-      <form method="post" action="/alliance/requirements-gate/{gid}/quick-status">
-        <input type="hidden" name="status" value="REJECTED/EXPIRED">
+      <form method="post" action="/alliance/requirements-gate/{gid}/reject" onsubmit="this.querySelector('button').disabled=true;">
         <button class="btn-reject" type="submit"
                 onclick="return confirm('Reject / expire requirement {gid}?');">✕ Reject</button>
       </form>
@@ -1065,19 +1062,12 @@ def register(core):
         reprocess_existing_gate(engine, max(1, min(limit, 100000)))
         return RedirectResponse("/alliance/requirements-gate?reprocessed=1", 303)
 
-    @app.post("/alliance/requirements-gate/{gid}/quick-status")
-    def quick_status(
-        req: Request,
-        gid: int,
-        status: str = Form(...),
-    ):
+    def _apply_quick_status(req: Request, gid: int, new_status: str, action_name: str):
         _login(core, req)
-
-        allowed = {"VERIFIED ACTIVE", "NEEDS VERIFICATION", "REJECTED/EXPIRED"}
-        if status not in allowed:
+        if new_status not in {"VERIFIED ACTIVE", "NEEDS VERIFICATION", "REJECTED/EXPIRED"}:
             raise HTTPException(400, "Invalid quick status")
 
-        eligible = status == "VERIFIED ACTIVE"
+        eligible = new_status == "VERIFIED ACTIVE"
         actor = _actor(core, req)
 
         with engine.begin() as c:
@@ -1086,51 +1076,68 @@ def register(core):
                     SELECT classification
                     FROM pi_requirement_gate_v1191
                     WHERE id=:id
+                    FOR UPDATE
                 """),
                 {"id": gid},
             ).mappings().first()
             if old_row is None:
-                raise HTTPException(404, "Not found")
+                raise HTTPException(404, "Requirement not found")
 
-            c.execute(
+            updated = c.execute(
                 text("""
                     UPDATE pi_requirement_gate_v1191
                     SET classification=:status,
                         matcher_eligible=:eligible,
-                        verified_by=CASE WHEN :eligible THEN :actor ELSE verified_by END,
-                        verified_at=CASE WHEN :eligible THEN NOW() ELSE verified_at END,
+                        verified_by=CASE WHEN :eligible THEN :actor ELSE NULL END,
+                        verified_at=CASE WHEN :eligible THEN NOW() ELSE NULL END,
                         updated_at=NOW()
                     WHERE id=:id
+                    RETURNING id,classification,matcher_eligible
                 """),
-                {"id": gid, "status": status, "eligible": eligible, "actor": actor},
-            )
+                {"id": gid, "status": new_status, "eligible": eligible, "actor": actor},
+            ).mappings().first()
+
+            if updated is None:
+                raise HTTPException(500, "Status update failed")
 
             c.execute(
                 text("""
                     INSERT INTO pi_requirement_gate_audit_v1191(
                         gate_id,action,actor,old_status,new_status,details
                     )
-                    VALUES(
-                        :id,'QUICK_STATUS',:actor,:old,:new,CAST(:details AS JSONB)
-                    )
+                    VALUES(:id,:action,:actor,:old,:new,CAST(:details AS JSONB))
                 """),
                 {
                     "id": gid,
+                    "action": action_name,
                     "actor": actor,
                     "old": old_row["classification"],
-                    "new": status,
+                    "new": new_status,
                     "details": json.dumps({
                         "matcher_eligible": eligible,
                         "structured_fields_edited": False,
                         "master_requirements_mutated": False,
+                        "confirmed_update": True,
                         "version": VERSION,
                     }),
                 },
             )
 
         return RedirectResponse(
-            f"/alliance/requirements-gate?quick_status={gid}:{status}", 303
+            f"/alliance/requirements-gate?quick_status={gid}:{new_status}", 303
         )
+
+    @app.post("/alliance/requirements-gate/{gid}/verify")
+    def quick_verify(req: Request, gid: int):
+        return _apply_quick_status(req, gid, "VERIFIED ACTIVE", "QUICK_VERIFY")
+
+    @app.post("/alliance/requirements-gate/{gid}/review")
+    def quick_review(req: Request, gid: int):
+        return _apply_quick_status(req, gid, "NEEDS VERIFICATION", "QUICK_REVIEW")
+
+    @app.post("/alliance/requirements-gate/{gid}/reject")
+    def quick_reject(req: Request, gid: int):
+        return _apply_quick_status(req, gid, "REJECTED/EXPIRED", "QUICK_REJECT")
 
     @app.post("/alliance/requirements-gate/{gid}/decision")
     def decision(
@@ -1383,10 +1390,15 @@ def register(core):
 
         notice = ""
         if quick_status:
+            parts = quick_status.split(":", 1)
+            action_gid = parts[0] if parts else ""
+            action_status = parts[1] if len(parts) > 1 else ""
+            action_matcher = "YES" if action_status == "VERIFIED ACTIVE" else "NO"
             notice = (
-                "<div class='info'><b>Status updated.</b> Requirement "
-                + _e(quick_status.replace(":", " → "))
-                + ". Structured details were preserved.</div>"
+                "<div class='info'><b>Action completed successfully.</b> Requirement ID <b>"
+                + _e(action_gid) + "</b> → <b>" + _e(action_status)
+                + "</b> · Matcher <b>" + action_matcher
+                + "</b>. Requirement details were preserved.</div>"
             )
         elif verified:
             notice = (
