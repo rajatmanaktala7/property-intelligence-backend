@@ -29,16 +29,25 @@ COVERAGE RULES
 6. Do not omit a property because some fields are unreadable. Use Unknown / Price on request / - and mark completeness Partial.
 7. Keep all clearly associated phone numbers together separated by " / ".
 8. Preserve useful details: floor, bedrooms, terrace, park facing, road width, corner, plot size, rent, ROI, possession, collaboration, booking, etc.
-9. Do not invent. If uncertain, preserve only readable information and mark Partial or Needs Review.
-10. Ignore non-property news/articles.
-11. Output ONLY valid JSON. No markdown fences. No explanation.
+9. AREA UNIT TRUTH IS MANDATORY:
+   - Copy the area VALUE and UNIT exactly from the newspaper source.
+   - NEVER convert sq m / sqm / sqmt / m2 into sq ft.
+   - NEVER convert sq ft into sq m, sq yd, acres, hectares, guntha, cent, or any other unit.
+   - NEVER silently assume sq ft when only a number is visible.
+   - If the source says 87 sq m, output "87 sq m", not "87 sq ft".
+   - If the source says 300 sqm, output "300 sqm", not "300 sq ft".
+   - If the source unit is unreadable or genuinely absent, output the readable number followed by "unit needs verification" and set completeness to "Needs Review".
+   - Original source area is evidence. Do not normalize or overwrite it with a converted measurement.
+10. Do not invent. If uncertain, preserve only readable information and mark Partial or Needs Review.
+11. Ignore non-property news/articles.
+12. Output ONLY valid JSON. No markdown fences. No explanation.
 
 OUTPUT
 Return a JSON array. Every object must contain exactly these keys:
 {
   "lead_type": "Available - Sale | Available - Rent | Available - Lease | Available - Commercial | Booking - Floor | New/Booking - Floor | Wanted | Wanted & Available | Available/Wanted | Requirement - Buy | Requirement - Rent | Market Data - Rent Roll | Unknown",
   "locality": "specific locality/project/sector/property name",
-  "area": "area exactly as readable",
+  "area": "source area value AND source unit exactly as readable; never convert units; if unit unclear write <value> unit needs verification",
   "configuration_details": "clean concise property description",
   "price": "price or Price on request",
   "agency_brand": "agency/company or -",
@@ -209,6 +218,7 @@ Records already extracted in pass 1:
 {existing}
 Scan the whole image again, especially small boxes, edges, narrow columns, and ads sharing broker phone numbers.
 Return ONLY genuinely missed property records using exactly the same JSON schema.
+AREA UNIT RULE: preserve the source value and source unit exactly. Never convert or assume sq ft. If the unit is unclear, write "<value> unit needs verification" and use completeness "Needs Review".
 Do not repeat records already represented above. Same phone with a different property/locality is NOT a duplicate.
 If nothing was missed, return [].'''
     audit_resp, audit_model = _generate(client, active, [audit_prompt, image])
