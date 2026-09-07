@@ -10,7 +10,7 @@ from fastapi import Query, Request
 from fastapi.responses import HTMLResponse
 from sqlalchemy import text
 
-VERSION = "12.3.8-ROBUST-MASTER-REQUIREMENTS"
+VERSION = "12.3.6-REQUIREMENT-RUN-MATCH-DASHBOARD-FIX"
 SOURCES = ("MASTER", "NEWSPAPER", "WHATSAPP", "MAGAZINE", "MANUAL")
 
 EXCLUDE_TOKENS = (
@@ -205,7 +205,6 @@ def _source_rows(e, source, per_table=5000):
 def _master_rows(e, source, limit=10000):
     if not _table_exists(e, "pi_master_requirements_v711"):
         return []
-
     params = {"n": int(limit)}
     source_clause = ""
     if source != "MASTER":
@@ -214,35 +213,30 @@ def _master_rows(e, source, limit=10000):
           AND (
             EXISTS (
               SELECT 1 FROM pi_master_source_links_v711 l
-              WHERE l.canonical_id=(to_jsonb(r)->>'canonical_id')
+              WHERE l.canonical_id=r.canonical_id
                 AND l.master_entity_type='REQUIREMENT'
                 AND (
                   UPPER(COALESCE(l.source_type,'')) LIKE :pat OR
                   UPPER(COALESCE(l.source_table,'')) LIKE :pat
                 )
             )
-            OR UPPER(COALESCE(to_jsonb(r)->>'source','')) LIKE :pat
-            OR UPPER(COALESCE(to_jsonb(r)->>'source_type','')) LIKE :pat
-            OR UPPER(COALESCE(to_jsonb(r)->>'source_name','')) LIKE :pat
-            OR UPPER(COALESCE(to_jsonb(r)->>'channel','')) LIKE :pat
-            OR UPPER(COALESCE(to_jsonb(r)->>'import_source','')) LIKE :pat
+            OR UPPER(COALESCE(r.clean_record->>'source','')) LIKE :pat
+            OR UPPER(COALESCE(r.clean_record->>'source_type','')) LIKE :pat
+            OR UPPER(COALESCE(r.clean_record->>'source_name','')) LIKE :pat
+            OR UPPER(COALESCE(r.clean_record->>'channel','')) LIKE :pat
+            OR UPPER(COALESCE(r.clean_record->>'import_source','')) LIKE :pat
           )
         """
-
     sql = f"""
-        SELECT
-          to_jsonb(r) AS d,
-          COALESCE(w.verification_status,'UNVERIFIED') AS verification_status,
-          COALESCE(a.assigned_to,'') AS assigned_to
+        SELECT r.canonical_id,r.locality,r.city,r.transaction_type,r.area_sqft,
+               r.sale_budget,r.rent_budget,r.phones,r.clean_record,r.created_at,
+               COALESCE(w.verification_status,'UNVERIFIED') AS verification_status,
+               COALESCE(a.assigned_to,'') AS assigned_to
         FROM pi_master_requirements_v711 r
-        LEFT JOIN pi_master_workflow_v720 w
-          ON w.canonical_id=(to_jsonb(r)->>'canonical_id')
-        LEFT JOIN pi_master_action_state_v730 a
-          ON a.canonical_id=(to_jsonb(r)->>'canonical_id')
+        LEFT JOIN pi_master_workflow_v720 w ON w.canonical_id=r.canonical_id
+        LEFT JOIN pi_master_action_state_v730 a ON a.canonical_id=r.canonical_id
         WHERE 1=1 {source_clause}
-        ORDER BY
-          NULLIF(to_jsonb(r)->>'updated_at','') DESC NULLS LAST,
-          NULLIF(to_jsonb(r)->>'created_at','') DESC NULLS LAST
+        ORDER BY r.created_at DESC NULLS LAST
         LIMIT :n
     """
     try:
@@ -250,56 +244,28 @@ def _master_rows(e, source, limit=10000):
             data = c.execute(text(sql), params).mappings().all()
     except Exception:
         return []
-
     out = []
     for x in data:
-        meta = dict(x)
-        obj = _dict(meta.get("d"))
-        if not obj:
-            continue
-        cr = _dict(obj.get("clean_record"))
-
-        cid = _first(obj, ["canonical_id", "id", "requirement_id"])
-        locality = _first(obj, ["locality", "location"])
-        city = _first(obj, ["city"])
-        location = locality or city or _first(cr, ["location", "preferred_location", "preferred_locations"])
-
-        contact = _first(obj, ["phones", "phone", "contact_phone", "contact_number", "mobile"])
-        if not contact:
-            contact = _first(cr, ["contact_phone", "contact_number", "phone", "mobile", "phones"])
-
-        area = _first(obj, ["area_sqft", "required_area_sqft", "requirement_sqft"])
-        if not area:
-            amin = _first(cr, ["area_min_sqft", "minimum_area_sqft", "min_area_sqft"])
-            amax = _first(cr, ["area_max_sqft", "maximum_area_sqft", "max_area_sqft"])
-            area = f"{amin}-{amax}" if amin or amax else _first(cr, ["required_area", "area"])
-
-        budget = _first(obj, ["sale_budget", "rent_budget", "budget", "budget_raw"])
-        if not budget:
-            budget = _first(cr, ["sale_budget", "rent_budget", "budget", "budget_raw", "max_budget"])
-
-        transaction = _first(obj, ["transaction_type", "transaction", "rent_or_sale"])
-        if not transaction:
-            transaction = _first(cr, ["transaction_type", "transaction", "rent_or_sale"])
-
+        r = dict(x)
+        cr = _dict(r.get("clean_record"))
         out.append({
-            "canonical_id": str(cid or ""),
+            "canonical_id": str(r.get("canonical_id") or ""),
             "source_pk": "",
             "source_table": "pi_master_requirements_v711",
             "source": "MASTER" if source == "MASTER" else source,
-            "message": _message(cr) or _message(obj),
+            "message": _message(cr),
             "company": _first(cr, ["company_name", "brand_name", "client_company", "company", "retailer_name"]),
             "contact_name": _first(cr, ["contact_name", "client_name", "name", "sender_name"]),
-            "contact": contact,
-            "location": location,
-            "transaction": transaction,
+            "contact": r.get("phones") or _first(cr, ["contact_phone", "contact_number", "phone", "mobile"]),
+            "location": r.get("locality") or r.get("city") or _first(cr, ["location", "preferred_location"]),
+            "transaction": r.get("transaction_type") or _first(cr, ["transaction_type", "rent_or_sale"]),
             "category": _first(cr, ["property_category", "required_property_category", "category", "intended_use", "use"]),
             "property_type": _first(cr, ["property_type", "required_property_type", "asset_type"]),
-            "area": area,
-            "budget": budget,
-            "created_at": _first(obj, ["created_at", "updated_at"]),
-            "verification": meta.get("verification_status") or "UNVERIFIED",
-            "assigned_to": meta.get("assigned_to") or "",
+            "area": r.get("area_sqft") or _first(cr, ["required_area", "required_area_sqft", "minimum_area_sqft", "maximum_area_sqft"]),
+            "budget": r.get("sale_budget") or r.get("rent_budget") or _first(cr, ["budget", "budget_raw"]),
+            "created_at": r.get("created_at"),
+            "verification": r.get("verification_status") or "UNVERIFIED",
+            "assigned_to": r.get("assigned_to") or "",
             "is_master": True,
         })
     return out
@@ -467,16 +433,19 @@ def _table(e, source, q, location, transaction, status, assigned, limit):
         rid = row.get("canonical_id") or f"{row.get('source_table')}:{row.get('source_pk')}"
         if is_master and row.get("canonical_id"):
             cid = _e(row["canonical_id"])
-            action = (
-                f'<a class="btn" href="/alliance/primary/requirement/{cid}">Open</a> '
-                f'<a class="btn" href="/alliance/primary/matcher?requirement_id={cid}">Run Match</a>'
-            )
+            verification = str(row.get("verification") or "").upper()
+            if verification == "VERIFIED":
+                action = (
+                    f'<a class="btn" href="/alliance/primary/requirement/{cid}">Open</a> '
+                    f'<a class="btn" href="/alliance/primary/matcher?requirement_id={cid}">Run Match</a>'
+                )
+            else:
+                action = (
+                    f'<a class="btn" href="/alliance/primary/requirement/{cid}">Open</a> '
+                    f'<a class="btn" href="/alliance/primary/requirement/{cid}">Verify First</a>'
+                )
         else:
-            src = _e(row.get("source") or source)
-            spk = _e(row.get("source_pk") or "")
-            action = (
-                f'<a class="btn" href="/alliance/final/requirements/run-match?source={src}&source_pk={spk}">Run Match</a>'
-            )
+            action = '<a class="btn" href="/alliance/primary/requirements">Verify First</a>'
         cls = "masterrow" if is_master else "sourceonly"
         vals = [
             rid, row.get("message"), row.get("company"), row.get("contact_name"), row.get("contact"),
@@ -542,42 +511,6 @@ def register(core):
             headers={"Cache-Control":"no-store","X-Alliance-Requirement-Restore":VERSION},
         )
 
-    @app.get("/alliance/final/requirements/run-match", response_class=HTMLResponse, include_in_schema=False)
-    def source_run_match(req: Request, source: str = Query(""), source_pk: str = Query("")):
-        _login(core, req)
-        src = source.upper().strip()
-        if src not in SOURCES or src == "MASTER":
-            return HTMLResponse(_shell("Run Match", '<div class="notice">Invalid source requirement.</div>'), status_code=400)
-
-        rows, _ = _source_rows(e, src)
-        selected = None
-        for row in rows:
-            if str(row.get("source_pk") or "") == str(source_pk or ""):
-                selected = row
-                break
-
-        if not selected:
-            return HTMLResponse(
-                _shell("Run Match", '<div class="notice"><b>Requirement not found in source database.</b></div>'),
-                status_code=404,
-            )
-
-        msg = _e(selected.get("message") or "")
-        loc = _e(selected.get("location") or "")
-        contact = _e(selected.get("contact") or "")
-        body = f"""
-        <div class="notice"><b>Run Match requested.</b><br>
-        This record is still a source-only requirement. Smart Matcher accepts only a human-verified Master Requirement.
-        Verify/promote this exact requirement first; after verification, use Run Match from the Master Requirement row.</div>
-        <div class="card">
-          <b>Original Requirement</b><p>{msg}</p>
-          <b>Location</b><p>{loc}</p>
-          <b>Contact</b><p>{contact}</p>
-          <p><a class="btn" href="/alliance/primary/requirements?q={source_pk}">Verify / Promote This Requirement</a></p>
-        </div>
-        """
-        return HTMLResponse(_shell("Run Match", body), headers={"Cache-Control":"no-store"})
-
     @app.get("/api/alliance/requirement-restore/status", include_in_schema=False)
     def restore_status(req: Request):
         _login(core, req)
@@ -600,7 +533,6 @@ def register(core):
 
     _move_front(app, "/alliance/final/requirements")
     _move_front(app, "/alliance/final/requirements/{source}")
-    _move_front(app, "/alliance/final/requirements/run-match")
     _move_front(app, "/api/alliance/requirement-restore/status")
 
     return {

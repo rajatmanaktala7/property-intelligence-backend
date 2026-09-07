@@ -6,7 +6,7 @@ from fastapi import Request
 from fastapi.responses import HTMLResponse
 from sqlalchemy import text
 
-VERSION = "11.4.0-PRODUCTION-STABILITY"
+VERSION = "11.4.1-RESTORED-REQUIREMENT-COUNTS"
 SOURCES = ("MASTER","NEWSPAPER","WHATSAPP","MAGAZINE","MANUAL")
 
 def _app(core):
@@ -191,7 +191,12 @@ def _dashboard(engine):
     m=_metrics(engine)
     ps=_restoration_snapshot(engine,"PROPERTY")
     pc={s:ps[s]["restored_visible"] for s in SOURCES}
-    rc={s:_source_count(engine,"REQUIREMENT",s) for s in SOURCES}
+    try:
+        import alliance_requirement_restore_v1235 as reqrestore
+        rs=reqrestore.restored_requirement_snapshot(engine)
+        rc={s:int(rs.get(s,{}).get("visible",0)) for s in SOURCES}
+    except Exception:
+        rc={s:_source_count(engine,"REQUIREMENT",s) for s in SOURCES}
 
     def _rest_note(source,label):
         s=ps[source]
