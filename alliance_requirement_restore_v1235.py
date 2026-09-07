@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import hashlib
 import html
@@ -10,7 +10,7 @@ from fastapi import Query, Request
 from fastapi.responses import HTMLResponse
 from sqlalchemy import text
 
-VERSION = "12.3.5-REQUIREMENT-SOURCE-RESTORE"
+VERSION = "12.3.6-REQUIREMENT-RUN-MATCH-DASHBOARD-FIX"
 SOURCES = ("MASTER", "NEWSPAPER", "WHATSAPP", "MAGAZINE", "MANUAL")
 
 EXCLUDE_TOKENS = (
@@ -351,6 +351,7 @@ def _move_front(app, path):
 def _nav():
     return """
     <nav>
+      <a href="/team-dashboard-v376">Dashboard</a>
       <a href="/alliance/primary">Command Centre</a>
       <a href="/property-manual">Add Property</a>
       <a href="/alliance/final/databases">Property Databases</a>
@@ -387,8 +388,8 @@ input,select{{width:100%;padding:8px;border:1px solid #98a2b3;border-radius:6px}
 th,td{{border:1px solid #d0d5dd;padding:7px;text-align:left;vertical-align:top;white-space:normal}}th{{position:sticky;top:0;background:#e9eef5;z-index:4}}
 .desc{{min-width:300px;max-width:500px}}.sourceonly{{background:#fff8e8}}.masterrow{{background:#f8fff9}}
 </style></head><body>
-<header><b>Alliance CRE Intelligence OS 11</b><small>PROPERTY → VERIFY → REQUIREMENT → MATCH → CLIENT → FOLLOW-UP → DEAL</small></header>
-{_nav()}<div class="wrap"><h2>{_e(title)}</h2>{body}<p><a class="btn" href="/alliance/primary">← Back to Dashboard</a></p></div>
+<header><b>Alliance CRE Intelligence OS 11</b><small>PROPERTY â†’ VERIFY â†’ REQUIREMENT â†’ MATCH â†’ CLIENT â†’ FOLLOW-UP â†’ DEAL</small></header>
+{_nav()}<div class="wrap"><h2>{_e(title)}</h2>{body}<p><a class="btn" href="/team-dashboard-v376">â† Back to Dashboard</a></p></div>
 </body></html>"""
 
 def _hub(e):
@@ -397,12 +398,12 @@ def _hub(e):
     for source in SOURCES:
         rows, meta = _combined(e, source)
         details[source] = meta
-        note = "Canonical inventory · matcher authority" if source == "MASTER" else (
-            f"Master linked: {meta['master']} · Restored source-only: {meta['source_only']}"
+        note = "Canonical inventory Â· matcher authority" if source == "MASTER" else (
+            f"Master linked: {meta['master']} Â· Restored source-only: {meta['source_only']}"
         )
         cards.append(f"""<a class="dbcard" href="/alliance/final/requirements/{source.lower()}">
           <b>{_e(source.title())} Requirements</b><div class="num">{len(rows)}</div>
-          <div class="sub">{_e(note)}</div><div class="open">Open →</div></a>""")
+          <div class="sub">{_e(note)}</div><div class="open">Open â†’</div></a>""")
     body = f"""<div class="notice"><b>All requirements restored for visibility.</b>
     Master remains canonical. Source-only records are read-only here and must be human verified/promoted before Smart Matcher can use them.
     Nothing is auto-copied into Master and no duplicate Master records are created.</div>
@@ -430,11 +431,21 @@ def _table(e, source, q, location, transaction, status, assigned, limit):
     for row in rows:
         is_master = bool(row.get("is_master"))
         rid = row.get("canonical_id") or f"{row.get('source_table')}:{row.get('source_pk')}"
-        action = (
-            f'<a class="btn" href="/alliance/primary/requirement/{_e(row["canonical_id"])}">Open</a>'
-            if is_master and row.get("canonical_id")
-            else '<a class="btn" href="/alliance/primary/requirements">Verify / Promote</a>'
-        )
+        if is_master and row.get("canonical_id"):
+            cid = _e(row["canonical_id"])
+            verification = str(row.get("verification") or "").upper()
+            if verification == "VERIFIED":
+                action = (
+                    f'<a class="btn" href="/alliance/primary/requirement/{cid}">Open</a> '
+                    f'<a class="btn" href="/alliance/primary/matcher?requirement_id={cid}">Run Match</a>'
+                )
+            else:
+                action = (
+                    f'<a class="btn" href="/alliance/primary/requirement/{cid}">Open</a> '
+                    f'<a class="btn" href="/alliance/primary/requirement/{cid}">Verify First</a>'
+                )
+        else:
+            action = '<a class="btn" href="/alliance/primary/requirements">Verify First</a>'
         cls = "masterrow" if is_master else "sourceonly"
         vals = [
             rid, row.get("message"), row.get("company"), row.get("contact_name"), row.get("contact"),
@@ -451,9 +462,9 @@ def _table(e, source, q, location, transaction, status, assigned, limit):
                 cells.append(f"<td{css}>{_e(value)}</td>")
         trs.append(f"<tr class='{cls}'>{''.join(cells)}</tr>")
     note = (
-        f"<b>{len(rows)}</b> rows shown. Canonical linked: <b>{meta['master']}</b> · "
+        f"<b>{len(rows)}</b> rows shown. Canonical linked: <b>{meta['master']}</b> Â· "
         f"Restored source-only: <b>{meta['source_only']}</b>. "
-        "Green rows are Master. Yellow rows are source-only and cannot run Matcher until verified/promoted."
+        "Green rows are Master. Verified Master requirements show Run Match. Yellow source-only rows must be verified/promoted first."
     )
     headers = [
         "Requirement ID / Source ID","Original Requirement","Client / Company","Contact Name","Contact No.",
