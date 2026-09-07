@@ -415,6 +415,31 @@ def _load_core():
 
         stabilization = production_surface.register(wrapped)
 
+        # 12.3.0 Alliance Team Operations
+        try:
+            import alliance_team_operations_v1230 as teamops_v1230
+            teamops_result = teamops_v1230.register(wrapped.core)
+            stabilization = dict(stabilization or {})
+            stabilization["team_operations_v1230"] = teamops_result
+        except Exception as exc:
+            stabilization = dict(stabilization or {})
+            stabilization["team_operations_v1230"] = {
+                "status":"ERROR",
+                "error":f"{type(exc).__name__}: {exc}",
+                "fail_safe":True,
+            }
+            print("[team-operations-v1230] warning:", type(exc).__name__, str(exc))
+
+        # Register universal Back-to-Dashboard layer if the module is present.
+        try:
+            import alliance_back_to_dashboard_v1221 as back_v1221
+            stabilization = dict(stabilization or {})
+            stabilization["back_to_dashboard_v1221"] = back_v1221.register(wrapped.core)
+        except ModuleNotFoundError:
+            print("[back-dashboard-v1221] module not present; continuing safely")
+        except Exception as exc:
+            print("[back-dashboard-v1221] warning:", type(exc).__name__, str(exc))
+
         # 7.3.7 Historical evidence repair is fail-safe and dry-run by default.
         try:
             import alliance_historical_repair_v737 as historical_repair_v737
