@@ -6,7 +6,7 @@ from fastapi import Request
 from fastapi.responses import HTMLResponse
 from sqlalchemy import text
 
-VERSION = "11.4.2-FINAL-TEAM-DASHBOARD"
+VERSION = "11.4.3-FINAL-ROUTE-RESCUE"
 SOURCES = ("MASTER","NEWSPAPER","WHATSAPP","MAGAZINE","MANUAL")
 
 def _app(core):
@@ -176,7 +176,7 @@ def _tile(title, subtitle, url):
     return f"""<a class="tile" href="{url}">
       <div class="tiletitle">{_e(title)}</div>
       <div class="tilesub">{_e(subtitle)}</div>
-      <div class="open">OPEN â†’</div>
+      <div class="open">OPEN Ã¢â€ â€™</div>
     </a>"""
 
 def _db_card(label, count, url, note=""):
@@ -184,7 +184,7 @@ def _db_card(label, count, url, note=""):
       <div class="dbtop">{_e(label)}</div>
       <div class="dbnum">{int(count)}</div>
       <div class="dbnote">{_e(note)}</div>
-      <div class="dbopen">Open Database â†’</div>
+      <div class="dbopen">Open Database Ã¢â€ â€™</div>
     </a>"""
 
 def _dashboard(engine):
@@ -203,10 +203,10 @@ def _dashboard(engine):
         if source=="MASTER":
             return "Canonical property database"
         if s["legacy"] is None:
-            return f"{label} Â· linked to Master: {s['canonical']}"
+            return f"{label} Ã‚Â· linked to Master: {s['canonical']}"
         if s["gap"]>0:
-            return f"{label} Â· linked: {s['canonical']} Â· awaiting lineage restoration: {s['gap']}"
-        return f"{label} Â· linked to Master: {s['canonical']} Â· fully reconciled"
+            return f"{label} Ã‚Â· linked: {s['canonical']} Ã‚Â· awaiting lineage restoration: {s['gap']}"
+        return f"{label} Ã‚Â· linked to Master: {s['canonical']} Ã‚Â· fully reconciled"
 
     property_cards = "".join([
         _db_card("Master Database",pc["MASTER"],"/alliance/final/database/master",_rest_note("MASTER","Canonical")),
@@ -252,7 +252,7 @@ header{{background:linear-gradient(135deg,var(--nav),var(--nav2));color:#fff;pad
 @media(max-width:700px){{.quickgrid,.dbgrid,.flow,.kpis{{grid-template-columns:1fr}}}}
 </style></head><body>
 <header>
-  <div class="brand"><b>AI Deal Intelligence OS Â· CRE 11</b><small>Alliance Infrastructure Â· PROPERTY â†’ VERIFY â†’ REQUIREMENT â†’ MATCH â†’ CLIENT â†’ FOLLOW-UP â†’ DEAL</small></div>
+  <div class="brand"><b>AI Deal Intelligence OS Ã‚Â· CRE 11</b><small>Alliance Infrastructure Ã‚Â· PROPERTY Ã¢â€ â€™ VERIFY Ã¢â€ â€™ REQUIREMENT Ã¢â€ â€™ MATCH Ã¢â€ â€™ CLIENT Ã¢â€ â€™ FOLLOW-UP Ã¢â€ â€™ DEAL</small></div>
   <div class="kpis">
     <div class="kpi"><span>Properties</span><strong>{m["properties"]}</strong></div>
     <div class="kpi"><span>Requirements</span><strong>{m["requirements"]}</strong></div>
@@ -322,13 +322,13 @@ header{{background:linear-gradient(135deg,var(--nav),var(--nav2));color:#fff;pad
 <section class="card">
 <div class="sectiontitle"><div><h2>Database Restoration Status</h2><p>Live reconciliation between legacy source tables and canonical Master lineage. No data is deleted or duplicated.</p></div></div>
 <div class="dbgrid">
-{_db_card("Newspaper Source",ps["NEWSPAPER"]["legacy"] if ps["NEWSPAPER"]["legacy"] is not None else ps["NEWSPAPER"]["canonical"],"/alliance/final/database/newspaper",f"Master linked: {ps['NEWSPAPER']['canonical']} Â· Missing lineage: {ps['NEWSPAPER']['gap']}")}
-{_db_card("WhatsApp Source",ps["WHATSAPP"]["legacy"] if ps["WHATSAPP"]["legacy"] is not None else ps["WHATSAPP"]["canonical"],"/alliance/final/database/whatsapp",f"Master linked: {ps['WHATSAPP']['canonical']} Â· Missing lineage: {ps['WHATSAPP']['gap']}")}
-{_db_card("Magazine Source",ps["MAGAZINE"]["legacy"] if ps["MAGAZINE"]["legacy"] is not None else ps["MAGAZINE"]["canonical"],"/alliance/final/database/magazine",f"Master linked: {ps['MAGAZINE']['canonical']} Â· Missing lineage: {ps['MAGAZINE']['gap']}")}
-{_db_card("Manual Source",ps["MANUAL"]["legacy"] if ps["MANUAL"]["legacy"] is not None else ps["MANUAL"]["canonical"],"/alliance/final/database/manual",f"Master linked: {ps['MANUAL']['canonical']} Â· Missing lineage: {ps['MANUAL']['gap']}")}
+{_db_card("Newspaper Source",ps["NEWSPAPER"]["legacy"] if ps["NEWSPAPER"]["legacy"] is not None else ps["NEWSPAPER"]["canonical"],"/alliance/final/database/newspaper",f"Master linked: {ps['NEWSPAPER']['canonical']} Ã‚Â· Missing lineage: {ps['NEWSPAPER']['gap']}")}
+{_db_card("WhatsApp Source",ps["WHATSAPP"]["legacy"] if ps["WHATSAPP"]["legacy"] is not None else ps["WHATSAPP"]["canonical"],"/alliance/final/database/whatsapp",f"Master linked: {ps['WHATSAPP']['canonical']} Ã‚Â· Missing lineage: {ps['WHATSAPP']['gap']}")}
+{_db_card("Magazine Source",ps["MAGAZINE"]["legacy"] if ps["MAGAZINE"]["legacy"] is not None else ps["MAGAZINE"]["canonical"],"/alliance/final/database/magazine",f"Master linked: {ps['MAGAZINE']['canonical']} Ã‚Â· Missing lineage: {ps['MAGAZINE']['gap']}")}
+{_db_card("Manual Source",ps["MANUAL"]["legacy"] if ps["MANUAL"]["legacy"] is not None else ps["MANUAL"]["canonical"],"/alliance/final/database/manual",f"Master linked: {ps['MANUAL']['canonical']} Ã‚Â· Missing lineage: {ps['MANUAL']['gap']}")}
 {_db_card("Master Properties",ps["MASTER"]["canonical"],"/alliance/final/database/master","Canonical unique properties")}
 </div>
-<div class="notice"><b>How to read this:</b> the large number is the live source-table count when an original source table still exists. â€œMaster linkedâ€ is how many canonical properties currently carry that source lineage. â€œMissing lineageâ€ shows records still requiring reconciliation before the source database is fully restored into Master.</div>
+<div class="notice"><b>How to read this:</b> the large number is the live source-table count when an original source table still exists. Ã¢â‚¬Å“Master linkedÃ¢â‚¬Â is how many canonical properties currently carry that source lineage. Ã¢â‚¬Å“Missing lineageÃ¢â‚¬Â shows records still requiring reconciliation before the source database is fully restored into Master.</div>
 </section>
 
 <section class="card">
