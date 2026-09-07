@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 import threading
@@ -226,7 +226,7 @@ code{{background:#f5eee5;padding:4px 6px;border-radius:5px}}
 <p>The health service is online while the main application loads independently.</p>
 <p><b>Boot state:</b> <code>{BOOT["state"]}</code></p>
 <p><b>Detail:</b> <code>{err}</code></p>
-<p><a href="/healthz">Health</a> ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â· <a href="/boot-status">Boot Status</a></p>
+<p><a href="/healthz">Health</a> ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â· <a href="/boot-status">Boot Status</a></p>
 </main>
 </body>
 </html>""",
@@ -958,6 +958,20 @@ def _load_core():
                 "fail_safe":True,
             }
             print("[requirement-restore-v1235] warning:", type(exc).__name__, str(exc))
+
+        # ALLIANCE_FINAL_DASHBOARD_V1241
+        try:
+            import alliance_final_dashboard_v1241 as finaldash_v1241
+            stabilization = dict(stabilization or {})
+            stabilization["final_dashboard_v1241"] = finaldash_v1241.register(wrapped.core)
+        except Exception as exc:
+            stabilization = dict(stabilization or {})
+            stabilization["final_dashboard_v1241"] = {
+                "status": "ERROR",
+                "error": f"{type(exc).__name__}: {exc}",
+                "fail_safe": True,
+            }
+            print("[final-dashboard-v1241] warning:", type(exc).__name__, str(exc))
 
         CORE_APP = wrapped.app
         try:
