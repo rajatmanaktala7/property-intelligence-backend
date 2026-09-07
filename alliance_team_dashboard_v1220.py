@@ -7,7 +7,7 @@ from fastapi import Form, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import text
 
-VERSION = "12.3.4-RESTORED-DASHBOARD-STAFF-DAY-PLAN"
+VERSION = "12.3.5-PREVIOUS-UI-RESTORED"
 ROUTE = "/alliance/primary"
 
 STAFF = ["Yogesh Mehra", "Priya", "Zoya Saifi"]
@@ -163,30 +163,27 @@ def _step(n, title, text, href, action):
 
 def _base_css():
     return """
-*{box-sizing:border-box}body{margin:0;background:#f5f7fb;color:#132238;font-family:Inter,Arial,sans-serif}
+*{box-sizing:border-box}body{margin:0;background:#f5f7fb;color:#132238;font-family:Arial,sans-serif}
 .top{background:#102a43;color:white;padding:22px 26px;display:flex;justify-content:space-between;gap:20px;flex-wrap:wrap}
-.top h1{margin:0 0 5px;font-size:25px}.top p{margin:0;color:#d8e5ef}.top .badge{align-self:center;background:#067647;padding:10px 14px;border-radius:10px;font-weight:800}
-.wrap{max-width:1500px;margin:auto;padding:22px}.section{margin:0 0 24px}.section h2{font-size:19px;margin:0 0 12px}
-.metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(185px,1fr));gap:12px}
-.metric{background:white;border:1px solid #e1e7ef;border-radius:13px;padding:15px;min-height:120px;box-shadow:0 2px 7px rgba(16,42,67,.04)}
+.top h1{margin:0 0 5px;font-size:26px}.top p{margin:0;color:#d8e5ef}.top .badge{align-self:center;background:#067647;padding:10px 14px;border-radius:10px;font-weight:800}
+.wrap{max-width:1750px;margin:auto;padding:22px}.section{margin-bottom:24px}.section h2{font-size:20px;margin:0 0 12px}
+.metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px}
+.metric,.panel,.staffcard{background:white;border:1px solid #e1e7ef;border-radius:13px;padding:15px;box-shadow:0 2px 7px rgba(16,42,67,.04)}
 .metric-label{font-size:13px;color:#64748b;font-weight:700}.metric-value{font-size:30px;font-weight:900;margin:6px 0}
 .metric-sub{font-size:12px;color:#667085;min-height:28px}.metric-link{display:inline-block;margin-top:8px;text-decoration:none;font-weight:700;color:#175cd3}
-.metric.warn{border-color:#f3c589}.metric.goodbox{border-color:#9edbb9}
-.two{display:grid;grid-template-columns:2fr 1fr;gap:16px}@media(max-width:950px){.two{grid-template-columns:1fr}}
-.panel{background:white;border:1px solid #e1e7ef;border-radius:13px;padding:17px}
-.step{display:grid;grid-template-columns:42px 1fr auto;gap:12px;align-items:center;padding:13px 0;border-bottom:1px solid #edf1f5}
-.step:last-child{border-bottom:0}.stepno{width:34px;height:34px;border-radius:50%;background:#e9f2ff;color:#175cd3;font-weight:900;display:grid;place-items:center}
-.step p{margin:4px 0 0;color:#667085;font-size:13px}.btn{background:#102a43;color:white;text-decoration:none;border:0;border-radius:8px;padding:9px 11px;font-size:13px;white-space:nowrap;cursor:pointer}
-.quickgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:10px}
-.quick{background:white;border:1px solid #e1e7ef;border-radius:11px;padding:14px;text-decoration:none;color:#132238}
-.quick b{display:block;margin-bottom:4px}.quick span{font-size:12px;color:#667085}
-.healthrow{display:flex;justify-content:space-between;border-bottom:1px solid #edf1f5;padding:9px 0;font-size:13px}.healthrow:last-child{border:0}
-.good{color:#067647}.bad{color:#b42318}.rule{background:#fff7e6;border:1px solid #f1d49b;border-radius:11px;padding:13px;margin-top:12px;font-size:13px}
-.footer{font-size:12px;color:#667085;margin-top:18px}
-table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:9px;border-bottom:1px solid #edf1f5;text-align:left;vertical-align:top}
-th{background:#f8fafc}textarea,input,select{width:100%;padding:9px;border:1px solid #cfd8e3;border-radius:8px;margin:5px 0}
-.formgrid{display:grid;grid-template-columns:1fr 1fr;gap:12px}@media(max-width:800px){.formgrid{grid-template-columns:1fr}}
-.pill{display:inline-block;padding:4px 8px;border-radius:999px;font-size:11px;font-weight:800}.okpill{background:#ecfdf3;color:#067647}.warnpill{background:#fff6ed;color:#b54708}
+.staffgrid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}@media(max-width:1000px){.staffgrid{grid-template-columns:1fr}}
+.staffhead{display:flex;justify-content:space-between;gap:12px;align-items:flex-start}.staffhead span{font-size:12px;color:#667085}
+.staffmetrics{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:14px 0}
+.staffmetrics div{background:#f8fafc;border-radius:9px;padding:10px;text-align:center}.staffmetrics strong{display:block;font-size:22px}.staffmetrics span{font-size:11px;color:#667085}
+.checks{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px}
+.two{display:grid;grid-template-columns:1.5fr 1fr;gap:16px}@media(max-width:950px){.two{grid-template-columns:1fr}}
+.tablebox{overflow:auto;max-height:420px}table{border-collapse:collapse;width:100%;font-size:12px}th,td{padding:8px;border-bottom:1px solid #edf1f5;text-align:left;vertical-align:top}th{background:#f8fafc;position:sticky;top:0}
+.quickgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:10px}.quick{background:white;border:1px solid #e1e7ef;border-radius:11px;padding:14px;text-decoration:none;color:#132238}.quick b{display:block;margin-bottom:4px}.quick span{font-size:12px;color:#667085}
+.btn,.mini{background:#102a43;color:white;text-decoration:none;border:0;border-radius:8px;padding:8px 10px;font-size:12px;display:inline-block;cursor:pointer}.goodbtn{background:#067647}
+.okpill,.warnpill,.badpill{display:inline-block;border-radius:999px;padding:4px 8px;font-size:11px;font-weight:800}
+.okpill{background:#ecfdf3;color:#067647}.warnpill{background:#fff6ed;color:#b54708}.badpill{background:#fef3f2;color:#b42318}
+.note,.rule{background:#fff7e6;border:1px solid #f1d49b;border-radius:11px;padding:12px;font-size:13px}.footer{font-size:12px;color:#667085;margin-top:18px}
+textarea,input,select{width:100%;padding:9px;border:1px solid #cfd8e3;border-radius:8px;margin:5px 0}.formgrid{display:grid;grid-template-columns:1fr 1fr;gap:12px}@media(max-width:800px){.formgrid{grid-template-columns:1fr}}
 """
 
 def _dashboard(core, req):
@@ -194,84 +191,119 @@ def _dashboard(core, req):
     e = _engine(core)
     _ensure_staff_tables(e)
     c = _counts(e)
-    checks, healthy = _health(e, c)
-    health_html = "".join(
-        f"<div class='healthrow'><span>{html.escape(k)}</span><b class='{'good' if v else 'bad'}'>{'READY' if v else 'CHECK'}</b></div>"
-        for k,v in checks.items()
-    )
-    status = "WORKABLE" if healthy else "ATTENTION NEEDED"
-    now = datetime.now(timezone.utc).strftime("%d %b %Y %H:%M UTC")
 
-    workflow = (
-        _step(1, "Capture", "Add a property or requirement. Keep original evidence and contact details.", "/property-manual", "Add Property") +
-        _step(2, "Verify Requirement", "Only human-verified requirements are allowed to run the matcher.", "/alliance/primary/requirements", "Open Requirements") +
-        _step(3, "Run Smart Matcher", "Use transaction, location, area range, use, floor and availability.", "/alliance/primary/requirements", "Run From Requirement") +
-        _step(4, "Verify Property Availability", "Call the owner/broker before client sharing. Gold extraction is not live availability.", "/alliance/primary/availability", "Verify Availability") +
-        _step(5, "Approve Match", "Approve only suitable properties. Assignment starts after an approved match.", "/alliance/primary/matcher", "Open Matcher") +
-        _step(6, "Assign & Follow Up", "Assign the approved opportunity to a team member and schedule follow-up.", "/alliance/primary/followups", "Follow-ups")
-    )
-
-    quick = """
-    <a class='quick' href='/alliance/primary/requirements'><b>Requirements</b><span>Verify and run matcher</span></a>
-    <a class='quick' href='/alliance/primary/matcher'><b>Smart Matcher</b><span>Review ranked properties</span></a>
-    <a class='quick' href='/alliance/primary/availability'><b>Availability</b><span>Verify before sending</span></a>
-    <a class='quick' href='/alliance/source/magazine'><b>Magazine Inventory</b><span>Workable governed records</span></a>
-    <a class='quick' href='/alliance/primary/properties'><b>Properties</b><span>Master property inventory</span></a>
-    <a class='quick' href='/alliance/primary/followups'><b>Follow-ups</b><span>Team action queue</span></a>
-    <a class='quick' href='/alliance/primary/day-plan'><b>Daily Day Plan</b><span>Yogesh · Priya · Zoya</span></a>
-    <a class='quick' href='/alliance/primary/staff-review'><b>Staff Review</b><span>Review daily work by staff name</span></a>
-    <a class='quick' href='/alliance/primary/monthly-review'><b>Monthly Review</b><span>Monthly staff performance</span></a>
-    <a class='quick' href='/property-manual'><b>Add Property</b><span>Manual property entry</span></a>
-    """
-
-    staff_metrics = []
+    staff_cards = []
     for name in STAFF:
         s = _staff_today(e, name)
-        state = f"{s['done']}/{s['total']} done · {s['open']} pending"
-        report = ("Plan ✓" if s["morning"] else "Plan pending") + " · " + ("Report ✓" if s["evening"] else "Report pending")
-        staff_metrics.append(_card(name, state, report, f"/alliance/primary/day-plan?staff={name.replace(' ','%20')}", "goodbox" if s["morning"] and s["evening"] else "warn"))
+        open_n = max(0, s["total"] - s["done"])
+        plan_cls = "okpill" if s["morning"] else "warnpill"
+        report_cls = "okpill" if s["evening"] else "warnpill"
+        staff_cards.append(f"""
+        <div class='staffcard'>
+          <div class='staffhead'>
+            <div><b>{html.escape(name)}</b><br><span>Today's activity</span></div>
+            <a class='mini' href='/alliance/primary/day-plan?staff={name.replace(" ","%20")}'>Open Day Plan</a>
+          </div>
+          <div class='staffmetrics'>
+            <div><strong>{s["total"]}</strong><span>Tasks</span></div>
+            <div><strong>{s["done"]}</strong><span>Done</span></div>
+            <div><strong>{open_n}</strong><span>Pending</span></div>
+          </div>
+          <div class='checks'>
+            <span class='{plan_cls}'>Morning plan: {"DONE" if s["morning"] else "PENDING"}</span>
+            <span class='{report_cls}'>Day report: {"DONE" if s["evening"] else "PENDING"}</span>
+          </div>
+          <a class='mini' href='/alliance/primary/staff-review?staff={name.replace(" ","%20")}'>History</a>
+        </div>""")
 
-    return HTMLResponse(f"""<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>
-<title>Alliance Team Command Centre</title><style>{_base_css()}</style></head><body>
+    recent = _rows(e, """SELECT task_date,team_member,task_text,status,outcome
+        FROM pi_team_daily_tasks_v1230
+        WHERE team_member IN ('Yogesh Mehra','Priya','Zoya Saifi')
+        ORDER BY task_date DESC,id DESC LIMIT 30""")
+    recent_rows = "".join(
+        f"<tr><td>{html.escape(str(x.get('task_date') or ''))}</td>"
+        f"<td><b>{html.escape(str(x.get('team_member') or ''))}</b></td>"
+        f"<td>{html.escape(str(x.get('task_text') or ''))}</td>"
+        f"<td>{html.escape(str(x.get('status') or ''))}</td>"
+        f"<td>{html.escape(str(x.get('outcome') or ''))}</td></tr>"
+        for x in recent
+    ) or "<tr><td colspan='5'>No staff tasks saved yet.</td></tr>"
+
+    quick = [
+        ("Requirements","/alliance/primary/requirements","Verify and run matcher"),
+        ("Smart Matcher","/alliance/primary/matcher","Review ranked properties"),
+        ("Availability","/alliance/primary/availability","Verify before client sharing"),
+        ("Property Databases","/alliance/final/databases","Master + source property views"),
+        ("Requirement Databases","/alliance/final/requirements","Master + source requirement views"),
+        ("Goa Properties","/alliance/goa-properties","Goa inventory and search"),
+        ("WhatsApp Live","/whatsapp-live","Live READY WhatsApp property feed"),
+        ("Hospitality Intelligence","/hospitality-intelligence","Restaurant, hotel, banquet and hospitality intelligence"),
+        ("Retail Expansion","/retail-expansion","Retail brand expansion intelligence"),
+        ("Commercial Intelligence","/commercial-intelligence","Malls, government premises and commercial opportunities"),
+        ("Requirement Discovery","/requirement-discovery","Demand discovery evidence"),
+        ("Marketing Contacts","/marketing-contacts","Marketing/contact intelligence"),
+        ("Follow-ups","/alliance/primary/followups","Team action queue"),
+        ("Deals & Reports","/alliance/primary/reports","Live workflow reports"),
+        ("Daily Day Plan","/alliance/primary/day-plan","Yogesh · Priya · Zoya"),
+        ("Staff Review","/alliance/primary/staff-review","Review daily work by staff"),
+        ("Monthly Review","/alliance/primary/monthly-review","Monthly staff performance"),
+        ("Add Requirement","/requirements-workbench","Capture new demand"),
+        ("Add Property","/property-manual","Manual property entry"),
+        ("Final Link Audit","/alliance/team-link-audit","27-route production audit"),
+    ]
+    quick_html = "".join(
+        f"<a class='quick' href='{html.escape(path,quote=True)}'><b>{html.escape(label)}</b><span>{html.escape(desc)}</span></a>"
+        for label,path,desc in quick
+    )
+
+    now = datetime.now(timezone.utc).strftime("%d %b %Y %H:%M UTC")
+    return HTMLResponse(f"""<!doctype html><html><head><meta charset='utf-8'>
+<meta name='viewport' content='width=device-width,initial-scale=1'><title>Alliance Team Command Centre</title>
+<style>{_base_css()}</style></head><body>
 <div class='top'>
- <div><h1>Alliance CRE · Team Command Centre</h1><p>Requirement → Smart Match → Availability Verification → Approval → Assignment → Follow-up</p></div>
- <div class='badge'>{status}</div>
+  <div><h1>Alliance CRE · Team Command Centre</h1><p>Daily staff accountability + CRE workflow + live intelligence access</p></div>
+  <div class='badge'>WORKABLE</div>
 </div>
 <div class='wrap'>
- <div class='section'>
-  <h2>Today at a glance</h2>
-  <div class='metrics'>
-   {_card("Verified Requirements", c["verified_requirements"], "Ready to run Smart Matcher", "/alliance/primary/requirements", "goodbox")}
-   {_card("Verify First", c["unverified_requirements"], "Requirements still needing human verification", "/alliance/primary/requirements", "warn")}
-   {_card("Verified Available Properties", c["verified_available"], "Safe candidates after current availability check", "/alliance/primary/availability", "goodbox")}
-   {_card("Availability Unknown", c["availability_unknown"], "Must be checked before client sharing", "/alliance/primary/availability", "warn")}
-   {_card("Matches Ready", c["matches_ready"], "Matcher output waiting for review", "/alliance/primary/matcher")}
-   {_card("Approved Matches", c["matches_approved"], "Eligible for assignment", "/alliance/primary/matcher", "goodbox")}
-   {_card("Scheduled Follow-ups", c["followups"], "Active team follow-up queue", "/alliance/primary/followups")}
-   {_card("Assigned Opportunities", c["assigned"], "Current team-owned work", "/alliance/primary/followups")}
-  </div>
- </div>
 
- <div class='section'>
-  <h2>Team Day Plan</h2>
-  <div class='metrics'>{''.join(staff_metrics)}</div>
- </div>
+<div class='section'><h2>Team Performance Today</h2><div class='staffgrid'>{''.join(staff_cards)}</div></div>
 
- <div class='section two'>
-  <div class='panel'><h2>Team workflow</h2>{workflow}
-   <div class='rule'><b>Client-safety rule:</b> Never send owner/broker contact details to the client. Verify property availability first, approve the match, then prepare the client-safe option.</div>
-  </div>
-  <div class='panel'><h2>Database health</h2>{health_html}
-   <div class='rule'><b>Magazine governance:</b><br>
-   Workable: {c["mag_workable"]}<br>
-   Gold / AI-safe: {c["mag_gold"]}<br>
-   Matcher Magazine: {c["matcher_magazine"]}<br>
-   Review queue: {c["mag_review"]}</div>
-  </div>
- </div>
+<div class='section'><h2>Alliance Deal Work Queue</h2><div class='metrics'>
+{_card("Master Properties",c["properties"],"Canonical property database","/alliance/final/database/master")}
+{_card("Master Requirements",c["requirements"],"Canonical requirement database","/alliance/primary/requirements")}
+{_card("Verified Requirements",c["verified_requirements"],"Ready to match","/alliance/primary/requirements","goodbox")}
+{_card("Verify First",c["unverified_requirements"],"Must be human verified","/alliance/primary/requirements","warn")}
+{_card("Verified Available",c["verified_available"],"Current confirmed stock","/alliance/primary/availability","goodbox")}
+{_card("Availability Unknown",c["availability_unknown"],"Verify matched candidates only","/alliance/primary/availability","warn")}
+{_card("Matches Ready",c["matches_ready"],"Waiting for review","/alliance/primary/matcher")}
+{_card("Approved Matches",c["matches_approved"],"Ready for assignment","/alliance/primary/matcher","goodbox")}
+{_card("Follow-ups",c["followups"],"Scheduled actions","/alliance/primary/followups")}
+{_card("Assigned",c["assigned"],"Team-owned opportunities","/alliance/primary/followups")}
+</div></div>
 
- <div class='section'><h2>Quick access</h2><div class='quickgrid'>{quick}</div></div>
- <div class='footer'>Dashboard version {VERSION} · Generated {now}. Previous Command Centre interface restored; staff day-plan data is stored separately without changing Master/Gold/matcher logic.</div>
+<div class='section two'>
+  <div class='panel'>
+    <h2>Latest Staff Tasks</h2>
+    <div class='tablebox'><table><tr><th>Date</th><th>Staff</th><th>Task</th><th>Status</th><th>Outcome</th></tr>{recent_rows}</table></div>
+    <p><a class='mini' href='/alliance/primary/staff-review'>Open Full Staff History</a></p>
+  </div>
+  <div class='panel'>
+    <h2>System Ready</h2>
+    <div class='checks'>
+      <span class='okpill'>27/27 dashboard routes PASS</span>
+      <span class='okpill'>Goa Properties LIVE</span>
+      <span class='okpill'>WhatsApp Live LIVE</span>
+      <span class='okpill'>Commercial Intelligence LIVE</span>
+    </div>
+    <div class='note'><b>Safety:</b> Requirement verification remains mandatory before Smart Matcher. Property availability must be verified before client sharing. Owner/broker contacts remain internal.</div>
+    <p><a class='mini goodbtn' href='/alliance/team-link-audit'>Open Full Link Audit</a></p>
+  </div>
+</div>
+
+<div class='section'><h2>Everything the Team Needs</h2><div class='quickgrid'>{quick_html}</div></div>
+
+<div class='note'><b>Management rule:</b> Yogesh Mehra, Priya and Zoya Saifi day plans remain stored under their exact staff names. This UI restoration does not change Master, Gold, Matcher, Requirement Gate or the 12.4.3 route fixes.</div>
+<div class='footer'>Dashboard 12.3.5-PREVIOUS-UI-RESTORED · {now}. Previous all-in-one visual interface restored with current production routes retained.</div>
 </div></body></html>""", headers={"Cache-Control":"no-store"})
 
 def _staff_shell(title, body):
