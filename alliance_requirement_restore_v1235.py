@@ -10,7 +10,7 @@ from fastapi import Query, Request
 from fastapi.responses import HTMLResponse
 from sqlalchemy import text
 
-VERSION = "12.3.7-RUN-MATCH-ALWAYS-VISIBLE"
+VERSION = "12.3.8-ROBUST-MASTER-REQUIREMENTS"
 SOURCES = ("MASTER", "NEWSPAPER", "WHATSAPP", "MAGAZINE", "MANUAL")
 
 EXCLUDE_TOKENS = (
@@ -205,6 +205,7 @@ def _source_rows(e, source, per_table=5000):
 def _master_rows(e, source, limit=10000):
     if not _table_exists(e, "pi_master_requirements_v711"):
         return []
+
     params = {"n": int(limit)}
     source_clause = ""
     if source != "MASTER":
@@ -213,30 +214,35 @@ def _master_rows(e, source, limit=10000):
           AND (
             EXISTS (
               SELECT 1 FROM pi_master_source_links_v711 l
-              WHERE l.canonical_id=r.canonical_id
+              WHERE l.canonical_id=(to_jsonb(r)->>'canonical_id')
                 AND l.master_entity_type='REQUIREMENT'
                 AND (
                   UPPER(COALESCE(l.source_type,'')) LIKE :pat OR
                   UPPER(COALESCE(l.source_table,'')) LIKE :pat
                 )
             )
-            OR UPPER(COALESCE(r.clean_record->>'source','')) LIKE :pat
-            OR UPPER(COALESCE(r.clean_record->>'source_type','')) LIKE :pat
-            OR UPPER(COALESCE(r.clean_record->>'source_name','')) LIKE :pat
-            OR UPPER(COALESCE(r.clean_record->>'channel','')) LIKE :pat
-            OR UPPER(COALESCE(r.clean_record->>'import_source','')) LIKE :pat
+            OR UPPER(COALESCE(to_jsonb(r)->>'source','')) LIKE :pat
+            OR UPPER(COALESCE(to_jsonb(r)->>'source_type','')) LIKE :pat
+            OR UPPER(COALESCE(to_jsonb(r)->>'source_name','')) LIKE :pat
+            OR UPPER(COALESCE(to_jsonb(r)->>'channel','')) LIKE :pat
+            OR UPPER(COALESCE(to_jsonb(r)->>'import_source','')) LIKE :pat
           )
         """
+
     sql = f"""
-        SELECT r.canonical_id,r.locality,r.city,r.transaction_type,r.area_sqft,
-               r.sale_budget,r.rent_budget,r.phones,r.clean_record,r.created_at,
-               COALESCE(w.verification_status,'UNVERIFIED') AS verification_status,
-               COALESCE(a.assigned_to,'') AS assigned_to
+        SELECT
+          to_jsonb(r) AS d,
+          COALESCE(w.verification_status,'UNVERIFIED') AS verification_status,
+          COALESCE(a.assigned_to,'') AS assigned_to
         FROM pi_master_requirements_v711 r
-        LEFT JOIN pi_master_workflow_v720 w ON w.canonical_id=r.canonical_id
-        LEFT JOIN pi_master_action_state_v730 a ON a.canonical_id=r.canonical_id
+        LEFT JOIN pi_master_workflow_v720 w
+          ON w.canonical_id=(to_jsonb(r)->>'canonical_id')
+        LEFT JOIN pi_master_action_state_v730 a
+          ON a.canonical_id=(to_jsonb(r)->>'canonical_id')
         WHERE 1=1 {source_clause}
-        ORDER BY r.created_at DESC NULLS LAST
+        ORDER BY
+          NULLIF(to_jsonb(r)->>'updated_at','') DESC NULLS LAST,
+          NULLIF(to_jsonb(r)->>'created_at','') DESC NULLS LAST
         LIMIT :n
     """
     try:
@@ -244,28 +250,56 @@ def _master_rows(e, source, limit=10000):
             data = c.execute(text(sql), params).mappings().all()
     except Exception:
         return []
+
     out = []
     for x in data:
-        r = dict(x)
-        cr = _dict(r.get("clean_record"))
+        meta = dict(x)
+        obj = _dict(meta.get("d"))
+        if not obj:
+            continue
+        cr = _dict(obj.get("clean_record"))
+
+        cid = _first(obj, ["canonical_id", "id", "requirement_id"])
+        locality = _first(obj, ["locality", "location"])
+        city = _first(obj, ["city"])
+        location = locality or city or _first(cr, ["location", "preferred_location", "preferred_locations"])
+
+        contact = _first(obj, ["phones", "phone", "contact_phone", "contact_number", "mobile"])
+        if not contact:
+            contact = _first(cr, ["contact_phone", "contact_number", "phone", "mobile", "phones"])
+
+        area = _first(obj, ["area_sqft", "required_area_sqft", "requirement_sqft"])
+        if not area:
+            amin = _first(cr, ["area_min_sqft", "minimum_area_sqft", "min_area_sqft"])
+            amax = _first(cr, ["area_max_sqft", "maximum_area_sqft", "max_area_sqft"])
+            area = f"{amin}-{amax}" if amin or amax else _first(cr, ["required_area", "area"])
+
+        budget = _first(obj, ["sale_budget", "rent_budget", "budget", "budget_raw"])
+        if not budget:
+            budget = _first(cr, ["sale_budget", "rent_budget", "budget", "budget_raw", "max_budget"])
+
+        transaction = _first(obj, ["transaction_type", "transaction", "rent_or_sale"])
+        if not transaction:
+            transaction = _first(cr, ["transaction_type", "transaction", "rent_or_sale"])
+
         out.append({
-            "canonical_id": str(r.get("canonical_id") or ""),
+            "canonical_id": str(cid or ""),
             "source_pk": "",
             "source_table": "pi_master_requirements_v711",
             "source": "MASTER" if source == "MASTER" else source,
-            "message": _message(cr),
+            "message": _message(cr) or _message(obj),
             "company": _first(cr, ["company_name", "brand_name", "client_company", "company", "retailer_name"]),
             "contact_name": _first(cr, ["contact_name", "client_name", "name", "sender_name"]),
-            "contact": r.get("phones") or _first(cr, ["contact_phone", "contact_number", "phone", "mobile"]),
-            "location": r.get("locality") or r.get("city") or _first(cr, ["location", "preferred_location"]),
-            "transaction": r.get("transaction_type") or _first(cr, ["transaction_type", "rent_or_sale"]),
+            "contact": contact,
+            "location": location,
+            "transaction": transaction,
             "category": _first(cr, ["property_category", "required_property_category", "category", "intended_use", "use"]),
             "property_type": _first(cr, ["property_type", "required_property_type", "asset_type"]),
-            "area": r.get("area_sqft") or _first(cr, ["required_area", "required_area_sqft", "minimum_area_sqft", "maximum_area_sqft"]),
-            "budget": r.get("sale_budget") or r.get("rent_budget") or _first(cr, ["budget", "budget_raw"]),
-            "created_at": r.get("created_at"),
-            "verification": r.get("verification_status") or "UNVERIFIED",
-            "assigned_to": r.get("assigned_to") or "",
+            "area": area,
+            "budget": budget,
+            "created_at": _first(obj, ["created_at", "updated_at"]),
+            "verification": meta.get("verification_status") or "UNVERIFIED",
+            "assigned_to": meta.get("assigned_to") or "",
             "is_master": True,
         })
     return out
