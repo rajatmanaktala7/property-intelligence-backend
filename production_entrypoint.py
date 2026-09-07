@@ -943,6 +943,22 @@ def _load_core():
             }
             print("[team-dashboard-v1220] warning:", type(exc).__name__, str(exc))
 
+        # ALLIANCE_REQUIREMENT_SOURCE_RESTORE_V1235
+        try:
+            import alliance_requirement_restore_v1235 as reqrestore_v1235
+            reqrestore_result = reqrestore_v1235.register(wrapped.core)
+            stabilization = dict(stabilization or {})
+            stabilization["requirement_restore_v1235"] = reqrestore_result
+            print("[requirement-restore-v1235]", reqrestore_result)
+        except Exception as exc:
+            stabilization = dict(stabilization or {})
+            stabilization["requirement_restore_v1235"] = {
+                "status":"ERROR",
+                "error":f"{type(exc).__name__}: {exc}",
+                "fail_safe":True,
+            }
+            print("[requirement-restore-v1235] warning:", type(exc).__name__, str(exc))
+
         CORE_APP = wrapped.app
         try:
             import alliance_whatsapp_safe_ingest_v5 as safe_wa
