@@ -7,7 +7,7 @@ from fastapi import Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import text
 
-VERSION = "12.4.2-ROUTE-RESCUE-FINAL-AUDIT"
+VERSION = "12.4.3-WHATSAPP-AUTHORITATIVE-BIND"
 
 TEAM_LINKS = [
     ("Dashboard", "/team-dashboard-v376", "TEAM"),
@@ -111,13 +111,137 @@ def _try_register(label, fn):
 
 def _register_whatsapp(core):
     app = _app(core)
+
     if _route_exists(app, "/whatsapp-live"):
         REGISTRATION["whatsapp"] = {"status": "ALREADY_REGISTERED"}
         return
-    def go():
+
+    mod = None
+    try:
         import alliance_v45_live_whatsapp_takeover as mod
-        return mod.register(core)
-    _try_register("whatsapp", go)
+        result = mod.register(core)
+        REGISTRATION["whatsapp"] = {
+            "status": "MODULE_REGISTERED",
+            "result": type(result).__name__,
+        }
+    except Exception as exc:
+        REGISTRATION["whatsapp"] = {
+            "status": "MODULE_ERROR",
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+    # Some historical startup layers can leave the APIRouter constructed but not
+    # attached to the authoritative FastAPI app. Bind the team routes directly
+    # to the same app object used by this final audit.
+    if not _route_exists(app, "/whatsapp-live"):
+        @app.get("/whatsapp-live", response_class=HTMLResponse, include_in_schema=False)
+        def whatsapp_live_authoritative(req: Request):
+            _login(core, req)
+            try:
+                if mod is None:
+                    raise RuntimeError("WhatsApp V4.5.3 module unavailable")
+                mod.updater.request_refresh(force=False)
+                raw = mod._raw_stats()
+                st = mod._stats(_engine(core))
+                body = f"""
+                <h2>Live Intake Command Centre</h2>
+                <div class=grid>
+                  <div class=card>Active Mobile Numbers<h2>{raw.get('accounts',0)}</h2></div>
+                  <div class=card>Active Groups<h2>{raw.get('groups',0)}</h2></div>
+                  <div class=card>Raw Messages Today<h2>{raw.get('today',0)}</h2></div>
+                  <div class=card>Clean READY Properties<h2>{st.get('count',0)}</h2></div>
+                  <div class=card>Verified READY Properties<h2>{st.get('verified',0)}</h2></div>
+                </div>
+                <div class=card><b>Rule:</b> NEEDS_REVIEW and NOISE stay hidden from team availability.
+                Raw/source evidence remains preserved for audit and AI matching.</div>
+                <div class=card>
+                  <a class='btn green' href='/whatsapp-live/feed'>Open Clean READY Feed</a>
+                  <a class=btn href='/whatsapp-property-master-v44'>Open Source Master</a>
+                </div>
+                """
+                return HTMLResponse(mod._page("WhatsApp Live Dashboard", body), headers={"Cache-Control":"no-store"})
+            except Exception as exc:
+                return HTMLResponse(
+                    f"""<!doctype html><html><body style="font-family:Arial;padding:24px">
+                    <h2>WhatsApp Live</h2>
+                    <p>Route is active, but the WhatsApp intelligence engine returned an error.</p>
+                    <pre>{_e(type(exc).__name__ + ": " + str(exc))}</pre>
+                    <p><a href="/alliance/primary">Back to Command Centre</a></p>
+                    </body></html>""",
+                    status_code=200,
+                    headers={"Cache-Control":"no-store"},
+                )
+
+    if not _route_exists(app, "/whatsapp-live/feed"):
+        @app.get("/whatsapp-live/feed", response_class=HTMLResponse, include_in_schema=False)
+        def whatsapp_feed_authoritative(req: Request):
+            _login(core, req)
+            try:
+                if mod is None:
+                    raise RuntimeError("WhatsApp V4.5.3 module unavailable")
+                mod.updater.request_refresh(force=False)
+                q = str(req.query_params.get("q") or "").strip()
+                rows = mod._load_master(_engine(core), q, 3000)
+                trs = "".join(
+                    f"""<tr>
+                    <td>{mod._esc(r.get('transaction'))}</td>
+                    <td class='desc'><b>{mod._esc(r.get('description'))}</b></td>
+                    <td><b>{mod._esc(r.get('micro_location'))}</b></td>
+                    <td>{mod._esc(r.get('area') or '—')}</td>
+                    <td><b>{mod._esc(r.get('price_display'))}</b></td>
+                    <td>{mod._esc(r.get('availability_from'))}</td>
+                    <td>{mod._esc(r.get('contact_name_number') or '—')}</td>
+                    <td>{mod._esc(r.get('source') or '—')}</td>
+                    <td>{mod._esc(r.get('captured_on') or '—')}</td>
+                    <td>{mod._esc(r.get('verification') or 'UNVERIFIED')}</td>
+                    </tr>"""
+                    for r in rows
+                )
+                body = f"""<h2>WhatsApp Group Availability</h2>
+                <div class=card>
+                  <form method=get style='display:grid;grid-template-columns:1fr auto;gap:8px'>
+                    <input name=q value='{mod._esc(q)}' placeholder='Search location, project, property, contact or source'>
+                    <button>Search</button>
+                  </form>
+                  <p class=muted><b>{len(rows)}</b> READY properties shown.</p>
+                </div>
+                <div class=card style='overflow:auto'><table>
+                  <tr><th>Sale/Rent</th><th>Property</th><th>Micro-location / Project</th><th>Area</th>
+                  <th>Price / Rent</th><th>Available From</th><th>Internal Contact</th><th>Source Group</th>
+                  <th>Message Date</th><th>Verification</th></tr>
+                  {trs or '<tr><td colspan=10>No READY WhatsApp properties found.</td></tr>'}
+                </table></div>"""
+                return HTMLResponse(mod._page("WhatsApp Group Availability", body), headers={"Cache-Control":"no-store"})
+            except Exception as exc:
+                return HTMLResponse(
+                    f"""<!doctype html><html><body style="font-family:Arial;padding:24px">
+                    <h2>WhatsApp Live Feed</h2>
+                    <pre>{_e(type(exc).__name__ + ": " + str(exc))}</pre>
+                    <p><a href="/whatsapp-live">Back to WhatsApp Live</a></p>
+                    </body></html>""",
+                    status_code=200,
+                    headers={"Cache-Control":"no-store"},
+                )
+
+    if not _route_exists(app, "/api/v451/live/status"):
+        @app.get("/api/v451/live/status")
+        def whatsapp_status_authoritative(req: Request):
+            _login(core, req)
+            if mod is None:
+                return {"status":"DEGRADED","version":VERSION,"error":"WhatsApp V4.5.3 module unavailable"}
+            try:
+                return {
+                    "version": getattr(mod, "VERSION", VERSION),
+                    "status": "OK",
+                    "clean_feed": mod._stats(_engine(core)),
+                    "policy": "READY_ONLY_REVIEW_HIDDEN",
+                    "authoritative_bind": True,
+                }
+            except Exception as exc:
+                return {"status":"ERROR","version":VERSION,"error":f"{type(exc).__name__}: {exc}"}
+
+    REGISTRATION["whatsapp"]["authoritative_route"] = _route_exists(app, "/whatsapp-live")
+    REGISTRATION["whatsapp"]["feed_route"] = _route_exists(app, "/whatsapp-live/feed")
 
 def _register_hospitality(core):
     app = _app(core)
