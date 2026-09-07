@@ -7,7 +7,7 @@ from fastapi import Form, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import text
 
-VERSION = "12.3.5-PREVIOUS-UI-RESTORED"
+VERSION = "12.3.6-PREVIOUS-UI-NEWSPAPER-RESTORED"
 ROUTE = "/alliance/primary"
 
 STAFF = ["Yogesh Mehra", "Priya", "Zoya Saifi"]
@@ -236,6 +236,7 @@ def _dashboard(core, req):
         ("Property Databases","/alliance/final/databases","Master + source property views"),
         ("Requirement Databases","/alliance/final/requirements","Master + source requirement views"),
         ("Goa Properties","/alliance/goa-properties","Goa inventory and search"),
+        ("Newspaper Capture","/capture-intelligence","Capture newspaper pages into clean property records"),
         ("WhatsApp Live","/whatsapp-live","Live READY WhatsApp property feed"),
         ("Hospitality Intelligence","/hospitality-intelligence","Restaurant, hotel, banquet and hospitality intelligence"),
         ("Retail Expansion","/retail-expansion","Retail brand expansion intelligence"),
