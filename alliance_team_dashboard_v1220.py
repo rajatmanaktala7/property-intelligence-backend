@@ -7,7 +7,7 @@ from fastapi import Form, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import text
 
-VERSION = "12.3.6-PREVIOUS-UI-NEWSPAPER-RESTORED"
+VERSION = "12.3.7-PREVIOUS-UI-BOTS-RESTORED"
 ROUTE = "/alliance/primary"
 
 STAFF = ["Yogesh Mehra", "Priya", "Zoya Saifi"]
@@ -240,6 +240,8 @@ def _dashboard(core, req):
         ("WhatsApp Live","/whatsapp-live","Live READY WhatsApp property feed"),
         ("Hospitality Intelligence","/hospitality-intelligence","Restaurant, hotel, banquet and hospitality intelligence"),
         ("Retail Expansion","/retail-expansion","Retail brand expansion intelligence"),
+        ("Hospitality Bot","/v3/hospitality-intelligence","Run hospitality discovery and review restaurants, cafes, lounges, clubs, banquets, hotels and guest houses"),
+        ("Retail Expansion Bot","/v3/retail-expansion-intelligence","Discover expansion contacts and retail demand signals from public indexed sources"),
         ("Commercial Intelligence","/commercial-intelligence","Malls, government premises and commercial opportunities"),
         ("Requirement Discovery","/requirement-discovery","Demand discovery evidence"),
         ("Marketing Contacts","/marketing-contacts","Marketing/contact intelligence"),
