@@ -10,7 +10,7 @@ from fastapi import Query, Request
 from fastapi.responses import HTMLResponse
 from sqlalchemy import text
 
-VERSION = "12.3.6-REQUIREMENT-RUN-MATCH-DASHBOARD-FIX"
+VERSION = "12.3.7-RUN-MATCH-ALWAYS-VISIBLE"
 SOURCES = ("MASTER", "NEWSPAPER", "WHATSAPP", "MAGAZINE", "MANUAL")
 
 EXCLUDE_TOKENS = (
@@ -433,19 +433,16 @@ def _table(e, source, q, location, transaction, status, assigned, limit):
         rid = row.get("canonical_id") or f"{row.get('source_table')}:{row.get('source_pk')}"
         if is_master and row.get("canonical_id"):
             cid = _e(row["canonical_id"])
-            verification = str(row.get("verification") or "").upper()
-            if verification == "VERIFIED":
-                action = (
-                    f'<a class="btn" href="/alliance/primary/requirement/{cid}">Open</a> '
-                    f'<a class="btn" href="/alliance/primary/matcher?requirement_id={cid}">Run Match</a>'
-                )
-            else:
-                action = (
-                    f'<a class="btn" href="/alliance/primary/requirement/{cid}">Open</a> '
-                    f'<a class="btn" href="/alliance/primary/requirement/{cid}">Verify First</a>'
-                )
+            action = (
+                f'<a class="btn" href="/alliance/primary/requirement/{cid}">Open</a> '
+                f'<a class="btn" href="/alliance/primary/matcher?requirement_id={cid}">Run Match</a>'
+            )
         else:
-            action = '<a class="btn" href="/alliance/primary/requirements">Verify First</a>'
+            src = _e(row.get("source") or source)
+            spk = _e(row.get("source_pk") or "")
+            action = (
+                f'<a class="btn" href="/alliance/final/requirements/run-match?source={src}&source_pk={spk}">Run Match</a>'
+            )
         cls = "masterrow" if is_master else "sourceonly"
         vals = [
             rid, row.get("message"), row.get("company"), row.get("contact_name"), row.get("contact"),
@@ -511,6 +508,42 @@ def register(core):
             headers={"Cache-Control":"no-store","X-Alliance-Requirement-Restore":VERSION},
         )
 
+    @app.get("/alliance/final/requirements/run-match", response_class=HTMLResponse, include_in_schema=False)
+    def source_run_match(req: Request, source: str = Query(""), source_pk: str = Query("")):
+        _login(core, req)
+        src = source.upper().strip()
+        if src not in SOURCES or src == "MASTER":
+            return HTMLResponse(_shell("Run Match", '<div class="notice">Invalid source requirement.</div>'), status_code=400)
+
+        rows, _ = _source_rows(e, src)
+        selected = None
+        for row in rows:
+            if str(row.get("source_pk") or "") == str(source_pk or ""):
+                selected = row
+                break
+
+        if not selected:
+            return HTMLResponse(
+                _shell("Run Match", '<div class="notice"><b>Requirement not found in source database.</b></div>'),
+                status_code=404,
+            )
+
+        msg = _e(selected.get("message") or "")
+        loc = _e(selected.get("location") or "")
+        contact = _e(selected.get("contact") or "")
+        body = f"""
+        <div class="notice"><b>Run Match requested.</b><br>
+        This record is still a source-only requirement. Smart Matcher accepts only a human-verified Master Requirement.
+        Verify/promote this exact requirement first; after verification, use Run Match from the Master Requirement row.</div>
+        <div class="card">
+          <b>Original Requirement</b><p>{msg}</p>
+          <b>Location</b><p>{loc}</p>
+          <b>Contact</b><p>{contact}</p>
+          <p><a class="btn" href="/alliance/primary/requirements?q={source_pk}">Verify / Promote This Requirement</a></p>
+        </div>
+        """
+        return HTMLResponse(_shell("Run Match", body), headers={"Cache-Control":"no-store"})
+
     @app.get("/api/alliance/requirement-restore/status", include_in_schema=False)
     def restore_status(req: Request):
         _login(core, req)
@@ -533,6 +566,7 @@ def register(core):
 
     _move_front(app, "/alliance/final/requirements")
     _move_front(app, "/alliance/final/requirements/{source}")
+    _move_front(app, "/alliance/final/requirements/run-match")
     _move_front(app, "/api/alliance/requirement-restore/status")
 
     return {
