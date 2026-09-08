@@ -1084,6 +1084,30 @@ def _load_core():
             stabilization = dict(stabilization or {})
             stabilization["hospitality_phone_recovery_v12417"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","fail_safe":True}
             print("[hospitality-phone-v12417] warning:",type(exc).__name__,str(exc))
+
+        # ALLIANCE_UNIVERSAL_NAV_FINAL_V12419A
+        try:
+            import alliance_back_to_dashboard_v1221 as back_v1221_final
+            app_obj = wrapped.core.app
+            try:
+                if getattr(app_obj.state, 'alliance_back_to_dashboard_v1221', False):
+                    app_obj.state.alliance_back_to_dashboard_v1221 = False
+            except Exception:
+                pass
+            try:
+                app_obj.user_middleware = [m for m in list(app_obj.user_middleware) if getattr(m, 'cls', None).__name__ != 'BackToDashboardMiddleware']
+                app_obj.middleware_stack = None
+            except Exception:
+                pass
+            nav_final_result = back_v1221_final.register(wrapped.core)
+            stabilization = dict(stabilization or {})
+            stabilization['universal_nav_final_v12419a'] = nav_final_result
+            print('[universal-nav-final-v12419a]', nav_final_result)
+        except Exception as exc:
+            stabilization = dict(stabilization or {})
+            stabilization['universal_nav_final_v12419a'] = {'status':'ERROR','error':f'{type(exc).__name__}: {exc}','fail_safe':True}
+            print('[universal-nav-final-v12419a] warning:', type(exc).__name__, str(exc))
+
         CORE_APP = wrapped.app
         try:
             import alliance_whatsapp_safe_ingest_v5 as safe_wa

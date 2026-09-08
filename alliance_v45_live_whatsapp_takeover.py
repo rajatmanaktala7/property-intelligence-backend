@@ -8,7 +8,7 @@ from fastapi.routing import APIRoute
 from sqlalchemy import text
 import alliance_auto_updater as updater
 
-VERSION = "4.5.3-SAFE-CLEAN-FEED"
+VERSION = "4.5.4-ALLIANCE-PRIMARY-NAV-FIX"
 
 CITY_ONLY = {
     "gurgaon","gurugram","delhi","new delhi","delhi ncr","ncr","noida","greater noida",
@@ -202,8 +202,9 @@ def _page(title,body):
     .ok{{color:#176b3a;font-weight:800}}
     </style></head><body><header><h2 style='margin:0'>WhatsApp Live Property Intelligence</h2>
     <small>READY properties only. Review/noise stays hidden from team availability.</small></header>
-    <nav><a href='/team-dashboard-v376'>← Dashboard</a><a href='/workspace'>Working Space</a>
-    <a href='/whatsapp-live'>Live Dashboard</a><a href='/whatsapp-live/feed'>Live Property Feed</a>
+    <nav><button type='button' onclick='history.back()' style='border:0;background:#475467;color:#fff;padding:8px 10px;border-radius:7px;font-weight:800;cursor:pointer'>&larr; Previous Page</button>
+    <a href='/alliance/primary' style='background:#102a43;color:#fff'>&larr; Back to Dashboard</a>
+    <a href='/whatsapp-live'>WhatsApp Live</a><a href='/whatsapp-live/feed'>Live Property Feed</a>
     <a href='/whatsapp-property-master-v44'>Source Master</a><a href='/whatsapp-live/raw-feed-v45'>Raw Audit Feed</a></nav>
     <main>{body}</main></body></html>"""
 
