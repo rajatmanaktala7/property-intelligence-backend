@@ -182,7 +182,9 @@ def install_fast_forms(app,engine,need_login,page_role_or_redirect,actor_name):
             dup=c.execute(text("SELECT property_code FROM pi_operational_properties WHERE division=:d AND lower(location)=lower(:loc) AND area_sqft=:a AND rent_amount=:r AND COALESCE(contact_number,'')=COALESCE(:ph,'') LIMIT 1"),{'d':d,'loc':payload.location,'a':a,'r':r,'ph':payload.contact_number}).first()
             if dup:raise HTTPException(409,f'Possible duplicate already exists: {dup[0]}')
             c.execute(text("INSERT INTO pi_operational_properties(property_code,division,property_name,property_types,city,location,google_location,area_sqft,area_text,rent_amount,rent_text,transaction_type,floor,frontage,parking,possession,suitable_for,nearby_brands,owner_broker_name,contact_number,contact_role,verification_status,remarks,created_by,entry_source,created_at,updated_at) VALUES(:pc,:d,:pn,CAST(:types AS jsonb),:city,:loc,:gl,:a,:at,:r,:rt,:tt,:floor,:front,:park,:poss,:suit,:near,:name,:phone,:role,:verify,:remarks,:by,'MANUAL',NOW(),NOW())"),{'pc':pc,'d':d,'pn':payload.property_name,'types':json.dumps(payload.property_types),'city':payload.city,'loc':payload.location,'gl':payload.google_location,'a':a,'at':payload.area_text,'r':r,'rt':payload.rent_text,'tt':payload.transaction_type,'floor':payload.floor,'front':payload.frontage,'park':payload.parking,'poss':payload.possession,'suit':payload.suitable_for,'near':payload.nearby_brands,'name':payload.owner_broker_name,'phone':payload.contact_number,'role':payload.contact_role,'verify':payload.verification_status,'remarks':payload.remarks,'by':actor_name(req)})
-        return {'status':'created','property_code':pc}
+        import alliance_operational_master_bridge_v12426 as bridge_v12426
+        bridge=bridge_v12426.sync_property(engine,pc,actor_name(req))
+        return {'status':'created','property_code':pc,'canonical_bridge':bridge}
 
     @app.get('/api/v19/properties')
     def list_properties(req:Request,division:str='DELHI_NCR'):
@@ -242,7 +244,9 @@ def install_fast_forms(app,engine,need_login,page_role_or_redirect,actor_name):
             dup=c.execute(text("SELECT requirement_code FROM pi_operational_requirements WHERE division=:d AND lower(preferred_locations)=lower(:loc) AND minimum_area_sqft=:mina AND maximum_area_sqft=:maxa AND COALESCE(contact_number,'')=COALESCE(:ph,'') LIMIT 1"),{'d':d,'loc':payload.preferred_locations,'mina':mina,'maxa':maxa,'ph':payload.contact_number}).first()
             if dup:raise HTTPException(409,f'Possible duplicate already exists: {dup[0]}')
             c.execute(text("INSERT INTO pi_operational_requirements(requirement_code,division,client_name,company_name,contact_number,requirement_types,city,preferred_locations,minimum_area_sqft,minimum_area_text,maximum_area_sqft,maximum_area_text,maximum_rent,maximum_rent_text,transaction_type,additional_points,verification_status,created_by,entry_source,created_at,updated_at) VALUES(:rc,:d,:client,:company,:phone,CAST(:types AS jsonb),:city,:loc,:mina,:minat,:maxa,:maxat,:rent,:rentt,:tt,:points,:verify,:by,'MANUAL',NOW(),NOW())"),{'rc':rc,'d':d,'client':payload.client_name,'company':payload.company_name,'phone':payload.contact_number,'types':json.dumps(payload.requirement_types),'city':payload.city,'loc':payload.preferred_locations,'mina':mina,'minat':payload.minimum_area_text,'maxa':maxa,'maxat':payload.maximum_area_text,'rent':rent,'rentt':payload.maximum_rent_text,'tt':payload.transaction_type,'points':payload.additional_points,'verify':payload.verification_status,'by':actor_name(req)})
-        return {'status':'created','requirement_code':rc}
+        import alliance_operational_master_bridge_v12426 as bridge_v12426
+        bridge=bridge_v12426.sync_requirement(engine,rc,actor_name(req))
+        return {'status':'created','requirement_code':rc,'canonical_bridge':bridge}
 
     @app.get('/api/v19/requirements')
     def list_requirements(req:Request,division:str='DELHI_NCR'):

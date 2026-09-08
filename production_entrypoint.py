@@ -448,9 +448,8 @@ def _load_core():
 
         # Register universal Back-to-Dashboard layer if the module is present.
         try:
-            import alliance_back_to_dashboard_v1221 as back_v1221
             stabilization = dict(stabilization or {})
-            stabilization["back_to_dashboard_v1221"] = back_v1221.register(wrapped.core)
+            stabilization["back_to_dashboard_v1221"] = {"status":"DISABLED_BY_12_4_26"}
         except ModuleNotFoundError:
             print("[back-dashboard-v1221] module not present; continuing safely")
         except Exception as exc:
@@ -1125,7 +1124,7 @@ def _load_core():
                 app_obj.middleware_stack = None
             except Exception:
                 pass
-            nav_final_result = back_v1221_final.register(wrapped.core)
+            nav_final_result = {'status':'DISABLED_BY_12_4_26'}
             stabilization = dict(stabilization or {})
             stabilization['universal_nav_final_v12419a'] = nav_final_result
             print('[universal-nav-final-v12419a]', nav_final_result)
