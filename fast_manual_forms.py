@@ -6,7 +6,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel
 from sqlalchemy import text
 
-V19_VERSION='20.1-GOA-PROPERTY-FORM-FIX'
+V19_VERSION='20.2-GOA-MANUAL-BROCHURE-UI'
 PROPERTY_TYPES=['Retail Shop','High Street Retail','Mall Retail','Office','Restaurant','Cafe','Banquet / Wedding Venue','Hotel','Guest House','Lounge','Club','Bar','Farmhouse','Warehouse','Industrial','Land','Mixed Use','Residential / Villa']
 
 class FastProperty(BaseModel):
@@ -76,7 +76,7 @@ def _property_page(d):
 *{{box-sizing:border-box}}body{{font-family:Arial;background:#f4f7fb;margin:0;color:#172437}}header{{background:#102235;color:#fff;padding:18px}}.w{{max-width:1250px;margin:auto;padding:18px}}.card{{background:#fff;padding:15px;border-radius:12px;margin-bottom:12px;border:1px solid #e2e8f0}}.g{{display:grid;grid-template-columns:1fr 1fr;gap:10px}}input,select,textarea{{width:100%;padding:9px;border:1px solid #ccd6e2;border-radius:7px;box-sizing:border-box}}.checks{{display:grid;grid-template-columns:repeat(3,1fr);gap:6px}}.checks input{{width:auto}}.checks label{{background:#f6f8fb;padding:7px;border-radius:6px}}.btn{{padding:9px 12px;background:#1677ff;color:#fff;border:0;border-radius:8px;cursor:pointer;text-decoration:none;display:inline-block;font-weight:bold}}.gray{{background:#e9eef5;color:#203247}}.green{{background:#08734b}}.drop{{border:2px dashed #8aaac7;padding:18px;border-radius:10px;text-align:center;cursor:pointer;background:#fbfdff}}.drop.drag{{border-color:#1677ff;background:#edf6ff}}.help{{font-size:12px;color:#65758a;margin-top:5px}}.files{{font-size:12px;white-space:pre-wrap;margin-top:8px}}.msg{{margin-top:10px;background:#fff8e8;padding:10px;border-radius:8px;white-space:pre-wrap}}.progress{{height:8px;background:#e8eef5;border-radius:6px;overflow:hidden;margin-top:5px}}.bar{{height:100%;width:0;background:#1677ff}}.fileRow{{padding:8px;border-bottom:1px solid #edf1f5}}table{{width:100%;border-collapse:collapse;font-size:12px}}th,td{{padding:8px;border-bottom:1px solid #eee;text-align:left;vertical-align:top}}.hidden{{display:none}}@media(max-width:800px){{.g,.checks{{grid-template-columns:1fr}}}}
 </style></head><body>
 <header><b>{{city}} Fast Property Entry V19.3</b><br><small>Back to Dashboard · Pictures · Multiple Videos · Multiple Brochures</small></header>
-<div class=w><p><a class="btn gray" href="/workspace">← Back to Dashboard</a></p>
+<div class=w><p><a class="btn gray" href="/alliance/primary">← Back to Dashboard</a></p>
 <div class=card><form id=f autocomplete=off><input id=editcode type=hidden><div class=g>
 <div><b>Property Name</b><input name=property_name></div><div><b>City</b><input name=city value="{{city}}"></div>
 <div style="grid-column:1/-1"><b>Property Types *</b><div class=checks>{{checks}}</div></div>
@@ -91,7 +91,7 @@ def _property_page(d):
 
 <div class=card><b>Pictures · Multiple</b><div class=drop id=idrop>Drag pictures here or click repeatedly to add</div><input id=ipick type=file accept="image/*,.heic,.heif" multiple hidden><div id=ilist class=files>No pictures selected.</div></div>
 <div class=card><b>Videos · Multiple</b><div class=drop id=vdrop>Drag videos here or click repeatedly to add</div><input id=vpick type=file accept="video/*,.mov,.mp4,.m4v,.webm,.avi,.mkv,.3gp" multiple hidden><div id=vlist class=files>No videos selected.</div></div>
-<div class=card><b>Brochures · Multiple</b><div class=drop id=bdrop>Drag brochures here or click repeatedly to add</div><input id=bpick type=file accept=".pdf,.doc,.docx,.ppt,.pptx" multiple hidden><div id=blist class=files>No brochures selected.</div></div>
+<div class=card><b>Brochures / PDFs · Multiple</b><div class=drop id=bdrop>Drag brochures here or click repeatedly to add (PDF, DOC, DOCX, PPT, PPTX)</div><input id=bpick type=file accept=".pdf,.doc,.docx,.ppt,.pptx" multiple hidden><div id=blist class=files>No brochures selected.</div></div>
 
 <button id=save class="btn green">Save Property + Upload Media</button> <button id=cancel type=button class="btn gray hidden" onclick=resetForm()>Cancel Edit</button><div id=msg class=msg>Ready.</div>
 <div id=progressBox class="card hidden"><b>Upload Progress</b><div id=fileProgress></div></div>
