@@ -1003,6 +1003,21 @@ def _load_core():
             }
             print("[dashboard-authority-v12410] warning:", type(exc).__name__, str(exc))
 
+        # ALLIANCE_ROOT_MATCHER_AUTHORITY_V12411
+        try:
+            import alliance_root_matcher_authority_v12411 as rootmatcher_v12411
+            stabilization = dict(stabilization or {})
+            stabilization["root_matcher_authority_v12411"] = rootmatcher_v12411.register(wrapped.core)
+            print("[root-matcher-authority-v12411]", stabilization["root_matcher_authority_v12411"])
+        except Exception as exc:
+            stabilization = dict(stabilization or {})
+            stabilization["root_matcher_authority_v12411"] = {
+                "status":"ERROR",
+                "error":f"{type(exc).__name__}: {exc}",
+                "fail_safe":True,
+            }
+            print("[root-matcher-authority-v12411] warning:", type(exc).__name__, str(exc))
+
         CORE_APP = wrapped.app
         try:
             import alliance_whatsapp_safe_ingest_v5 as safe_wa

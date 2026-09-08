@@ -4,7 +4,7 @@ from typing import Any, Dict, List
 
 import alliance_phase5_canonical_matcher as phase5
 
-VERSION = "1.0.2-NORTH-GOA-BHK-AREA-FIX"
+VERSION = "1.0.3-ALL-WHATSAPP-REQUIREMENT-SEARCH"
 
 
 def _evaluate(
@@ -167,8 +167,10 @@ def run_match(
     # WHATSAPP AVAILABILITY ONLY
     # =====================================================
 
-    wa_raw = phase5.load_whatsapp_master(
-        engine
+    wa_raw = phase5.load_whatsapp_master_for_requirement(
+        engine,
+        req,
+        limit=20000,
     )
 
     wa_candidates = phase5.dedupe_candidates(

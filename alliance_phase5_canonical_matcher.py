@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy import create_engine, text
 
-VERSION = "5.0.5-NORTH-GOA-BHK-AREA-PARSER-FIX"
+VERSION = "5.0.6-ALL-WHATSAPP-REQUIREMENT-SEARCH"
 LIVE_WA_GENERATION_FALLBACK = "159d9eab-5be5-5313-9af5-8f9913522087"
 
 # Phase 5 rules:
@@ -539,52 +539,122 @@ def _live_wa_generation(engine) -> str:
     except Exception:
         return LIVE_WA_GENERATION_FALLBACK
 
-def load_whatsapp_master(engine, limit: int = 10000) -> List[Dict[str, Any]]:
+def _whatsapp_requirement_terms(req: Dict[str, Any]) -> List[str]:
+    loc = req.get("location")
+    if not loc:
+        return []
+    if loc == "NORTH GOA":
+        out = ["NORTH GOA"]
+        for canon in sorted(NORTH_GOA_LOCALITIES):
+            out.append(canon)
+            out.extend(LOCATION_ALIASES.get(canon, []))
+    else:
+        out = [loc]
+        out.extend(LOCATION_ALIASES.get(loc, []))
+    clean = []
+    seen = set()
+    for x in out:
+        x = str(x or "").strip()
+        k = norm(x)
+        if x and k and k not in seen:
+            seen.add(k)
+            clean.append(x)
+    return clean
+
+def load_whatsapp_master_for_requirement(
+    engine,
+    req: Dict[str, Any],
+    limit: int = 20000,
+) -> List[Dict[str, Any]]:
     if not table_exists(engine, "pi_whatsapp_property_master"):
         return []
-    g = _live_wa_generation(engine)
+
     wanted = [
         "record_id", "lead_type", "description", "area", "configuration_details",
         "price", "source", "captured_on", "verification", "furnishing", "floor",
+        "generation_id",
     ]
     cols = table_columns(engine, "pi_whatsapp_property_master")
     selected = [x for x in wanted if x in cols]
+    if not selected:
+        return []
+
     qcols = ", ".join('"' + x + '"' for x in selected)
+    where = []
+    params: Dict[str, Any] = {"lim": int(max(1, min(limit, 50000)))}
+
+    tx = norm(req.get("transaction"))
+    if tx in {"SALE", "RENT"} and "lead_type" in cols:
+        where.append("UPPER(COALESCE(lead_type,'')) = :tx")
+        params["tx"] = tx
+
+    blob_parts = []
+    for c in ("description", "configuration_details", "source"):
+        if c in cols:
+            blob_parts.append(f"COALESCE({c},'')")
+    blob = " || ' ' || ".join(blob_parts) if blob_parts else "''"
+
+    terms = _whatsapp_requirement_terms(req)
+    if terms:
+        loc_parts = []
+        for i, term in enumerate(terms):
+            key = f"loc{i}"
+            loc_parts.append(f"({blob}) ILIKE :{key}")
+            params[key] = f"%{term}%"
+        where.append("(" + " OR ".join(loc_parts) + ")")
+
+    sql = f"SELECT {qcols} FROM pi_whatsapp_property_master"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    if "captured_on" in cols:
+        sql += " ORDER BY captured_on DESC NULLS LAST"
+    sql += " LIMIT :lim"
+
     with engine.connect() as c:
-        rows = [dict(r) for r in c.execute(text(
-            f'SELECT {qcols} FROM pi_whatsapp_property_master '
-            'WHERE generation_id=:g ORDER BY captured_on DESC NULLS LAST, id DESC LIMIT :lim'
-        ), {"g": g, "lim": int(limit)}).mappings().all()]
+        rows = [dict(r) for r in c.execute(text(sql), params).mappings().all()]
+
     out = []
     for d in rows:
-        tx = norm(d.get("lead_type"))
-        if tx not in {"SALE", "RENT"}:
+        txv = norm(d.get("lead_type"))
+        if txv not in {"SALE", "RENT"}:
             continue
+
         desc = str(d.get("description") or "")
-        loc = canonical_location(desc)
+        cfg = str(d.get("configuration_details") or "")
+        blob_text = (desc + " " + cfg).strip()
+
+        loc = canonical_location(blob_text)
+        if not loc and "NORTH GOA" in norm(blob_text):
+            loc = "NORTH GOA"
         if not loc:
-            cfg_loc = candidate_location(d.get("configuration_details"))
-            loc = cfg_loc if cfg_loc and cfg_loc not in {"COMMERCIAL", "APARTMENT", "VILLA", "OFFICE", "RETAIL", "RESTAURANT", "BANQUET", "HOTEL", "WAREHOUSE", "LAND"} else None
+            cfg_loc = candidate_location(cfg)
+            loc = cfg_loc if cfg_loc and cfg_loc not in {
+                "COMMERCIAL", "APARTMENT", "VILLA", "OFFICE", "RETAIL",
+                "RESTAURANT", "BANQUET", "HOTEL", "WAREHOUSE", "LAND"
+            } else None
         if not loc:
             continue
-        fam, sub = family_subtype(d.get("configuration_details"), desc)
-        atext = d.get("area")
-        area_sqft = area_to_sqft(atext)
-        # Keep missing-area WhatsApp records. _area_gate() will still reject
-        # them whenever the requirement explicitly contains an area constraint.
+
+        fam, sub = family_subtype(cfg, desc)
+        area_sqft = area_to_sqft(d.get("area"))
+
         ptext = d.get("price")
         price = money_value(ptext)
-        comparable = price is not None and bool(re.search(r"(?i)\b(cr|crore|lac|lakh|k)\b", str(ptext or "")))
+        comparable = price is not None and bool(
+            re.search(r"(?i)\b(cr|crore|lac|lakh|lakhs|k)\b", str(ptext or ""))
+        )
+
         ver = d.get("verification") or "UNVERIFIED"
         if not _available(ver):
             continue
+
         out.append({
-            "source_bucket": "WHATSAPP_PHASE41",
+            "source_bucket": "WHATSAPP_ALL_STORED",
             "source_table": "pi_whatsapp_property_master",
             "record_id": str(d.get("record_id") or ""),
             "description": sanitize_text(desc),
             "location": loc,
-            "transaction": tx,
+            "transaction": txv,
             "family": fam,
             "subtype": sub,
             "area_sqft": area_sqft,
@@ -597,8 +667,13 @@ def load_whatsapp_master(engine, limit: int = 10000) -> List[Dict[str, Any]]:
             "captured_on": d.get("captured_on"),
             "source_name": sanitize_text(d.get("source") or "WhatsApp"),
             "review_reasons": None,
+            "generation_id": str(d.get("generation_id") or "") if "generation_id" in d else None,
         })
     return out
+
+def load_whatsapp_master(engine, limit: int = 10000) -> List[Dict[str, Any]]:
+    return load_whatsapp_master_for_requirement(engine, {}, limit=limit)
+
 
 def load_candidates(engine, pi_limit: int = 15000, wa_limit: int = 10000) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     pi = load_pi_properties(engine, pi_limit)
@@ -682,7 +757,7 @@ def eligible(req: Dict[str, Any], p: Dict[str, Any], location_mode: str = "EXACT
         return False, "REQUIREMENT_LOCATION_UNKNOWN", ["Requirement needs a specific locality"]
     if location_mode == "EXACT":
         if rloc == "NORTH GOA":
-            if ploc not in NORTH_GOA_LOCALITIES:
+            if ploc not in (NORTH_GOA_LOCALITIES | {"NORTH GOA"}):
                 return False, "WRONG_LOCATION", [f"Required NORTH GOA; candidate {ploc or 'unknown'}"]
             why.append(f"North Goa region match: {ploc}")
         else:
