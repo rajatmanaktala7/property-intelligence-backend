@@ -6,7 +6,7 @@ from fastapi import Form, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import text
 
-VERSION="12.4.16-HOSPITALITY-PURITY-DEDUP-ENRICHMENT"
+VERSION="12.4.16A-HOSPITALITY-PAGE-NAME-COLLISION-FIX"
 
 NOISE_EXACT={
     "local","farm house","dance bar","cafe west delhi","banquet halls in connaught place",
@@ -253,7 +253,7 @@ def stats(engine):
           FROM ai_hospitality_entity e LEFT JOIN ai_hospitality_quality_v12416 q USING(hospitality_id)
         """)).mappings().one())
     return r
-def page(core,req,status="CALL_READY",page=1,per_page=100,msg=""):
+def render_page(core,req,status="CALL_READY",page=1,per_page=100,msg=""):
     _login(core,req); ensure_quality_schema(core.engine); audit_purity(core.engine)
     allowed={"CALL_READY","CONTACT_READY","ENRICHMENT_REQUIRED","QUARANTINED_NOISE","ALL"}
     if status not in allowed: status="CALL_READY"
@@ -299,8 +299,8 @@ def register(core):
     app.router.routes[:]=kept
     @app.get("/hospitality-intelligence",response_class=HTMLResponse)
     @app.get("/v3/hospitality-intelligence",response_class=HTMLResponse)
-    def ui(req:Request,status:str=Query("CALL_READY"),page:int=Query(1),per_page:int=Query(100),msg:str=Query("")):
-        return page(core,req,status,page,per_page,msg)
+    def ui(req:Request,status:str=Query("CALL_READY"),page_no:int=Query(1,alias="page"),per_page:int=Query(100),msg:str=Query("")):
+        return render_page(core,req,status,page_no,per_page,msg)
     @app.post("/hospitality-intelligence/run-purity")
     def purity(req:Request):
         _login(core,req); o=audit_purity(core.engine)
