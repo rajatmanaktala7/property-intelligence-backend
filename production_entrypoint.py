@@ -1064,6 +1064,16 @@ def _load_core():
             }
             print("[hospitality-data-recovery-v12415] warning:",type(exc).__name__,str(exc))
 
+        # ALLIANCE_HOSPITALITY_PURITY_V12416
+        try:
+            import alliance_hospitality_purity_v12416 as hosp_purity_v12416
+            stabilization = dict(stabilization or {})
+            stabilization["hospitality_purity_v12416"] = hosp_purity_v12416.register(wrapped.core)
+            print("[hospitality-purity-v12416]", stabilization["hospitality_purity_v12416"])
+        except Exception as exc:
+            stabilization = dict(stabilization or {})
+            stabilization["hospitality_purity_v12416"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","fail_safe":True}
+            print("[hospitality-purity-v12416] warning:",type(exc).__name__,str(exc))
         CORE_APP = wrapped.app
         try:
             import alliance_whatsapp_safe_ingest_v5 as safe_wa
