@@ -208,16 +208,21 @@ def install_fast_forms(app,engine,need_login,page_role_or_redirect,actor_name):
             c.execute(text("SET LOCAL lock_timeout='1500ms'"));c.execute(text("SET LOCAL statement_timeout='3500ms'"))
             x=c.execute(text("UPDATE pi_operational_properties SET property_name=:pn,property_types=CAST(:types AS jsonb),city=:city,location=:loc,google_location=:gl,area_sqft=:a,area_text=:at,rent_amount=:r,rent_text=:rt,transaction_type=:tt,floor=:floor,frontage=:front,parking=:park,possession=:poss,suitable_for=:suit,nearby_brands=:near,owner_broker_name=:name,contact_number=:phone,contact_role=:role,verification_status=:verify,remarks=:remarks,updated_at=NOW() WHERE property_code=:pc"),{'pc':pc,'pn':payload.property_name,'types':json.dumps(payload.property_types),'city':payload.city,'loc':payload.location,'gl':payload.google_location,'a':a,'at':payload.area_text,'r':r,'rt':payload.rent_text,'tt':payload.transaction_type,'floor':payload.floor,'front':payload.frontage,'park':payload.parking,'poss':payload.possession,'suit':payload.suitable_for,'near':payload.nearby_brands,'name':payload.owner_broker_name,'phone':payload.contact_number,'role':payload.contact_role,'verify':payload.verification_status,'remarks':payload.remarks})
             if not x.rowcount:raise HTTPException(404,'Property not found')
-        return {'status':'updated','property_code':pc}
+        import alliance_operational_master_bridge_v12426 as bridge_v12426
+        bridge=bridge_v12426.sync_property(engine,pc,actor_name(req))
+        return {'status':'updated','property_code':pc,'canonical_bridge':bridge}
 
     @app.delete('/api/v19/property/{pc}')
     def delete_property(pc:str,req:Request):
         need_login(req)
+        import alliance_operational_master_bridge_v12426 as bridge_v12426
         with engine.begin() as c:
-            c.execute(text("SET LOCAL lock_timeout='1500ms'"));c.execute(text("DELETE FROM pi_operational_matches WHERE property_code=:pc"),{'pc':pc});c.execute(text("DELETE FROM pi_operational_property_media WHERE property_code=:pc"),{'pc':pc})
-            x=c.execute(text("DELETE FROM pi_operational_properties WHERE property_code=:pc"),{'pc':pc})
+            c.execute(text("SET LOCAL lock_timeout='1500ms'"))
+            x=c.execute(text("UPDATE pi_operational_properties SET entry_source='ARCHIVED',updated_at=NOW() WHERE property_code=:pc"),{'pc':pc})
             if not x.rowcount:raise HTTPException(404,'Property not found')
-        return {'status':'deleted','property_code':pc}
+            c.execute(text("DELETE FROM pi_operational_matches WHERE property_code=:pc"),{'pc':pc})
+        bridge=bridge_v12426.withdraw_property(engine,pc,actor_name(req))
+        return {'status':'archived','property_code':pc,'canonical_bridge':bridge}
 
     @app.post('/api/v19/property/{pc}/images')
     async def upload_images(pc:str,req:Request,files:list[UploadFile]=File(...)):
@@ -271,16 +276,21 @@ def install_fast_forms(app,engine,need_login,page_role_or_redirect,actor_name):
             x=c.execute(text("UPDATE pi_operational_requirements SET client_name=:client,company_name=:company,contact_number=:phone,requirement_types=CAST(:types AS jsonb),city=:city,preferred_locations=:loc,minimum_area_sqft=:mina,minimum_area_text=:minat,maximum_area_sqft=:maxa,maximum_area_text=:maxat,maximum_rent=:rent,maximum_rent_text=:rentt,transaction_type=:tt,additional_points=:points,verification_status=:verify,updated_at=NOW() WHERE requirement_code=:rc"),{'rc':rc,'client':payload.client_name,'company':payload.company_name,'phone':payload.contact_number,'types':json.dumps(payload.requirement_types),'city':payload.city,'loc':payload.preferred_locations,'mina':mina,'minat':payload.minimum_area_text,'maxa':maxa,'maxat':payload.maximum_area_text,'rent':rent,'rentt':payload.maximum_rent_text,'tt':payload.transaction_type,'points':payload.additional_points,'verify':payload.verification_status})
             if not x.rowcount:raise HTTPException(404,'Requirement not found')
             c.execute(text("DELETE FROM pi_operational_matches WHERE requirement_code=:rc"),{'rc':rc})
-        return {'status':'updated','requirement_code':rc}
+        import alliance_operational_master_bridge_v12426 as bridge_v12426
+        bridge=bridge_v12426.sync_requirement(engine,rc,actor_name(req))
+        return {'status':'updated','requirement_code':rc,'canonical_bridge':bridge}
 
     @app.delete('/api/v19/requirement/{rc}')
     def delete_requirement(rc:str,req:Request):
         need_login(req)
+        import alliance_operational_master_bridge_v12426 as bridge_v12426
         with engine.begin() as c:
-            c.execute(text("SET LOCAL lock_timeout='1500ms'"));c.execute(text("DELETE FROM pi_operational_matches WHERE requirement_code=:rc"),{'rc':rc})
-            x=c.execute(text("DELETE FROM pi_operational_requirements WHERE requirement_code=:rc"),{'rc':rc})
+            c.execute(text("SET LOCAL lock_timeout='1500ms'"))
+            x=c.execute(text("UPDATE pi_operational_requirements SET entry_source='ARCHIVED',updated_at=NOW() WHERE requirement_code=:rc"),{'rc':rc})
             if not x.rowcount:raise HTTPException(404,'Requirement not found')
-        return {'status':'deleted','requirement_code':rc}
+            c.execute(text("DELETE FROM pi_operational_matches WHERE requirement_code=:rc"),{'rc':rc})
+        bridge=bridge_v12426.withdraw_requirement(engine,rc,actor_name(req))
+        return {'status':'archived','requirement_code':rc,'canonical_bridge':bridge}
 
     @app.middleware('http')
     async def router(request,call_next):

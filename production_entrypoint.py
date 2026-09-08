@@ -1155,6 +1155,17 @@ def _load_core():
             stabilization["team_workflow_repair_v12424"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","fail_safe":True}
             print("[team-workflow-repair-v12424] warning:",type(exc).__name__,str(exc))
 
+        # ALLIANCE_CANONICAL_LIFECYCLE_HARDENING_V12426A
+        try:
+            import alliance_operational_master_bridge_v12426 as bridge_v12426
+            stabilization = dict(stabilization or {})
+            stabilization["canonical_bridge_v12426a"] = bridge_v12426.register(wrapped.core)
+            print("[canonical-bridge-v12426a]", stabilization["canonical_bridge_v12426a"])
+        except Exception as exc:
+            stabilization = dict(stabilization or {})
+            stabilization["canonical_bridge_v12426a"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","fail_safe":True}
+            print("[canonical-bridge-v12426a] warning:",type(exc).__name__,str(exc))
+
         CORE_APP = wrapped.app
         try:
             import alliance_whatsapp_safe_ingest_v5 as safe_wa
