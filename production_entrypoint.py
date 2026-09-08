@@ -1100,6 +1100,17 @@ def _load_core():
             }
             print("[hospitality-contact-bot-v12422] warning:",type(exc).__name__,str(exc))
 
+        # ALLIANCE_HOSPITALITY_CONTACT_BOT_V12423
+        try:
+            import alliance_hospitality_contact_bot_v12423 as hosp_contact_v12423
+            stabilization = dict(stabilization or {})
+            stabilization["hospitality_contact_bot_v12423"] = hosp_contact_v12423.register(wrapped.core)
+            print("[hospitality-contact-bot-v12423]", stabilization["hospitality_contact_bot_v12423"])
+        except Exception as exc:
+            stabilization = dict(stabilization or {})
+            stabilization["hospitality_contact_bot_v12423"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","fail_safe":True}
+            print("[hospitality-contact-bot-v12423] warning:",type(exc).__name__,str(exc))
+
         # ALLIANCE_UNIVERSAL_NAV_FINAL_V12419A
         try:
             import alliance_back_to_dashboard_v1221 as back_v1221_final
