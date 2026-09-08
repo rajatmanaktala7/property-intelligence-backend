@@ -1134,6 +1134,17 @@ def _load_core():
             stabilization['universal_nav_final_v12419a'] = {'status':'ERROR','error':f'{type(exc).__name__}: {exc}','fail_safe':True}
             print('[universal-nav-final-v12419a] warning:', type(exc).__name__, str(exc))
 
+        # ALLIANCE_TEAM_WORKFLOW_REPAIR_V12424
+        try:
+            import alliance_team_workflow_repair_v12424 as workflow_v12424
+            stabilization = dict(stabilization or {})
+            stabilization["team_workflow_repair_v12424"] = workflow_v12424.register(wrapped.core)
+            print("[team-workflow-repair-v12424]", stabilization["team_workflow_repair_v12424"])
+        except Exception as exc:
+            stabilization = dict(stabilization or {})
+            stabilization["team_workflow_repair_v12424"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","fail_safe":True}
+            print("[team-workflow-repair-v12424] warning:",type(exc).__name__,str(exc))
+
         CORE_APP = wrapped.app
         try:
             import alliance_whatsapp_safe_ingest_v5 as safe_wa

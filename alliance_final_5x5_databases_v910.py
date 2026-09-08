@@ -4,7 +4,7 @@ from fastapi import Form, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import text
 
-VERSION="9.1.1-GOA-MANUAL-ENTRY-NAV"
+VERSION="9.1.2-NEWSPAPER-REGION-QUICK-FILTER"
 SOURCES=("MASTER","NEWSPAPER","WHATSAPP","MAGAZINE","MANUAL")
 CATEGORY_OPTIONS=("Residential Sale","Residential Rent","Commercial Sale","Commercial Rent","Industrial Sale","Industrial Rent","Farmhouse Sale","Farmhouse Rent")
 
@@ -202,7 +202,7 @@ def register(core):
     @app.get("/alliance/final/databases",response_class=HTMLResponse)
     def dbhub(req:Request):
         _login(core,req)
-        cards="".join(f'<div class="dbcard"><h3>{s.title()} Database</h3><a class="btn good" href="/alliance/final/database/{s.lower()}">Open</a></div>' for s in SOURCES)
+        cards="".join(f'<div class="dbcard"><h3>{s.title()} Database</h3><a class="btn good" href="/alliance/final/database/{s.lower()}">Open</a>' + ('<div style="margin-top:8px"><a class="btn light" href="/alliance/final/database/newspaper?location=Delhi">Delhi Newspaper</a> <a class="btn light" href="/alliance/final/database/newspaper?location=Goa">Goa Newspaper</a></div>' if s=="NEWSPAPER" else "") + '</div>' for s in SOURCES)
         actions='<div class="card"><b>Manual Property Entry</b><br><br><a class="btn good" href="/fast-property-entry?division=DELHI_NCR">+ Add Delhi NCR Property</a> <a class="btn good" href="/fast-property-entry?division=GOA">+ Add Goa Property</a><br><small>Both forms support pictures, multiple videos and brochures.</small></div>'
         return HTMLResponse(_shell("5 Property Databases",actions+f'<div class="grid">{cards}</div><div class="card"><b>Matcher rule:</b> Matcher searches Master Property Database only. Source databases remain separate evidence views.</div>'))
     @app.get("/alliance/final/database/{source}",response_class=HTMLResponse)

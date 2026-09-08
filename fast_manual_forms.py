@@ -6,7 +6,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel
 from sqlalchemy import text
 
-V19_VERSION='20.2-GOA-MANUAL-BROCHURE-UI'
+V19_VERSION='20.4-TEAM-WORKFLOW-AREA-MEDIA-REPAIR'
 PROPERTY_TYPES=['Retail Shop','High Street Retail','Mall Retail','Office','Restaurant','Cafe','Banquet / Wedding Venue','Hotel','Guest House','Lounge','Club','Bar','Farmhouse','Warehouse','Industrial','Land','Mixed Use','Residential / Villa']
 
 class FastProperty(BaseModel):
@@ -50,6 +50,8 @@ def parse_area(v):
     if m:return float(m.group(1))
     m=re.search(r'(\d+(?:\.\d+)?)\s*(?:sq\.?\s*m(?:t|ts|tr|trs)?|sqm|sqmt|sqmtr|m2|m²|square\s*met(?:er|re)s?)',s)
     if m:return round(float(m.group(1))*10.7639104167,2)
+    m=re.search(r'(\d+(?:\.\d+)?)\s*(?:sq\.?\s*yd|sqyd|sq\s*yard|square\s*yards?)',s)
+    if m:return round(float(m.group(1))*9,2)
     m=re.search(r'(\d+(?:\.\d+)?)\s*(?:acre|acres)',s)
     if m:return round(float(m.group(1))*43560,2)
     m=re.search(r'(\d+(?:\.\d+)?)',s)
@@ -81,7 +83,7 @@ def _property_page(d):
 <div><b>Property Name</b><input name=property_name></div><div><b>City</b><input name=city value="{{city}}"></div>
 <div style="grid-column:1/-1"><b>Property Types *</b><div class=checks>{{checks}}</div></div>
 <div><b>Location *</b><input name=location required placeholder="Siolim / Assagao / Anjuna"></div><div><b>Google Location (Optional)</b><input name=google_location placeholder="Optional Google Maps link or pin"><div class=help>Not required. Property can be saved without Google location.</div></div>
-<div><b>Area *</b><input name=area_text placeholder="500 sq m / 5000 sqft / 2.5 acre / type manually" required><div class=help>Mandatory free text. Sq m, sqm, sqmt, sqft and acre are accepted.</div></div><div><b id=amountLabel>Rent Amount *</b><input name=rent_text id=amountInput placeholder="5 lakhs" required><div class=help id=amountHelp>Enter rent amount.</div></div>
+<div><b>Area *</b><input name=area_text placeholder="500 sq m / 5000 sqft / 2.5 acre / type manually" required><div class=help>Mandatory free text. Sqft, sq m/sqm/sqmtr, sq yd/sqyd and acre are accepted.</div></div><div><b id=amountLabel>Rent Amount *</b><input name=rent_text id=amountInput placeholder="5 lakhs" required><div class=help id=amountHelp>Enter rent amount.</div></div>
 <div><b>Transaction</b><select name=transaction_type id=transaction_type><option>LEASE</option><option>SALE</option></select></div><div><b>Floor</b><input name=floor></div>
 <div><b>Frontage</b><input name=frontage></div><div><b>Parking</b><input name=parking></div><div><b>Possession</b><input name=possession></div><div><b>Suitable For</b><input name=suitable_for></div>
 <div><b>Nearby Brands</b><input name=nearby_brands></div><div><b>Owner/Broker Name</b><input name=owner_broker_name></div><div><b>Contact Number</b><input name=contact_number></div>
@@ -125,7 +127,7 @@ def _requirement_page(d):
     checks=''.join(f"<label><input type=checkbox name=rtype value='{x}'> {x}</label>" for x in PROPERTY_TYPES)
     return f'''<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>Fast Requirement Entry</title>
 <style>body{{font-family:Arial;background:#f4f7fb;margin:0;color:#172437}}header{{background:#102235;color:#fff;padding:18px}}.w{{max-width:1150px;margin:auto;padding:18px}}.card{{background:#fff;padding:15px;border-radius:12px;margin-bottom:12px}}.g{{display:grid;grid-template-columns:1fr 1fr;gap:10px}}input,select,textarea{{width:100%;padding:9px;border:1px solid #ccd6e2;border-radius:7px;box-sizing:border-box}}.checks{{display:grid;grid-template-columns:repeat(3,1fr);gap:6px}}.checks input{{width:auto}}.btn{{padding:9px 12px;background:#1677ff;color:#fff;border:0;border-radius:8px;cursor:pointer}}.red{{background:#b42318}}.gray{{background:#e9eef5;color:#203247}}table{{width:100%;border-collapse:collapse;font-size:12px}}th,td{{padding:8px;border-bottom:1px solid #eee;text-align:left}}.hidden{{display:none}}.msg{{margin-top:10px;background:#fff8e8;padding:9px}}@media(max-width:800px){{.g,.checks{{grid-template-columns:1fr}}}}</style></head>
-<body><header><b>{'Goa' if d=='GOA' else 'Delhi NCR'} Fast Requirement Entry V19.2</b><br><small>Fast save · Edit/Delete · Form clears after save</small></header><div class=w><p><a class='btn gray' style='text-decoration:none;display:inline-block' href='/'>← Back to Dashboard</a></p>
+<body><header><b>{'Goa' if d=='GOA' else 'Delhi NCR'} Fast Requirement Entry V19.2</b><br><small>Fast save · Edit/Delete · Form clears after save</small></header><div class=w><p><a class='btn gray' style='text-decoration:none;display:inline-block' href='/alliance/primary'>← Back to Dashboard</a></p>
 <div class=card><form id=f><input id=editcode type=hidden><div class=g><div><b>Client Name</b><input name=client_name></div><div><b>Company Name</b><input name=company_name></div><div><b>Contact Number</b><input name=contact_number></div><div><b>City</b><input name=city></div>
 <div style="grid-column:1/-1"><b>Requirement Types *</b><div class=checks>{checks}</div></div><div style="grid-column:1/-1"><b>Preferred Locations *</b><input name=preferred_locations required></div>
 <div><b>Minimum Area *</b><input name=minimum_area_text placeholder="4000 sqft" required></div><div><b>Maximum Area *</b><input name=maximum_area_text placeholder="5000 sqft" required></div>
@@ -173,7 +175,7 @@ def install_fast_forms(app,engine,need_login,page_role_or_redirect,actor_name):
     @app.post('/api/v19/property')
     def add_property(payload:FastProperty,req:Request,division:str='DELHI_NCR'):
         need_login(req);d='GOA' if division.upper()=='GOA' else 'DELHI_NCR';a=parse_area(payload.area_text);r=parse_money(payload.rent_text)
-        if not a or not r:raise HTTPException(400,'Area and Rent must contain recognizable values.')
+        if not a or not r:raise HTTPException(400,'Area and Rent/Sale Amount must contain recognizable values.')
         pc=code('GOA-PROP' if d=='GOA' else 'PROP')
         with engine.begin() as c:
             c.execute(text("SET LOCAL lock_timeout='1500ms'"));c.execute(text("SET LOCAL statement_timeout='3500ms'"))
@@ -199,7 +201,7 @@ def install_fast_forms(app,engine,need_login,page_role_or_redirect,actor_name):
     @app.put('/api/v19/property/{pc}')
     def edit_property(pc:str,payload:FastProperty,req:Request):
         need_login(req);a=parse_area(payload.area_text);r=parse_money(payload.rent_text)
-        if not a or not r:raise HTTPException(400,'Area and Rent must contain recognizable values.')
+        if not a or not r:raise HTTPException(400,'Area and Rent/Sale Amount must contain recognizable values.')
         with engine.begin() as c:
             c.execute(text("SET LOCAL lock_timeout='1500ms'"));c.execute(text("SET LOCAL statement_timeout='3500ms'"))
             x=c.execute(text("UPDATE pi_operational_properties SET property_name=:pn,property_types=CAST(:types AS jsonb),city=:city,location=:loc,google_location=:gl,area_sqft=:a,area_text=:at,rent_amount=:r,rent_text=:rt,transaction_type=:tt,floor=:floor,frontage=:front,parking=:park,possession=:poss,suitable_for=:suit,nearby_brands=:near,owner_broker_name=:name,contact_number=:phone,contact_role=:role,verification_status=:verify,remarks=:remarks,updated_at=NOW() WHERE property_code=:pc"),{'pc':pc,'pn':payload.property_name,'types':json.dumps(payload.property_types),'city':payload.city,'loc':payload.location,'gl':payload.google_location,'a':a,'at':payload.area_text,'r':r,'rt':payload.rent_text,'tt':payload.transaction_type,'floor':payload.floor,'front':payload.frontage,'park':payload.parking,'poss':payload.possession,'suit':payload.suitable_for,'near':payload.nearby_brands,'name':payload.owner_broker_name,'phone':payload.contact_number,'role':payload.contact_role,'verify':payload.verification_status,'remarks':payload.remarks})
