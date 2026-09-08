@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
-VERSION = "12.4.10-DASHBOARD-AUTHORITY-DUAL-BACK-NAV"
+VERSION = "12.4.10.1-DASHBOARD-AUTHORITY-UNIVERSAL-NAV-COMPAT"
 REGISTRATION = {}
 
 def _app(core):
@@ -22,24 +22,7 @@ def _remove_exact_get(app, path):
     return removed
 
 def _inject_dual_nav(page_html: str) -> str:
-    nav = """<div style="max-width:1400px;margin:12px auto 0;padding:0 18px;display:flex;gap:8px;flex-wrap:wrap">
-<button type="button" onclick="history.back()" style="background:#475467;color:white;border:0;border-radius:8px;padding:9px 12px;font-weight:800;cursor:pointer">&larr; Previous Page</button>
-<a href="/alliance/primary" style="background:#102a43;color:white;text-decoration:none;border-radius:8px;padding:9px 12px;font-weight:800">&larr; Back to Dashboard</a>
-</div>"""
-    if "<body>" in page_html:
-        close_header = page_html.find("</header>")
-        if close_header >= 0:
-            pos = close_header + len("</header>")
-            page_html = page_html[:pos] + nav + page_html[pos:]
-        else:
-            page_html = page_html.replace("<body>", "<body>" + nav, 1)
-
-    bottom = """<div style="max-width:1400px;margin:0 auto 24px;padding:0 18px;display:flex;gap:8px;flex-wrap:wrap">
-<button type="button" onclick="history.back()" style="background:#475467;color:white;border:0;border-radius:8px;padding:9px 12px;font-weight:800;cursor:pointer">&larr; Previous Page</button>
-<a href="/alliance/primary" style="background:#102a43;color:white;text-decoration:none;border-radius:8px;padding:9px 12px;font-weight:800">&larr; Back to Dashboard</a>
-</div>"""
-    if "</body>" in page_html:
-        page_html = page_html.replace("</body>", bottom + "</body>", 1)
+    # Universal middleware now owns navigation.
     return page_html
 
 def register(core):
