@@ -1034,6 +1034,21 @@ def _load_core():
             }
             print("[root-matcher-authority-v12411] warning:", type(exc).__name__, str(exc))
 
+        # ALLIANCE_BOT_PAGES_AUTHORITY_V12414
+        try:
+            import alliance_bot_pages_authority_v12414 as botpages_v12414
+            stabilization = dict(stabilization or {})
+            stabilization["bot_pages_authority_v12414"] = botpages_v12414.register(wrapped.core)
+            print("[bot-pages-authority-v12414]", stabilization["bot_pages_authority_v12414"])
+        except Exception as exc:
+            stabilization = dict(stabilization or {})
+            stabilization["bot_pages_authority_v12414"] = {
+                "status":"ERROR",
+                "error":f"{type(exc).__name__}: {exc}",
+                "fail_safe":True,
+            }
+            print("[bot-pages-authority-v12414] warning:",type(exc).__name__,str(exc))
+
         CORE_APP = wrapped.app
         try:
             import alliance_whatsapp_safe_ingest_v5 as safe_wa
