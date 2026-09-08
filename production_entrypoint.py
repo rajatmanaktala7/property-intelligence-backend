@@ -1134,6 +1134,17 @@ def _load_core():
             stabilization['universal_nav_final_v12419a'] = {'status':'ERROR','error':f'{type(exc).__name__}: {exc}','fail_safe':True}
             print('[universal-nav-final-v12419a] warning:', type(exc).__name__, str(exc))
 
+        # ALLIANCE_HOSPITALITY_AUTO_V12425
+        try:
+            import alliance_hospitality_auto_v12425 as hosp_auto_v12425
+            stabilization = dict(stabilization or {})
+            stabilization["hospitality_auto_v12425"] = hosp_auto_v12425.register(wrapped.core)
+            print("[hospitality-auto-v12425]", stabilization["hospitality_auto_v12425"])
+        except Exception as exc:
+            stabilization = dict(stabilization or {})
+            stabilization["hospitality_auto_v12425"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","fail_safe":True}
+            print("[hospitality-auto-v12425] warning:",type(exc).__name__,str(exc))
+
         # ALLIANCE_TEAM_WORKFLOW_REPAIR_V12424
         try:
             import alliance_team_workflow_repair_v12424 as workflow_v12424
