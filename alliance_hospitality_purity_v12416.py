@@ -6,7 +6,7 @@ from fastapi import Form, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import text
 
-VERSION="12.4.16A-HOSPITALITY-PAGE-NAME-COLLISION-FIX"
+VERSION="12.4.16B-DEDUPE-SQL-AND-TOP-PREVIOUS-NAV-FIX"
 
 NOISE_EXACT={
     "local","farm house","dance bar","cafe west delhi","banquet halls in connaught place",
@@ -161,7 +161,8 @@ def dedupe_exact(engine):
                 c.execute(text("UPDATE ai_hospitality_source_history SET hospitality_id=:keep WHERE hospitality_id=:lose"),{"keep":kid,"lose":lid})
                 c.execute(text("""
                   UPDATE ai_hospitality_entity SET active=FALSE,
-                    notes=CONCAT(COALESCE(notes,''),' | MERGED_DUPLICATE_INTO:',:keep),updated_at=NOW()
+                    notes=COALESCE(notes,'') || ' | MERGED_DUPLICATE_INTO:' || CAST(:keep AS TEXT),
+                    updated_at=NOW()
                   WHERE hospitality_id=:lose
                 """),{"keep":str(kid),"lose":lid})
                 c.execute(text("""
@@ -278,7 +279,7 @@ def render_page(core,req,status="CALL_READY",page=1,per_page=100,msg=""):
     last=max(1,(total+per_page-1)//per_page)
     notice=f"<div class='notice'>{esc(msg)}</div>" if msg else ""
     body=f"""<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>Hospitality Intelligence</title>
-<style>*{{box-sizing:border-box}}body{{font-family:Arial;margin:0;background:#f5f7fb;color:#172033}}.wrap{{max-width:1900px;margin:auto;padding:18px}}.card{{background:white;border:1px solid #dfe6ee;border-radius:12px;padding:14px;margin-bottom:14px}}.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px}}.m{{padding:12px;background:#f8fafc;border:1px solid #e4e7ec;border-radius:9px}}.m strong{{font-size:25px;display:block}}.btn,button{{background:#102a43;color:#fff;border:0;border-radius:7px;padding:8px 11px;text-decoration:none;cursor:pointer}}table{{width:100%;border-collapse:collapse;font-size:12px}}th,td{{padding:8px;border-bottom:1px solid #edf1f5;text-align:left;vertical-align:top}}th{{background:#f8fafc;position:sticky;top:0}}.box{{overflow:auto;max-height:68vh}}.notice{{background:#ecfdf3;border:1px solid #abefc6;padding:10px;border-radius:8px;margin-bottom:12px}}</style></head><body><div class='wrap'>{notice}
+<style>*{{box-sizing:border-box}}body{{font-family:Arial;margin:0;background:#f5f7fb;color:#172033}}.wrap{{max-width:1900px;margin:auto;padding:18px}}.card{{background:white;border:1px solid #dfe6ee;border-radius:12px;padding:14px;margin-bottom:14px}}.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px}}.m{{padding:12px;background:#f8fafc;border:1px solid #e4e7ec;border-radius:9px}}.m strong{{font-size:25px;display:block}}.btn,button{{background:#102a43;color:#fff;border:0;border-radius:7px;padding:8px 11px;text-decoration:none;cursor:pointer}}table{{width:100%;border-collapse:collapse;font-size:12px}}th,td{{padding:8px;border-bottom:1px solid #edf1f5;text-align:left;vertical-align:top}}th{{background:#f8fafc;position:sticky;top:0}}.box{{overflow:auto;max-height:68vh}}.notice{{background:#ecfdf3;border:1px solid #abefc6;padding:10px;border-radius:8px;margin-bottom:12px}}</style></head><body><div class='wrap'><div class='topnav'><button type='button' onclick='history.back()'>&larr; Previous Page</button><a href='/alliance/primary'>&larr; Back to Dashboard</a></div>{notice}
 <div class='card'><h1>Hospitality Intelligence · Sales-Ready Database</h1><p>Purity first → exact deduplication → contact enrichment → human verification.</p><div class='grid'>
 <div class='m'>Active Clean Pool<strong>{s['total_active']}</strong></div><div class='m'>CALL READY<strong>{s['call_ready']}</strong></div><div class='m'>CONTACT READY<strong>{s['contact_ready']}</strong></div><div class='m'>Needs Enrichment<strong>{s['enrichment_required']}</strong></div><div class='m'>Noise Quarantined<strong>{s['quarantined_noise']}</strong></div><div class='m'>Merged Duplicates<strong>{s['merged_duplicates']}</strong></div><div class='m'>Phone Numbers<strong>{s['with_phone']}</strong></div></div></div>
 <div class='card'><h2>Database Repair Controls</h2>
