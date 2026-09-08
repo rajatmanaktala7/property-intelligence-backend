@@ -1049,6 +1049,21 @@ def _load_core():
             }
             print("[bot-pages-authority-v12414] warning:",type(exc).__name__,str(exc))
 
+        # ALLIANCE_HOSPITALITY_DATA_RECOVERY_V12415
+        try:
+            import alliance_hospitality_data_recovery_v12415 as hospdata_v12415
+            stabilization = dict(stabilization or {})
+            stabilization["hospitality_data_recovery_v12415"] = hospdata_v12415.register(wrapped.core)
+            print("[hospitality-data-recovery-v12415]", stabilization["hospitality_data_recovery_v12415"])
+        except Exception as exc:
+            stabilization = dict(stabilization or {})
+            stabilization["hospitality_data_recovery_v12415"] = {
+                "status":"ERROR",
+                "error":f"{type(exc).__name__}: {exc}",
+                "fail_safe":True,
+            }
+            print("[hospitality-data-recovery-v12415] warning:",type(exc).__name__,str(exc))
+
         CORE_APP = wrapped.app
         try:
             import alliance_whatsapp_safe_ingest_v5 as safe_wa
