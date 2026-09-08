@@ -4,7 +4,7 @@ from typing import Any, Dict, List
 
 import alliance_phase5_canonical_matcher as phase5
 
-VERSION = "1.0.0-WHATSAPP-FIRST-STAGED-MATCHER"
+VERSION = "1.0.2-NORTH-GOA-BHK-AREA-FIX"
 
 
 def _evaluate(

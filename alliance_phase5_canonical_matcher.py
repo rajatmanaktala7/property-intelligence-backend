@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy import create_engine, text
 
-VERSION = "5.0.3-PHASE5-SAFE-PAYLOAD-SCRUB"
+VERSION = "5.0.5-NORTH-GOA-BHK-AREA-PARSER-FIX"
 LIVE_WA_GENERATION_FALLBACK = "159d9eab-5be5-5313-9af5-8f9913522087"
 
 # Phase 5 rules:
@@ -70,9 +70,31 @@ LOCATION_ALIASES = {
     "PORVORIM": ["PORVORIM"],
     "SALIGAO": ["SALIGAO"],
     "ALDONA": ["ALDONA"],
+    "MORJIM": ["MORJIM"],
+    "ASHWEM": ["ASHWEM", "ASHVEM"],
+    "MANDREM": ["MANDREM"],
+    "ARAMBOL": ["ARAMBOL"],
+    "CANDOLIM": ["CANDOLIM"],
+    "CALANGUTE": ["CALANGUTE"],
+    "BAGA": ["BAGA"],
+    "ARPORA": ["ARPORA"],
+    "MAPUSA": ["MAPUSA"],
+    "PARRA": ["PARRA"],
+    "MOIRA": ["MOIRA"],
+    "REIS MAGOS": ["REIS MAGOS", "REISMAGOS"],
+    "NERUL GOA": ["NERUL GOA", "NERUL, GOA"],
+    "SANGOLDA": ["SANGOLDA"],
+    "PILERNE": ["PILERNE"],
     "JUHU": ["JUHU", "JVPD", "GULMOHAR ROAD"],
     "BANDRA WEST": ["BANDRA WEST"],
     "KHAR WEST": ["KHAR WEST"],
+}
+
+NORTH_GOA_LOCALITIES = {
+    "SIOLIM", "ASSAGAO", "VAGATOR", "ANJUNA", "MORJIM", "ASHWEM",
+    "MANDREM", "ARAMBOL", "CANDOLIM", "CALANGUTE", "BAGA", "ARPORA",
+    "MAPUSA", "PORVORIM", "SALIGAO", "ALDONA", "PARRA", "MOIRA",
+    "REIS MAGOS", "NERUL GOA", "SANGOLDA", "PILERNE",
 }
 
 CITY_ONLY = {
@@ -312,21 +334,42 @@ def area_to_sqft(v: Any, unit: Any = None) -> Optional[float]:
 
 def parse_requirement_area(raw: str) -> Tuple[Optional[float], Optional[float]]:
     s = str(raw or "").replace(",", "")
-    factor = 1.0
-    if re.search(r"(?i)(sq\.?\s*m|sqm|square\s*met)", s):
-        factor = 10.7639104167
-    elif re.search(r"(?i)(sq\.?\s*yd|sqyd|yard|gaj)", s):
-        factor = 9.0
-    elif re.search(r"(?i)acre", s):
-        factor = 43560.0
-    m = re.search(r"(?i)\b(\d+(?:\.\d+)?)\s*(?:-|to|–)\s*(\d+(?:\.\d+)?)\s*(?:sq\.?\s*ft|sqft|sft|sq\.?\s*m|sqm|sq\.?\s*yd|sqyd|yards?|gaj|acres?)?\b", s)
+
+    # Never interpret BHK counts such as "1-2 BHK" as area.
+    area_unit = r"(?:sq\.?\s*ft|sqft|sft|square\s*feet|sq\.?\s*m|sqm|square\s*met(?:er|re)s?|sq\.?\s*yd|sqyd|yards?|gaj|acres?)"
+
+    m = re.search(
+        rf"(?i)\b(\d+(?:\.\d+)?)\s*(?:-|to|–)\s*(\d+(?:\.\d+)?)\s*({area_unit})\b",
+        s
+    )
     if m:
-        a, b = float(m.group(1))*factor, float(m.group(2))*factor
-        return min(a,b), max(a,b)
-    m = re.search(r"(?i)\b(\d+(?:\.\d+)?)\s*(?:sq\.?\s*ft|sqft|sft|sq\.?\s*m|sqm|sq\.?\s*yd|sqyd|yards?|gaj|acres?)\b", s)
+        unit = norm(m.group(3))
+        factor = 1.0
+        if any(x in unit for x in ["SQ M", "SQM", "SQUARE MET"]):
+            factor = 10.7639104167
+        elif any(x in unit for x in ["SQ YD", "SQYD", "YARD", "GAJ"]):
+            factor = 9.0
+        elif "ACRE" in unit:
+            factor = 43560.0
+        a, b = float(m.group(1)) * factor, float(m.group(2)) * factor
+        return min(a, b), max(a, b)
+
+    m = re.search(
+        rf"(?i)\b(\d+(?:\.\d+)?)\s*({area_unit})\b",
+        s
+    )
     if m:
-        x = float(m.group(1))*factor
-        return x*0.90, x*1.10
+        unit = norm(m.group(2))
+        factor = 1.0
+        if any(x in unit for x in ["SQ M", "SQM", "SQUARE MET"]):
+            factor = 10.7639104167
+        elif any(x in unit for x in ["SQ YD", "SQYD", "YARD", "GAJ"]):
+            factor = 9.0
+        elif "ACRE" in unit:
+            factor = 43560.0
+        x = float(m.group(1)) * factor
+        return x * 0.90, x * 1.10
+
     return None, None
 
 def money_value(raw: Any) -> Optional[float]:
@@ -363,12 +406,27 @@ def parse_requirement(raw: str) -> Dict[str, Any]:
     fam, sub = family_subtype(raw)
     amin, amax = parse_requirement_area(raw)
     bmin, bmax = parse_budget(raw)
+
+    raw_norm = norm(raw)
+    location = "NORTH GOA" if "NORTH GOA" in raw_norm else canonical_location(raw)
+
+    acceptable_subtypes = []
+    for subtype_name, words in SUBTYPE_WORDS.items():
+        if any(norm(word) and norm(word) in raw_norm for word in words):
+            if subtype_name not in acceptable_subtypes:
+                acceptable_subtypes.append(subtype_name)
+
+    if sub and sub not in acceptable_subtypes:
+        acceptable_subtypes.insert(0, sub)
+
     return {
         "raw": str(raw or "").strip(),
-        "location": canonical_location(raw),
+        "location": location,
+        "location_scope": "REGION" if location == "NORTH GOA" else "LOCALITY",
         "transaction": canonical_transaction(raw),
         "family": fam,
         "subtype": sub,
+        "acceptable_subtypes": acceptable_subtypes,
         "area_min_sqft": amin,
         "area_max_sqft": amax,
         "budget_min": bmin,
@@ -512,8 +570,8 @@ def load_whatsapp_master(engine, limit: int = 10000) -> List[Dict[str, Any]]:
         fam, sub = family_subtype(d.get("configuration_details"), desc)
         atext = d.get("area")
         area_sqft = area_to_sqft(atext)
-        if area_sqft is None:
-            continue
+        # Keep missing-area WhatsApp records. _area_gate() will still reject
+        # them whenever the requirement explicitly contains an area constraint.
         ptext = d.get("price")
         price = money_value(ptext)
         comparable = price is not None and bool(re.search(r"(?i)\b(cr|crore|lac|lakh|k)\b", str(ptext or "")))
@@ -530,7 +588,7 @@ def load_whatsapp_master(engine, limit: int = 10000) -> List[Dict[str, Any]]:
             "family": fam,
             "subtype": sub,
             "area_sqft": area_sqft,
-            "area_unit_verified": True,
+            "area_unit_verified": bool(area_sqft is not None),
             "price": price if comparable else None,
             "price_text": sanitize_text(ptext),
             "price_comparable": comparable,
@@ -602,16 +660,17 @@ def _area_gate(req: Dict[str, Any], p: Dict[str, Any]) -> Tuple[bool, str]:
 
 def _type_gate(req: Dict[str, Any], p: Dict[str, Any]) -> Tuple[bool, str]:
     rf, rs = req.get("family"), req.get("subtype")
+    accepted = req.get("acceptable_subtypes") or ([rs] if rs else [])
     pf, ps = p.get("family"), p.get("subtype")
     if rf:
         if not pf:
             return False, "PROPERTY_FAMILY_UNKNOWN"
         if rf != pf:
             return False, "WRONG_PROPERTY_FAMILY"
-    if rs:
+    if accepted:
         if not ps:
             return False, "PROPERTY_SUBTYPE_UNKNOWN"
-        if rs != ps:
+        if ps not in accepted:
             return False, "WRONG_PROPERTY_SUBTYPE"
     return True, "TYPE_ELIGIBLE"
 
@@ -622,9 +681,14 @@ def eligible(req: Dict[str, Any], p: Dict[str, Any], location_mode: str = "EXACT
     if not rloc:
         return False, "REQUIREMENT_LOCATION_UNKNOWN", ["Requirement needs a specific locality"]
     if location_mode == "EXACT":
-        if ploc != rloc:
-            return False, "WRONG_LOCATION", [f"Required {rloc}; candidate {ploc or 'unknown'}"]
-        why.append(f"Exact location {rloc}")
+        if rloc == "NORTH GOA":
+            if ploc not in NORTH_GOA_LOCALITIES:
+                return False, "WRONG_LOCATION", [f"Required NORTH GOA; candidate {ploc or 'unknown'}"]
+            why.append(f"North Goa region match: {ploc}")
+        else:
+            if ploc != rloc:
+                return False, "WRONG_LOCATION", [f"Required {rloc}; candidate {ploc or 'unknown'}"]
+            why.append(f"Exact location {rloc}")
     else:
         alternatives = approved_alternatives(req)
         if ploc not in alternatives:
