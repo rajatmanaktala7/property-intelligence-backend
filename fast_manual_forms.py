@@ -1,4 +1,5 @@
 import re, uuid, json
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from typing import Optional
 from fastapi import Request, HTTPException, UploadFile, File
@@ -6,7 +7,14 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel
 from sqlalchemy import text
 
-V19_VERSION='20.4-TEAM-WORKFLOW-AREA-MEDIA-REPAIR'
+V19_VERSION='20.5-CANONICAL-ATOMICITY-ELIGIBILITY-CLOSURE'
+
+class _BoundEngine:
+    # Reuse one open SQLAlchemy Connection for bridge begin/connect calls.
+    def __init__(self, conn): self._conn=conn
+    def begin(self): return nullcontext(self._conn)
+    def connect(self): return nullcontext(self._conn)
+
 PROPERTY_TYPES=['Retail Shop','High Street Retail','Mall Retail','Office','Restaurant','Cafe','Banquet / Wedding Venue','Hotel','Guest House','Lounge','Club','Bar','Farmhouse','Warehouse','Industrial','Land','Mixed Use','Residential / Villa']
 
 class FastProperty(BaseModel):
@@ -182,8 +190,8 @@ def install_fast_forms(app,engine,need_login,page_role_or_redirect,actor_name):
             dup=c.execute(text("SELECT property_code FROM pi_operational_properties WHERE division=:d AND lower(location)=lower(:loc) AND area_sqft=:a AND rent_amount=:r AND COALESCE(contact_number,'')=COALESCE(:ph,'') LIMIT 1"),{'d':d,'loc':payload.location,'a':a,'r':r,'ph':payload.contact_number}).first()
             if dup:raise HTTPException(409,f'Possible duplicate already exists: {dup[0]}')
             c.execute(text("INSERT INTO pi_operational_properties(property_code,division,property_name,property_types,city,location,google_location,area_sqft,area_text,rent_amount,rent_text,transaction_type,floor,frontage,parking,possession,suitable_for,nearby_brands,owner_broker_name,contact_number,contact_role,verification_status,remarks,created_by,entry_source,created_at,updated_at) VALUES(:pc,:d,:pn,CAST(:types AS jsonb),:city,:loc,:gl,:a,:at,:r,:rt,:tt,:floor,:front,:park,:poss,:suit,:near,:name,:phone,:role,:verify,:remarks,:by,'MANUAL',NOW(),NOW())"),{'pc':pc,'d':d,'pn':payload.property_name,'types':json.dumps(payload.property_types),'city':payload.city,'loc':payload.location,'gl':payload.google_location,'a':a,'at':payload.area_text,'r':r,'rt':payload.rent_text,'tt':payload.transaction_type,'floor':payload.floor,'front':payload.frontage,'park':payload.parking,'poss':payload.possession,'suit':payload.suitable_for,'near':payload.nearby_brands,'name':payload.owner_broker_name,'phone':payload.contact_number,'role':payload.contact_role,'verify':payload.verification_status,'remarks':payload.remarks,'by':actor_name(req)})
-        import alliance_operational_master_bridge_v12426 as bridge_v12426
-        bridge=bridge_v12426.sync_property(engine,pc,actor_name(req))
+            import alliance_operational_master_bridge_v12426 as bridge_v12426
+            bridge=bridge_v12426.sync_property(_BoundEngine(c),pc,actor_name(req))
         return {'status':'created','property_code':pc,'canonical_bridge':bridge}
 
     @app.get('/api/v19/properties')
@@ -208,8 +216,8 @@ def install_fast_forms(app,engine,need_login,page_role_or_redirect,actor_name):
             c.execute(text("SET LOCAL lock_timeout='1500ms'"));c.execute(text("SET LOCAL statement_timeout='3500ms'"))
             x=c.execute(text("UPDATE pi_operational_properties SET property_name=:pn,property_types=CAST(:types AS jsonb),city=:city,location=:loc,google_location=:gl,area_sqft=:a,area_text=:at,rent_amount=:r,rent_text=:rt,transaction_type=:tt,floor=:floor,frontage=:front,parking=:park,possession=:poss,suitable_for=:suit,nearby_brands=:near,owner_broker_name=:name,contact_number=:phone,contact_role=:role,verification_status=:verify,remarks=:remarks,updated_at=NOW() WHERE property_code=:pc"),{'pc':pc,'pn':payload.property_name,'types':json.dumps(payload.property_types),'city':payload.city,'loc':payload.location,'gl':payload.google_location,'a':a,'at':payload.area_text,'r':r,'rt':payload.rent_text,'tt':payload.transaction_type,'floor':payload.floor,'front':payload.frontage,'park':payload.parking,'poss':payload.possession,'suit':payload.suitable_for,'near':payload.nearby_brands,'name':payload.owner_broker_name,'phone':payload.contact_number,'role':payload.contact_role,'verify':payload.verification_status,'remarks':payload.remarks})
             if not x.rowcount:raise HTTPException(404,'Property not found')
-        import alliance_operational_master_bridge_v12426 as bridge_v12426
-        bridge=bridge_v12426.sync_property(engine,pc,actor_name(req))
+            import alliance_operational_master_bridge_v12426 as bridge_v12426
+            bridge=bridge_v12426.sync_property(_BoundEngine(c),pc,actor_name(req))
         return {'status':'updated','property_code':pc,'canonical_bridge':bridge}
 
     @app.delete('/api/v19/property/{pc}')
@@ -221,7 +229,7 @@ def install_fast_forms(app,engine,need_login,page_role_or_redirect,actor_name):
             x=c.execute(text("UPDATE pi_operational_properties SET entry_source='ARCHIVED',updated_at=NOW() WHERE property_code=:pc"),{'pc':pc})
             if not x.rowcount:raise HTTPException(404,'Property not found')
             c.execute(text("DELETE FROM pi_operational_matches WHERE property_code=:pc"),{'pc':pc})
-        bridge=bridge_v12426.withdraw_property(engine,pc,actor_name(req))
+            bridge=bridge_v12426.withdraw_property(_BoundEngine(c),pc,actor_name(req))
         return {'status':'archived','property_code':pc,'canonical_bridge':bridge}
 
     @app.post('/api/v19/property/{pc}/images')
@@ -249,8 +257,8 @@ def install_fast_forms(app,engine,need_login,page_role_or_redirect,actor_name):
             dup=c.execute(text("SELECT requirement_code FROM pi_operational_requirements WHERE division=:d AND lower(preferred_locations)=lower(:loc) AND minimum_area_sqft=:mina AND maximum_area_sqft=:maxa AND COALESCE(contact_number,'')=COALESCE(:ph,'') LIMIT 1"),{'d':d,'loc':payload.preferred_locations,'mina':mina,'maxa':maxa,'ph':payload.contact_number}).first()
             if dup:raise HTTPException(409,f'Possible duplicate already exists: {dup[0]}')
             c.execute(text("INSERT INTO pi_operational_requirements(requirement_code,division,client_name,company_name,contact_number,requirement_types,city,preferred_locations,minimum_area_sqft,minimum_area_text,maximum_area_sqft,maximum_area_text,maximum_rent,maximum_rent_text,transaction_type,additional_points,verification_status,created_by,entry_source,created_at,updated_at) VALUES(:rc,:d,:client,:company,:phone,CAST(:types AS jsonb),:city,:loc,:mina,:minat,:maxa,:maxat,:rent,:rentt,:tt,:points,:verify,:by,'MANUAL',NOW(),NOW())"),{'rc':rc,'d':d,'client':payload.client_name,'company':payload.company_name,'phone':payload.contact_number,'types':json.dumps(payload.requirement_types),'city':payload.city,'loc':payload.preferred_locations,'mina':mina,'minat':payload.minimum_area_text,'maxa':maxa,'maxat':payload.maximum_area_text,'rent':rent,'rentt':payload.maximum_rent_text,'tt':payload.transaction_type,'points':payload.additional_points,'verify':payload.verification_status,'by':actor_name(req)})
-        import alliance_operational_master_bridge_v12426 as bridge_v12426
-        bridge=bridge_v12426.sync_requirement(engine,rc,actor_name(req))
+            import alliance_operational_master_bridge_v12426 as bridge_v12426
+            bridge=bridge_v12426.sync_requirement(_BoundEngine(c),rc,actor_name(req))
         return {'status':'created','requirement_code':rc,'canonical_bridge':bridge}
 
     @app.get('/api/v19/requirements')
@@ -276,8 +284,8 @@ def install_fast_forms(app,engine,need_login,page_role_or_redirect,actor_name):
             x=c.execute(text("UPDATE pi_operational_requirements SET client_name=:client,company_name=:company,contact_number=:phone,requirement_types=CAST(:types AS jsonb),city=:city,preferred_locations=:loc,minimum_area_sqft=:mina,minimum_area_text=:minat,maximum_area_sqft=:maxa,maximum_area_text=:maxat,maximum_rent=:rent,maximum_rent_text=:rentt,transaction_type=:tt,additional_points=:points,verification_status=:verify,updated_at=NOW() WHERE requirement_code=:rc"),{'rc':rc,'client':payload.client_name,'company':payload.company_name,'phone':payload.contact_number,'types':json.dumps(payload.requirement_types),'city':payload.city,'loc':payload.preferred_locations,'mina':mina,'minat':payload.minimum_area_text,'maxa':maxa,'maxat':payload.maximum_area_text,'rent':rent,'rentt':payload.maximum_rent_text,'tt':payload.transaction_type,'points':payload.additional_points,'verify':payload.verification_status})
             if not x.rowcount:raise HTTPException(404,'Requirement not found')
             c.execute(text("DELETE FROM pi_operational_matches WHERE requirement_code=:rc"),{'rc':rc})
-        import alliance_operational_master_bridge_v12426 as bridge_v12426
-        bridge=bridge_v12426.sync_requirement(engine,rc,actor_name(req))
+            import alliance_operational_master_bridge_v12426 as bridge_v12426
+            bridge=bridge_v12426.sync_requirement(_BoundEngine(c),rc,actor_name(req))
         return {'status':'updated','requirement_code':rc,'canonical_bridge':bridge}
 
     @app.delete('/api/v19/requirement/{rc}')
@@ -289,7 +297,7 @@ def install_fast_forms(app,engine,need_login,page_role_or_redirect,actor_name):
             x=c.execute(text("UPDATE pi_operational_requirements SET entry_source='ARCHIVED',updated_at=NOW() WHERE requirement_code=:rc"),{'rc':rc})
             if not x.rowcount:raise HTTPException(404,'Requirement not found')
             c.execute(text("DELETE FROM pi_operational_matches WHERE requirement_code=:rc"),{'rc':rc})
-        bridge=bridge_v12426.withdraw_requirement(engine,rc,actor_name(req))
+            bridge=bridge_v12426.withdraw_requirement(_BoundEngine(c),rc,actor_name(req))
         return {'status':'archived','requirement_code':rc,'canonical_bridge':bridge}
 
     @app.middleware('http')

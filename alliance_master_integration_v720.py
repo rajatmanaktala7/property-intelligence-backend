@@ -158,7 +158,8 @@ def _table(data,cols):
     return f"<div class='card tablebox'><table><thead><tr>{head}</tr></thead><tbody>{''.join(out)}</tbody></table></div>"
 
 def _search_properties(engine,q="",tx="",limit=500):
-    wh=["1=1"];params={"n":limit}
+    # 12.4.26B: canonical eligibility gate.
+    wh=["p.promotion_status=\'PROMOTED_VALIDATED\'","COALESCE(w.availability_status,\'UNKNOWN\') NOT IN (\'INACTIVE\',\'UNAVAILABLE\')"];params={"n":limit}
     if q:
         wh.append("(COALESCE(p.locality,'') ILIKE :q OR COALESCE(p.city,'') ILIKE :q OR COALESCE(p.clean_record::text,'') ILIKE :q)")
         params["q"]="%"+q+"%"
