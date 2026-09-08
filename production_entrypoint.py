@@ -988,6 +988,21 @@ def _load_core():
             }
             print("[operations-hotfix-v1244] warning:",type(exc).__name__,str(exc))
 
+        # ALLIANCE_DASHBOARD_AUTHORITY_V12410
+        try:
+            import alliance_dashboard_authority_v12410 as dashboard_v12410
+            stabilization = dict(stabilization or {})
+            stabilization["dashboard_authority_v12410"] = dashboard_v12410.register(wrapped.core)
+            print("[dashboard-authority-v12410]", stabilization["dashboard_authority_v12410"])
+        except Exception as exc:
+            stabilization = dict(stabilization or {})
+            stabilization["dashboard_authority_v12410"] = {
+                "status":"ERROR",
+                "error":f"{type(exc).__name__}: {exc}",
+                "fail_safe":True,
+            }
+            print("[dashboard-authority-v12410] warning:", type(exc).__name__, str(exc))
+
         CORE_APP = wrapped.app
         try:
             import alliance_whatsapp_safe_ingest_v5 as safe_wa
