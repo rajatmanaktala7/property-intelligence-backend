@@ -1,11 +1,11 @@
 from __future__ import annotations
-import json, re
+import json, re, ssl, urllib.request
 from urllib.parse import urlparse
 from fastapi import Query, Request
 from fastapi.responses import HTMLResponse
 from sqlalchemy import text
 
-VERSION="12.4.18A-PRESERVE-EXISTING-PHONES"
+VERSION="12.4.19-OFFICIAL-PAGE-PHONE-RECOVERY"
 
 BAD_NUMBERS={"9876543210","9999999999","8888888888","1234567890","0000000000"}
 WEAK_HOSTS=("justdial.","tripadvisor.","zomato.","swiggy.","magicpin.","sloshout.","wedmegood.",
@@ -93,6 +93,66 @@ def quarantine_weak_existing(engine):
 def _item_text(item):
     return " ".join(_norm(item.get(k)) for k in ("name","title","summary","snippet","content","description","url"))
 
+
+def _fetch_page_text(url, timeout=5):
+    url=_norm(url)
+    if not url.startswith(("http://","https://")):
+        return ""
+    try:
+        req=urllib.request.Request(
+            url,
+            headers={
+                "User-Agent":"Mozilla/5.0 (compatible; AllianceCRE/1.0; +https://allianceinfrastructure.co.in/)",
+                "Accept":"text/html,application/xhtml+xml",
+            },
+        )
+        ctx=ssl.create_default_context()
+        with urllib.request.urlopen(req,timeout=timeout,context=ctx) as r:
+            ctype=(r.headers.get("Content-Type") or "").lower()
+            if "html" not in ctype and "text" not in ctype:
+                return ""
+            raw=r.read(750000).decode("utf-8","replace")
+        tels=" ".join(re.findall(r"(?i)tel:\s*([+0-9().\s-]{10,24})",raw))
+        raw=re.sub(r"(?is)<script.*?</script>|<style.*?</style>|<noscript.*?</noscript>"," ",raw)
+        txt=re.sub(r"(?s)<[^>]+>"," ",raw)
+        txt=re.sub(r"&nbsp;"," ",txt,flags=re.I)
+        txt=re.sub(r"\s+"," ",txt)
+        return (tels+" "+txt)[:500000]
+    except Exception:
+        return ""
+
+def _rank_result_urls(name,location,results):
+    strong=[]; weak=[]; seen=set()
+    for item in results:
+        url=_norm(item.get("url"))
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        blob=_item_text(item)
+        ns=_name_strength(name,blob)
+        if ns < 0.34:
+            continue
+        if not _location_ok(location,blob) and ns < 0.67:
+            continue
+        host=_host(url)
+        rec=(ns,url,host)
+        if host and not _weak_host(host):
+            strong.append(rec)
+        else:
+            weak.append(rec)
+    strong.sort(reverse=True)
+    weak.sort(reverse=True)
+    return [u for _,u,_ in strong[:3]] + [u for _,u,_ in weak[:1]]
+
+def _collect_from_pages(name,location,results):
+    expanded=[]
+    for url in _rank_result_urls(name,location,results):
+        txt=_fetch_page_text(url)
+        if not txt:
+            continue
+        expanded.append({"name":name,"url":url,"summary":txt,"snippet":txt})
+    return expanded
+
 def _collect_candidates(name,location,results):
     phones={}
     for item in results:
@@ -159,6 +219,18 @@ def recover_one(engine,row):
         else:
             errors.append(_norm(r.get("message") or r.get("status")))
     candidates=_collect_candidates(name,location,merged)
+    page_results=_collect_from_pages(name,location,merged)
+    page_candidates=_collect_candidates(name,location,page_results)
+    for p,d in page_candidates.items():
+        if p not in candidates:
+            candidates[p]=d
+        else:
+            x=candidates[p]
+            x["evidence"]+=d["evidence"]
+            x["urls"]=list(dict.fromkeys(x["urls"]+d["urls"]))
+            x["domains"].update(d["domains"])
+            x["strong_domains"].update(d["strong_domains"])
+            x["best_name_strength"]=max(x["best_name_strength"],d["best_name_strength"])
     best=None
     with engine.begin() as c:
         for p,d in candidates.items():
@@ -317,7 +389,18 @@ def register(core):
     @app.post("/api/alliance/hospitality-phone-recovery/batch")
     def batch(req:Request,limit:int=Query(5)):
         _login(core,req)
-        return {"status":"PASS","version":VERSION,**run_batch(core.engine,limit),**stats(core.engine)}
+        b=run_batch(core.engine,limit)
+        st=stats(core.engine)
+        return {
+            "status":"PASS","version":VERSION,
+            "batch_processed":b["unique_processed"],
+            "batch_high_confidence_saved":b["high_confidence_saved"],
+            "batch_needs_verification":b["needs_verification"],
+            "batch_low_confidence":b["low_confidence"],
+            "batch_no_phone_found":b["no_phone_found"],
+            "results":b["results"],
+            **st
+        }
 
     @app.post("/api/alliance/hospitality-phone-recovery/reset-errors")
     def reset_errors(req:Request):
@@ -369,7 +452,7 @@ def register(core):
                 panel=f"""
                 <div class='card' id='phone-recovery-v12418'>
                   <h2>All Numbers Recovery 12.4.18 · Controlled Queue</h2>
-                  <p>Existing phone values are preserved. Only businesses missing a phone are searched. Each business is attempted once. One-source numbers are review-only. Only corroborated high-confidence numbers are auto-saved.</p>
+                  <p>Existing phone values are preserved. Missing-phone businesses are searched once. The engine now checks matched public business pages because search snippets often omit phone numbers. One-source numbers are review-only; corroborated high-confidence numbers may be auto-saved.</p>
                   <div class='grid'>
                     <div class='m'>Unique Businesses Attempted<strong id='pr-processed'>{s['unique_processed']}</strong></div>
                     <div class='m'>Phones Saved<strong id='pr-saved'>{s['phones_saved']}</strong></div>
@@ -403,14 +486,14 @@ def register(core):
                   }}
                   async function testFive(){{
                     let j=await postu('/api/alliance/hospitality-phone-recovery/batch?limit=5');
-                    document.getElementById('pr-progress').innerText='Tested '+j.unique_processed+' unique businesses. High '+j.high_confidence_saved+', verify '+j.needs_verification+', low '+j.low_confidence+', no phone '+j.no_phone_found+'.';
+                    document.getElementById('pr-progress').innerText='Tested '+j.batch_processed+' businesses this batch. High '+j.batch_high_confidence_saved+', verify '+j.batch_needs_verification+', low '+j.batch_low_confidence+', no phone '+j.batch_no_phone_found+'.';
                   }}
                   async function recoverAll(){{
                     PR_STOP=false; let el=document.getElementById('pr-progress');
                     while(!PR_STOP){{
                       let j=await postu('/api/alliance/hospitality-phone-recovery/batch?limit=5');
-                      el.innerText='Attempted '+j.unique_processed+' this batch | total '+j.unique_processed+'? refresh metrics above | remaining '+j.pending;
-                      if((j.unique_processed||0)===0 || (j.pending||0)===0) break;
+                      el.innerText='Attempted '+j.batch_processed+' this batch | total unique '+j.unique_processed+' | remaining '+j.pending;
+                      if((j.batch_processed||0)===0 || (j.pending||0)===0) break;
                       await new Promise(r=>setTimeout(r,900));
                     }}
                     el.innerText='Recovery stopped/completed. Remaining: '+document.getElementById('pr-pending').innerText+'.';
