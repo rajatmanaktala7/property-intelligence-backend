@@ -5,7 +5,7 @@ from fastapi import Query, Request
 from fastapi.responses import HTMLResponse
 from sqlalchemy import text
 
-VERSION="12.4.18-PHONE-RECOVERY-QUEUE-FIX"
+VERSION="12.4.18A-PRESERVE-EXISTING-PHONES"
 
 BAD_NUMBERS={"9876543210","9999999999","8888888888","1234567890","0000000000"}
 WEAK_HOSTS=("justdial.","tripadvisor.","zomato.","swiggy.","magicpin.","sloshout.","wedmegood.",
@@ -84,45 +84,11 @@ def ensure_schema(engine):
     return True
 
 def quarantine_weak_existing(engine):
-    """Move all current unverified, non-strict-recovery phone values out of the active phone field.
-    Nothing is deleted: every valid phone becomes a LEGACY_WEAK candidate with evidence preserved."""
+    # 12.4.18A safety rule: do not mass-clear existing unverified phones.
+    # Current live phone rows come from mixed sources and cannot be safely
+    # separated into only the weak 12.4.16 batch.
     ensure_schema(engine)
-    with engine.connect() as c:
-        rows=[dict(x) for x in c.execute(text("""
-          SELECT e.hospitality_id,e.contact_phone,e.verification_status
-          FROM ai_hospitality_entity e
-          WHERE e.active=TRUE
-            AND COALESCE(e.contact_phone,'')<>''
-            AND COALESCE(e.verification_status,'UNVERIFIED')<>'VERIFIED'
-            AND NOT EXISTS(
-              SELECT 1 FROM ai_hospitality_source_history s
-              WHERE s.hospitality_id=e.hospitality_id
-                AND s.source_type IN ('STRICT_PHONE_RECOVERY','HUMAN_PHONE_VERIFICATION')
-            )
-        """)).mappings().all()]
-    moved=0
-    with engine.begin() as c:
-        for r in rows:
-            hid=int(r["hospitality_id"])
-            p=_phone(r.get("contact_phone"))
-            if p:
-                c.execute(text("""
-                  INSERT INTO ai_hospitality_phone_candidate_v12418(
-                    hospitality_id,phone,confidence,decision,evidence_count,domain_count,strong_domain_count,
-                    evidence_urls,source_summary,updated_at
-                  ) VALUES(:id,:p,20,'LEGACY_WEAK',1,0,0,'[]'::jsonb,
-                           'Existing unverified phone quarantined before strict recovery',NOW())
-                  ON CONFLICT(hospitality_id,phone) DO UPDATE SET
-                    decision='LEGACY_WEAK',confidence=LEAST(ai_hospitality_phone_candidate_v12418.confidence,20),
-                    source_summary='Existing unverified phone quarantined before strict recovery',updated_at=NOW()
-                """),{"id":hid,"p":p})
-            c.execute(text("""
-              UPDATE ai_hospitality_entity
-              SET contact_phone=NULL,updated_at=NOW()
-              WHERE hospitality_id=:id
-            """),{"id":hid})
-            moved+=1
-    return moved
+    return 0
 
 def _item_text(item):
     return " ".join(_norm(item.get(k)) for k in ("name","title","summary","snippet","content","description","url"))
@@ -346,7 +312,7 @@ def register(core):
     def quarantine(req:Request):
         _login(core,req)
         moved=quarantine_weak_existing(core.engine)
-        return {"status":"PASS","version":VERSION,"moved_to_legacy_weak":moved,**stats(core.engine)}
+        return {"status":"PASS","version":VERSION,"moved_to_legacy_weak":0,"safety":"NO_EXISTING_PHONES_MODIFIED",**stats(core.engine)}
 
     @app.post("/api/alliance/hospitality-phone-recovery/batch")
     def batch(req:Request,limit:int=Query(5)):
@@ -403,7 +369,7 @@ def register(core):
                 panel=f"""
                 <div class='card' id='phone-recovery-v12418'>
                   <h2>All Numbers Recovery 12.4.18 · Controlled Queue</h2>
-                  <p>Each business is attempted once. One-source numbers are review-only. Only corroborated high-confidence numbers are auto-saved.</p>
+                  <p>Existing phone values are preserved. Only businesses missing a phone are searched. Each business is attempted once. One-source numbers are review-only. Only corroborated high-confidence numbers are auto-saved.</p>
                   <div class='grid'>
                     <div class='m'>Unique Businesses Attempted<strong id='pr-processed'>{s['unique_processed']}</strong></div>
                     <div class='m'>Phones Saved<strong id='pr-saved'>{s['phones_saved']}</strong></div>
@@ -414,7 +380,7 @@ def register(core):
                     <div class='m'>Legacy Weak<strong id='pr-legacy'>{s['legacy_weak_candidates']}</strong></div>
                     <div class='m'>Errors<strong id='pr-errors'>{s['errors']}</strong></div>
                   </div><br>
-                  <button type='button' onclick='qWeak()'>A. Quarantine Existing Unverified Phones</button>
+                  <button type='button' onclick='qWeak()'>A. Existing Phones Preserved</button>
                   <button type='button' onclick='testFive()'>B. Test Next 5</button>
                   <button type='button' onclick='recoverAll()'>C. Recover All Remaining</button>
                   <button type='button' onclick='resetErrors()'>Reset Errors Only</button>
@@ -433,7 +399,7 @@ def register(core):
                   }}
                   async function qWeak(){{
                     let j=await postu('/api/alliance/hospitality-phone-recovery/quarantine-weak');
-                    document.getElementById('pr-progress').innerText='Quarantined '+j.moved_to_legacy_weak+' existing unverified phones.';
+                    document.getElementById('pr-progress').innerText='Safety check complete. Existing phones preserved. No phone values changed.';
                   }}
                   async function testFive(){{
                     let j=await postu('/api/alliance/hospitality-phone-recovery/batch?limit=5');
