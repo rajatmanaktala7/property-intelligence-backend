@@ -5,7 +5,7 @@ from fastapi import Query, Request
 from fastapi.responses import HTMLResponse
 from sqlalchemy import text
 
-VERSION="12.4.19-OFFICIAL-PAGE-PHONE-RECOVERY"
+VERSION="12.4.20B-ONE-TIME-DATA-RETRIEVER"
 
 BAD_NUMBERS={"9876543210","9999999999","8888888888","1234567890","0000000000"}
 WEAK_HOSTS=("justdial.","tripadvisor.","zomato.","swiggy.","magicpin.","sloshout.","wedmegood.",
@@ -26,11 +26,17 @@ def _phone(v):
     d=re.sub(r"\D","",str(v or ""))
     if len(d)>=10:
         d=d[-10:]
-    if len(d)!=10 or d[0] not in "6789" or d in BAD_NUMBERS or len(set(d))<5:
+    if len(d)!=10 or d[0] not in "6789" or d in BAD_NUMBERS or len(set(d))<4:
         return None
     return d
 def _tokens(v):
-    return {x for x in re.findall(r"[a-z0-9]+",_norm(v).lower()) if len(x)>=3 and x not in GENERIC_TOKENS}
+    out=set()
+    for x in re.findall(r"[a-z0-9]+",_norm(v).lower()):
+        if x in GENERIC_TOKENS:
+            continue
+        if len(x)>=3 or (len(x)>=2 and any(ch.isdigit() for ch in x)):
+            out.add(x)
+    return out
 def _name_strength(name,textv):
     a=_tokens(name)
     if not a: return 0.0
@@ -49,12 +55,42 @@ def _location_ok(location,textv):
     if not terms: return True
     t=_norm(textv).lower()
     return any(x in t for x in terms)
+def _search_location_hint(location):
+    s=_norm(location)
+    low=s.lower()
+    locality=""
+    for x in (
+        "connaught place","rajouri garden","naraina","janakpuri","greater kailash",
+        "saket","vasant kunj","punjabi bagh","rohini","dwarka","indirapuram",
+        "vasundhara","paharganj","chanakyapuri","green park","hauz khas",
+        "faridabad","greater noida","noida","gurugram","gurgaon","ghaziabad"
+    ):
+        if x in low:
+            locality=x.title()
+            break
+    if not locality:
+        m=re.search(r"\bsector\s*[- ]?\s*(\d{1,3}[a-z]?)\b",low,re.I)
+        if m:
+            locality="Sector "+m.group(1).upper()
+    city=""
+    for x in ("Gurugram","Gurgaon","Greater Noida","Noida","Ghaziabad","Faridabad","New Delhi","Delhi"):
+        if x.lower() in low:
+            city=x
+            break
+    p=re.search(r"\b([1-9]\d{5})\b",s)
+    pin=p.group(1) if p else ""
+    vals=[]
+    for x in (locality,city,pin):
+        if x and x.lower() not in {v.lower() for v in vals}:
+            vals.append(x)
+    return " ".join(vals) or "Delhi NCR"
+
 def _weak_host(host): return any(x in host for x in WEAK_HOSTS)
 
 def ensure_schema(engine):
     with engine.begin() as c:
         c.execute(text("""
-        CREATE TABLE IF NOT EXISTS ai_hospitality_phone_candidate_v12418(
+        CREATE TABLE IF NOT EXISTS ai_hospitality_phone_candidate_v12420b(
           candidate_id BIGSERIAL PRIMARY KEY,
           hospitality_id BIGINT NOT NULL REFERENCES ai_hospitality_entity(hospitality_id),
           phone TEXT NOT NULL,
@@ -70,7 +106,7 @@ def ensure_schema(engine):
           UNIQUE(hospitality_id,phone)
         )"""))
         c.execute(text("""
-        CREATE TABLE IF NOT EXISTS ai_hospitality_phone_recovery_state_v12418(
+        CREATE TABLE IF NOT EXISTS ai_hospitality_phone_recovery_state_v12420b(
           hospitality_id BIGINT PRIMARY KEY REFERENCES ai_hospitality_entity(hospitality_id),
           attempts INT NOT NULL DEFAULT 0,
           last_status TEXT NOT NULL DEFAULT 'PENDING',
@@ -79,8 +115,8 @@ def ensure_schema(engine):
           completed BOOLEAN NOT NULL DEFAULT FALSE,
           updated_at TIMESTAMPTZ DEFAULT NOW()
         )"""))
-        c.execute(text("CREATE INDEX IF NOT EXISTS ix_hosp_phone_candidate_decision_v12418 ON ai_hospitality_phone_candidate_v12418(decision)"))
-        c.execute(text("CREATE INDEX IF NOT EXISTS ix_hosp_phone_state_completed_v12418 ON ai_hospitality_phone_recovery_state_v12418(completed)"))
+        c.execute(text("CREATE INDEX IF NOT EXISTS ix_hosp_phone_candidate_decision_v12420b ON ai_hospitality_phone_candidate_v12420b(decision)"))
+        c.execute(text("CREATE INDEX IF NOT EXISTS ix_hosp_phone_state_completed_v12420b ON ai_hospitality_phone_recovery_state_v12420b(completed)"))
     return True
 
 def quarantine_weak_existing(engine):
@@ -132,7 +168,7 @@ def _rank_result_urls(name,location,results):
         ns=_name_strength(name,blob)
         if ns < 0.34:
             continue
-        if not _location_ok(location,blob) and ns < 0.67:
+        if not _location_ok(location,blob) and ns < 0.60:
             continue
         host=_host(url)
         rec=(ns,url,host)
@@ -161,11 +197,11 @@ def _collect_candidates(name,location,results):
         if strength < 0.34:
             continue
         loc_ok=_location_ok(location,blob)
-        if not loc_ok and strength < 0.67:
+        if not loc_ok and strength < 0.60:
             continue
         found=set()
         # Compact 10-digit numbers and common +91 / spaced / hyphenated forms.
-        for raw in re.findall(r"(?<!\d)(?:\+?91[\s().-]*)?[6-9](?:[\s().-]*\d){9}(?!\d)",blob):
+        for raw in re.findall(r"(?<!\d)(?:(?:\+?91|0)[\s().-]*)?[6-9](?:[\s().-]*\d){9}(?!\d)",blob):
             p=_phone(raw)
             if p: found.add(p)
         for raw in re.findall(r"(?<!\d)[6-9]\d{9}(?!\d)",blob):
@@ -206,10 +242,11 @@ def recover_one(engine,row):
     hid=int(row["hospitality_id"])
     name=_norm(row["business_name"])
     location=_norm(row.get("location") or row.get("city") or "Delhi NCR")
+    hint=_search_location_hint(location)
     queries=[
-      f'{name} {location} phone',
-      f'{name} {location} contact number',
-      f'{name} {location} mobile whatsapp',
+      f'"{name}" {hint} phone',
+      f'"{name}" {hint} contact mobile',
+      f'"{name}" phone number',
     ]
     merged=[]; errors=[]
     for q in queries:
@@ -236,18 +273,18 @@ def recover_one(engine,row):
         for p,d in candidates.items():
             score,decision=_score_candidate(d)
             c.execute(text("""
-              INSERT INTO ai_hospitality_phone_candidate_v12418(
+              INSERT INTO ai_hospitality_phone_candidate_v12420b(
                 hospitality_id,phone,confidence,decision,evidence_count,domain_count,strong_domain_count,
                 evidence_urls,source_summary,updated_at
               ) VALUES(:id,:p,:score,:decision,:ev,:domains,:strong,CAST(:urls AS jsonb),:summary,NOW())
               ON CONFLICT(hospitality_id,phone) DO UPDATE SET
-                confidence=GREATEST(ai_hospitality_phone_candidate_v12418.confidence,EXCLUDED.confidence),
+                confidence=GREATEST(ai_hospitality_phone_candidate_v12420b.confidence,EXCLUDED.confidence),
                 decision=CASE
-                  WHEN EXCLUDED.confidence>ai_hospitality_phone_candidate_v12418.confidence THEN EXCLUDED.decision
-                  ELSE ai_hospitality_phone_candidate_v12418.decision END,
-                evidence_count=GREATEST(ai_hospitality_phone_candidate_v12418.evidence_count,EXCLUDED.evidence_count),
-                domain_count=GREATEST(ai_hospitality_phone_candidate_v12418.domain_count,EXCLUDED.domain_count),
-                strong_domain_count=GREATEST(ai_hospitality_phone_candidate_v12418.strong_domain_count,EXCLUDED.strong_domain_count),
+                  WHEN EXCLUDED.confidence>ai_hospitality_phone_candidate_v12420b.confidence THEN EXCLUDED.decision
+                  ELSE ai_hospitality_phone_candidate_v12420b.decision END,
+                evidence_count=GREATEST(ai_hospitality_phone_candidate_v12420b.evidence_count,EXCLUDED.evidence_count),
+                domain_count=GREATEST(ai_hospitality_phone_candidate_v12420b.domain_count,EXCLUDED.domain_count),
+                strong_domain_count=GREATEST(ai_hospitality_phone_candidate_v12420b.strong_domain_count,EXCLUDED.strong_domain_count),
                 evidence_urls=EXCLUDED.evidence_urls,source_summary=EXCLUDED.source_summary,updated_at=NOW()
             """),{"id":hid,"p":p,"score":score,"decision":decision,"ev":d["evidence"],
                   "domains":len(d["domains"]),"strong":len(d["strong_domains"]),"urls":json.dumps(d["urls"][:12]),
@@ -270,11 +307,11 @@ def recover_one(engine,row):
               "CANDIDATES_NEED_VERIFY" if best and best[2]=="NEEDS_VERIFICATION" else (
               "LOW_CONFIDENCE_ONLY" if best else "NO_PHONE_FOUND"))
         c.execute(text("""
-          INSERT INTO ai_hospitality_phone_recovery_state_v12418(
+          INSERT INTO ai_hospitality_phone_recovery_state_v12420b(
             hospitality_id,attempts,last_status,last_error,last_run_at,completed,updated_at
           ) VALUES(:id,1,:st,:err,NOW(),TRUE,NOW())
           ON CONFLICT(hospitality_id) DO UPDATE SET
-            attempts=ai_hospitality_phone_recovery_state_v12418.attempts+1,last_status=:st,last_error=:err,
+            attempts=ai_hospitality_phone_recovery_state_v12420b.attempts+1,last_status=:st,last_error=:err,
             last_run_at=NOW(),completed=TRUE,updated_at=NOW()
         """),{"id":hid,"st":state,"err":" | ".join(errors)[:1000] or None})
     return {"hospitality_id":hid,"business_name":name,"status":state,
@@ -288,7 +325,7 @@ def _claim_batch(engine,limit):
           SELECT e.hospitality_id,e.business_name,e.location,e.city
           FROM ai_hospitality_entity e
           LEFT JOIN ai_hospitality_quality_v12416 q ON q.hospitality_id=e.hospitality_id
-          LEFT JOIN ai_hospitality_phone_recovery_state_v12418 s ON s.hospitality_id=e.hospitality_id
+          LEFT JOIN ai_hospitality_phone_recovery_state_v12420b s ON s.hospitality_id=e.hospitality_id
           WHERE e.active=TRUE
             AND COALESCE(q.quality_status,'')<>'QUARANTINED_NOISE'
             AND COALESCE(e.contact_phone,'')=''
@@ -299,7 +336,7 @@ def _claim_batch(engine,limit):
         """),{"lim":limit}).mappings().all()]
         for r in rows:
             c.execute(text("""
-              INSERT INTO ai_hospitality_phone_recovery_state_v12418(
+              INSERT INTO ai_hospitality_phone_recovery_state_v12420b(
                 hospitality_id,attempts,last_status,last_run_at,completed,updated_at
               ) VALUES(:id,0,'IN_PROGRESS',NOW(),FALSE,NOW())
               ON CONFLICT(hospitality_id) DO UPDATE SET last_status='IN_PROGRESS',last_run_at=NOW(),updated_at=NOW()
@@ -317,7 +354,7 @@ def run_batch(engine,limit=5):
             hid=int(r["hospitality_id"])
             with engine.begin() as c:
                 c.execute(text("""
-                  UPDATE ai_hospitality_phone_recovery_state_v12418
+                  UPDATE ai_hospitality_phone_recovery_state_v12420b
                   SET attempts=attempts+1,last_status='ERROR',last_error=:err,last_run_at=NOW(),
                       completed=TRUE,updated_at=NOW()
                   WHERE hospitality_id=:id
@@ -336,18 +373,18 @@ def stats(engine):
     with engine.connect() as c:
         active=int(c.execute(text("SELECT COUNT(*) FROM ai_hospitality_entity WHERE active=TRUE")).scalar() or 0)
         phones=int(c.execute(text("SELECT COUNT(*) FROM ai_hospitality_entity WHERE active=TRUE AND COALESCE(contact_phone,'')<>''")).scalar() or 0)
-        processed=int(c.execute(text("SELECT COUNT(*) FROM ai_hospitality_phone_recovery_state_v12418 WHERE completed=TRUE")).scalar() or 0)
-        high=int(c.execute(text("SELECT COUNT(*) FROM ai_hospitality_phone_candidate_v12418 WHERE decision='HIGH_CONFIDENCE'")).scalar() or 0)
-        verify=int(c.execute(text("SELECT COUNT(*) FROM ai_hospitality_phone_candidate_v12418 WHERE decision='NEEDS_VERIFICATION'")).scalar() or 0)
-        low=int(c.execute(text("SELECT COUNT(*) FROM ai_hospitality_phone_candidate_v12418 WHERE decision='LOW_CONFIDENCE'")).scalar() or 0)
-        legacy=int(c.execute(text("SELECT COUNT(*) FROM ai_hospitality_phone_candidate_v12418 WHERE decision='LEGACY_WEAK'")).scalar() or 0)
-        noresult=int(c.execute(text("SELECT COUNT(*) FROM ai_hospitality_phone_recovery_state_v12418 WHERE completed=TRUE AND last_status='NO_PHONE_FOUND'")).scalar() or 0)
-        errors=int(c.execute(text("SELECT COUNT(*) FROM ai_hospitality_phone_recovery_state_v12418 WHERE completed=TRUE AND last_status='ERROR'")).scalar() or 0)
+        processed=int(c.execute(text("SELECT COUNT(*) FROM ai_hospitality_phone_recovery_state_v12420b WHERE completed=TRUE")).scalar() or 0)
+        high=int(c.execute(text("SELECT COUNT(*) FROM ai_hospitality_phone_candidate_v12420b WHERE decision='HIGH_CONFIDENCE'")).scalar() or 0)
+        verify=int(c.execute(text("SELECT COUNT(*) FROM ai_hospitality_phone_candidate_v12420b WHERE decision='NEEDS_VERIFICATION'")).scalar() or 0)
+        low=int(c.execute(text("SELECT COUNT(*) FROM ai_hospitality_phone_candidate_v12420b WHERE decision='LOW_CONFIDENCE'")).scalar() or 0)
+        legacy=int(c.execute(text("SELECT COUNT(*) FROM ai_hospitality_phone_candidate_v12420b WHERE decision='LEGACY_WEAK'")).scalar() or 0)
+        noresult=int(c.execute(text("SELECT COUNT(*) FROM ai_hospitality_phone_recovery_state_v12420b WHERE completed=TRUE AND last_status='NO_PHONE_FOUND'")).scalar() or 0)
+        errors=int(c.execute(text("SELECT COUNT(*) FROM ai_hospitality_phone_recovery_state_v12420b WHERE completed=TRUE AND last_status='ERROR'")).scalar() or 0)
         pending=int(c.execute(text("""
           SELECT COUNT(*)
           FROM ai_hospitality_entity e
           LEFT JOIN ai_hospitality_quality_v12416 q ON q.hospitality_id=e.hospitality_id
-          LEFT JOIN ai_hospitality_phone_recovery_state_v12418 s ON s.hospitality_id=e.hospitality_id
+          LEFT JOIN ai_hospitality_phone_recovery_state_v12420b s ON s.hospitality_id=e.hospitality_id
           WHERE e.active=TRUE AND COALESCE(q.quality_status,'')<>'QUARANTINED_NOISE'
             AND COALESCE(e.contact_phone,'')='' AND COALESCE(s.completed,FALSE)=FALSE
         """)).scalar() or 0)
@@ -361,7 +398,7 @@ def reset_failed_queue(engine):
     ensure_schema(engine)
     with engine.begin() as c:
         n=c.execute(text("""
-          UPDATE ai_hospitality_phone_recovery_state_v12418
+          UPDATE ai_hospitality_phone_recovery_state_v12420b
           SET completed=FALSE,last_status='PENDING',last_error=NULL,updated_at=NOW()
           WHERE last_status='ERROR'
              OR (last_status='IN_PROGRESS' AND last_run_at < NOW()-INTERVAL '15 minutes')
@@ -450,9 +487,9 @@ def register(core):
                 body=resp.body.decode("utf-8")
                 s=stats(core.engine)
                 panel=f"""
-                <div class='card' id='phone-recovery-v12418'>
-                  <h2>All Numbers Recovery 12.4.18 · Controlled Queue</h2>
-                  <p>Existing phone values are preserved. Missing-phone businesses are searched once. The engine now checks matched public business pages because search snippets often omit phone numbers. One-source numbers are review-only; corroborated high-confidence numbers may be auto-saved.</p>
+                <div class='card' id='phone-recovery-v12420b'>
+                  <h2>All Numbers Recovery 12.4.20B · One-Time Data Retriever</h2>
+                  <p>Existing phones are preserved. Missing-phone businesses get one fresh 12.4.20B pass using concise name + locality searches, search snippets, and matched public pages. One-source numbers remain review-only; corroborated high-confidence numbers may be auto-saved.</p>
                   <div class='grid'>
                     <div class='m'>Unique Businesses Attempted<strong id='pr-processed'>{s['unique_processed']}</strong></div>
                     <div class='m'>Phones Saved<strong id='pr-saved'>{s['phones_saved']}</strong></div>
@@ -465,7 +502,7 @@ def register(core):
                   </div><br>
                   <button type='button' onclick='qWeak()'>A. Existing Phones Preserved</button>
                   <button type='button' onclick='testFive()'>B. Test Next 5</button>
-                  <button type='button' onclick='recoverAll()'>C. Recover All Remaining</button>
+                  <button type='button' onclick='recoverAll()'>C. Retrieve ALL Missing Numbers</button>
                   <button type='button' onclick='resetErrors()'>Reset Errors Only</button>
                   <div id='pr-progress' style='margin-top:10px;font-weight:700'></div>
                   <script>
