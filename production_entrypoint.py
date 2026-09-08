@@ -48,8 +48,8 @@ LATE_REGISTRATION = {
 # - no data is deleted or mutated by the shield
 # -----------------------------------------------------------------------------
 
-MAX_CORE_REQUESTS = 8
-CORE_GATE_WAIT_SECONDS = 1.5
+MAX_CORE_REQUESTS = 5
+CORE_GATE_WAIT_SECONDS = 1.0
 
 INGEST_MAX_CONCURRENT = 2
 INGEST_MIN_INTERVAL_SECONDS = 0.15
@@ -178,7 +178,23 @@ async def boot_status():
 
 @health_app.get("/runtime-status")
 async def runtime_status():
+    pool_snapshot = None
+    try:
+        if CORE_APP is not None:
+            import app as _core_app
+            p = _core_app.engine.pool
+            pool_snapshot = {
+                "class": type(p).__name__,
+                "status": p.status() if hasattr(p, "status") else "unknown",
+                "size": p.size() if hasattr(p, "size") else None,
+                "checked_in": p.checkedin() if hasattr(p, "checkedin") else None,
+                "checked_out": p.checkedout() if hasattr(p, "checkedout") else None,
+                "overflow": p.overflow() if hasattr(p, "overflow") else None,
+            }
+    except Exception as exc:
+        pool_snapshot = {"error": f"{type(exc).__name__}: {exc}"}
     return {
+        "db_pool_status": pool_snapshot,
         "status": "OK",
         "version": VERSION,
         "boot_state": BOOT["state"],

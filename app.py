@@ -41,9 +41,34 @@ if DATABASE_URL.startswith("postgres://"):
 elif DATABASE_URL.startswith("postgresql://"):
     DATABASE_URL=DATABASE_URL.replace("postgresql://","postgresql+psycopg://",1)
 
-engine=create_engine(DATABASE_URL,pool_pre_ping=True,pool_recycle=300)
+engine=create_engine(
+    DATABASE_URL,
+    pool_pre_ping=True,
+    pool_recycle=300,
+    pool_size=10,
+    max_overflow=10,
+    pool_timeout=8,
+    pool_use_lifo=True,
+)
 client=genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 app=FastAPI(title="Property Intelligence Unified Workspace",version=VERSION)
+
+@app.get("/api/system/db-pool-status")
+def db_pool_status():
+    pool = engine.pool
+    status = {
+        "status": "OK",
+        "pool_class": type(pool).__name__,
+        "pool_status": pool.status() if hasattr(pool, "status") else "unknown",
+    }
+    for name in ("size", "checkedin", "checkedout", "overflow"):
+        fn = getattr(pool, name, None)
+        if callable(fn):
+            try:
+                status[name] = fn()
+            except Exception:
+                status[name] = None
+    return status
 
 SCHEMA='''
 CREATE TABLE IF NOT EXISTS pi_properties(
