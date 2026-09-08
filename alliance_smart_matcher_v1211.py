@@ -138,7 +138,7 @@ def _area_score(req,p):
     if distance<=0.50:return 3,["area within 50% of range"]
     return 0,["area outside requirement range"]
 def _availability_score(p):
-    if _upper(p.get("availability_status"))=="UNAVAILABLE":return -999,["unavailable"]
+    if _upper(p.get("availability_status")) in {"UNAVAILABLE","INACTIVE"}:return -999,["unavailable/inactive"]
     ver=_upper(p.get("verification_status"));avail=_upper(p.get("availability_status"))
     if ver=="VERIFIED" and avail=="AVAILABLE":return 10,["verified available"]
     if ver=="VERIFIED":return 7,["verified; availability recheck"]

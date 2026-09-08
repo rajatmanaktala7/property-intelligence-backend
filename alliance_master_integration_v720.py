@@ -159,7 +159,7 @@ def _table(data,cols):
 
 def _search_properties(engine,q="",tx="",limit=500):
     # 12.4.26B: canonical eligibility gate.
-    wh=["p.promotion_status=\'PROMOTED_VALIDATED\'","COALESCE(w.availability_status,\'UNKNOWN\') NOT IN (\'INACTIVE\',\'UNAVAILABLE\')"];params={"n":limit}
+    wh=["p.promotion_status=\'PROMOTED_VALIDATED\'"];params={"n":limit}
     if q:
         wh.append("(COALESCE(p.locality,'') ILIKE :q OR COALESCE(p.city,'') ILIKE :q OR COALESCE(p.clean_record::text,'') ILIKE :q)")
         params["q"]="%"+q+"%"
@@ -262,12 +262,17 @@ def register(core):
         table="pi_master_properties_v711" if et=="PROPERTY" else "pi_master_requirements_v711"
         with engine.begin() as c:
             if not c.execute(text(f"SELECT 1 FROM {table} WHERE canonical_id=:id"),{"id":canonical_id}).first():raise HTTPException(404,"Entity not found")
+            desired_availability='ACTIVE' if et=='REQUIREMENT' else 'UNKNOWN'
             c.execute(text("""INSERT INTO pi_master_workflow_v720(canonical_id,entity_type,verification_status,verified_at,verified_by,availability_status)
-              VALUES(:id,:et,'VERIFIED',NOW(),:by,'AVAILABLE')
+              VALUES(:id,:et,'VERIFIED',NOW(),:by,:av)
               ON CONFLICT(canonical_id) DO UPDATE SET verification_status='VERIFIED',verified_at=NOW(),verified_by=EXCLUDED.verified_by,
-              availability_status=CASE WHEN pi_master_workflow_v720.availability_status='UNKNOWN' THEN 'AVAILABLE' ELSE pi_master_workflow_v720.availability_status END,updated_at=NOW()"""),
-              {"id":canonical_id,"et":et,"by":_actor(core,req)})
-        return {"status":"VERIFIED","canonical_id":canonical_id}
+              availability_status=CASE
+                WHEN :et='REQUIREMENT' THEN 'ACTIVE'
+                WHEN pi_master_workflow_v720.availability_status IN ('AVAILABLE','UNAVAILABLE') THEN pi_master_workflow_v720.availability_status
+                ELSE 'UNKNOWN' END,updated_at=NOW()"""),
+              {"id":canonical_id,"et":et,"by":_actor(core,req),"av":desired_availability})
+        return {"status":"VERIFIED","canonical_id":canonical_id,
+                "availability_policy":"SEPARATE_FOR_PROPERTY"}
 
     @app.post("/api/v7.2/match/{requirement_id}")
     def api_match(requirement_id:str,req:Request):
@@ -282,7 +287,7 @@ def register(core):
         if not rr:raise HTTPException(404,"Requirement not found")
         matches=_run_match(engine,requirement_id)
         # Privacy hard gate: only verified properties in outbound draft and no contacts.
-        verified=[m for m in matches if m["property"].get("verification_status")=="VERIFIED"]
+        verified=[m for m in matches if m["property"].get("verification_status")=="VERIFIED" and m["property"].get("availability_status")=="AVAILABLE"]
         return {"status":"ok","message":_client_message(_safe(dict(rr)),verified),"verified_options":len(verified),
                 "privacy":{"owner_broker_contacts_included":False}}
 

@@ -179,7 +179,7 @@ def _mark_unavailable(engine,cid,actor):
     with engine.begin() as c:
         c.execute(text("""INSERT INTO pi_master_workflow_v720(canonical_id,entity_type,verification_status,availability_status,updated_at)
           VALUES(:id,'PROPERTY','UNVERIFIED','UNAVAILABLE',NOW())
-          ON CONFLICT(canonical_id) DO UPDATE SET availability_status='UNAVAILABLE',verification_status='UNVERIFIED',updated_at=NOW()"""),{"id":cid})
+          ON CONFLICT(canonical_id) DO UPDATE SET availability_status='UNAVAILABLE',updated_at=NOW()"""),{"id":cid})
     _set_action(engine,cid,"PROPERTY",actor,stage="UNAVAILABLE")
     _audit_log(engine,cid,"PROPERTY","MARKED_UNAVAILABLE",actor,{})
 
@@ -203,7 +203,7 @@ def _match_full(engine,rid,limit=50):
     rl=(req.get("locality") or "").strip().lower()
     rc=(req.get("city") or "").strip().lower()
     for p in props:
-        if p.get("availability_status")=="UNAVAILABLE": continue
+        if str(p.get("availability_status") or "").upper() in {"UNAVAILABLE","INACTIVE"}: continue
         score,reasons=v720._score(req,p)
         pl=(p.get("locality") or "").strip().lower(); pc=(p.get("city") or "").strip().lower()
         if rl and pl and (rl in pl or pl in rl):
@@ -250,7 +250,7 @@ def _approved_matches(engine,rid):
     out=[]
     for r in rows:
         d=_safe(dict(r)); d=v720._decorate_property(d)
-        if d.get("review_status")=="APPROVED" and d.get("verification_status")=="VERIFIED" and d.get("availability_status")!="UNAVAILABLE":
+        if d.get("promotion_status")=="PROMOTED_VALIDATED" and d.get("review_status")=="APPROVED" and d.get("verification_status")=="VERIFIED" and d.get("availability_status")=="AVAILABLE":
             out.append(d)
     return out
 
