@@ -4,7 +4,7 @@ from fastapi.responses import HTMLResponse
 from sqlalchemy import text
 import alliance_core_contract as contract
 
-VERSION = "1.2.0-TABLE-AND-WORKFLOW-AUDIT"
+VERSION = "1.3.0-GREEN-LINK-AUTHORITY"
 
 def _app(core): return getattr(core, "app", None) or core
 def _engine(core): return getattr(core, "engine", None)
@@ -97,6 +97,9 @@ def _html(title, data):
 <style>body{{font-family:Arial;margin:0;background:#f4f7fb}}main{{padding:20px}}table{{border-collapse:collapse;width:100%;background:white}}td{{padding:9px;border-bottom:1px solid #ddd}}</style></head>
 <body><main><h2>{title}</h2><table>{rows}</table></main></body></html>'''
 
+def _green_checks(mapping):
+    return " &nbsp; ".join(("🟢 " if bool(v) else "🔴 ")+str(k) for k,v in mapping.items())
+
 def register(core):
     app = _app(core)
     owned = {"/alliance/system-doctor","/alliance/primary/data-health","/alliance/primary/ai-control","/api/alliance/system-doctor"}
@@ -112,13 +115,13 @@ def register(core):
         _login(core, req)
         s = snapshot(core)
         return HTMLResponse(_html("Alliance System Doctor", {
-            "Status": s["status"], "Matcher": s["matcher_version"],
+            "Status": ("🟢 PASS" if s["status"]=="PASS" else "🔴 FAIL"), "Matcher": s["matcher_version"],
             "Blockers": ", ".join(s["blockers"]) or "None",
-            "Routes": str(s["routes"]),
+            "Routes": _green_checks(s["routes"]),
             "Route Details": str(s["route_details"]),
-            "Table Views": str(s["table_view_routes"]),
-            "Table Presentation": str(s["table_presentation"]),
-            "Tables": str(s["tables"])
+            "Table Views": _green_checks(s["table_view_routes"]),
+            "Table Presentation": _green_checks(s["table_presentation"]),
+            "Tables": _green_checks(s["tables"])
         }))
 
     @app.get("/alliance/primary/data-health", response_class=HTMLResponse)

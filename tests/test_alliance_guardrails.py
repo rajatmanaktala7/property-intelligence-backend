@@ -40,7 +40,7 @@ def test_requirement_manual_canonical_alias_is_protected():
 
 def test_system_doctor_checks_registered_canonical_routes():
     source = txt("alliance_system_doctor.py")
-    assert 'VERSION = "1.1.0-ROUTE-AUTHORITY-AWARE"' in source
+    assert 'VERSION = "1.3.0-GREEN-LINK-AUTHORITY"' in source
     assert '"resolution": "REGISTERED_ROUTE" if present else "MISSING"' in source
     assert '"route_details": route_details' in source
 
@@ -59,3 +59,14 @@ def test_database_hub_routes_are_protected():
     doctor = txt("alliance_system_doctor.py")
     assert '"table_view_routes": table_view_checks' in doctor
     assert '"table_presentation": presentation' in doctor
+
+
+def test_green_link_authority_is_protected():
+    doctor = txt("alliance_system_doctor.py")
+    contract_src = txt("alliance_core_contract.py")
+    final = txt("alliance_final_5x5_databases_v910.py")
+    assert "def _green_checks(mapping):" in doctor
+    assert "🟢 PASS" in doctor and "🔴 FAIL" in doctor
+    assert '"property_databases":' in contract_src
+    assert '"requirement_databases":' in contract_src
+    assert "/alliance/primary/reports" not in final

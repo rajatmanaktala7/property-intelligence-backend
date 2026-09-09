@@ -17,6 +17,8 @@ ROUTE_REGISTRY = {
     "properties": {"path": "/alliance/primary/properties", "authority": "MASTER_PROPERTY", "lifecycle": "ACTIVE"},
     "property_manual": {"path": "/property-manual", "authority": "OPERATIONAL_TO_MASTER", "lifecycle": "ACTIVE"},
     "requirements": {"path": "/alliance/primary/requirements", "authority": "MASTER_REQUIREMENT", "lifecycle": "ACTIVE"},
+    "property_databases": {"path": "/alliance/primary/databases", "authority": "MASTER_AND_SOURCE_VIEWS", "lifecycle": "ACTIVE"},
+    "requirement_databases": {"path": "/alliance/primary/requirements-hub", "authority": "MASTER_AND_SOURCE_VIEWS", "lifecycle": "ACTIVE"},
     "requirement_manual": {"path": "/requirement-manual", "authority": "OPERATIONAL_TO_MASTER", "lifecycle": "ACTIVE"},
     "availability": {"path": "/alliance/primary/availability", "authority": "PROPERTY_AVAILABILITY", "lifecycle": "ACTIVE"},
     "matcher": {"path": "/alliance/primary/matcher", "authority": "MASTER_PROPERTY_AND_REQUIREMENT", "lifecycle": "ACTIVE"},
