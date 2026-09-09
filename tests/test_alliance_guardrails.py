@@ -28,3 +28,10 @@ def test_contract_safety_flags():
     assert c.PROTECTED_INVARIANTS["client_contact_exposure"] is False
     assert c.PROTECTED_INVARIANTS["historical_backfill"] == "NOT_AUTHORIZED"
     assert c.PROTECTED_INVARIANTS["property_verification_separate_from_availability"] is True
+
+
+def test_requirement_manual_canonical_alias_is_protected():
+    source = Path('fast_manual_forms.py').read_text(encoding='utf-8')
+    assert "'/requirement-manual'" in source
+    assert "RedirectResponse(f'/fast-requirement-entry?division={div}',307)" in source
+    assert contract.ROUTE_REGISTRY['requirement_manual']['path'] == '/requirement-manual'

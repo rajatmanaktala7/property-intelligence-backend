@@ -306,7 +306,7 @@ def install_fast_forms(app,engine,need_login,page_role_or_redirect,actor_name):
         if request.method=='GET' and p in {'/manual-property-final','/manual-property-v18','/manual-property-final-exec','/operational-property-form','/property-form-final','/property-manual','/goa-property-form','/v14-property-form'}:
             if p=='/goa-property-form':div='GOA'
             return RedirectResponse(f'/fast-property-entry?division={div}',307)
-        if request.method=='GET' and p in {'/manual-requirement-final','/operational-requirement-form','/goa-requirement-form','/v14-requirement-form'}:
+        if request.method=='GET' and p in {'/requirement-manual','/manual-requirement-final','/operational-requirement-form','/goa-requirement-form','/v14-requirement-form'}:
             if p=='/goa-requirement-form':div='GOA'
             return RedirectResponse(f'/fast-requirement-entry?division={div}',307)
         response=await call_next(request)
