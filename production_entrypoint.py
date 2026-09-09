@@ -1199,6 +1199,17 @@ def _load_core():
             stabilization["alliance_system_doctor"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","fail_safe":True}
             print("[alliance-system-doctor] warning:", type(exc).__name__, str(exc))
 
+        # ALLIANCE_DEEP_RUNTIME_AUDITOR
+        try:
+            import alliance_deep_runtime_auditor as deep_audit
+            stabilization = dict(stabilization or {})
+            stabilization["alliance_deep_runtime_auditor"] = deep_audit.register(wrapped.core)
+            print("[alliance-deep-runtime-auditor]", stabilization["alliance_deep_runtime_auditor"])
+        except Exception as exc:
+            stabilization = dict(stabilization or {})
+            stabilization["alliance_deep_runtime_auditor"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","fail_safe":True}
+            print("[alliance-deep-runtime-auditor] warning:", type(exc).__name__, str(exc))
+
         CORE_APP = wrapped.app
         try:
             import alliance_whatsapp_safe_ingest_v5 as safe_wa

@@ -90,3 +90,17 @@ def test_runtime_rectifier_contracts():
     assert 'id=areaInput type=number' in forms
     assert 'id=amountInput type=number' in forms
     assert "Numeric-only entry is supported." in forms
+
+
+def test_deep_runtime_auditor_is_protected():
+    auditor = txt("alliance_deep_runtime_auditor.py")
+    entry = txt("production_entrypoint.py")
+    contract = txt("alliance_core_contract.py")
+    assert "/alliance/deep-audit" in auditor
+    assert "/api/alliance/deep-audit" in auditor
+    assert "ASGITransport" in auditor
+    assert "BUSY_MARKERS" in auditor
+    assert "source_link_results" in auditor
+    assert "registered_method" in auditor
+    assert "ALLIANCE_DEEP_RUNTIME_AUDITOR" in entry
+    assert '"deep_audit"' in contract

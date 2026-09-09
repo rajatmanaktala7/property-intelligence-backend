@@ -35,6 +35,7 @@ ROUTE_REGISTRY = {
     "ai_control": {"path": "/alliance/primary/ai-control", "authority": "SYSTEM", "lifecycle": "ACTIVE"},
     "data_health": {"path": "/alliance/primary/data-health", "authority": "SYSTEM", "lifecycle": "ACTIVE"},
     "system_doctor": {"path": "/alliance/system-doctor", "authority": "SYSTEM", "lifecycle": "ACTIVE"},
+    "deep_audit": {"path": "/alliance/deep-audit", "authority": "SYSTEM", "lifecycle": "ACTIVE"},
     "workspace": {"path": "/workspace", "authority": "ADMIN", "lifecycle": "ADMIN_ONLY"},
 }
 
