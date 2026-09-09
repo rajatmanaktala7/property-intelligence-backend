@@ -1199,6 +1199,17 @@ def _load_core():
             stabilization["alliance_system_doctor"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","fail_safe":True}
             print("[alliance-system-doctor] warning:", type(exc).__name__, str(exc))
 
+        # ALLIANCE_BUSINESS_AUTOPILOT_V1
+        try:
+            import alliance_business_autopilot_v1 as business_autopilot_v1
+            stabilization = dict(stabilization or {})
+            stabilization["alliance_business_autopilot_v1"] = business_autopilot_v1.register(wrapped.core)
+            print("[alliance-business-autopilot-v1]", stabilization["alliance_business_autopilot_v1"])
+        except Exception as exc:
+            stabilization = dict(stabilization or {})
+            stabilization["alliance_business_autopilot_v1"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","fail_safe":True}
+            print("[alliance-business-autopilot-v1] warning:", type(exc).__name__, str(exc))
+
         # ALLIANCE_DEEP_RUNTIME_AUDITOR
         try:
             import alliance_deep_runtime_auditor as deep_audit
