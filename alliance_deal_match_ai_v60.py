@@ -10,9 +10,9 @@ from sqlalchemy import text
 import alliance_phase5_canonical_matcher as phase5
 import alliance_whatsapp_first_match_v1 as whatsapp_first
 
-VERSION = "6.2.0-WHATSAPP-FIRST-MATCHER"
+VERSION = "6.3.0-CANONICAL-MASTER-MATCHER"
 ROUTE = "/deal-match-ai-v60"
-ENGINE_VERSION = whatsapp_first.VERSION
+ENGINE_VERSION = "1.1.0-CANONICAL-MASTER-AUTHORITY"
 
 # This file intentionally keeps the existing public route and API names.
 # Matching is delegated to the separately validated Phase 5 canonical engine.
@@ -107,9 +107,8 @@ th{{background:#f7ecdf;position:sticky;top:0}}
 <small>Canonical inventory · eligibility first · exact before approved alternatives · verification protected</small>
 </header>
 <nav>
-<a href="/team-dashboard-v376">← Dashboard</a>
-<a href="/workspace">Working Space</a>
-<a href="/whatsapp-live">WhatsApp Workspace</a>
+<a href="javascript:history.back()">← Previous Page</a>
+<a href="/alliance/primary">Dashboard</a>
 </nav>
 <main>{body}</main>
 </body>
@@ -215,7 +214,7 @@ def render_results(core, q: str, mode: str, min_score: float):
 <h2>Requirement Intelligence Card</h2>
 <p>{esc(q)}</p>
 <div class="grid">
-<div><b>Location</b><br>{esc(req.get("location") or "Not identified")}</div>
+<div><b>Primary Locations</b><br>{esc(", ".join(req.get("primary_locations") or [req.get("location")]) if (req.get("primary_locations") or req.get("location")) else "Not identified")}</div>
 <div><b>Transaction</b><br>{esc(req.get("transaction") or "Not identified")}</div>
 <div><b>Property Family</b><br>{esc(req.get("family") or "Not identified")}</div>
 <div><b>Subtype / Use</b><br>{esc(req.get("subtype") or "Generic")}</div>
@@ -299,7 +298,7 @@ def register(core):
             "status": "OK",
             "version": VERSION,
             "engine_version": ENGINE_VERSION,
-            "matching_model": "WHATSAPP_FIRST_STAGED_MATCHING",
+            "matching_model": "CANONICAL_MASTER_ONLY",
             "sources": counts,
             "candidate_count": len(deduped),
             "contacts_exposed": False,

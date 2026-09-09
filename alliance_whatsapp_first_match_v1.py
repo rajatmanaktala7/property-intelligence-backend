@@ -4,7 +4,7 @@ from typing import Any, Dict, List
 
 import alliance_phase5_canonical_matcher as phase5
 
-VERSION = "1.0.3-ALL-WHATSAPP-REQUIREMENT-SEARCH"
+VERSION = "1.1.0-CANONICAL-MASTER-AUTHORITY"
 
 
 def _evaluate(
@@ -151,200 +151,48 @@ def _tag(rows, stage):
     return out
 
 
-def run_match(
-    engine,
-    requirement_text: str,
-    min_score: float = 70.0,
-    limit: int = 50,
-):
-
-    req = phase5.parse_requirement(
-        requirement_text
-    )
-
-    # =====================================================
-    # STAGE 1
-    # WHATSAPP AVAILABILITY ONLY
-    # =====================================================
-
-    wa_raw = phase5.load_whatsapp_master_for_requirement(
-        engine,
-        req,
-        limit=20000,
-    )
-
-    wa_candidates = phase5.dedupe_candidates(
-        wa_raw
-    )
-
-    wa_result = _evaluate(
-        req,
-        wa_candidates,
-        min_score,
-        limit
-    )
-
-    # =====================================================
-    # STAGE 2
-    # DATABASE FALLBACK ONLY IF WHATSAPP FOUND NOTHING
-    # =====================================================
-
-    fallback_used = not _has_match(
-        wa_result
-    )
-
-    pi_raw = []
-    pi_candidates = []
-
-    if fallback_used:
-
-        pi_raw = phase5.load_pi_properties(
-            engine
-        )
-
-        pi_candidates = phase5.dedupe_candidates(
-            pi_raw
-        )
-
-        selected = _evaluate(
-            req,
-            pi_candidates,
-            min_score,
-            limit
-        )
-
-        stage = "DATABASE_FALLBACK"
-
-    else:
-
-        selected = wa_result
-
-        stage = "WHATSAPP_PRIMARY"
-
-    exact_verified = _tag(
-        selected["exact_verified"],
-        stage
-    )
-
-    exact_verify = _tag(
-        selected["exact_needs_verification"],
-        stage
-    )
-
-    alternatives = _tag(
-        selected["alternatives"],
-        stage
-    )
-
+def run_match(engine, requirement_text: str, min_score: float = 70.0, limit: int = 50):
+    req = phase5.parse_requirement(requirement_text)
+    pi_raw = phase5.load_pi_properties(engine)
+    pi_candidates = phase5.dedupe_candidates(pi_raw)
+    selected = _evaluate(req, pi_candidates, min_score, limit)
+    try:
+        wa_count = len(phase5.load_whatsapp_master_for_requirement(engine, req, limit=20000))
+    except Exception:
+        wa_count = 0
+    exact_verified = _tag(selected["exact_verified"], "CANONICAL_MASTER")
+    exact_verify = _tag(selected["exact_needs_verification"], "CANONICAL_MASTER")
+    alternatives = _tag(selected["alternatives"], "CANONICAL_MASTER")
     result = {
-
         "version": VERSION,
-
         "requirement": req,
-
         "summary": {
-
-            "pi_whatsapp_property_master":
-                len(wa_raw),
-
-            "whatsapp_deduped_candidates":
-                len(wa_candidates),
-
-            "pi_properties":
-                len(pi_raw),
-
-            "database_deduped_candidates":
-                len(pi_candidates),
-
-            "deduped_candidates":
-                len(
-                    pi_candidates
-                    if fallback_used
-                    else wa_candidates
-                ),
-
-            "exact_verified":
-                len(exact_verified),
-
-            "exact_needs_verification":
-                len(exact_verify),
-
-            "approved_alternatives":
-                len(alternatives),
-
-            "inventory_gap":
-                not bool(
-                    exact_verified
-                    or exact_verify
-                    or alternatives
-                ),
-
-            "matching_path":
-                (
-                    "WHATSAPP_THEN_DATABASE_FALLBACK"
-                    if fallback_used
-                    else "WHATSAPP_ONLY"
-                ),
-
-            "primary_source":
-                "pi_whatsapp_property_master",
-
-            "fallback_source":
-                "pi_properties",
-
-            "fallback_used":
-                fallback_used,
-
-            "contacts_exposed":
-                False,
-
-            "price_used_only_when_comparable":
-                True,
-
-            "price_excluded_from_identity":
-                True,
+            "pi_properties": len(pi_raw),
+            "database_deduped_candidates": len(pi_candidates),
+            "deduped_candidates": len(pi_candidates),
+            "pi_whatsapp_property_master": wa_count,
+            "whatsapp_deduped_candidates": 0,
+            "exact_verified": len(exact_verified),
+            "exact_needs_verification": len(exact_verify),
+            "approved_alternatives": len(alternatives),
+            "inventory_gap": not bool(exact_verified or exact_verify or alternatives),
+            "matching_path": "CANONICAL_MASTER_ONLY",
+            "primary_source": "pi_properties",
+            "evidence_source": "pi_whatsapp_property_master",
+            "fallback_source": None,
+            "fallback_used": False,
+            "contacts_exposed": False,
+            "price_used_only_when_comparable": True,
+            "price_excluded_from_identity": True,
         },
-
-        "exact_verified":
-            exact_verified,
-
-        "exact_needs_verification":
-            exact_verify,
-
-        "alternatives":
-            alternatives,
-
-        "rejected_sample":
-            selected.get(
-                "rejected_sample",
-                []
-            )[:100],
+        "exact_verified": exact_verified,
+        "exact_needs_verification": exact_verify,
+        "alternatives": alternatives,
+        "rejected_sample": selected.get("rejected_sample", [])[:100],
     }
-
-    # =====================================================
-    # CONTACT SECURITY
-    # =====================================================
-
-    if hasattr(
-        phase5,
-        "sanitize_public_payload"
-    ):
-
-        result = (
-            phase5.sanitize_public_payload(
-                result
-            )
-        )
-
+    if hasattr(phase5, "sanitize_public_payload"):
+        result = phase5.sanitize_public_payload(result)
     payload = repr(result)
-
-    if (
-        phase5.PHONE_RE.search(payload)
-        or phase5.EMAIL_RE.search(payload)
-    ):
-
-        raise RuntimeError(
-            "CONTACT_LEAK_GUARD_TRIGGERED"
-        )
-
+    if phase5.PHONE_RE.search(payload) or phase5.EMAIL_RE.search(payload):
+        raise RuntimeError("CONTACT_LEAK_GUARD_TRIGGERED")
     return result

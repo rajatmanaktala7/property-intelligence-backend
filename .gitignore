@@ -49,3 +49,8 @@ app-before-v17-2-final-execution-*.py
 app-before-v17-4-final-template-*.py
 app-before-v17-5-data-recovery-vault-*.py
 app-before-v17-6-universal-recovery-*.py
+
+# Local secrets - never commit
+.env
+.env.*
+!.env.example

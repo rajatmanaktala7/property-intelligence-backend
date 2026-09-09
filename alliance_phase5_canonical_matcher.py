@@ -237,20 +237,26 @@ def sanitize_public_payload(value):
 
     return value
 
-def canonical_location(*vals: Any) -> Optional[str]:
+def canonical_locations(*vals: Any) -> List[str]:
     blob = norm(" ".join(str(v or "") for v in vals))
     if not blob:
-        return None
-    found = []
+        return []
+    hits = []
     for canon, aliases in LOCATION_ALIASES.items():
+        positions = []
         for a in aliases:
             aa = norm(a)
-            if aa and re.search(r"(?<![A-Z0-9])" + re.escape(aa) + r"(?![A-Z0-9])", blob):
-                found.append((len(aa), canon))
-    if found:
-        found.sort(reverse=True)
-        return found[0][1]
-    return None
+            m = re.search(r"(?<![A-Z0-9])" + re.escape(aa) + r"(?![A-Z0-9])", blob) if aa else None
+            if m:
+                positions.append(m.start())
+        if positions:
+            hits.append((min(positions), canon))
+    hits.sort()
+    return [canon for _, canon in hits]
+
+def canonical_location(*vals: Any) -> Optional[str]:
+    locations = canonical_locations(*vals)
+    return locations[0] if locations else None
 
 def candidate_location(raw: Any) -> Optional[str]:
     """
@@ -421,7 +427,9 @@ def parse_requirement(raw: str) -> Dict[str, Any]:
 
     return {
         "raw": str(raw or "").strip(),
+        "primary_locations": (["NORTH GOA"] if location == "NORTH GOA" else canonical_locations(raw)),
         "location": location,
+        "location_intent": ("AROUND" if re.search(r"\b(AROUND|NEARBY|SURROUNDING|VICINITY)\b", raw_norm) else "EXACT"),
         "location_scope": "REGION" if location == "NORTH GOA" else "LOCALITY",
         "transaction": canonical_transaction(raw),
         "family": fam,
@@ -540,17 +548,22 @@ def _live_wa_generation(engine) -> str:
         return LIVE_WA_GENERATION_FALLBACK
 
 def _whatsapp_requirement_terms(req: Dict[str, Any]) -> List[str]:
+    locations = list(req.get("primary_locations") or [])
     loc = req.get("location")
-    if not loc:
+    if loc and loc not in locations:
+        locations.append(loc)
+    if not locations:
         return []
-    if loc == "NORTH GOA":
+    if "NORTH GOA" in locations:
         out = ["NORTH GOA"]
         for canon in sorted(NORTH_GOA_LOCALITIES):
             out.append(canon)
             out.extend(LOCATION_ALIASES.get(canon, []))
     else:
-        out = [loc]
-        out.extend(LOCATION_ALIASES.get(loc, []))
+        out = []
+        for requested_loc in locations:
+            out.append(requested_loc)
+            out.extend(LOCATION_ALIASES.get(requested_loc, []))
     clean = []
     seen = set()
     for x in out:
@@ -752,23 +765,26 @@ def _type_gate(req: Dict[str, Any], p: Dict[str, Any]) -> Tuple[bool, str]:
 def eligible(req: Dict[str, Any], p: Dict[str, Any], location_mode: str = "EXACT") -> Tuple[bool, str, List[str]]:
     why = []
     rloc = req.get("location")
+    requested = list(req.get("primary_locations") or [])
+    if rloc and rloc not in requested:
+        requested.append(rloc)
     ploc = p.get("location")
-    if not rloc:
+    if not requested:
         return False, "REQUIREMENT_LOCATION_UNKNOWN", ["Requirement needs a specific locality"]
     if location_mode == "EXACT":
-        if rloc == "NORTH GOA":
+        if "NORTH GOA" in requested:
             if ploc not in (NORTH_GOA_LOCALITIES | {"NORTH GOA"}):
                 return False, "WRONG_LOCATION", [f"Required NORTH GOA; candidate {ploc or 'unknown'}"]
             why.append(f"North Goa region match: {ploc}")
         else:
-            if ploc != rloc:
-                return False, "WRONG_LOCATION", [f"Required {rloc}; candidate {ploc or 'unknown'}"]
-            why.append(f"Exact location {rloc}")
+            if ploc not in requested:
+                return False, "WRONG_LOCATION", [f"Required one of {', '.join(requested)}; candidate {ploc or 'unknown'}"]
+            why.append(f"Exact requested location {ploc}")
     else:
         alternatives = approved_alternatives(req)
         if ploc not in alternatives:
             return False, "NOT_APPROVED_ALTERNATIVE", [f"{ploc or 'unknown'} not in approved alternatives"]
-        why.append(f"Approved alternative {ploc} for {rloc}")
+        why.append(f"Approved alternative {ploc} for {', '.join(requested)}")
 
     rtx = req.get("transaction")
     ptx = p.get("transaction")
@@ -795,8 +811,11 @@ def eligible(req: Dict[str, Any], p: Dict[str, Any], location_mode: str = "EXACT
     return True, "ELIGIBLE", why
 
 def approved_alternatives(req: Dict[str, Any]) -> List[str]:
+    locations = list(req.get("primary_locations") or [])
     loc = req.get("location")
-    if not loc:
+    if loc and loc not in locations:
+        locations.append(loc)
+    if not locations:
         return []
     keys = []
     if req.get("subtype"):
@@ -805,9 +824,11 @@ def approved_alternatives(req: Dict[str, Any]) -> List[str]:
         keys.append(req["family"])
     out = []
     for key in keys:
-        for alt in APPROVED_EQUIVALENCE.get(key, {}).get(loc, []):
-            if alt not in out:
-                out.append(alt)
+        mapping = APPROVED_EQUIVALENCE.get(key, {})
+        for requested_loc in locations:
+            for alt in mapping.get(requested_loc, []):
+                if alt not in locations and alt not in out:
+                    out.append(alt)
     return out
 
 def score(req: Dict[str, Any], p: Dict[str, Any], mode: str, gate_why: List[str]) -> Tuple[float, List[str]]:

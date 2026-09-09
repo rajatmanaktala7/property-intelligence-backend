@@ -1188,6 +1188,17 @@ def _load_core():
             stabilization["link_authority_v12427"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","fail_safe":True}
             print("[link-authority-v12427] warning:",type(exc).__name__,str(exc))
 
+        # ALLIANCE_SYSTEM_DOCTOR_PERMANENT
+        try:
+            import alliance_system_doctor as system_doctor
+            stabilization = dict(stabilization or {})
+            stabilization["alliance_system_doctor"] = system_doctor.register(wrapped.core)
+            print("[alliance-system-doctor]", stabilization["alliance_system_doctor"])
+        except Exception as exc:
+            stabilization = dict(stabilization or {})
+            stabilization["alliance_system_doctor"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","fail_safe":True}
+            print("[alliance-system-doctor] warning:", type(exc).__name__, str(exc))
+
         CORE_APP = wrapped.app
         try:
             import alliance_whatsapp_safe_ingest_v5 as safe_wa
@@ -1394,7 +1405,3 @@ app = HealthFirstDispatcher()
 
 
 # 7.3.7 HISTORICAL EVIDENCE REPAIR REGISTRATION
-
-
-
-
