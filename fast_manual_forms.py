@@ -180,6 +180,12 @@ def install_fast_forms(app,engine,need_login,page_role_or_redirect,actor_name):
         d='GOA' if division.upper()=='GOA' else 'DELHI_NCR'
         return HTMLResponse(_requirement_page(d))
 
+    @app.get('/requirement-manual')
+    def canonical_requirement_manual(req:Request,division:str='DELHI_NCR'):
+        if not page_role_or_redirect(req):return RedirectResponse('/login',303)
+        d='GOA' if division.upper()=='GOA' else 'DELHI_NCR'
+        return RedirectResponse(f'/fast-requirement-entry?division={d}',307)
+
     @app.post('/api/v19/property')
     def add_property(payload:FastProperty,req:Request,division:str='DELHI_NCR'):
         need_login(req);d='GOA' if division.upper()=='GOA' else 'DELHI_NCR';a=parse_area(payload.area_text);r=parse_money(payload.rent_text)

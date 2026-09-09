@@ -4,7 +4,7 @@ from fastapi.responses import HTMLResponse
 from sqlalchemy import text
 import alliance_core_contract as contract
 
-VERSION = "1.0.0-ALLIANCE-SYSTEM-DOCTOR"
+VERSION = "1.1.0-ROUTE-AUTHORITY-AWARE"
 
 def _app(core): return getattr(core, "app", None) or core
 def _engine(core): return getattr(core, "engine", None)
@@ -23,7 +23,19 @@ def snapshot(core):
     app = _app(core)
     engine = _engine(core)
     paths = _paths(app)
-    route_checks = {k: (v["path"] in paths) for k,v in contract.ROUTE_REGISTRY.items() if v["lifecycle"] == "ACTIVE"}
+    route_details = {}
+    for key, meta in contract.ROUTE_REGISTRY.items():
+        if meta["lifecycle"] != "ACTIVE":
+            continue
+        path = meta["path"]
+        present = path in paths
+        route_details[key] = {
+            "ok": present,
+            "path": path,
+            "resolution": "REGISTERED_ROUTE" if present else "MISSING",
+            "authority": meta.get("authority"),
+        }
+    route_checks = {k: v["ok"] for k, v in route_details.items()}
     tables = {t: _table(engine, t) for t in [
         "pi_master_properties_v711", "pi_master_requirements_v711", "pi_master_source_links_v711",
         "pi_master_workflow_v720", "pi_master_matches_v720", "pi_operational_properties", "pi_operational_requirements"
@@ -46,6 +58,7 @@ def snapshot(core):
         "contract_version": contract.VERSION,
         "protected_invariants": contract.PROTECTED_INVARIANTS,
         "routes": route_checks,
+        "route_details": route_details,
         "tables": tables,
         "matcher_version": matcher_version,
         "blockers": blockers,
@@ -74,7 +87,9 @@ def register(core):
         return HTMLResponse(_html("Alliance System Doctor", {
             "Status": s["status"], "Matcher": s["matcher_version"],
             "Blockers": ", ".join(s["blockers"]) or "None",
-            "Routes": str(s["routes"]), "Tables": str(s["tables"])
+            "Routes": str(s["routes"]),
+            "Route Details": str(s["route_details"]),
+            "Tables": str(s["tables"])
         }))
 
     @app.get("/alliance/primary/data-health", response_class=HTMLResponse)

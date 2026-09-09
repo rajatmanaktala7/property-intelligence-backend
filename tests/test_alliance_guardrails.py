@@ -31,7 +31,15 @@ def test_contract_safety_flags():
 
 
 def test_requirement_manual_canonical_alias_is_protected():
-    source = Path('fast_manual_forms.py').read_text(encoding='utf-8')
-    assert "'/requirement-manual'" in source
-    assert "RedirectResponse(f'/fast-requirement-entry?division={div}',307)" in source
+    sys.path.insert(0, str(ROOT))
+    import alliance_core_contract as contract
+    source = txt("fast_manual_forms.py")
+    assert "@app.get('/requirement-manual')" in source
+    assert "RedirectResponse(f'/fast-requirement-entry?division={d}',307)" in source
     assert contract.ROUTE_REGISTRY['requirement_manual']['path'] == '/requirement-manual'
+
+def test_system_doctor_checks_registered_canonical_routes():
+    source = txt("alliance_system_doctor.py")
+    assert 'VERSION = "1.1.0-ROUTE-AUTHORITY-AWARE"' in source
+    assert '"resolution": "REGISTERED_ROUTE" if present else "MISSING"' in source
+    assert '"route_details": route_details' in source
