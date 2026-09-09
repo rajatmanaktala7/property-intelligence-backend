@@ -4,7 +4,7 @@ from fastapi.responses import HTMLResponse
 from sqlalchemy import text
 import alliance_core_contract as contract
 
-VERSION = "1.3.0-GREEN-LINK-AUTHORITY"
+VERSION = "1.3.1-PROPERTY-TABLE-COLUMN-CLOSURE"
 
 def _app(core): return getattr(core, "app", None) or core
 def _engine(core): return getattr(core, "engine", None)
@@ -60,7 +60,7 @@ def snapshot(core):
         presentation = {
             "primary_master_tables": "<table" in primary_src and "Master Properties" in primary_src and "Requirement Intelligence" in primary_src,
             "final_5x5_tables": "width:max-content;min-width:100%;font-size:11px" in final_src and "Property Database" in final_src and "Requirements" in final_src,
-            "property_table_columns": all(x in final_src for x in ["Property ID","Property Description","Location","Rent/Sale","Amount","Contact No.","Status","Assigned To","Source"]),
+            "property_table_columns": all(x in final_src for x in ["Property ID","Description / Address","Location","Rent/Sale","Amount","Contact No.","Status","Assigned To","Source"]),
             "requirement_table_columns": all(x in final_src for x in ["Requirement ID","Requirement / Original Message","Client / Company","Contact No.","Location","Rent/Sale","Budget","Status","Assigned To","Source"]),
         }
     except Exception:

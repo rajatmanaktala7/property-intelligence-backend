@@ -4,7 +4,7 @@ from fastapi import Form, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import text
 
-VERSION="9.1.3-TABLE-PRESENTATION-RESTORED"
+VERSION="9.1.4-PROPERTY-TABLE-COLUMNS-RESTORED"
 SOURCES=("MASTER","NEWSPAPER","WHATSAPP","MAGAZINE","MANUAL")
 CATEGORY_OPTIONS=("Residential Sale","Residential Rent","Commercial Sale","Commercial Rent","Industrial Sale","Industrial Rent","Farmhouse Sale","Farmhouse Rent")
 
@@ -167,13 +167,13 @@ def _property_table(core,e,req,source,q,location,category,transaction,status,ass
         <select name="verified_with" required><option>OWNER</option><option>BROKER</option><option>OTHER</option></select>
         <input name="verified_by" required placeholder="Verified By team member"><input name="remarks" placeholder="Remarks"><input type="datetime-local" name="next_verification_at"><button class="good">Save</button></form></div></details>"""
         delete=f"""<form method="post" action="/alliance/primary/property/{_e(cid)}/delete" onsubmit="return confirm('Archive this property? Original source evidence remains preserved.');"><button class="danger">Delete</button></form>"""
-        vals=[cid,locality,desc,pcat,ptype,area,floor,amount,cname,cphone,_fmt_dt(r.get("created_at")),stat,verify,
+        vals=[cid,locality,desc,pcat,ptype,area,floor,tx,amount,cname,cphone,_fmt_dt(r.get("created_at")),stat,verify,
               f'<a class="btn light" href="/alliance/primary/property/{_e(cid)}">History</a>',r.get("assigned_to") or "",source_name,
               f'<a class="btn light" href="/alliance/primary/property/{_e(cid)}/edit">Edit</a>',delete]
-        cls=["nowrap","loc","desc","","","","","","","","nowrap","nowrap","","","","","",""]
-        trs.append("<tr>"+"".join(f'<td class="{cls[i]}">{x if i in (12,13,16,17) else _e(x)}</td>' for i,x in enumerate(vals))+"</tr>")
-    H=["Property ID","Location","Description / Address","Property Category","Property Type","Area","Floor","Amount","Contact Name","Contact No.","Date & Time","Status","Verify","History","Assigned To","Source","Edit","Delete"]
-    return _filter_form(q,location,category,transaction,status,assigned,limit)+f'<div class="tablebox"><table><thead><tr>{"".join("<th>"+x+"</th>" for x in H)}</tr></thead><tbody>{"".join(trs) if trs else "<tr><td colspan=18>No records found</td></tr>"}</tbody></table></div>'
+        cls=["nowrap","loc","desc","","","","","nowrap","","","","nowrap","nowrap","","","","","",""]
+        trs.append("<tr>"+"".join(f'<td class="{cls[i]}">{x if i in (13,14,17,18) else _e(x)}</td>' for i,x in enumerate(vals))+"</tr>")
+    H=["Property ID","Location","Description / Address","Property Category","Property Type","Area","Floor","Rent/Sale","Amount","Contact Name","Contact No.","Date & Time","Status","Verify","History","Assigned To","Source","Edit","Delete"]
+    return _filter_form(q,location,category,transaction,status,assigned,limit)+f'<div class="tablebox"><table><thead><tr>{"".join("<th>"+x+"</th>" for x in H)}</tr></thead><tbody>{"".join(trs) if trs else "<tr><td colspan=19>No records found</td></tr>"}</tbody></table></div>'
 def _requirement_table(e,source,q,location,category,transaction,status,assigned,limit):
     rows=_requirement_rows(e,source,q,location,category,transaction,status,assigned,limit)
     trs=[]

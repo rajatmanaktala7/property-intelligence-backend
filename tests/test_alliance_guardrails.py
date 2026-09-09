@@ -40,7 +40,7 @@ def test_requirement_manual_canonical_alias_is_protected():
 
 def test_system_doctor_checks_registered_canonical_routes():
     source = txt("alliance_system_doctor.py")
-    assert 'VERSION = "1.3.0-GREEN-LINK-AUTHORITY"' in source
+    assert 'VERSION = "1.3.1-PROPERTY-TABLE-COLUMN-CLOSURE"' in source
     assert '"resolution": "REGISTERED_ROUTE" if present else "MISSING"' in source
     assert '"route_details": route_details' in source
 
@@ -70,3 +70,11 @@ def test_green_link_authority_is_protected():
     assert '"property_databases":' in contract_src
     assert '"requirement_databases":' in contract_src
     assert "/alliance/primary/reports" not in final
+
+
+def test_property_table_final_columns_are_protected():
+    final = txt("alliance_final_5x5_databases_v910.py")
+    doctor = txt("alliance_system_doctor.py")
+    for col in ["Property ID","Location","Description / Address","Rent/Sale","Amount","Contact No.","Status","Assigned To","Source"]:
+        assert col in final
+    assert '"property_table_columns": all(x in final_src' in doctor
