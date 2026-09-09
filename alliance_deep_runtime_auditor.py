@@ -1,11 +1,11 @@
 from __future__ import annotations
-import asyncio, html, re, time
+import asyncio, html, re
 from urllib.parse import urlparse
 import httpx
 from fastapi import Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
-VERSION="2.0.0-BATCHED-NONBLOCKING"
+VERSION="2.1.0-GET-START-ROUTE-SAFE"
 BATCH_SIZE=3
 PAUSE_SECONDS=0.20
 SEEDS=["/alliance/primary","/alliance/primary/properties","/alliance/primary/requirements","/alliance/primary/availability","/alliance/primary/matcher","/alliance/primary/followups","/property-manual","/requirement-manual","/alliance/primary/databases","/alliance/primary/requirements-hub","/alliance/final/databases","/alliance/final/requirements","/deal-match-ai-v60","/whatsapp-live","/capture-intelligence","/property-discovery","/commercial-intelligence","/hospitality-intelligence","/retail-expansion","/requirement-discovery","/marketing-contacts","/alliance/primary/ai-control","/alliance/primary/data-health","/alliance/system-doctor"]
@@ -29,15 +29,14 @@ def _eligible(raw):
     if "{" in p: return None
     return raw
 def _links(body):
-    vals=re.findall("href\\s*=\\s*[\"']([^\"']+)[\"']",body,re.I)
-    out=[]
+    vals=re.findall(r'href\s*=\s*["\']([^"\']+)["\']',body,re.I); out=[]
     for v in vals:
         x=_eligible(v)
         if x and x not in out: out.append(x)
     return out
 def _snap():
     vals=list(STATE["results"].values()); red=[x for x in vals if not x["ok"]]
-    return {"version":VERSION,"running":STATE["running"],"tested":len(vals),"green":len(vals)-len(red),"red":len(red),"remaining":len(STATE["queue"]),"failures":red,"results":vals,"error":STATE["error"]}
+    return {"version":VERSION,"running":STATE["running"],"tested":len(vals),"green":len(vals)-len(red),"red":len(red),"remaining":len(STATE["queue"]),"discovered":len(STATE["discovered"]),"failures":red,"results":vals,"error":STATE["error"]}
 async def _worker(core,cookies,g):
     transport=httpx.ASGITransport(app=_app(core),raise_app_exceptions=False)
     try:
@@ -55,12 +54,13 @@ async def _worker(core,cookies,g):
                         item["status"]=r.status_code
                         reason=f"HTTP_{r.status_code}" if r.status_code>=400 else ("AUTH_REDIRECT" if r.url.path=="/login" else "")
                         if not reason:
-                            for marker in ("alliance is busy processing earlier requests","internal server error","traceback (most recent call last)","application error"):
+                            for marker in ("alliance is busy processing earlier requests","internal server error","traceback (most recent call last)","application error","upstream error"):
                                 if marker in low: reason="ERROR_CONTENT:"+marker; break
                         item["reason"]=reason or "OK"; item["ok"]=not bool(reason)
                         for x in _links(body):
                             STATE["discovered"].add(x)
-                            if x not in STATE["results"] and x not in STATE["queue"] and len(STATE["results"])+len(STATE["queue"])<300: STATE["queue"].append(x)
+                            if x not in STATE["results"] and x not in STATE["queue"] and len(STATE["results"])+len(STATE["queue"])<300:
+                                STATE["queue"].append(x)
                     except Exception as exc: item["reason"]=f"{type(exc).__name__}: {exc}"
                     STATE["results"][path]=item
                     await asyncio.sleep(PAUSE_SECONDS)
@@ -71,7 +71,7 @@ def _render(s):
     rows="".join(f"<tr><td>{'🟢' if x['ok'] else '🔴'}</td><td><code>{html.escape(x['path'])}</code></td><td>{x['status'] or ''}</td><td>{html.escape(x['reason'])}</td></tr>" for x in s["results"])
     failures="<br>".join(f"🔴 <code>{html.escape(x['path'])}</code> — {html.escape(x['reason'])}" for x in s["failures"]) or "None"
     refresh="<meta http-equiv='refresh' content='3'>" if s["running"] else ""
-    return f"""<!doctype html><html><head><meta charset=utf-8>{refresh}<meta name=viewport content='width=device-width,initial-scale=1'><title>Alliance Deep Audit V2</title><style>body{{font-family:Arial;background:#f4f7fb;margin:0}}main{{padding:18px}}.c{{background:white;border:1px solid #ddd;border-radius:10px;padding:12px;margin:10px 0}}table{{border-collapse:collapse;width:100%;background:white;font-size:11px}}th,td{{border:1px solid #aaa;padding:6px;text-align:left}}th{{background:#e9eef5}}</style></head><body><main><h2>Alliance Deep Runtime Audit V2</h2><div class=c><b>{'RUNNING' if s['running'] else 'IDLE / COMPLETE'}</b> · Tested {s['tested']} · 🟢 {s['green']} · 🔴 {s['red']} · Queue {s['remaining']}</div><form method=post action='/alliance/deep-audit/start'><button type=submit>Start / Restart Audit</button></form><h3>Failures</h3><div class=c>{failures}</div><h3>All Results</h3><table><tr><th></th><th>Page</th><th>HTTP</th><th>Result</th></tr>{rows}</table><p><small>Read-only GET audit. No business POST/PUT/PATCH/DELETE action is executed.</small></p></main></body></html>"""
+    return f"""<!doctype html><html><head><meta charset=utf-8>{refresh}<meta name=viewport content='width=device-width,initial-scale=1'><title>Alliance Deep Audit V2.1</title><style>body{{font-family:Arial;background:#f4f7fb;margin:0}}main{{padding:18px}}.c{{background:white;border:1px solid #ddd;border-radius:10px;padding:12px;margin:10px 0}}table{{border-collapse:collapse;width:100%;background:white;font-size:11px}}th,td{{border:1px solid #aaa;padding:6px;text-align:left}}th{{background:#e9eef5}}a.btn{{display:inline-block;padding:10px 16px;background:#222;color:#fff;text-decoration:none;border-radius:7px;font-weight:700}}</style></head><body><main><h2>Alliance Deep Runtime Audit V2.1</h2><div class=c><b>{'RUNNING' if s['running'] else 'IDLE / COMPLETE'}</b> · Tested {s['tested']} · 🟢 {s['green']} · 🔴 {s['red']} · Queue {s['remaining']} · Discovered {s['discovered']}</div><a class=btn href='/alliance/deep-audit/start'>Start / Restart Audit</a><h3>Failures</h3><div class=c>{failures}</div><h3>All Results</h3><table><tr><th></th><th>Page</th><th>HTTP</th><th>Result</th></tr>{rows}</table><p><small>Read-only GET audit. No business POST/PUT/PATCH/DELETE action is executed.</small></p></main></body></html>"""
 def register(core):
     app=_app(core); owned={"/alliance/deep-audit","/alliance/deep-audit/start","/api/alliance/deep-audit"}
     app.router.routes[:]=[r for r in app.router.routes if getattr(r,"path",None) not in owned]
@@ -79,11 +79,15 @@ def register(core):
     async def api(req:Request): _login(core,req); return JSONResponse(_snap())
     @app.get("/alliance/deep-audit",response_class=HTMLResponse)
     async def page(req:Request): _login(core,req); return HTMLResponse(_render(_snap()))
-    @app.post("/alliance/deep-audit/start")
+    @app.get("/alliance/deep-audit/start")
     async def start(req:Request):
         _login(core,req)
         if not STATE["running"]:
             STATE["generation"]+=1; STATE["running"]=True; STATE["queue"]=list(SEEDS); STATE["results"]={}; STATE["discovered"]=set(); STATE["error"]=None
             asyncio.create_task(_worker(core,dict(req.cookies),STATE["generation"]))
-        return HTMLResponse(_render(_snap()),status_code=202)
-    return {"status":"REGISTERED","version":VERSION}
+        return RedirectResponse("/alliance/deep-audit",status_code=303)
+    methods={(getattr(r,"path",None),m) for r in app.router.routes for m in (getattr(r,"methods",set()) or set())}
+    required={("/alliance/deep-audit","GET"),("/alliance/deep-audit/start","GET"),("/api/alliance/deep-audit","GET")}
+    missing=sorted(required-methods)
+    if missing: raise RuntimeError("Deep audit route contract missing: "+repr(missing))
+    return {"status":"REGISTERED","version":VERSION,"route_contract":"PASS"}
