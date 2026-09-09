@@ -11,7 +11,9 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import text
 import alliance_government_commercial_sources_v1 as govsrc
 
-VERSION = "5.0.0-GOV-SOURCES-STRICT-CITY"
+VERSION = "5.0.1-SINGLE-FLIGHT-RUNTIME-SAFETY"
+
+FULL_RUN_STALE_MINUTES = 45
 
 TARGET_CITIES = [
     "Delhi", "Gurugram", "Noida", "Greater Noida", "Ghaziabad", "Faridabad",
@@ -431,7 +433,28 @@ def register(core):
         return HTMLResponse(_render(engine,_clean(view).upper(),_clean(city),_clean(message)))
     @router.post("/commercial-intelligence/research-all")
     def research_all(req:Request,background_tasks:BackgroundTasks):
-        core.need_login(req); background_tasks.add_task(_run_full,engine)
+        core.need_login(req)
+        with engine.begin() as c:
+            c.execute(text("""
+                UPDATE aci_intel_runs
+                   SET status='STALE', completed_at=COALESCE(completed_at,NOW()),
+                       note=COALESCE(note,'') || ' | auto-closed stale RUNNING job'
+                 WHERE status='RUNNING'
+                   AND started_at < NOW() - (:mins * INTERVAL '1 minute')
+            """), {"mins": FULL_RUN_STALE_MINUTES})
+            active=c.execute(text("""
+                SELECT run_code,started_at
+                  FROM aci_intel_runs
+                 WHERE status='RUNNING'
+                 ORDER BY started_at DESC
+                 LIMIT 1
+            """)).mappings().first()
+        if active:
+            return RedirectResponse(
+                "/commercial-intelligence?message=Commercial+Intelligence+research+is+already+running.+Please+refresh+for+results.+A+second+heavy+job+was+not+queued.",
+                status_code=303,
+            )
+        background_tasks.add_task(_run_full,engine)
         return RedirectResponse("/commercial-intelligence?message=Full+mall+and+premises+research+started.+Refresh+later+for+results.",status_code=303)
     @router.post("/commercial-intelligence/research/{asset_code}")
     def research_one(asset_code:str,req:Request,background_tasks:BackgroundTasks):

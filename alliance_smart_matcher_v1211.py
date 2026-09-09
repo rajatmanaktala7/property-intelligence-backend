@@ -5,7 +5,7 @@ import html, json, re
 from fastapi import HTTPException
 from sqlalchemy import text
 
-VERSION="12.1.1-SMART-MATCHER-INTELLIGENCE"
+VERSION="12.1.2-RUN-MATCH-CONTRACT-FIX"
 
 MICRO_MARKETS={
     "SOUTH DELHI":{
@@ -198,7 +198,9 @@ def _smart_match_full(engine,rid,limit=50):
                 match_score=EXCLUDED.match_score,match_reasons=EXCLUDED.match_reasons,status='READY_FOR_REVIEW',updated_at=NOW()
             """),{"r":rid,"p":p["canonical_id"],"s":item["score"],
                   "why":json.dumps({"bucket":item["tier"],"reasons":item["reasons"],"blockers":item["blockers"]})})
-    return results[:limit]
+    # Primary workspace contract is (requirement, matches). Availability and
+    # Matcher pages both unpack two values. Returning only a list breaks Run Match.
+    return req, results[:limit]
 
 def register(core):
     import alliance_primary_workspace_v730 as ws

@@ -78,3 +78,15 @@ def test_property_table_final_columns_are_protected():
     for col in ["Property ID","Location","Description / Address","Rent/Sale","Amount","Contact No.","Status","Assigned To","Source"]:
         assert col in final
     assert '"property_table_columns": all(x in final_src' in doctor
+
+
+def test_runtime_rectifier_contracts():
+    commercial = txt("alliance_commercial_intelligence_ai.py")
+    matcher = txt("alliance_smart_matcher_v1211.py")
+    forms = txt("fast_manual_forms.py")
+    assert "FULL_RUN_STALE_MINUTES = 45" in commercial
+    assert "A+second+heavy+job+was+not+queued" in commercial
+    assert "return req, results[:limit]" in matcher
+    assert 'id=areaInput type=number' in forms
+    assert 'id=amountInput type=number' in forms
+    assert "Numeric-only entry is supported." in forms

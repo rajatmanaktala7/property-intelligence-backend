@@ -7,7 +7,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel
 from sqlalchemy import text
 
-V19_VERSION='20.5-CANONICAL-ATOMICITY-ELIGIBILITY-CLOSURE'
+V19_VERSION='20.6-NUMERIC-PROPERTY-ENTRY-RUNTIME-RECTIFIER'
 
 class _BoundEngine:
     # Reuse one open SQLAlchemy Connection for bridge begin/connect calls.
@@ -91,7 +91,7 @@ def _property_page(d):
 <div><b>Property Name</b><input name=property_name></div><div><b>City</b><input name=city value="{{city}}"></div>
 <div style="grid-column:1/-1"><b>Property Types *</b><div class=checks>{{checks}}</div></div>
 <div><b>Location *</b><input name=location required placeholder="Siolim / Assagao / Anjuna"></div><div><b>Google Location (Optional)</b><input name=google_location placeholder="Optional Google Maps link or pin"><div class=help>Not required. Property can be saved without Google location.</div></div>
-<div><b>Area *</b><input name=area_text placeholder="500 sq m / 5000 sqft / 2.5 acre / type manually" required><div class=help>Mandatory free text. Sqft, sq m/sqm/sqmtr, sq yd/sqyd and acre are accepted.</div></div><div><b id=amountLabel>Rent Amount *</b><input name=rent_text id=amountInput placeholder="5 lakhs" required><div class=help id=amountHelp>Enter rent amount.</div></div>
+<div><b>Area *</b><div style="display:grid;grid-template-columns:2fr 1fr;gap:6px"><input name=area_text id=areaInput type=number step=any min=0 inputmode=decimal placeholder="500" required><select id=areaUnit><option value="sqft">sq ft</option><option value="sqm">sq m</option><option value="sqyd">sq yd</option><option value="acre">acre</option></select></div><div class=help>Enter numbers only, then choose the unit.</div></div><div><b id=amountLabel>Rent Amount *</b><div style="display:grid;grid-template-columns:2fr 1fr;gap:6px"><input name=rent_text id=amountInput type=number step=any min=0 inputmode=decimal placeholder="500000" required><select id=amountUnit><option value="">₹ exact</option><option value="lakh">Lakh</option><option value="crore">Crore</option></select></div><div class=help id=amountHelp>Enter numbers only. Choose ₹ exact, Lakh or Crore.</div></div>
 <div><b>Transaction</b><select name=transaction_type id=transaction_type><option>LEASE</option><option>SALE</option></select></div><div><b>Floor</b><input name=floor></div>
 <div><b>Frontage</b><input name=frontage></div><div><b>Parking</b><input name=parking></div><div><b>Possession</b><input name=possession></div><div><b>Suitable For</b><input name=suitable_for></div>
 <div><b>Nearby Brands</b><input name=nearby_brands></div><div><b>Owner/Broker Name</b><input name=owner_broker_name></div><div><b>Contact Number</b><input name=contact_number></div>
@@ -119,7 +119,7 @@ setup('IMAGE','idrop','ipick');setup('VIDEO','vdrop','vpick');setup('BROCHURE','
 function syncAmountLabel(){{const t=document.getElementById('transaction_type'),sale=t&&t.value==='SALE',l=document.getElementById('amountLabel'),i=document.getElementById('amountInput'),h=document.getElementById('amountHelp');if(l)l.textContent=sale?'Sale Amount *':'Rent Amount *';if(i)i.placeholder=sale?'10 crore / 95000000':'5 lakhs / 500000';if(h)h.textContent=sale?'Enter total sale price.':'Enter rent amount.';}}
 document.getElementById('transaction_type').addEventListener('change',syncAmountLabel);syncAmountLabel();
 function clearMedia(){{selected.IMAGE=[];selected.VIDEO=[];selected.BROCHURE=[];render('IMAGE');render('VIDEO');render('BROCHURE')}}
-function bodyFromForm(){{let fd=new FormData(f),b={{property_types:[...document.querySelectorAll('[name=ptype]:checked')].map(x=>x.value)}};for(let [k,v] of fd.entries())if(k!=='ptype')b[k]=String(v).trim()||null;return b}}
+function bodyFromForm(){{let fd=new FormData(f),b={{property_types:[...document.querySelectorAll('[name=ptype]:checked')].map(x=>x.value)}};for(let [k,v] of fd.entries())if(k!=='ptype')b[k]=String(v).trim()||null;const au=document.getElementById('areaUnit'),mu=document.getElementById('amountUnit');if(b.area_text&&au)b.area_text=b.area_text+' '+au.value;if(b.rent_text&&mu&&mu.value)b.rent_text=b.rent_text+' '+mu.value;return b}}
 function resetForm(){{f.reset();editcode.value='';cancel.classList.add('hidden');save.textContent='Save Property + Upload Media';clearMedia();msg.textContent='Ready for next property.'}}
 async function J(u,o={{}}){{let r=await fetch(u,o),d={{}};try{{d=await r.json()}}catch(e){{d={{detail:'Invalid server response'}}}}if(!r.ok)throw Error(d.detail||d.message||('HTTP '+r.status));return d}}
 function row(file,kind){{let id='p_'+Math.random().toString(36).slice(2);fileProgress.insertAdjacentHTML('beforeend',`<div class=fileRow id="${{id}}"><b>${{kind}} · ${{file.name}}</b><div class=progress><div class=bar></div></div><span>Waiting</span></div>`);return document.getElementById(id)}}
@@ -189,7 +189,7 @@ def install_fast_forms(app,engine,need_login,page_role_or_redirect,actor_name):
     @app.post('/api/v19/property')
     def add_property(payload:FastProperty,req:Request,division:str='DELHI_NCR'):
         need_login(req);d='GOA' if division.upper()=='GOA' else 'DELHI_NCR';a=parse_area(payload.area_text);r=parse_money(payload.rent_text)
-        if not a or not r:raise HTTPException(400,'Area and Rent/Sale Amount must contain recognizable values.')
+        if a is None or a<=0 or r is None or r<=0:raise HTTPException(400,'Area and Rent/Sale Amount must be positive numbers. Numeric-only entry is supported.')
         pc=code('GOA-PROP' if d=='GOA' else 'PROP')
         with engine.begin() as c:
             c.execute(text("SET LOCAL lock_timeout='1500ms'"));c.execute(text("SET LOCAL statement_timeout='3500ms'"))
@@ -217,7 +217,7 @@ def install_fast_forms(app,engine,need_login,page_role_or_redirect,actor_name):
     @app.put('/api/v19/property/{pc}')
     def edit_property(pc:str,payload:FastProperty,req:Request):
         need_login(req);a=parse_area(payload.area_text);r=parse_money(payload.rent_text)
-        if not a or not r:raise HTTPException(400,'Area and Rent/Sale Amount must contain recognizable values.')
+        if a is None or a<=0 or r is None or r<=0:raise HTTPException(400,'Area and Rent/Sale Amount must be positive numbers. Numeric-only entry is supported.')
         with engine.begin() as c:
             c.execute(text("SET LOCAL lock_timeout='1500ms'"));c.execute(text("SET LOCAL statement_timeout='3500ms'"))
             x=c.execute(text("UPDATE pi_operational_properties SET property_name=:pn,property_types=CAST(:types AS jsonb),city=:city,location=:loc,google_location=:gl,area_sqft=:a,area_text=:at,rent_amount=:r,rent_text=:rt,transaction_type=:tt,floor=:floor,frontage=:front,parking=:park,possession=:poss,suitable_for=:suit,nearby_brands=:near,owner_broker_name=:name,contact_number=:phone,contact_role=:role,verification_status=:verify,remarks=:remarks,updated_at=NOW() WHERE property_code=:pc"),{'pc':pc,'pn':payload.property_name,'types':json.dumps(payload.property_types),'city':payload.city,'loc':payload.location,'gl':payload.google_location,'a':a,'at':payload.area_text,'r':r,'rt':payload.rent_text,'tt':payload.transaction_type,'floor':payload.floor,'front':payload.frontage,'park':payload.parking,'poss':payload.possession,'suit':payload.suitable_for,'near':payload.nearby_brands,'name':payload.owner_broker_name,'phone':payload.contact_number,'role':payload.contact_role,'verify':payload.verification_status,'remarks':payload.remarks})
