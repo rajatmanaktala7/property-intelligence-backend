@@ -1177,6 +1177,17 @@ def _load_core():
             stabilization["team_readiness_v12426c"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","fail_safe":True}
             print("[team-readiness-v12426c] warning:",type(exc).__name__,str(exc))
 
+        # ALLIANCE_UNIVERSAL_LINK_AUTHORITY_V12427A
+        try:
+            import alliance_link_authority_v12427 as link_v12427
+            stabilization = dict(stabilization or {})
+            stabilization["link_authority_v12427"] = link_v12427.register(wrapped.core)
+            print("[link-authority-v12427]", stabilization["link_authority_v12427"])
+        except Exception as exc:
+            stabilization = dict(stabilization or {})
+            stabilization["link_authority_v12427"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","fail_safe":True}
+            print("[link-authority-v12427] warning:",type(exc).__name__,str(exc))
+
         CORE_APP = wrapped.app
         try:
             import alliance_whatsapp_safe_ingest_v5 as safe_wa
