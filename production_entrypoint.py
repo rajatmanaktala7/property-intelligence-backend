@@ -1199,6 +1199,17 @@ def _load_core():
             stabilization["alliance_system_doctor"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","fail_safe":True}
             print("[alliance-system-doctor] warning:", type(exc).__name__, str(exc))
 
+        # ALLIANCE_BABY_CRE_COPILOT_V1
+        try:
+            import alliance_baby_cre_copilot_v1 as alliance_baby
+            stabilization = dict(stabilization or {})
+            stabilization["alliance_baby_cre_copilot_v1"] = alliance_baby.register(wrapped.core)
+            print("[alliance-baby-cre-copilot-v1]", stabilization["alliance_baby_cre_copilot_v1"])
+        except Exception as exc:
+            stabilization = dict(stabilization or {})
+            stabilization["alliance_baby_cre_copilot_v1"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","fail_safe":True}
+            print("[alliance-baby-cre-copilot-v1] warning:", type(exc).__name__, str(exc))
+
         # ALLIANCE_BUSINESS_AUTOPILOT_V1
         try:
             import alliance_business_autopilot_v1 as business_autopilot_v1
