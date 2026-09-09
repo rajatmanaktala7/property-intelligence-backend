@@ -4,7 +4,7 @@ from fastapi import Form, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import text
 
-VERSION="9.1.2-NEWSPAPER-REGION-QUICK-FILTER"
+VERSION="9.1.3-TABLE-PRESENTATION-RESTORED"
 SOURCES=("MASTER","NEWSPAPER","WHATSAPP","MAGAZINE","MANUAL")
 CATEGORY_OPTIONS=("Residential Sale","Residential Rent","Commercial Sale","Commercial Rent","Industrial Sale","Industrial Rent","Farmhouse Sale","Farmhouse Rent")
 
@@ -199,6 +199,11 @@ def _requirement_table(e,source,q,location,category,transaction,status,assigned,
 def register(core):
     app=_app(core);e=_engine(core)
     if app is None or e is None:raise RuntimeError("9.1 requires app + engine")
+    @app.get("/alliance/primary/databases")
+    def canonical_property_databases(req:Request):
+        _login(core,req)
+        return RedirectResponse("/alliance/final/databases",307)
+
     @app.get("/alliance/final/databases",response_class=HTMLResponse)
     def dbhub(req:Request):
         _login(core,req)
@@ -210,6 +215,11 @@ def register(core):
         _login(core,req);src=source.upper()
         if src not in SOURCES:return HTMLResponse("Unknown property database",404)
         return HTMLResponse(_shell(f"{src.title()} Property Database",_property_table(core,e,req,src,q,location,category,transaction,status,assigned,limit)))
+    @app.get("/alliance/primary/requirements-hub")
+    def canonical_requirement_databases(req:Request):
+        _login(core,req)
+        return RedirectResponse("/alliance/final/requirements",307)
+
     @app.get("/alliance/final/requirements",response_class=HTMLResponse)
     def rhub(req:Request):
         _login(core,req)

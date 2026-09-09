@@ -43,3 +43,19 @@ def test_system_doctor_checks_registered_canonical_routes():
     assert 'VERSION = "1.1.0-ROUTE-AUTHORITY-AWARE"' in source
     assert '"resolution": "REGISTERED_ROUTE" if present else "MISSING"' in source
     assert '"route_details": route_details' in source
+
+def test_finalized_table_presentation_is_protected():
+    primary = txt("alliance_primary_workspace_v730.py")
+    final = txt("alliance_final_5x5_databases_v910.py")
+    assert "width:max-content;min-width:100%;font-size:11px" in primary
+    assert "width:max-content;min-width:100%;font-size:11px" in final
+    assert "Property ID" in final and "Requirement ID" in final
+    assert "Contact No." in final and "Assigned To" in final and "Source" in final
+
+def test_database_hub_routes_are_protected():
+    final = txt("alliance_final_5x5_databases_v910.py")
+    assert '@app.get("/alliance/primary/databases")' in final
+    assert '@app.get("/alliance/primary/requirements-hub")' in final
+    doctor = txt("alliance_system_doctor.py")
+    assert '"table_view_routes": table_view_checks' in doctor
+    assert '"table_presentation": presentation' in doctor

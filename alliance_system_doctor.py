@@ -4,7 +4,7 @@ from fastapi.responses import HTMLResponse
 from sqlalchemy import text
 import alliance_core_contract as contract
 
-VERSION = "1.1.0-ROUTE-AUTHORITY-AWARE"
+VERSION = "1.2.0-TABLE-AND-WORKFLOW-AUDIT"
 
 def _app(core): return getattr(core, "app", None) or core
 def _engine(core): return getattr(core, "engine", None)
@@ -45,9 +45,34 @@ def snapshot(core):
         matcher_version = getattr(matcher, "VERSION", "unknown")
     except Exception as exc:
         matcher_version = f"ERROR:{type(exc).__name__}"
+    table_view_routes = {
+        "property_databases": "/alliance/final/databases",
+        "requirement_databases": "/alliance/final/requirements",
+        "primary_property_databases": "/alliance/primary/databases",
+        "primary_requirement_databases": "/alliance/primary/requirements-hub",
+    }
+    table_view_checks = {k: (v in paths) for k, v in table_view_routes.items()}
+    presentation = {}
+    try:
+        root = __import__("pathlib").Path(__file__).resolve().parent
+        primary_src = (root / "alliance_primary_workspace_v730.py").read_text(encoding="utf-8")
+        final_src = (root / "alliance_final_5x5_databases_v910.py").read_text(encoding="utf-8")
+        presentation = {
+            "primary_master_tables": "<table" in primary_src and "Master Properties" in primary_src and "Requirement Intelligence" in primary_src,
+            "final_5x5_tables": "width:max-content;min-width:100%;font-size:11px" in final_src and "Property Database" in final_src and "Requirements" in final_src,
+            "property_table_columns": all(x in final_src for x in ["Property ID","Property Description","Location","Rent/Sale","Amount","Contact No.","Status","Assigned To","Source"]),
+            "requirement_table_columns": all(x in final_src for x in ["Requirement ID","Requirement / Original Message","Client / Company","Contact No.","Location","Rent/Sale","Budget","Status","Assigned To","Source"]),
+        }
+    except Exception:
+        presentation = {"primary_master_tables": False, "final_5x5_tables": False, "property_table_columns": False, "requirement_table_columns": False}
+
     blockers = []
     for k,ok in route_checks.items():
         if not ok: blockers.append(f"MISSING_ROUTE:{k}")
+    for k,ok in table_view_checks.items():
+        if not ok: blockers.append(f"MISSING_TABLE_VIEW_ROUTE:{k}")
+    for k,ok in presentation.items():
+        if not ok: blockers.append(f"TABLE_PRESENTATION_REGRESSION:{k}")
     for k,ok in tables.items():
         if not ok: blockers.append(f"MISSING_TABLE:{k}")
     if "CANONICAL-MASTER-AUTHORITY" not in matcher_version:
@@ -59,6 +84,8 @@ def snapshot(core):
         "protected_invariants": contract.PROTECTED_INVARIANTS,
         "routes": route_checks,
         "route_details": route_details,
+        "table_view_routes": table_view_checks,
+        "table_presentation": presentation,
         "tables": tables,
         "matcher_version": matcher_version,
         "blockers": blockers,
@@ -89,6 +116,8 @@ def register(core):
             "Blockers": ", ".join(s["blockers"]) or "None",
             "Routes": str(s["routes"]),
             "Route Details": str(s["route_details"]),
+            "Table Views": str(s["table_view_routes"]),
+            "Table Presentation": str(s["table_presentation"]),
             "Tables": str(s["tables"])
         }))
 

@@ -112,6 +112,9 @@ PRIMARY_NAV=[
 ("Data Repair","/alliance/primary/data-repair"),
     ("Source Recovery","/alliance/primary/source-recovery"),
 ("Add Property","/property-manual"),
+("Add Requirement","/requirement-manual"),
+("Property Databases","/alliance/final/databases"),
+("Requirement Databases","/alliance/final/requirements"),
 ]
 
 def _shell(core,req,title,body):
@@ -135,7 +138,7 @@ nav a,.btn,.mini{{background:#0d2238;color:white;text-decoration:none;border:0;b
 .btn.alt,.mini.alt{{background:#475467}}.btn.good,.mini.good{{background:#067647}}.btn.warn,.mini.warn{{background:#b54708}}
 .wrap{{max-width:1800px;margin:auto;padding:18px}}.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:10px}}
 .card{{background:white;border:1px solid #e1e7ee;border-radius:12px;padding:14px;margin-bottom:12px}}.num{{font-size:28px;font-weight:800}}
-.tablebox{{overflow:auto;max-height:72vh}}table{{border-collapse:collapse;width:100%;font-size:12px}}th,td{{padding:8px;border-bottom:1px solid #edf0f4;text-align:left;vertical-align:top}}
+.tablebox{{overflow:auto;max-height:72vh;border:1px solid #98a2b3;background:white}}table{{border-collapse:collapse;width:max-content;min-width:100%;font-size:11px}}th,td{{padding:6px 7px;border:1px solid #98a2b3;text-align:left;vertical-align:top;white-space:normal}}th{{position:sticky;top:0;background:#e9eef5;z-index:3;white-space:nowrap}}tbody tr:nth-child(even) td{{background:#f8fafc}}tbody tr:hover td{{background:#eef4ff}}
 th{{position:sticky;top:0;background:#f8fafc}}input,select,textarea{{padding:8px;border:1px solid #cfd8e3;border-radius:7px;max-width:100%}}
 form.inline{{display:flex;gap:7px;flex-wrap:wrap;align-items:center}}.muted{{color:#667085}}.ok{{color:#08783e;font-weight:700}}.warntext{{color:#b54708;font-weight:700}}
 .bad{{color:#b42318;font-weight:700}}.pill{{padding:3px 7px;border-radius:999px;background:#eef2f6;white-space:nowrap}}pre{{white-space:pre-wrap;word-break:break-word}}
