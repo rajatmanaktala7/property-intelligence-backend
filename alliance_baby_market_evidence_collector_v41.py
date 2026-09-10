@@ -131,7 +131,23 @@ def assess_market(engine,req,target):
         decision=gate42.apply(req,target,decision,evidence)
     except Exception:
         pass
+    external_fetch=None
+    if not decision.get("recommendable") and str(evidence.get("status") or "").upper() in {"UNKNOWN","INSUFFICIENT"}:
+        try:
+            import alliance_baby_external_market_evidence_v5 as v5
+            external_fetch=v5.automatic_escalate(engine,req,target,evidence)
+            if external_fetch.get("status") in {"FETCHED","CACHED"}:
+                evidence,payload=evidence_for_v4(engine,req,target)
+                decision=v4.classify(req,target,payload)
+                try:
+                    import alliance_baby_market_evidence_truth_gate_v42 as gate42
+                    decision=gate42.apply(req,target,decision,evidence)
+                except Exception:
+                    pass
+        except Exception as exc:
+            external_fetch={"status":"ERROR","error":f"{type(exc).__name__}: {exc}"}
     return {"market":target,"evidence":evidence,"v4_decision":decision,
+            "external_fetch":external_fetch,
             "client_safe_property":False,
             "next_action":"SEARCH_MASTER" if decision.get("recommendable") else "SEARCH_MORE_EVIDENCE",
             "truth_boundary":"Market recommendation is not a property recommendation."}
