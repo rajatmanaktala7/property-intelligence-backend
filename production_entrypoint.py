@@ -1247,6 +1247,28 @@ def _load_core():
             stabilization["alliance_baby_v3_live_certification"] = {"status":"ERROR","error":f"{type(_baby_v3_cert_err).__name__}: {_baby_v3_cert_err}","fail_safe":True}
             print("[alliance-baby-v3-live-certification] warning:",type(_baby_v3_cert_err).__name__,str(_baby_v3_cert_err))
 
+        # ALLIANCE_BABY_USE_CASE_MARKET_INTELLIGENCE_V4
+        try:
+            import alliance_baby_use_case_market_intelligence_v4 as _baby_v4
+            stabilization = dict(stabilization or {})
+            stabilization["alliance_baby_use_case_market_intelligence_v4"] = {"status":"LOADED","version":_baby_v4.VERSION,"exam":_baby_v4.exam()}
+            print("[alliance-baby-use-case-market-v4]", stabilization["alliance_baby_use_case_market_intelligence_v4"])
+        except Exception as _baby_v4_err:
+            stabilization = dict(stabilization or {})
+            stabilization["alliance_baby_use_case_market_intelligence_v4"] = {"status":"ERROR","error":f"{type(_baby_v4_err).__name__}: {_baby_v4_err}","fail_safe":True}
+            print("[alliance-baby-use-case-market-v4] warning:",type(_baby_v4_err).__name__,str(_baby_v4_err))
+
+        # ALLIANCE_BABY_MARKET_EVIDENCE_COLLECTOR_V41
+        try:
+            import alliance_baby_market_evidence_collector_v41 as _baby_v41
+            stabilization = dict(stabilization or {})
+            stabilization["alliance_baby_market_evidence_collector_v41"] = _baby_v41.register(wrapped.core)
+            print("[alliance-baby-market-evidence-v41]", stabilization["alliance_baby_market_evidence_collector_v41"])
+        except Exception as _baby_v41_err:
+            stabilization = dict(stabilization or {})
+            stabilization["alliance_baby_market_evidence_collector_v41"] = {"status":"ERROR","error":f"{type(_baby_v41_err).__name__}: {_baby_v41_err}","fail_safe":True}
+            print("[alliance-baby-market-evidence-v41] warning:",type(_baby_v41_err).__name__,str(_baby_v41_err))
+
         # ALLIANCE_BUSINESS_AUTOPILOT_V1
         try:
             import alliance_business_autopilot_v1 as business_autopilot_v1
