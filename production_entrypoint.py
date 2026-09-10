@@ -1225,6 +1225,17 @@ def _load_core():
             }
             print("[alliance-baby-autonomous-satisfaction-gate-v1] warning:", type(_baby_sat_err).__name__, str(_baby_sat_err))
 
+        # ALLIANCE_BABY_GEOGRAPHIC_INTELLIGENCE_V3
+        try:
+            import alliance_baby_geographic_intelligence_v3 as _baby_geo_v3
+            stabilization = dict(stabilization or {})
+            stabilization["alliance_baby_geographic_intelligence_v3"] = {"status":"LOADED","version":_baby_geo_v3.VERSION,"exam":_baby_geo_v3.exam()}
+            print("[alliance-baby-geographic-intelligence-v3]", stabilization["alliance_baby_geographic_intelligence_v3"])
+        except Exception as _baby_geo_err:
+            stabilization = dict(stabilization or {})
+            stabilization["alliance_baby_geographic_intelligence_v3"] = {"status":"ERROR","error":f"{type(_baby_geo_err).__name__}: {_baby_geo_err}","fail_safe":True}
+            print("[alliance-baby-geographic-intelligence-v3] warning:",type(_baby_geo_err).__name__,str(_baby_geo_err))
+
         # ALLIANCE_BUSINESS_AUTOPILOT_V1
         try:
             import alliance_business_autopilot_v1 as business_autopilot_v1
