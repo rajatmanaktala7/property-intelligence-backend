@@ -5,7 +5,7 @@ from decimal import Decimal
 from fastapi import Request
 from fastapi.responses import HTMLResponse,JSONResponse
 from pydantic import BaseModel,Field
-VERSION="6.0.0-ALLIANCE-BABY-REQUIREMENT-ANSWER-MACHINE"
+VERSION="6.1.0-ALLIANCE-BABY-ANSWER-QUALITY-GUARD"
 MAX_OVER_BUDGET_PCT=.15
 class AnswerInput(BaseModel):
     requirement:str=Field(min_length=5)
@@ -95,8 +95,23 @@ def _ptext(p):
         if v not in (None,'',[],{}):vals.append(json.dumps(v,ensure_ascii=False,default=str) if isinstance(v,(dict,list)) else str(v))
     return _n(' '.join(vals))
 def _ploc(p):return _clean(p.get('locality') or p.get('location') or p.get('city') or '')
+def _location_tokens(v):
+    return [x.strip() for x in re.split(r"[,;/|]+",_clean(v)) if x.strip()]
+
+def _single_market(v):
+    parts=_location_tokens(v)
+    return parts[0] if len(parts)==1 else ""
+
+def _location_quality(v):
+    parts=_location_tokens(v)
+    if not parts:return "MISSING"
+    if len(parts)>1:return "MULTI_MARKET"
+    return "SINGLE_MARKET"
+
 def _same(a,b):
-    a,b=_n(a),_n(b);return bool(a and b and (a==b or a in b or b in a))
+    a=_single_market(a);b=_single_market(b)
+    a,b=_n(a),_n(b)
+    return bool(a and b and a==b)
 def _aband(ra,pa):
     if not ra or not pa:return 'UNKNOWN',None
     try:d=abs(float(pa)-float(ra))/max(float(ra),1)
@@ -136,12 +151,25 @@ def _nearby(req):
     if not loc:return []
     try:
         import alliance_micromarket_knowledge_v1 as g
-        r=g.suggest(loc,req.get('raw_text') or '',12) or {};out=[]
+        r=g.suggest(loc,req.get('raw_text') or '',20) or {}
+        out=[];seen=set()
+        category=_n(req.get('category') or 'GENERAL')
+        max_km=3.0 if category=='OFFICE' else 12.0
         for x in r.get('suggestions') or []:
             place=_clean(x.get('location'))
-            if place and not _same(place,loc):out.append({'location':place,'distance_km':x.get('distance_km'),'market_type':x.get('market_type')})
-        return out
-    except:return []
+            if not place or _location_quality(place)!="SINGLE_MARKET" or _same(place,loc):continue
+            try:dist=float(x.get('distance_km'))
+            except (TypeError,ValueError):continue
+            if dist<0 or dist>max_km:continue
+            key=_n(place)
+            if key in seen:continue
+            seen.add(key)
+            out.append({'location':place,'distance_km':round(dist,2),'market_type':x.get('market_type')})
+        out.sort(key=lambda z:z['distance_km'])
+        return out[:8]
+    except Exception:
+        return []
+
 def _comparables(engine,req):
     if req.get('category') in {'RESIDENTIAL','GENERAL'}:return []
     try:
@@ -158,6 +186,8 @@ def _phones(p):
     if isinstance(v,str):v=re.findall(r"(?:\+?91[\s-]?)?[6-9]\d{9}",v)
     return [str(x) for x in v if str(x).strip()][:5]
 def _eligible(req,p):
+    pl=_ploc(p)
+    if _location_quality(pl)=="MULTI_MARKET":return False
     if req.get('transaction_type') and p.get('transaction_type') and _n(p.get('transaction_type'))!=req['transaction_type']:return False
     tr,_=_truth(p)
     if tr in {'VERIFIED_NOT_AVAILABLE','UNVERIFIED_NOT_AVAILABLE'}:return False
@@ -172,8 +202,13 @@ def _eligible(req,p):
     return True
 def _row(req,p,tier,reason):
     tr,trust=_truth(p);ab,ad=_aband(req.get('area_sqft'),p.get('area_sqft'));bf,bd,pr=_bfit(req,p);pf,pfound=_pfit(req,p)
-    score={'EXACT':40,'NEARBY':26,'COMPARABLE':20,'OTHER':5}.get(tier,0)+{'STRONG':25,'GOOD':18,'BROAD':8,'UNKNOWN':3}.get(ab,0)+{'WITHIN_BUDGET':16,'NO_NUMERIC_LIMIT':10,'PRICE_UNKNOWN':4,'SLIGHTLY_OVER_BUDGET':5}.get(bf,0)+{'FULL':9,'PARTIAL':5,'NO_PREFERENCE':5,'UNKNOWN':1}.get(pf,0)+(10 if tr=='VERIFIED_AVAILABLE' else 6 if tr.startswith('VERIFIED') else 2)
-    action='READY_TO_PITCH' if tr=='VERIFIED_AVAILABLE' else 'VERIFY_AVAILABILITY_AND_DETAILS'
+    score={'EXACT':40,'NEARBY':26,'COMPARABLE':20,'OTHER':5}.get(tier,0)+{'STRONG':25,'GOOD':18,'BROAD':8,'UNKNOWN':0}.get(ab,0)+{'WITHIN_BUDGET':16,'NO_NUMERIC_LIMIT':4,'PRICE_UNKNOWN':0,'SLIGHTLY_OVER_BUDGET':5}.get(bf,0)+{'FULL':9,'PARTIAL':5,'NO_PREFERENCE':2,'UNKNOWN':0}.get(pf,0)+(10 if tr=='VERIFIED_AVAILABLE' else 6 if tr.startswith('VERIFIED') else 2)
+    if not req.get('area_sqft'): score-=8
+    if not req.get('budget_rupees') and not req.get('budget_market_rate'): score-=6
+    if _n(req.get('category')) in {'GENERAL',''}: score-=8
+    score=max(0,score)
+    req_complete=bool(req.get('locality') and req.get('transaction_type') and _n(req.get('category')) not in {'GENERAL',''})
+    action='READY_TO_PITCH' if tr=='VERIFIED_AVAILABLE' and req_complete else 'VERIFY_AVAILABILITY_AND_DETAILS'
     cr=p.get('clean_record') if isinstance(p.get('clean_record'),dict) else {}
     return {'canonical_id':p.get('canonical_id'),'location':_ploc(p),'city':p.get('city'),'area_sqft':p.get('area_sqft'),'area_sqyd':p.get('area_sqyd'),'property_type':p.get('property_type') or p.get('category') or '','transaction':p.get('transaction_type'),'price_raw':p.get('price_raw') or p.get('sale_amount') or p.get('rent_amount') or '','price_rupees':pr,'verification_status':p.get('verification_status') or 'UNVERIFIED','availability_status':p.get('availability_status') or 'UNKNOWN','truth':tr,'trust_score':trust,'location_tier':tier,'market_reason':reason,'area_band':ab,'area_diff_pct':ad,'budget_fit':bf,'budget_diff_pct':bd,'preference_fit':pf,'preferences_found':pfound,'match_score':min(100,score),'phones':_phones(p),'assigned_to':p.get('assigned_to'),'action':action,'description':_clean(p.get('description') or cr.get('description') or '')}
 def match_requirement(engine,req,limit_per_section=8):
