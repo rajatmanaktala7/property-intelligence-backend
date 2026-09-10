@@ -1269,6 +1269,16 @@ def _load_core():
             stabilization["alliance_baby_market_evidence_collector_v41"] = {"status":"ERROR","error":f"{type(_baby_v41_err).__name__}: {_baby_v41_err}","fail_safe":True}
             print("[alliance-baby-market-evidence-v41] warning:",type(_baby_v41_err).__name__,str(_baby_v41_err))
 
+        # ALLIANCE_BABY_MARKET_EVIDENCE_TRUTH_GATE_V42
+        try:
+            import alliance_baby_market_evidence_truth_gate_v42 as _baby_v42
+            stabilization = dict(stabilization or {})
+            stabilization["alliance_baby_market_evidence_truth_gate_v42"] = {"status":"LOADED","version":_baby_v42.VERSION,"exam":_baby_v42.exam()}
+            print("[alliance-baby-market-evidence-truth-v42]", stabilization["alliance_baby_market_evidence_truth_gate_v42"])
+        except Exception as _baby_v42_err:
+            stabilization = dict(stabilization or {})
+            stabilization["alliance_baby_market_evidence_truth_gate_v42"] = {"status":"ERROR","error":f"{type(_baby_v42_err).__name__}: {_baby_v42_err}","fail_safe":True}
+
         # ALLIANCE_BUSINESS_AUTOPILOT_V1
         try:
             import alliance_business_autopilot_v1 as business_autopilot_v1

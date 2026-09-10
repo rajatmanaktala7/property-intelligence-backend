@@ -126,6 +126,11 @@ def assess_market(engine,req,target):
     import alliance_baby_use_case_market_intelligence_v4 as v4
     evidence,payload=evidence_for_v4(engine,req,target)
     decision=v4.classify(req,target,payload)
+    try:
+        import alliance_baby_market_evidence_truth_gate_v42 as gate42
+        decision=gate42.apply(req,target,decision,evidence)
+    except Exception:
+        pass
     return {"market":target,"evidence":evidence,"v4_decision":decision,
             "client_safe_property":False,
             "next_action":"SEARCH_MASTER" if decision.get("recommendable") else "SEARCH_MORE_EVIDENCE",
