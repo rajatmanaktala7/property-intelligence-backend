@@ -5,7 +5,7 @@ from decimal import Decimal
 from fastapi import Request
 from fastapi.responses import HTMLResponse,JSONResponse
 from pydantic import BaseModel,Field
-VERSION="6.2.0-ALLIANCE-BABY-REQUIREMENT-INTELLIGENCE"
+VERSION="6.3.0-ALLIANCE-BABY-COMMERCIAL-MARKET-BRAIN"
 MAX_OVER_BUDGET_PCT=.15
 class AnswerInput(BaseModel):
     requirement:str=Field(min_length=5)
@@ -29,12 +29,38 @@ def _money_to_rupees(s):
     if u in {'k','thousand'}:return n*1000
     return n
 def _budget(raw):
-    s=str(raw or '');market=bool(re.search(r"\b(?:current|prevailing)?\s*market\s+rate\b",s,re.I))
-    pats=[r"(?:budget|upto|up to|max(?:imum)?|within)\s*(?::|-)?\s*(?:₹|rs\.?|inr)?\s*(\d[\d,]*(?:\.\d+)?)\s*(crore|cr|lakh|lac|lacs|lakhs)",r"(?:₹|rs\.?|inr)\s*(\d[\d,]*(?:\.\d+)?)\s*(crore|cr|lakh|lac|lacs|lakhs)"]
+    s=str(raw or "")
+    market=bool(re.search(r"\b(?:current|prevailing)?\s*market\s+rate\b",s,re.I))
+    monthly=bool(re.search(
+        r"(?:/|\bper\s+)\s*(?:month|monthly|mo\b)|\bmonthly\b|\bp\.?m\.?\b",
+        s,re.I,
+    ))
+    yearly=bool(re.search(
+        r"(?:/|\bper\s+)\s*(?:year|annum)|\bannual(?:ly)?\b|\bp\.?a\.?\b",
+        s,re.I,
+    ))
+    period="MONTH" if monthly else "YEAR" if yearly else ""
+    pats=[
+        r"(?:budget|upto|up to|max(?:imum)?|within)\s*(?::|-)?\s*(?:₹|rs\.?|inr)?\s*(\d[\d,]*(?:\.\d+)?)\s*(crore|cr|lakh|lac|lacs|lakhs|k|thousand)",
+        r"(?:₹|rs\.?|inr)\s*(\d[\d,]*(?:\.\d+)?)\s*(crore|cr|lakh|lac|lacs|lakhs|k|thousand)",
+        r"\b(\d[\d,]*(?:\.\d+)?)\s*(crore|cr|lakh|lac|lacs|lakhs|k|thousand)\b",
+    ]
     for p in pats:
         m=re.search(p,s,re.I)
-        if m:return {'budget_rupees':_money_to_rupees(m.group(1)+' '+m.group(2)),'budget_raw':_clean(m.group(0)),'budget_market_rate':market}
-    return {'budget_rupees':None,'budget_raw':'MARKET_RATE' if market else '','budget_market_rate':market}
+        if m:
+            return {
+                "budget_rupees":_money_to_rupees(m.group(1)+" "+m.group(2)),
+                "budget_raw":_clean(m.group(0)),
+                "budget_market_rate":market,
+                "budget_period":period,
+            }
+    return {
+        "budget_rupees":None,
+        "budget_raw":"MARKET_RATE" if market else "",
+        "budget_market_rate":market,
+        "budget_period":period,
+    }
+
 def _area(raw):
     pats=[('SQYD',r"(\d[\d,]*(?:\.\d+)?)\s*(?:sq\.?\s*y(?:d|ards?)|sqyd|square\s*yards?|yards?)\b",9),('SQFT',r"(\d[\d,]*(?:\.\d+)?)\s*(?:sq\.?\s*ft|sqft|square\s*feet|sft)\b",1),('SQM',r"(\d[\d,]*(?:\.\d+)?)\s*(?:sq\.?\s*m(?:tr|etre|eter)?s?|sqm|square\s*met(?:re|er)s?)\b",10.7639104167),('ACRE',r"(\d[\d,]*(?:\.\d+)?)\s*acres?\b",43560)]
     for unit,p,f in pats:
@@ -92,6 +118,64 @@ def _prefs(raw):
     for k,toks in [('STILT',('STILT',)),('GROUND_FLOOR',('GROUND FLOOR',' GF ')),('FIRST_FLOOR',('FIRST FLOOR','1ST FLOOR')),('CORNER',('CORNER',)),('PARKING',('PARKING',)),('MAIN_ROAD',('MAIN ROAD','MAIN MARKET'))]:
         if any(t in ' '+s+' ' for t in toks):out.append(k)
     return out
+def _money_label(v):
+    try:
+        n=float(v)
+    except (TypeError,ValueError):
+        return ""
+    if n>=10000000:
+        return "₹"+("{:g}".format(round(n/10000000,2)))+" crore"
+    if n>=100000:
+        return "₹"+("{:g}".format(round(n/100000,2)))+" lakh"
+    if n>=1000:
+        return "₹"+("{:g}".format(round(n/1000,2)))+"k"
+    return "₹"+("{:,.0f}".format(n))
+
+def _budget_display(req):
+    if req.get("budget_market_rate"):
+        return "Market rate"
+    value=req.get("budget_rupees")
+    if not value:
+        return "not captured"
+    label=_money_label(value)
+    if req.get("transaction_type")=="RENT":
+        period=req.get("budget_period") or "MONTH"
+        if period=="MONTH":
+            return label+"/month"
+        if period=="YEAR":
+            return label+"/year"
+    return label
+
+def _rent_economics(req):
+    if req.get("transaction_type")!="RENT":
+        return {
+            "rent_budget_monthly":None,
+            "rent_budget_per_sqft_month":None,
+            "rent_economics_status":"NOT_APPLICABLE",
+        }
+    budget=req.get("budget_rupees")
+    area=req.get("area_sqft")
+    period=req.get("budget_period") or "MONTH"
+    if not budget:
+        return {
+            "rent_budget_monthly":None,
+            "rent_budget_per_sqft_month":None,
+            "rent_economics_status":"BUDGET_MISSING",
+        }
+    monthly=float(budget)
+    if period=="YEAR":
+        monthly=monthly/12.0
+    per_sqft=None
+    if area:
+        try:
+            per_sqft=round(monthly/float(area),2)
+        except Exception:
+            per_sqft=None
+    return {
+        "rent_budget_monthly":round(monthly,2),
+        "rent_budget_per_sqft_month":per_sqft,
+        "rent_economics_status":"COMPLETE" if per_sqft is not None else "AREA_MISSING",
+    }
 def _requirement_quality(req):
     missing=[]
     if not req.get("locality"):missing.append("location")
@@ -179,6 +263,7 @@ def parse_requirement(raw,i=1):
         **a,
         **b,
     }
+    req.update(_rent_economics(req))
     req.update(_requirement_quality(req))
     return req
 
@@ -288,6 +373,62 @@ def _nearby(req):
     except Exception:
         return []
 
+def _commercial_market_brain(req):
+    loc=req.get("locality") or ""
+    if not loc:
+        return []
+    category=_n(req.get("category") or "GENERAL")
+    if category in {"","GENERAL"}:
+        return []
+    try:
+        import alliance_micromarket_knowledge_v1 as g
+        response=g.suggest(loc,req.get("raw_text") or "",40) or {}
+    except Exception:
+        return []
+    max_km=3.0 if category=="OFFICE" else 15.0
+    out=[]
+    seen=set()
+    for suggestion in response.get("suggestions") or []:
+        place=_clean(suggestion.get("location"))
+        if not place or _location_quality(place)!="SINGLE_MARKET":
+            continue
+        if _same(place,loc):
+            continue
+        try:
+            distance=float(suggestion.get("distance_km"))
+        except (TypeError,ValueError):
+            continue
+        if distance<0 or distance>max_km:
+            continue
+        key=_n(place)
+        if key in seen:
+            continue
+        seen.add(key)
+        fit=_market_fit(req,suggestion)
+        source_fit=_n(suggestion.get("fit"))
+        out.append({
+            "location":place,
+            "distance_km":round(distance,2),
+            "market_type":suggestion.get("market_type") or "",
+            "market_fit":fit.get("market_fit"),
+            "market_fit_score":fit.get("market_fit_score",0),
+            "market_fit_reason":fit.get("market_fit_reason"),
+            "source_fit":source_fit,
+            "source_reason":_clean(suggestion.get("reason")),
+            "commercially_equivalent":bool(
+                source_fit=="USE_MATCH"
+                or fit.get("market_fit") in {"STRONG","GOOD"}
+            ),
+        })
+    out.sort(
+        key=lambda x:(
+            x.get("commercially_equivalent",False),
+            x.get("market_fit_score",0),
+            -x.get("distance_km",999),
+        ),
+        reverse=True,
+    )
+    return out[:10]
 def _comparables(engine,req):
     if req.get('category') in {'RESIDENTIAL','GENERAL'}:return []
     try:
@@ -378,15 +519,14 @@ def _row(req,p,tier,reason):
 
 def match_requirement(engine,req,limit_per_section=8):
     import alliance_master_integration_v720 as master
-
     props=master._search_properties(
         engine,
         tx=req.get("transaction_type") or "",
         limit=4000,
     )
-
     nearby=_nearby(req)
     comparable=_comparables(engine,req)
+    market_brain=_commercial_market_brain(req)
 
     nearby_by_location={_n(x["location"]):x for x in nearby}
     comparable_by_location={_n(x["location"]):x for x in comparable}
@@ -397,8 +537,8 @@ def match_requirement(engine,req,limit_per_section=8):
     comparable_rows=[]
 
     for p in props:
-        if not _eligible(req,p):continue
-
+        if not _eligible(req,p):
+            continue
         property_location=_ploc(p)
         property_key=_n(property_location)
         market_meta=None
@@ -406,7 +546,6 @@ def match_requirement(engine,req,limit_per_section=8):
         if req.get("locality") and _same(req["locality"],property_location):
             tier="EXACT"
             reason="Exact requested locality"
-
         elif property_key in nearby_by_location:
             tier="NEARBY"
             market_meta=nearby_by_location[property_key]
@@ -415,17 +554,14 @@ def match_requirement(engine,req,limit_per_section=8):
                 +" · "+str(market_meta.get("distance_km"))+" km"
                 +" · market fit "+str(market_meta.get("market_fit"))
             )
-
         elif property_key in comparable_by_location:
             tier="COMPARABLE"
             comp=comparable_by_location[property_key]
             reason="Use-case comparable: "+", ".join(comp.get("reasons") or [])
-
         else:
             continue
 
         row=_row(req,p,tier,reason)
-
         if market_meta:
             row["distance_km"]=market_meta.get("distance_km")
             row["market_fit"]=market_meta.get("market_fit")
@@ -460,25 +596,39 @@ def match_requirement(engine,req,limit_per_section=8):
     nearby_rows=sort_rows(nearby_rows)
     comparable_rows=sort_rows(comparable_rows)
 
+    inventory_counts={}
+    for row in verified_exact+unverified_exact+nearby_rows+comparable_rows:
+        key=_n(row.get("location"))
+        inventory_counts[key]=inventory_counts.get(key,0)+1
+
+    for market in market_brain:
+        count=inventory_counts.get(_n(market.get("location")),0)
+        market["master_inventory_found"]=count
+        market["inventory_status"]="FOUND_IN_MASTER" if count else "NO_MATCHING_MASTER_INVENTORY"
+        market["next_action"]="REVIEW_MATCHING_INVENTORY" if count else "SOURCE_AND_VERIFY"
+
     any_rows=bool(verified_exact or unverified_exact or nearby_rows or comparable_rows)
 
     if req.get("requirement_quality")=="INCOMPLETE":
         outcome=(
             "REQUIREMENT_INCOMPLETE_PRELIMINARY_OPTIONS_ONLY"
-            if any_rows
+            if any_rows or market_brain
             else "REQUIREMENT_INCOMPLETE_NEEDS_DETAILS"
         )
     elif verified_exact:
         outcome="AVAILABLE_OPTIONS_FOUND"
     elif any_rows:
         outcome="MATCHES_FOUND_VERIFY_BEFORE_PITCH"
+    elif market_brain:
+        outcome="NO_MATCHING_INVENTORY_MARKETS_IDENTIFIED_FOR_SOURCING"
     else:
         outcome="NO_SUITABLE_MASTER_INVENTORY_SOURCING_REQUIRED"
 
     queue=[]
     for priority,bucket in ((1,unverified_exact),(2,nearby_rows),(3,comparable_rows)):
         for row in bucket:
-            if row["truth"]=="VERIFIED_AVAILABLE":continue
+            if row["truth"]=="VERIFIED_AVAILABLE":
+                continue
             queue.append({
                 "priority":priority,
                 "canonical_id":row.get("canonical_id"),
@@ -500,6 +650,21 @@ def match_requirement(engine,req,limit_per_section=8):
                 ),
             })
 
+    sourcing_queue=[
+        {
+            "priority":1 if m.get("market_fit")=="STRONG" else 2,
+            "location":m.get("location"),
+            "distance_km":m.get("distance_km"),
+            "market_type":m.get("market_type"),
+            "market_fit":m.get("market_fit"),
+            "market_fit_score":m.get("market_fit_score"),
+            "reason":m.get("market_fit_reason"),
+            "action":"SOURCE_AND_VERIFY",
+        }
+        for m in market_brain
+        if not m.get("master_inventory_found")
+    ][:10]
+
     return {
         "requirement":req,
         "outcome":outcome,
@@ -507,11 +672,13 @@ def match_requirement(engine,req,limit_per_section=8):
         "unverified_exact":unverified_exact,
         "nearby_matches":nearby_rows,
         "comparable_matches":comparable_rows,
+        "commercial_market_intelligence":market_brain,
+        "market_sourcing_queue":sourcing_queue,
         "verification_queue":queue[:20],
         "nearby_markets_checked":nearby,
         "comparable_markets_checked":comparable,
         "master_candidates_scanned":len(props),
-        "truth_rule":"Unverified matches are shown to Alliance team for verification, never as confirmed available.",
+        "truth_rule":"Alternative-market intelligence never means property availability. Only Master inventory is shown as property inventory, and unverified inventory requires human verification.",
     }
 
 def _client(res):
@@ -571,6 +738,13 @@ def exam():
     add('buyer SALE',_tx('Serious & Ready Buyer')=='SALE');add('lease RENT',_tx('Need shop on lease')=='RENT');add('stilt', 'STILT' in _prefs('Stilt floor preferred'));add('residential inference',_cat('125 sq yd stilt floor ready buyer')=='RESIDENTIAL')
     post='URGENT PROPERTY REQUIREMENT – CR PARK\nLocation: CR Park\nRequirement 1: 125 Sq. Yards • Stilt floor preferred • Budget: Up to ₹2.5 Crore\nRequirement 2: 160 Sq. Yards • Budget as per current market rate\nSerious & Ready Buyer';p=parse_post(post)
     add('split two',len(p)==2);add('location inherited',len(p)==2 and all(_n(x['locality'])=='CR PARK' for x in p));add('req1 area',p[0]['area_sqft']==1125);add('req2 area',p[1]['area_sqft']==1440);add('req1 budget',p[0]['budget_rupees']==25000000);add('req2 market',p[1]['budget_market_rate']);add('unverified truth',_truth({'verification_status':'UNVERIFIED','availability_status':'UNKNOWN'})[0]=='UNVERIFIED_NEEDS_UPDATE');add('verified truth',_truth({'verification_status':'VERIFIED','availability_status':'AVAILABLE'})[0]=='VERIFIED_AVAILABLE');add('slightly over',_bfit({'budget_rupees':25000000},{'price_raw':'2.6 Cr'})[0]=='SLIGHTLY_OVER_BUDGET');add('far over',_bfit({'budget_rupees':25000000},{'price_raw':'3.2 Cr'})[0]=='OVER_BUDGET')
+    rent_req=parse_requirement('Need restaurant on lease in Calangute, 1500 sqft, budget 2 lakh/month')
+    add('v63 monthly budget period',rent_req.get('budget_period')=='MONTH')
+    add('v63 monthly budget amount',rent_req.get('rent_budget_monthly')==200000)
+    add('v63 rent per sqft',rent_req.get('rent_budget_per_sqft_month')==133.33)
+    add('v63 clean budget display',_budget_display(rent_req)=='₹2 lakh/month')
+    sale_req=parse_requirement('Want to buy a villa in Calangute, 3000 sqft, budget 8 crore')
+    add('v63 sale has no rent economics',sale_req.get('rent_economics_status')=='NOT_APPLICABLE')
     passed=sum(x['pass'] for x in tests);return {'status':'PASS' if passed==len(tests) else 'FAIL','tested':len(tests),'passed':passed,'failed':len(tests)-passed,'tests':tests}
 def _table(title,rows):
     if not rows:
@@ -651,9 +825,53 @@ def _table(title,rows):
         +"</table></div></div>"
     )
 
+def _market_table(title,rows):
+    if not rows:
+        return "<div class=card><h3>"+html.escape(title)+"</h3><p>None.</p></div>"
+    header=(
+        "<tr>"
+        "<th>Rank</th>"
+        "<th>Alternative market</th>"
+        "<th>Distance</th>"
+        "<th>Market type</th>"
+        "<th>Commercial fit</th>"
+        "<th>Master inventory</th>"
+        "<th>Next action</th>"
+        "</tr>"
+    )
+    body=[]
+    for idx,x in enumerate(rows,1):
+        distance=str(x.get("distance_km"))+" km" if x.get("distance_km") is not None else "—"
+        fit=str(x.get("market_fit") or "—")
+        if x.get("market_fit_reason"):
+            fit+=" · "+str(x.get("market_fit_reason"))
+        count=int(x.get("master_inventory_found") or 0)
+        inventory=str(count)+" matching candidate(s)" if count else "None in current Master match"
+        vals=(
+            idx,
+            x.get("location") or "—",
+            distance,
+            x.get("market_type") or "—",
+            fit,
+            inventory,
+            x.get("next_action") or "SOURCE_AND_VERIFY",
+        )
+        body.append(
+            "<tr>"
+            +"".join("<td>"+html.escape(str(v))+"</td>" for v in vals)
+            +"</tr>"
+        )
+    return (
+        "<div class=card><h3>"
+        +html.escape(title)
+        +"</h3><p><b>Important:</b> These are market recommendations, not claims of property availability.</p>"
+        +"<div class=scroll><table>"
+        +header
+        +"".join(body)
+        +"</table></div></div>"
+    )
 def _render(data,raw):
     out=[]
-
     if data:
         for i,res in enumerate(data.get("results") or [],1):
             req=res["requirement"]
@@ -672,12 +890,28 @@ def _render(data,raw):
                 +"<p>"+html.escape(tx)
                 +" · "+html.escape(category)
                 +" · "+html.escape(str(req.get("area_raw") or "area not captured"))
-                +" · Budget "+html.escape(str(req.get("budget_raw") or "not captured"))
+                +" · Budget "+html.escape(_budget_display(req))
                 +"</p>"
                 +"<p><b>Requirement quality:</b> "
                 +html.escape(quality)
                 +" · "+str(completeness)+"% complete</p>"
             )
+
+            if req.get("transaction_type")=="RENT":
+                monthly=req.get("rent_budget_monthly")
+                per_sqft=req.get("rent_budget_per_sqft_month")
+                if monthly:
+                    hero+=(
+                        "<p><b>Rent economics:</b> "
+                        +html.escape(_money_label(monthly))+"/month"
+                    )
+                    if per_sqft is not None:
+                        hero+=(
+                            " · ₹"
+                            +html.escape("{:,.2f}".format(per_sqft))
+                            +"/sqft/month"
+                        )
+                    hero+="</p>"
 
             if missing:
                 hero+=(
@@ -687,33 +921,33 @@ def _render(data,raw):
                 )
             else:
                 hero+="<p><b>Requirement complete.</b></p>"
-
             hero+="</div>"
             out.append(hero)
 
             out.append(_table(
-                "A. VERIFIED AVAILABLE",
+                "A. VERIFIED AVAILABLE · EXACT REQUESTED MARKET",
                 res.get("verified_available") or [],
             ))
             out.append(_table(
-                "B. UNVERIFIED EXACT MATCHES",
+                "B. UNVERIFIED EXACT MATCHES · VERIFY FIRST",
                 res.get("unverified_exact") or [],
             ))
+            out.append(_market_table(
+                "C. COMMERCIAL MARKET INTELLIGENCE · ALTERNATIVE MARKETS CONSIDERED",
+                res.get("commercial_market_intelligence") or [],
+            ))
 
-            if quality=="COMPLETE":
-                nearby_title="C. NEARBY MATCHES"
-            else:
-                nearby_title=(
-                    "C. PRELIMINARY NEARBY ALTERNATIVES "
-                    "· COMPLETE REQUIREMENT BEFORE PITCH"
-                )
-
+            nearby_title=(
+                "D. ACTUAL MASTER INVENTORY FOUND IN NEARBY MARKETS"
+                if quality=="COMPLETE"
+                else "D. PRELIMINARY MASTER INVENTORY IN NEARBY MARKETS · COMPLETE REQUIREMENT BEFORE PITCH"
+            )
             out.append(_table(
                 nearby_title,
                 res.get("nearby_matches") or [],
             ))
             out.append(_table(
-                "D. COMPARABLE MARKET MATCHES",
+                "E. EVIDENCE-QUALIFIED COMPARABLE INVENTORY",
                 res.get("comparable_matches") or [],
             ))
 
@@ -728,26 +962,33 @@ def _render(data,raw):
                         +html.escape(str(x.get("canonical_id") or ""))
                         +" · score "+str(x.get("match_score"))
                         +" · "
-                        +html.escape(
-                            ", ".join(x.get("phones") or [])
-                            or "no contact in Master"
-                        )
+                        +html.escape(", ".join(x.get("phones") or []) or "no contact in Master")
                     )
-
                     if x.get("distance_km") is not None:
                         item+=" · "+str(x.get("distance_km"))+" km"
-
                     if x.get("market_fit"):
-                        item+=(
-                            " · market fit "
-                            +html.escape(str(x.get("market_fit")))
-                        )
-
+                        item+=" · market fit "+html.escape(str(x.get("market_fit")))
                     item+="</li>"
                     items.append(item)
-
                 out.append(
-                    "<div class=card><h3>E. TEAM VERIFY NOW</h3><ol>"
+                    "<div class=card><h3>F. TEAM VERIFY ACTUAL INVENTORY NOW</h3><ol>"
+                    +"".join(items)
+                    +"</ol></div>"
+                )
+
+            sourcing=res.get("market_sourcing_queue") or []
+            if sourcing:
+                items=[]
+                for x in sourcing:
+                    items.append(
+                        "<li><b>P"+str(x.get("priority"))+"</b> · "
+                        +html.escape(str(x.get("location") or ""))
+                        +" · "+html.escape(str(x.get("market_fit") or ""))
+                        +" · "+str(x.get("distance_km"))+" km"
+                        +" · SOURCE + VERIFY</li>"
+                    )
+                out.append(
+                    "<div class=card><h3>G. SOURCING QUEUE · GOOD MARKET, NO MATCHING MASTER INVENTORY</h3><ol>"
                     +"".join(items)
                     +"</ol></div>"
                 )
@@ -762,7 +1003,7 @@ def _render(data,raw):
         "<!doctype html><html><head>"
         "<meta charset=utf-8>"
         "<meta name=viewport content='width=device-width,initial-scale=1'>"
-        "<title>Baby V6.2</title>"
+        "<title>Baby V6.3</title>"
         "<style>"
         "body{font-family:Arial;background:#f5f7fb;color:#172033;margin:0}"
         ".wrap{max-width:1500px;margin:auto;padding:20px}"
@@ -776,12 +1017,12 @@ def _render(data,raw):
         "</style></head><body><div class=wrap>"
         "<p><a href='javascript:history.back()'>← Previous Page</a>"
         " · <a href=/alliance/primary>Dashboard</a></p>"
-        "<h1>Alliance Baby V6.2 · Requirement Intelligence + Explainable Matching</h1>"
-        "<p>Truth-first matching. Missing details are never guessed. "
-        "Nearby alternatives show distance and use-case fit.</p>"
+        "<h1>Alliance Baby V6.3 · Commercial Market Brain + Rent Economics</h1>"
+        "<p>Exact inventory first. Alternative markets are intelligence, not availability claims. "
+        "Rent budgets are normalized with monthly economics.</p>"
         "<form method=get>"
         "<textarea name=q>"+html.escape(raw or "")+"</textarea><br>"
-        "<button>Find Availability + Matching Options</button>"
+        "<button>Find Availability + Smart Market Options</button>"
         "</form>"
         +"".join(out)
         +"</div></body></html>"
