@@ -1236,6 +1236,17 @@ def _load_core():
             stabilization["alliance_baby_geographic_intelligence_v3"] = {"status":"ERROR","error":f"{type(_baby_geo_err).__name__}: {_baby_geo_err}","fail_safe":True}
             print("[alliance-baby-geographic-intelligence-v3] warning:",type(_baby_geo_err).__name__,str(_baby_geo_err))
 
+        # ALLIANCE_BABY_V3_LIVE_CERTIFICATION
+        try:
+            import alliance_baby_v3_live_certification as _baby_v3_cert
+            stabilization = dict(stabilization or {})
+            stabilization["alliance_baby_v3_live_certification"] = _baby_v3_cert.register(wrapped.core)
+            print("[alliance-baby-v3-live-certification]", stabilization["alliance_baby_v3_live_certification"])
+        except Exception as _baby_v3_cert_err:
+            stabilization = dict(stabilization or {})
+            stabilization["alliance_baby_v3_live_certification"] = {"status":"ERROR","error":f"{type(_baby_v3_cert_err).__name__}: {_baby_v3_cert_err}","fail_safe":True}
+            print("[alliance-baby-v3-live-certification] warning:",type(_baby_v3_cert_err).__name__,str(_baby_v3_cert_err))
+
         # ALLIANCE_BUSINESS_AUTOPILOT_V1
         try:
             import alliance_business_autopilot_v1 as business_autopilot_v1
