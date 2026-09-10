@@ -1208,12 +1208,22 @@ def _load_core():
         except Exception as exc:
             stabilization = dict(stabilization or {})
             stabilization["alliance_baby_cre_copilot_v1"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","fail_safe":True}
-            try:
-                import alliance_baby_autonomous_satisfaction_gate_v1 as _baby_sat
-                _baby_sat.register(core)
-            except Exception as _baby_sat_err:
-                print('Alliance Baby satisfaction gate registration skipped:', type(_baby_sat_err).__name__, str(_baby_sat_err))
             print("[alliance-baby-cre-copilot-v1] warning:", type(exc).__name__, str(exc))
+
+        # ALLIANCE_BABY_AUTONOMOUS_SATISFACTION_GATE_V1
+        try:
+            import alliance_baby_autonomous_satisfaction_gate_v1 as _baby_sat
+            stabilization = dict(stabilization or {})
+            stabilization["alliance_baby_autonomous_satisfaction_gate_v1"] = _baby_sat.register(wrapped.core)
+            print("[alliance-baby-autonomous-satisfaction-gate-v1]", stabilization["alliance_baby_autonomous_satisfaction_gate_v1"])
+        except Exception as _baby_sat_err:
+            stabilization = dict(stabilization or {})
+            stabilization["alliance_baby_autonomous_satisfaction_gate_v1"] = {
+                "status":"ERROR",
+                "error":f"{type(_baby_sat_err).__name__}: {_baby_sat_err}",
+                "fail_safe":True,
+            }
+            print("[alliance-baby-autonomous-satisfaction-gate-v1] warning:", type(_baby_sat_err).__name__, str(_baby_sat_err))
 
         # ALLIANCE_BUSINESS_AUTOPILOT_V1
         try:
