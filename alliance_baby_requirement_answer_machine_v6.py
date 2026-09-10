@@ -5,7 +5,7 @@ from decimal import Decimal
 from fastapi import Request
 from fastapi.responses import HTMLResponse,JSONResponse
 from pydantic import BaseModel,Field
-VERSION="6.4.0-ALLIANCE-BABY-COMMERCIAL-SUITABILITY-BRAIN"
+VERSION="6.4.1-ALLIANCE-BABY-SOURCING-CONSISTENCY-FINAL"
 MAX_OVER_BUDGET_PCT=.15
 class AnswerInput(BaseModel):
     requirement:str=Field(min_length=5)
@@ -229,27 +229,36 @@ def _market_fit(req,x):
     direct_hits=[t for t in direct_map.get(cat,(cat,)) if t in market_type]
     context_hits=[t for t in context_map.get(cat,()) if t in market_type]
 
-    direct_score=0
-    if direct_hits:
-        direct_score=60+min(20,10*(len(direct_hits)-1))
-    elif source_fit=="USE_MATCH":
-        direct_score=45
-
-    context_score=min(20,10*len(context_hits))
-    evidence_bonus=10 if source_fit=="USE_MATCH" else 0
-    compatibility_bonus=10 if "compatible" in source_reason.lower() else 0
-    score=min(100,direct_score+context_score+evidence_bonus+compatibility_bonus)
-
     if direct_hits:
         direct_label="DIRECT"
+        direct_score=60+min(20,10*(len(direct_hits)-1))
     elif source_fit=="USE_MATCH":
         direct_label="SUPPORTED_BY_SOURCE"
+        direct_score=40
     elif context_hits:
         direct_label="CONTEXT_ONLY"
+        direct_score=20
     else:
         direct_label="WEAK"
+        direct_score=0
 
-    label="STRONG" if score>=75 else "GOOD" if score>=50 else "WEAK"
+    context_score=min(15,5*len(context_hits))
+    source_bonus=10 if source_fit=="USE_MATCH" else 0
+    compatibility_bonus=5 if "compatible" in source_reason.lower() else 0
+    raw_score=min(100,direct_score+context_score+source_bonus+compatibility_bonus)
+
+    if direct_label=="DIRECT":
+        score=max(75,raw_score)
+        label="STRONG"
+    elif direct_label=="SUPPORTED_BY_SOURCE":
+        score=min(74,max(50,raw_score))
+        label="GOOD"
+    elif direct_label=="CONTEXT_ONLY":
+        score=min(49,max(30,raw_score))
+        label="WEAK"
+    else:
+        score=min(29,raw_score)
+        label="WEAK"
 
     why=[]
     if direct_hits:
@@ -258,6 +267,10 @@ def _market_fit(req,x):
         why.append("market context: "+", ".join(context_hits[:3]))
     if source_fit=="USE_MATCH":
         why.append("micro-market engine supports this use")
+    if direct_label=="SUPPORTED_BY_SOURCE":
+        why.append("support is indirect; verify local use-case strength")
+    if direct_label=="CONTEXT_ONLY":
+        why.append("context fit only; not a direct use match")
     if not why:
         why.append("no strong direct-use evidence")
 
@@ -857,14 +870,20 @@ def match_requirement(engine,req,limit_per_section=8):
 
     sourcing_queue=[
         {
-            "priority":1 if m.get("market_fit")=="STRONG" else 2,
+            "priority":{
+                "DIRECT":1,
+                "SUPPORTED_BY_SOURCE":2,
+                "CONTEXT_ONLY":3,
+                "WEAK":4,
+            }.get(m.get("direct_use_fit"),4),
             "location":m.get("location"),
             "distance_km":m.get("distance_km"),
             "market_type":m.get("market_type"),
             "market_fit":m.get("market_fit"),
             "market_fit_score":m.get("market_fit_score"),
+            "direct_use_fit":m.get("direct_use_fit"),
             "reason":m.get("market_fit_reason"),
-            "action":"SOURCE_AND_VERIFY",
+            "action":"SOURCE_AND_VERIFY" if m.get("direct_use_fit")!="WEAK" else "LOW_PRIORITY_RESEARCH",
         }
         for m in market_brain
         if not m.get("master_inventory_found")
@@ -985,6 +1004,12 @@ def exam():
     prow={'location_tier':'NEARBY','truth':'UNVERIFIED_NEEDS_UPDATE','area_band':'STRONG','market_fit_score':90}
     suit=_suitability_score(fake,prow,{'area_sqft':1500,'rent_amount':150000,'description':'ground floor restaurant main road frontage'})
     add('v64 suitability score generated',suit.get('suitability_score',0)>0)
+    direct=_market_fit({'category':'FNB'},{'market_type':'TOURISM_FNB','fit':'USE_MATCH','reason':'requirement-use compatible'})
+    indirect=_market_fit({'category':'FNB'},{'market_type':'PREMIUM_LIFESTYLE','fit':'USE_MATCH','reason':'requirement-use compatible'})
+    context=_market_fit({'category':'FNB'},{'market_type':'BEACH_LIFESTYLE','fit':'','reason':''})
+    add('v641 direct strong',direct.get('direct_use_fit')=='DIRECT' and direct.get('market_fit')=='STRONG')
+    add('v641 indirect good not strong',indirect.get('direct_use_fit')=='SUPPORTED_BY_SOURCE' and indirect.get('market_fit')=='GOOD')
+    add('v641 context weak',context.get('direct_use_fit')=='CONTEXT_ONLY' and context.get('market_fit')=='WEAK')
     passed=sum(x['pass'] for x in tests);return {'status':'PASS' if passed==len(tests) else 'FAIL','tested':len(tests),'passed':passed,'failed':len(tests)-passed,'tests':tests}
 def _table(title,rows):
     if not rows:
@@ -1211,9 +1236,10 @@ def _render(data,raw):
                     items.append(
                         "<li><b>P"+str(x.get("priority"))+"</b> · "
                         +html.escape(str(x.get("location") or ""))
+                        +" · "+html.escape(str(x.get("direct_use_fit") or "UNKNOWN"))
                         +" · "+html.escape(str(x.get("market_fit") or ""))
                         +" · "+str(x.get("distance_km"))+" km"
-                        +" · SOURCE + VERIFY</li>"
+                        +" · "+html.escape(str(x.get("action") or "SOURCE_AND_VERIFY"))+"</li>"
                     )
                 out.append(
                     "<div class=card><h3>G. SOURCING QUEUE · GOOD MARKET, NO MATCHING MASTER INVENTORY</h3><ol>"
@@ -1231,7 +1257,7 @@ def _render(data,raw):
         "<!doctype html><html><head>"
         "<meta charset=utf-8>"
         "<meta name=viewport content='width=device-width,initial-scale=1'>"
-        "<title>Baby V6.4</title>"
+        "<title>Baby V6.4.1</title>"
         "<style>"
         "body{font-family:Arial;background:#f5f7fb;color:#172033;margin:0}"
         ".wrap{max-width:1500px;margin:auto;padding:20px}"
@@ -1245,7 +1271,7 @@ def _render(data,raw):
         "</style></head><body><div class=wrap>"
         "<p><a href='javascript:history.back()'>← Previous Page</a>"
         " · <a href=/alliance/primary>Dashboard</a></p>"
-        "<h1>Alliance Baby V6.4 · Commercial Suitability Brain</h1>"
+        "<h1>Alliance Baby V6.4.1 · Commercial Suitability Brain · Final Consistency</h1>"
         "<p>Exact inventory first. Alternative markets are intelligence, not availability claims. "
         "Rent budgets are normalized with monthly economics.</p>"
         "<form method=get>"
