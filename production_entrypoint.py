@@ -518,6 +518,18 @@ def _load_core():
         import alliance_live_feed_purity as live_feed_purity
         live_feed_purity.register(wrapped)
 
+        # ALLIANCE_BABY_V6_REQUIREMENT_ANSWER_MACHINE
+        try:
+            import alliance_baby_requirement_answer_machine_v6 as baby_v6
+            baby_v6_result = baby_v6.register(wrapped.core)
+            stabilization = dict(stabilization or {})
+            stabilization["baby_v6_requirement_answer_machine"] = baby_v6_result
+            print("[baby-v6-answer-machine]", baby_v6_result)
+        except Exception as exc:
+            stabilization = dict(stabilization or {})
+            stabilization["baby_v6_requirement_answer_machine"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","fail_safe":True}
+            print("[baby-v6-answer-machine] warning:", type(exc).__name__, str(exc))
+
         try:
             late = _late_register_intelligence(wrapped)
             stabilization = dict(stabilization or {})
