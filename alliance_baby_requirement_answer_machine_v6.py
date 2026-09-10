@@ -5,7 +5,7 @@ from decimal import Decimal
 from fastapi import Request
 from fastapi.responses import HTMLResponse,JSONResponse
 from pydantic import BaseModel,Field
-VERSION="6.3.0-ALLIANCE-BABY-COMMERCIAL-MARKET-BRAIN"
+VERSION="6.4.0-ALLIANCE-BABY-COMMERCIAL-SUITABILITY-BRAIN"
 MAX_OVER_BUDGET_PCT=.15
 class AnswerInput(BaseModel):
     requirement:str=Field(min_length=5)
@@ -205,35 +205,70 @@ def _market_fit(req,x):
             "market_fit":"UNASSESSED",
             "market_fit_score":0,
             "market_fit_reason":"Category/use missing; commercial equivalence is not asserted.",
+            "direct_use_fit":"UNKNOWN",
+            "direct_use_score":0,
         }
 
-    token_map={
-        "FNB":("FNB","RESTAURANT","CAFE","TOURISM","LIFESTYLE","HIGH_STREET","DESTINATION"),
-        "FASHION":("RETAIL","HIGH_STREET","MALL","PREMIUM","DESTINATION"),
-        "JEWELLERY":("RETAIL","HIGH_STREET","MALL","PREMIUM","LUXURY"),
-        "RETAIL":("RETAIL","HIGH_STREET","MALL","PREMIUM","DESTINATION"),
-        "OFFICE":("OFFICE","CBD","DISTRICT_CENTRE","CORRIDOR","TECH"),
-        "RESIDENTIAL":("RESIDENTIAL","VILLA","LIFESTYLE","PREMIUM","MIXED"),
+    direct_map={
+        "FNB":("FNB","RESTAURANT","CAFE","QSR","FOOD","DINING"),
+        "FASHION":("FASHION","APPAREL","RETAIL","HIGH_STREET","MALL"),
+        "JEWELLERY":("JEWELLERY","JEWELRY","LUXURY","RETAIL","HIGH_STREET","MALL"),
+        "RETAIL":("RETAIL","HIGH_STREET","MALL","SHOWROOM","SHOPPING"),
+        "OFFICE":("OFFICE","CBD","BUSINESS","TECH","DISTRICT_CENTRE"),
+        "RESIDENTIAL":("RESIDENTIAL","VILLA","APARTMENT","HOUSING"),
     }
-    wanted=token_map.get(cat,(cat,))
-    hits=[tok for tok in wanted if tok in market_type]
+    context_map={
+        "FNB":("TOURISM","LIFESTYLE","DESTINATION","HIGH_STREET"),
+        "FASHION":("PREMIUM","DESTINATION","LIFESTYLE"),
+        "JEWELLERY":("PREMIUM","LUXURY","DESTINATION"),
+        "RETAIL":("PREMIUM","DESTINATION","LIFESTYLE"),
+        "OFFICE":("CORRIDOR","CBD","TECH","BUSINESS"),
+        "RESIDENTIAL":("LIFESTYLE","PREMIUM","MIXED","BEACH"),
+    }
 
-    score=25*len(hits)
-    if source_fit=="USE_MATCH":score+=35
-    if "compatible" in source_reason.lower():score+=15
-    score=min(100,max(0,score))
+    direct_hits=[t for t in direct_map.get(cat,(cat,)) if t in market_type]
+    context_hits=[t for t in context_map.get(cat,()) if t in market_type]
 
-    label="STRONG" if score>=70 else "GOOD" if score>=45 else "WEAK"
+    direct_score=0
+    if direct_hits:
+        direct_score=60+min(20,10*(len(direct_hits)-1))
+    elif source_fit=="USE_MATCH":
+        direct_score=45
+
+    context_score=min(20,10*len(context_hits))
+    evidence_bonus=10 if source_fit=="USE_MATCH" else 0
+    compatibility_bonus=10 if "compatible" in source_reason.lower() else 0
+    score=min(100,direct_score+context_score+evidence_bonus+compatibility_bonus)
+
+    if direct_hits:
+        direct_label="DIRECT"
+    elif source_fit=="USE_MATCH":
+        direct_label="SUPPORTED_BY_SOURCE"
+    elif context_hits:
+        direct_label="CONTEXT_ONLY"
+    else:
+        direct_label="WEAK"
+
+    label="STRONG" if score>=75 else "GOOD" if score>=50 else "WEAK"
+
     why=[]
-    if hits:why.append("market type supports "+", ".join(hits[:3]))
-    if source_fit=="USE_MATCH":why.append("micro-market engine reports use compatibility")
-    if not why:why.append("geographic proximity only; use-case equivalence is weak")
+    if direct_hits:
+        why.append("direct use match: "+", ".join(direct_hits[:3]))
+    if context_hits:
+        why.append("market context: "+", ".join(context_hits[:3]))
+    if source_fit=="USE_MATCH":
+        why.append("micro-market engine supports this use")
+    if not why:
+        why.append("no strong direct-use evidence")
 
     return {
         "market_fit":label,
         "market_fit_score":score,
         "market_fit_reason":"; ".join(why),
+        "direct_use_fit":direct_label,
+        "direct_use_score":direct_score,
     }
+
 def _split(raw):
     text=str(raw or '').strip();ms=list(re.finditer(r"(?:^|\n|\r|\s)(?:🏠\s*)?Requirement\s*(\d+)\s*:",text,re.I))
     if len(ms)<2:return [text] if text else []
@@ -385,9 +420,11 @@ def _commercial_market_brain(req):
         response=g.suggest(loc,req.get("raw_text") or "",40) or {}
     except Exception:
         return []
+
     max_km=3.0 if category=="OFFICE" else 15.0
     out=[]
     seen=set()
+
     for suggestion in response.get("suggestions") or []:
         place=_clean(suggestion.get("location"))
         if not place or _location_quality(place)!="SINGLE_MARKET":
@@ -400,35 +437,53 @@ def _commercial_market_brain(req):
             continue
         if distance<0 or distance>max_km:
             continue
+
         key=_n(place)
         if key in seen:
             continue
         seen.add(key)
+
         fit=_market_fit(req,suggestion)
-        source_fit=_n(suggestion.get("fit"))
+        direct=fit.get("direct_use_fit")
+        direct_score=int(fit.get("direct_use_score") or 0)
+        market_score=int(fit.get("market_fit_score") or 0)
+        distance_score=max(0,20-round((distance/max_km)*20))
+        suitability=min(100,market_score+distance_score)
+
+        if direct=="DIRECT":
+            priority=1
+        elif direct=="SUPPORTED_BY_SOURCE":
+            priority=2
+        elif direct=="CONTEXT_ONLY":
+            priority=3
+        else:
+            priority=4
+
         out.append({
             "location":place,
             "distance_km":round(distance,2),
             "market_type":suggestion.get("market_type") or "",
             "market_fit":fit.get("market_fit"),
-            "market_fit_score":fit.get("market_fit_score",0),
+            "market_fit_score":market_score,
             "market_fit_reason":fit.get("market_fit_reason"),
-            "source_fit":source_fit,
+            "direct_use_fit":direct,
+            "direct_use_score":direct_score,
+            "commercial_suitability_score":suitability,
+            "market_priority":priority,
+            "source_fit":_n(suggestion.get("fit")),
             "source_reason":_clean(suggestion.get("reason")),
-            "commercially_equivalent":bool(
-                source_fit=="USE_MATCH"
-                or fit.get("market_fit") in {"STRONG","GOOD"}
-            ),
         })
+
     out.sort(
         key=lambda x:(
-            x.get("commercially_equivalent",False),
-            x.get("market_fit_score",0),
-            -x.get("distance_km",999),
-        ),
-        reverse=True,
+            x.get("market_priority",9),
+            -x.get("direct_use_score",0),
+            -x.get("commercial_suitability_score",0),
+            x.get("distance_km",999),
+        )
     )
     return out[:10]
+
 def _comparables(engine,req):
     if req.get('category') in {'RESIDENTIAL','GENERAL'}:return []
     try:
@@ -459,6 +514,153 @@ def _eligible(req,p):
         commercial=any(x in t for x in ('COMMERCIAL','SHOP','SHOWROOM','OFFICE','RESTAURANT','BANQUET'))
         if commercial and not res:return False
     return True
+def _property_format_fit(req,p):
+    cat=_n(req.get("category") or "")
+    t=_ptext(p)
+    score=0
+    reasons=[]
+
+    if cat=="FNB":
+        if any(x in t for x in ("GROUND FLOOR"," GF ","GROUND","HIGH STREET","SHOP","SHOWROOM","RESTAURANT")):
+            score+=25
+            reasons.append("street/ground-floor format")
+        if any(x in t for x in ("FRONTAGE","CORNER","MAIN ROAD","MAIN MARKET")):
+            score+=15
+            reasons.append("visibility/frontage")
+        if "PARKING" in t:
+            score+=5
+            reasons.append("parking")
+    elif cat in {"RETAIL","FASHION","JEWELLERY"}:
+        if any(x in t for x in ("GROUND FLOOR"," GF ","GROUND","SHOP","SHOWROOM","HIGH STREET","MALL")):
+            score+=25
+            reasons.append("retail-ready format")
+        if any(x in t for x in ("FRONTAGE","CORNER","MAIN ROAD","MAIN MARKET")):
+            score+=15
+            reasons.append("visibility/frontage")
+    elif cat=="OFFICE":
+        if any(x in t for x in ("OFFICE","COMMERCIAL","BUSINESS","TOWER","FLOOR")):
+            score+=25
+            reasons.append("office-compatible format")
+        if "PARKING" in t:
+            score+=10
+            reasons.append("parking")
+    elif cat=="RESIDENTIAL":
+        if any(x in t for x in ("VILLA","APARTMENT","FLAT","HOUSE","RESIDENTIAL")):
+            score+=30
+            reasons.append("residential format")
+
+    prefs=req.get("preferences") or []
+    pref_fit,_=_pfit(req,p)
+    if prefs and pref_fit=="FULL":
+        score+=20
+        reasons.append("all stated preferences found")
+    elif prefs and pref_fit=="PARTIAL":
+        score+=10
+        reasons.append("some stated preferences found")
+
+    return {
+        "property_format_score":min(100,score),
+        "property_format_reason":", ".join(reasons) if reasons else "format evidence limited",
+    }
+
+def _rent_economics_fit(req,p):
+    if req.get("transaction_type")!="RENT":
+        return {
+            "rent_economics_fit":"NOT_APPLICABLE",
+            "rent_economics_fit_score":0,
+            "property_rent_per_sqft_month":None,
+        }
+
+    budget_psf=req.get("rent_budget_per_sqft_month")
+    prop_area=p.get("area_sqft")
+    prop_price=_price(p)
+
+    if not budget_psf or not prop_area or not prop_price:
+        return {
+            "rent_economics_fit":"UNKNOWN",
+            "rent_economics_fit_score":0,
+            "property_rent_per_sqft_month":None,
+        }
+
+    try:
+        prop_psf=round(float(prop_price)/float(prop_area),2)
+    except Exception:
+        return {
+            "rent_economics_fit":"UNKNOWN",
+            "rent_economics_fit_score":0,
+            "property_rent_per_sqft_month":None,
+        }
+
+    ratio=prop_psf/max(float(budget_psf),0.01)
+    if ratio<=1.0:
+        label="WITHIN_BUDGET";score=25
+    elif ratio<=1.10:
+        label="SLIGHTLY_OVER";score=15
+    elif ratio<=1.20:
+        label="STRETCH";score=5
+    else:
+        label="OVER_BUDGET";score=-20
+
+    return {
+        "rent_economics_fit":label,
+        "rent_economics_fit_score":score,
+        "property_rent_per_sqft_month":prop_psf,
+    }
+
+def _suitability_score(req,row,p=None):
+    market_score=int(row.get("market_fit_score") or 0)
+    location_score={"EXACT":30,"NEARBY":20,"COMPARABLE":15}.get(row.get("location_tier"),5)
+    truth_score={
+        "VERIFIED_AVAILABLE":20,
+        "VERIFIED_NEEDS_AVAILABILITY_UPDATE":10,
+        "UNVERIFIED_AVAILABILITY_CLAIM":7,
+        "UNVERIFIED_NEEDS_UPDATE":3,
+    }.get(row.get("truth"),0)
+
+    format_score=0
+    format_reason="format evidence limited"
+    rent_score=0
+    rent_label="NOT_APPLICABLE"
+    prop_psf=None
+
+    if p is not None:
+        ff=_property_format_fit(req,p)
+        format_score=int(ff.get("property_format_score") or 0)
+        format_reason=ff.get("property_format_reason")
+        rf=_rent_economics_fit(req,p)
+        rent_score=int(rf.get("rent_economics_fit_score") or 0)
+        rent_label=rf.get("rent_economics_fit")
+        prop_psf=rf.get("property_rent_per_sqft_month")
+
+    area_score={"STRONG":15,"GOOD":10,"BROAD":4}.get(row.get("area_band"),0)
+
+    total=round(
+        market_score*0.30
+        +location_score
+        +truth_score
+        +format_score*0.20
+        +area_score
+        +rent_score
+    )
+    total=max(0,min(100,total))
+
+    if total>=75:
+        band="A_RECOMMENDED"
+    elif total>=55:
+        band="B_CONSIDER"
+    elif total>=35:
+        band="C_VERIFY"
+    else:
+        band="D_LOW_CONFIDENCE"
+
+    return {
+        "suitability_score":total,
+        "suitability_band":band,
+        "property_format_score":format_score,
+        "property_format_reason":format_reason,
+        "rent_economics_fit":rent_label,
+        "property_rent_per_sqft_month":prop_psf,
+    }
 def _row(req,p,tier,reason):
     tr,trust=_truth(p)
     ab,ad=_aband(req.get("area_sqft"),p.get("area_sqft"))
@@ -488,7 +690,7 @@ def _row(req,p,tier,reason):
 
     cr=p.get("clean_record") if isinstance(p.get("clean_record"),dict) else {}
 
-    return {
+    row={
         "canonical_id":p.get("canonical_id"),
         "location":_ploc(p),
         "city":p.get("city"),
@@ -516,6 +718,8 @@ def _row(req,p,tier,reason):
         "action":action,
         "description":_clean(p.get("description") or cr.get("description") or ""),
     }
+    row.update(_suitability_score(req,row,p))
+    return row
 
 def match_requirement(engine,req,limit_per_section=8):
     import alliance_master_integration_v720 as master
@@ -583,6 +787,7 @@ def match_requirement(engine,req,limit_per_section=8):
         rows.sort(
             key=lambda x:(
                 x["truth"]=="VERIFIED_AVAILABLE",
+                x.get("suitability_score",0),
                 x.get("market_fit_score",0),
                 x["match_score"],
                 x["trust_score"],
@@ -691,14 +896,13 @@ def _client(res):
             "We have captured "+loc+" as the preferred location. "
             +"To shortlist suitable options, please confirm: "
             +", ".join(missing)
-            +". Any nearby alternatives shown internally are preliminary "
-            +"and will be verified before sharing."
+            +". Alternative markets shown internally are preliminary intelligence only."
         )
 
     verified=res.get("verified_available") or []
     if verified:
         lines=[loc+": "+str(len(verified))+" verified available option(s) found."]
-        for x in verified[:5]:
+        for x in verified[:3]:
             area=x.get("area_sqyd") or x.get("area_sqft")
             unit="sq yd" if x.get("area_sqyd") else "sqft"
             lines.append(
@@ -708,15 +912,43 @@ def _client(res):
             )
         return "\n".join(lines)
 
-    if (
-        res.get("unverified_exact")
-        or res.get("nearby_matches")
-        or res.get("comparable_matches")
-    ):
+    exact=res.get("unverified_exact") or []
+    if exact:
         return (
-            "We have identified potential options for "+loc+". "
-            +"Availability, commercial suitability and current details "
-            +"are being reconfirmed before sharing confirmed options."
+            "We have identified potential inventory in "+loc
+            +", but availability and current commercial details are being verified before sharing it as confirmed."
+        )
+
+    markets=res.get("commercial_market_intelligence") or []
+    best=[
+        x for x in markets
+        if x.get("direct_use_fit") in {"DIRECT","SUPPORTED_BY_SOURCE"}
+    ][:4]
+
+    nearby_inventory=res.get("nearby_matches") or []
+    if best:
+        names=", ".join(str(x.get("location")) for x in best)
+        msg=(
+            "No verified "+loc+" option is currently confirmed. "
+            +"Based on the stated use, the strongest alternative markets currently identified are "
+            +names+"."
+        )
+        if nearby_inventory:
+            inv=nearby_inventory[0]
+            msg+=(
+                " We also have a "+str(inv.get("location"))
+                +" Master inventory candidate that is being verified."
+            )
+        else:
+            msg+=" Sourcing and verification are required in these markets."
+        return msg
+
+    if nearby_inventory:
+        inv=nearby_inventory[0]
+        return (
+            "No verified "+loc+" option is currently confirmed. "
+            +"A potential "+str(inv.get("location"))
+            +" inventory candidate is being verified before any client recommendation."
         )
 
     return (
@@ -745,6 +977,14 @@ def exam():
     add('v63 clean budget display',_budget_display(rent_req)=='₹2 lakh/month')
     sale_req=parse_requirement('Want to buy a villa in Calangute, 3000 sqft, budget 8 crore')
     add('v63 sale has no rent economics',sale_req.get('rent_economics_status')=='NOT_APPLICABLE')
+    fnb_direct=_market_fit({'category':'FNB'},{'market_type':'TOURISM_FNB','fit':'USE_MATCH','reason':'requirement-use compatible'})
+    fnb_context=_market_fit({'category':'FNB'},{'market_type':'PREMIUM_LIFESTYLE','fit':'USE_MATCH','reason':'requirement-use compatible'})
+    add('v64 direct FNB outranks lifestyle',fnb_direct.get('direct_use_score',0)>fnb_context.get('direct_use_score',0))
+    add('v64 direct label',fnb_direct.get('direct_use_fit')=='DIRECT')
+    fake={'category':'FNB','preferences':[],'transaction_type':'RENT','rent_budget_per_sqft_month':133.33,'area_sqft':1500}
+    prow={'location_tier':'NEARBY','truth':'UNVERIFIED_NEEDS_UPDATE','area_band':'STRONG','market_fit_score':90}
+    suit=_suitability_score(fake,prow,{'area_sqft':1500,'rent_amount':150000,'description':'ground floor restaurant main road frontage'})
+    add('v64 suitability score generated',suit.get('suitability_score',0)>0)
     passed=sum(x['pass'] for x in tests);return {'status':'PASS' if passed==len(tests) else 'FAIL','tested':len(tests),'passed':passed,'failed':len(tests)-passed,'tests':tests}
 def _table(title,rows):
     if not rows:
@@ -752,69 +992,54 @@ def _table(title,rows):
 
     header=(
         "<tr>"
-        "<th>Score</th>"
+        "<th>Suitability</th>"
+        "<th>Match</th>"
         "<th>Status</th>"
         "<th>Location</th>"
         "<th>Distance</th>"
         "<th>Market fit</th>"
+        "<th>Format fit</th>"
+        "<th>Rent economics</th>"
         "<th>Area</th>"
         "<th>Price</th>"
-        "<th>Fit</th>"
         "<th>Contact</th>"
         "<th>Action</th>"
         "</tr>"
     )
 
     body=[]
-
     for x in rows:
-        if x.get("area_sqyd"):
-            area=str(x.get("area_sqyd"))+" sq yd"
-        else:
-            area=str(x.get("area_sqft") or "—")+" sqft"
-
-        fit=(
-            str(x.get("location_tier"))
-            +" | area "+str(x.get("area_band"))
-            +" | "+str(x.get("budget_fit"))
-            +" | pref "+str(x.get("preference_fit"))
-        )
-
+        area=(str(x.get("area_sqyd"))+" sq yd") if x.get("area_sqyd") else (str(x.get("area_sqft") or "—")+" sqft")
         phones=", ".join(x.get("phones") or []) or "—"
+        distance=str(x.get("distance_km"))+" km" if x.get("distance_km") is not None else "—"
 
-        if x.get("distance_km") is not None:
-            distance=str(x.get("distance_km"))+" km"
-        else:
-            distance="—"
+        market_fit=x.get("market_fit") or ("EXACT" if x.get("location_tier")=="EXACT" else "—")
+        if x.get("market_fit_reason"):
+            market_fit=str(market_fit)+" · "+str(x.get("market_fit_reason"))
 
-        market_fit=x.get("market_fit")
-        if not market_fit and x.get("location_tier")=="EXACT":
-            market_fit="EXACT"
-        if not market_fit:
-            market_fit="—"
+        format_fit=str(x.get("property_format_score") or 0)+" · "+str(x.get("property_format_reason") or "limited evidence")
+        rent_fit=str(x.get("rent_economics_fit") or "NOT_APPLICABLE")
+        if x.get("property_rent_per_sqft_month") is not None:
+            rent_fit+=" · ₹"+str(x.get("property_rent_per_sqft_month"))+"/sqft/month"
 
-        reason=x.get("market_fit_reason")
-        if reason:
-            market_fit=str(market_fit)+" · "+str(reason)
+        suitability=str(x.get("suitability_score") or 0)+" · "+str(x.get("suitability_band") or "UNRATED")
 
-        values=(
+        vals=(
+            suitability,
             x.get("match_score"),
             x.get("truth"),
             x.get("location") or "—",
             distance,
             market_fit,
+            format_fit,
+            rent_fit,
             area,
             x.get("price_raw") or "—",
-            fit,
             phones,
             x.get("action"),
         )
 
-        cells="".join(
-            "<td>"+html.escape(str(value))+"</td>"
-            for value in values
-        )
-        body.append("<tr>"+cells+"</tr>")
+        body.append("<tr>"+"".join("<td>"+html.escape(str(v))+"</td>" for v in vals)+"</tr>")
 
     return (
         "<div class=card><h3>"
@@ -828,48 +1053,51 @@ def _table(title,rows):
 def _market_table(title,rows):
     if not rows:
         return "<div class=card><h3>"+html.escape(title)+"</h3><p>None.</p></div>"
+
     header=(
         "<tr>"
         "<th>Rank</th>"
         "<th>Alternative market</th>"
         "<th>Distance</th>"
         "<th>Market type</th>"
-        "<th>Commercial fit</th>"
+        "<th>Direct use fit</th>"
+        "<th>Commercial suitability</th>"
         "<th>Master inventory</th>"
         "<th>Next action</th>"
         "</tr>"
     )
+
     body=[]
     for idx,x in enumerate(rows,1):
         distance=str(x.get("distance_km"))+" km" if x.get("distance_km") is not None else "—"
-        fit=str(x.get("market_fit") or "—")
-        if x.get("market_fit_reason"):
-            fit+=" · "+str(x.get("market_fit_reason"))
+        fit=str(x.get("market_fit") or "—")+" · "+str(x.get("market_fit_reason") or "")
+        suitability=str(x.get("commercial_suitability_score") or 0)+" · "+fit
+        direct=str(x.get("direct_use_fit") or "UNKNOWN")
         count=int(x.get("master_inventory_found") or 0)
         inventory=str(count)+" matching candidate(s)" if count else "None in current Master match"
+
         vals=(
             idx,
             x.get("location") or "—",
             distance,
             x.get("market_type") or "—",
-            fit,
+            direct,
+            suitability,
             inventory,
             x.get("next_action") or "SOURCE_AND_VERIFY",
         )
-        body.append(
-            "<tr>"
-            +"".join("<td>"+html.escape(str(v))+"</td>" for v in vals)
-            +"</tr>"
-        )
+        body.append("<tr>"+"".join("<td>"+html.escape(str(v))+"</td>" for v in vals)+"</tr>")
+
     return (
         "<div class=card><h3>"
         +html.escape(title)
-        +"</h3><p><b>Important:</b> These are market recommendations, not claims of property availability.</p>"
+        +"</h3><p><b>Important:</b> Direct-use markets rank above broad lifestyle/proximity markets. These are recommendations, not availability claims.</p>"
         +"<div class=scroll><table>"
         +header
         +"".join(body)
         +"</table></div></div>"
     )
+
 def _render(data,raw):
     out=[]
     if data:
@@ -1003,7 +1231,7 @@ def _render(data,raw):
         "<!doctype html><html><head>"
         "<meta charset=utf-8>"
         "<meta name=viewport content='width=device-width,initial-scale=1'>"
-        "<title>Baby V6.3</title>"
+        "<title>Baby V6.4</title>"
         "<style>"
         "body{font-family:Arial;background:#f5f7fb;color:#172033;margin:0}"
         ".wrap{max-width:1500px;margin:auto;padding:20px}"
@@ -1017,7 +1245,7 @@ def _render(data,raw):
         "</style></head><body><div class=wrap>"
         "<p><a href='javascript:history.back()'>← Previous Page</a>"
         " · <a href=/alliance/primary>Dashboard</a></p>"
-        "<h1>Alliance Baby V6.3 · Commercial Market Brain + Rent Economics</h1>"
+        "<h1>Alliance Baby V6.4 · Commercial Suitability Brain</h1>"
         "<p>Exact inventory first. Alternative markets are intelligence, not availability claims. "
         "Rent budgets are normalized with monthly economics.</p>"
         "<form method=get>"
