@@ -5,6 +5,7 @@ from typing import Any, Dict, List
 
 import alliance_phase5_canonical_matcher as phase5
 import alliance_requirement_intelligence_gate_v1 as requirement_gate
+import alliance_master_property_match_source_v1 as master_source
 
 VERSION = "1.4.0-LOCATION-PURITY-CONTACT-GUARD"
 
@@ -182,8 +183,17 @@ def run_match(
         req["transaction_source"] = requirement_intelligence.get("transaction_source")
         req["transaction_confidence"] = requirement_intelligence.get("transaction_confidence")
 
-    # Load canonical inventory first. Frozen Phase5 eligibility/scoring stays unchanged.
-    pi_raw = phase5.load_pi_properties(engine)
+    # Load AUTHORITATIVE MASTER inventory first.
+    # Frozen Phase5 eligibility/scoring stays unchanged.
+    pi_raw = master_source.load_master_properties(
+        engine,
+        req,
+        limit=12000,
+    )
+    master_source_used = "pi_master_properties_v711"
+    if not pi_raw:
+        pi_raw = phase5.load_pi_properties(engine)
+        master_source_used = "pi_properties_LEGACY_FALLBACK"
     pi_candidates = phase5.dedupe_candidates(pi_raw)
     pi_candidates, pi_scope = requirement_gate.enforce_strict_scope(
         pi_candidates, requirement_intelligence
@@ -251,17 +261,17 @@ def run_match(
 
     canonical_verified = _tag(
         pi_selected["exact_verified"],
-        "CANONICAL_MASTER",
+        "MASTER_PROPERTY_DATABASE",
     )
 
     canonical_verify = _tag(
         pi_selected["exact_needs_verification"],
-        "CANONICAL_MASTER",
+        "MASTER_PROPERTY_DATABASE",
     )
 
     canonical_alternatives = _tag(
         pi_selected["alternatives"],
-        "CANONICAL_MASTER",
+        "MASTER_PROPERTY_DATABASE",
     )
 
     wa_exact_all = (
@@ -331,8 +341,10 @@ def run_match(
                 or exact_verify
                 or alternatives
             ),
-            "matching_path": "CANONICAL_THEN_WHATSAPP_MASTER",
-            "primary_source": "pi_properties",
+            "matching_path": "MASTER_PROPERTY_DB_THEN_WHATSAPP_MASTER",
+            "primary_source": master_source_used,
+            "master_property_rows_loaded": len(pi_raw),
+            "master_property_source_adapter": master_source.VERSION,
             "evidence_source": "pi_whatsapp_property_master",
             "fallback_source": "pi_whatsapp_property_master",
             "fallback_used": bool(
