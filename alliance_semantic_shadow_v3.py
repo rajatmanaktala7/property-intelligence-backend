@@ -7,7 +7,8 @@ from sqlalchemy import text
 
 import alliance_requirement_brain_v3 as brain
 
-VERSION = "3.0.0-SHADOW-COMPARISON"
+VERSION = "3.1.0-SHADOW-CAPTURE-REVIEW-MODE"
+MODE = "REVIEW"
 
 
 def ensure_schema(engine) -> None:
@@ -27,6 +28,14 @@ def ensure_schema(engine) -> None:
                 notes TEXT
             )
         """))
+        for stmt in (
+            "ALTER TABLE pi_semantic_shadow_v3_runs ADD COLUMN IF NOT EXISTS review_decision TEXT",
+            "ALTER TABLE pi_semantic_shadow_v3_runs ADD COLUMN IF NOT EXISTS reviewer TEXT",
+            "ALTER TABLE pi_semantic_shadow_v3_runs ADD COLUMN IF NOT EXISTS reviewed_at TIMESTAMPTZ",
+            "ALTER TABLE pi_semantic_shadow_v3_runs ADD COLUMN IF NOT EXISTS approved_snapshot JSONB",
+            "ALTER TABLE pi_semantic_shadow_v3_runs ADD COLUMN IF NOT EXISTS correction_reason TEXT",
+        ):
+            c.execute(text(stmt))
         c.execute(text("""
             CREATE INDEX IF NOT EXISTS idx_semantic_shadow_v3_created
             ON pi_semantic_shadow_v3_runs(created_at DESC)
@@ -56,13 +65,19 @@ def _v2_snapshot(raw_text: str) -> Dict[str, Any]:
 
 
 def compare(v2: Dict[str, Any], v3: Dict[str, Any]) -> Dict[str, Any]:
-    v3_locations = [x["name"] for x in v3.get("locations") or [] if x.get("constraint") != "EXCLUDED"]
+    v3_locations = [
+        x["name"] for x in v3.get("locations") or []
+        if x.get("constraint") != "EXCLUDED"
+    ]
     v3_transaction = (v3.get("transaction") or {}).get("value")
     v3_asset = (v3.get("asset") or {}).get("primary_asset")
     return {
         "transaction_changed": v2.get("transaction") != v3_transaction,
         "asset_changed": (v2.get("subtype") or v2.get("family")) != v3_asset,
-        "location_count_v2": len(v2.get("primary_locations") or ([v2.get("location")] if v2.get("location") else [])),
+        "location_count_v2": len(
+            v2.get("primary_locations")
+            or ([v2.get("location")] if v2.get("location") else [])
+        ),
         "location_count_v3": len(v3_locations),
         "locations_v3": v3_locations,
         "unknown_transaction_preserved": v3_transaction is None,
@@ -75,7 +90,7 @@ def analyze(raw_text: str, source: str = "DEAL_MATCH") -> Dict[str, Any]:
     v3 = brain.analyze(raw_text, source=source)
     return {
         "version": VERSION,
-        "mode": "SHADOW_ONLY",
+        "mode": MODE,
         "production_behavior_changed": False,
         "v2": v2,
         "v3": v3,
@@ -88,7 +103,7 @@ def capture(engine, raw_text: str, source: str = "DEAL_MATCH") -> Dict[str, Any]
     try:
         ensure_schema(engine)
         with engine.begin() as c:
-            c.execute(text("""
+            inserted = c.execute(text("""
                 INSERT INTO pi_semantic_shadow_v3_runs(
                     source, raw_text, v2_snapshot, v3_snapshot,
                     comparison, brain_version
@@ -99,6 +114,7 @@ def capture(engine, raw_text: str, source: str = "DEAL_MATCH") -> Dict[str, Any]
                     CAST(:comparison AS JSONB),
                     :brain_version
                 )
+                RETURNING id
             """), {
                 "source": source,
                 "raw_text": raw_text,
@@ -106,8 +122,10 @@ def capture(engine, raw_text: str, source: str = "DEAL_MATCH") -> Dict[str, Any]
                 "v3": json.dumps(result["v3"], default=str),
                 "comparison": json.dumps(result["comparison"], default=str),
                 "brain_version": brain.VERSION,
-            })
+            }).scalar_one()
         result["persisted"] = True
+        result["review_id"] = int(inserted)
+        result["review_url"] = f"/semantic-v3/review/{inserted}"
     except Exception as exc:
         result["persisted"] = False
         result["persistence_error"] = f"{type(exc).__name__}: {exc}"
@@ -124,26 +142,30 @@ def register(core) -> Dict[str, Any]:
     except Exception as exc:
         schema_status = f"ERROR:{type(exc).__name__}:{exc}"
 
-    if not any(getattr(r, "path", None) == "/api/semantic-v3/status" for r in app.router.routes):
+    paths = {getattr(r, "path", None) for r in app.router.routes}
+
+    if "/api/semantic-v3/status" not in paths:
         @app.get("/api/semantic-v3/status")
         def semantic_v3_status():
             return {
                 "status": "OK",
                 "version": VERSION,
                 "brain_version": brain.VERSION,
-                "mode": "SHADOW_ONLY",
+                "mode": MODE,
                 "production_behavior_changed": False,
+                "production_matching_brain": "V2.3",
+                "v3_global_authoritative": False,
                 "schema_status": schema_status,
             }
         registered.append("/api/semantic-v3/status")
 
-    if not any(getattr(r, "path", None) == "/api/semantic-v3/analyze" for r in app.router.routes):
+    if "/api/semantic-v3/analyze" not in paths:
         @app.get("/api/semantic-v3/analyze")
         def semantic_v3_analyze(q: str):
-            return analyze(q, source="MANUAL_SHADOW_API")
+            return analyze(q, source="MANUAL_REVIEW_API")
         registered.append("/api/semantic-v3/analyze")
 
-    if not any(getattr(r, "path", None) == "/api/semantic-v3/recent" for r in app.router.routes):
+    if "/api/semantic-v3/recent" not in paths:
         @app.get("/api/semantic-v3/recent")
         def semantic_v3_recent(limit: int = 20):
             limit = max(1, min(int(limit), 100))
@@ -151,19 +173,25 @@ def register(core) -> Dict[str, Any]:
             with core.engine.connect() as c:
                 rows = c.execute(text("""
                     SELECT id, created_at, source, brain_version,
-                           comparison, reviewed
+                           comparison, reviewed, review_decision,
+                           reviewer, reviewed_at
                     FROM pi_semantic_shadow_v3_runs
                     ORDER BY id DESC
                     LIMIT :limit
                 """), {"limit": limit}).mappings().all()
-            return {"status": "OK", "count": len(rows), "rows": [dict(r) for r in rows]}
+            return {
+                "status": "OK",
+                "mode": MODE,
+                "count": len(rows),
+                "rows": [dict(r) for r in rows],
+            }
         registered.append("/api/semantic-v3/recent")
 
     return {
         "status": "REGISTERED",
         "version": VERSION,
         "brain_version": brain.VERSION,
-        "mode": "SHADOW_ONLY",
+        "mode": MODE,
         "registered_routes": registered,
         "schema_status": schema_status,
         "production_behavior_changed": False,

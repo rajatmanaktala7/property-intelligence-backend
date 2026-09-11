@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import alliance_requirement_intelligence_os_v2 as brain
 
-VERSION = "3.0.0-V2-PRODUCTION-V3-SHADOW"
+VERSION = "3.1.0-V2-PRODUCTION-V3-REVIEW"
 
 
 def classify(raw: str):
@@ -10,14 +10,14 @@ def classify(raw: str):
     return {"version": VERSION, **result}
 
 
-def _shadow_capture(core, raw: str, source: str):
+def _capture(core, raw: str, source: str):
     try:
-        import alliance_semantic_shadow_v3 as shadow_v3
-        return shadow_v3.capture(core.engine, raw, source=source)
+        import alliance_semantic_shadow_v3 as semantic_v3
+        return semantic_v3.capture(core.engine, raw, source=source)
     except Exception as exc:
         return {
             "persisted": False,
-            "shadow_fail_safe": True,
+            "semantic_v3_fail_safe": True,
             "error": f"{type(exc).__name__}: {exc}",
         }
 
@@ -25,12 +25,24 @@ def _shadow_capture(core, raw: str, source: str):
 def install(core):
     import alliance_deal_match_ai_v60 as v60
 
-    shadow_registration = None
+    semantic_registration = None
+    review_registration = None
+
     try:
-        import alliance_semantic_shadow_v3 as shadow_v3
-        shadow_registration = shadow_v3.register(core)
+        import alliance_semantic_shadow_v3 as semantic_v3
+        semantic_registration = semantic_v3.register(core)
     except Exception as exc:
-        shadow_registration = {
+        semantic_registration = {
+            "status": "ERROR",
+            "error": f"{type(exc).__name__}: {exc}",
+            "fail_safe": True,
+        }
+
+    try:
+        import alliance_semantic_review_v3 as review_v3
+        review_registration = review_v3.register(core)
+    except Exception as exc:
+        review_registration = {
             "status": "ERROR",
             "error": f"{type(exc).__name__}: {exc}",
             "fail_safe": True,
@@ -41,7 +53,8 @@ def install(core):
             "status": "ALREADY_INSTALLED",
             "version": VERSION,
             "matcher_version": v60.VERSION,
-            "semantic_v3_shadow": shadow_registration,
+            "semantic_v3": semantic_registration,
+            "semantic_v3_review": review_registration,
         }
 
     original_render = v60.render_results
@@ -52,12 +65,42 @@ def install(core):
     def guarded_render(core_arg, q, mode, min_score):
         parts = v60.split_requirement_text(q)
         decisions = [classify(p["source"]) for p in parts]
+        captures = []
 
         for part in parts:
-            _shadow_capture(core_arg, part["source"], "DEAL_MATCH_PAGE")
+            captures.append(
+                _capture(core_arg, part["source"], "DEAL_MATCH_PAGE")
+            )
 
         if parts and all(d["role"] == "REQUIREMENT" for d in decisions):
-            return original_render(core_arg, q, mode, min_score)
+            response = original_render(core_arg, q, mode, min_score)
+
+            # Do not alter matcher calculations. Add only a review-mode banner to HTML.
+            try:
+                if hasattr(response, "body"):
+                    body = response.body.decode("utf-8")
+                    review_links = [
+                        c.get("review_url")
+                        for c in captures
+                        if isinstance(c, dict) and c.get("review_url")
+                    ]
+                    links = " ".join(
+                        f'<a class="btn" href="{u}">Review V3 #{i+1}</a>'
+                        for i, u in enumerate(review_links)
+                    )
+                    banner = (
+                        '<div class="card"><h3>AI V3 Review Mode</h3>'
+                        '<p class="amber">Visible matcher result below is still V2.3 production logic. '
+                        'V3 ran independently and is ready for human review.</p>'
+                        + links
+                        + ' <a class="btn" href="/semantic-v3/review">Open Review Queue</a></div>'
+                    )
+                    body = body.replace("<main>", "<main>" + banner, 1)
+                    return v60.HTMLResponse(body)
+            except Exception:
+                pass
+
+            return response
 
         cards = [
             '<div class="card"><h2>Unified WhatsApp Intent Intelligence</h2>'
@@ -87,13 +130,25 @@ def install(core):
                     + v60.esc(decision["supply_score"]) + '</p></div>'
                 )
 
+        review_links = [
+            c.get("review_url")
+            for c in captures
+            if isinstance(c, dict) and c.get("review_url")
+        ]
+        review_html = " ".join(
+            f'<a class="btn" href="{u}">Review V3 #{i+1}</a>'
+            for i, u in enumerate(review_links)
+        )
+
         cards.append(
             '<div class="card"><p><b>Intent Guard:</b> ' + v60.esc(VERSION)
             + ' · <b>Requirement Brain:</b> ' + v60.esc(brain.VERSION)
             + ' · <b>Matcher:</b> ' + v60.esc(v60.VERSION)
-            + '</p><p class="green">V3 semantic intelligence is running in SHADOW mode only. '
+            + '</p><p class="green">V3 semantic intelligence is in REVIEW mode. '
             'Production matching remains V2.3. Contacts remain hidden.</p>'
-            '<a class="btn" href="/deal-match-ai-v60">Run Another Item</a></div>'
+            + review_html
+            + ' <a class="btn" href="/semantic-v3/review">Review Queue</a>'
+            + ' <a class="btn" href="/deal-match-ai-v60">Run Another Item</a></div>'
         )
 
         return v60.HTMLResponse(
@@ -106,9 +161,14 @@ def install(core):
 
         for part in parts:
             d = classify(part["source"])
-            _shadow_capture(core_arg, part["source"], "DEAL_MATCH_API")
+            capture = _capture(core_arg, part["source"], "DEAL_MATCH_API")
 
-            item = {"item_number": part["number"], "intent": d}
+            item = {
+                "item_number": part["number"],
+                "intent": d,
+                "semantic_v3_review_id": capture.get("review_id") if isinstance(capture, dict) else None,
+                "semantic_v3_review_url": capture.get("review_url") if isinstance(capture, dict) else None,
+            }
 
             if d["role"] == "REQUIREMENT":
                 item["matched"] = True
@@ -130,7 +190,9 @@ def install(core):
             "engine_version": v60.ENGINE_VERSION,
             "intent_guard_version": VERSION,
             "requirement_brain_version": brain.VERSION,
-            "semantic_v3_mode": "SHADOW_ONLY",
+            "semantic_v3_mode": "REVIEW",
+            "semantic_v3_global_authoritative": False,
+            "production_matching_brain": brain.VERSION,
             "item_count": len(parts),
             "results": out,
             "contacts_exposed": False,
@@ -149,7 +211,9 @@ def install(core):
         "matcher_file_modified": False,
         "blocks_supply_from_matcher": True,
         "constraint_summary_unified": True,
-        "semantic_v3_shadow": shadow_registration,
+        "semantic_v3": semantic_registration,
+        "semantic_v3_review": review_registration,
         "production_matching_brain": brain.VERSION,
-        "v3_authoritative": False,
+        "semantic_v3_mode": "REVIEW",
+        "v3_global_authoritative": False,
     }
