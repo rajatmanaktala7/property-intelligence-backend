@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy import create_engine, text
 
-VERSION = "5.1.0-WHATSAPP-REQUIREMENT-BRAIN"
+VERSION = "5.2.0-LOCATION-PURITY-FULL-AUDIT"
 LIVE_WA_GENERATION_FALLBACK = "159d9eab-5be5-5313-9af5-8f9913522087"
 
 # Phase 5 rules:
@@ -230,7 +230,9 @@ APPROVED_EQUIVALENCE = {
     },
 }
 
-PHONE_RE = re.compile(r"(?<!\d)(?:\+?91[\s-]?)?[6-9]\d{9}(?!\d)")
+PHONE_RE = re.compile(
+    r"(?<![A-Za-z0-9.])(?:\+?91[\s-]?)?[6-9]\d{9}(?![A-Za-z0-9.])"
+)
 EMAIL_RE = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.I)
 
 def norm(v: Any) -> str:
@@ -241,6 +243,26 @@ def sanitize_text(v: Any) -> str:
     s = PHONE_RE.sub("[CONTACT HIDDEN]", s)
     s = EMAIL_RE.sub("[EMAIL HIDDEN]", s)
     return re.sub(r"\s+", " ", s).strip()
+
+
+def text_contains_contact(v: Any) -> bool:
+    if not isinstance(v, str):
+        return False
+    return bool(PHONE_RE.search(v) or EMAIL_RE.search(v))
+
+def public_payload_contact_paths(value: Any, path: str = "$") -> List[str]:
+    hits: List[str] = []
+    if isinstance(value, dict):
+        for k, v in value.items():
+            hits.extend(public_payload_contact_paths(v, f"{path}.{k}"))
+        return hits
+    if isinstance(value, (list, tuple)):
+        for i, v in enumerate(value):
+            hits.extend(public_payload_contact_paths(v, f"{path}[{i}]"))
+        return hits
+    if text_contains_contact(value):
+        hits.append(path)
+    return hits
 
 def db_url(raw: str) -> str:
     u = (raw or "").strip()
@@ -357,24 +379,45 @@ def canonical_location(*vals: Any) -> Optional[str]:
     locations = canonical_locations(*vals)
     return locations[0] if locations else None
 
+INVALID_LOCATION_VALUES = {
+    "UNKNOWN", "NA", "N A", "NONE", "DELHI NCR", "NCR",
+    "COMMERCIAL", "RESIDENTIAL", "APARTMENT", "FLAT", "VILLA",
+    "OFFICE", "RETAIL", "SHOP", "SHOWROOM", "RESTAURANT", "CAFE",
+    "LOUNGE", "BANQUET", "HOTEL", "WAREHOUSE", "GODOWN", "LAND",
+    "PLOT", "BUILDER FLOOR", "INDEPENDENT FLOOR", "PENTHOUSE",
+    "FARMHOUSE", "FARM HOUSE",
+}
+
+def location_value_is_plausible(raw: Any) -> bool:
+    cleaned = norm(raw)
+    if not cleaned or cleaned in CITY_ONLY or cleaned in INVALID_LOCATION_VALUES:
+        return False
+    if re.fullmatch(r"\d+(?:\.\d+)?\s*BHK", cleaned):
+        return False
+    if re.fullmatch(r"(?:GROUND|LOWER GROUND|UPPER GROUND|\d+(?:ST|ND|RD|TH)?)\s*FLOOR", cleaned):
+        return False
+    if re.fullmatch(r"\d+(?:\.\d+)?\s*(?:SQ\s*FT|SQFT|SFT|SQ\s*M|SQM|SQ\s*YD|SQYD|YD|YDS|YARD|GAJ|ACRE|ACRES)", cleaned):
+        return False
+    if re.fullmatch(r"\d+(?:\.\d+)?", cleaned):
+        return False
+    if re.search(r"\b(?:CR|CRORE|LAC|LAKH|LAKHS)\b", cleaned) and re.search(r"\d", cleaned):
+        return False
+    property_tokens = {"BHK","BEDROOM","BEDROOMS","APARTMENT","FLAT","VILLA","KOTHI","OFFICE","SHOP","RETAIL","COMMERCIAL","RESIDENTIAL","FLOOR","FURNISHED","UNFURNISHED","SEMIFURNISHED","SEMI","FURNISH","READY","SALE","RENT","LEASE"}
+    words = set(cleaned.split())
+    alpha_words = {w for w in words if not w.isdigit()}
+    if alpha_words and alpha_words.issubset(property_tokens):
+        return False
+    return True
+
 def candidate_location(raw: Any) -> Optional[str]:
-    """
-    Prefer known alias canonicalization, but do not throw away a specific
-    canonical locality merely because it is absent from LOCATION_ALIASES.
-    City-only values remain invalid.
-    """
     if raw in (None, ""):
         return None
     known = canonical_location(raw)
     if known:
         return known
     cleaned = norm(raw)
-    if not cleaned or cleaned in CITY_ONLY:
+    if not location_value_is_plausible(cleaned):
         return None
-    # Reject values that are clearly too generic to be a micro-location.
-    if cleaned in {"UNKNOWN", "NA", "N A", "NONE", "DELHI NCR", "NCR"}:
-        return None
-    # Keep the database's canonical locality as the matching token.
     return cleaned
 
 def canonical_transaction(*vals: Any) -> Optional[str]:
@@ -955,10 +998,7 @@ def load_whatsapp_master_for_requirement(
             loc = "NORTH GOA"
         if not loc:
             cfg_loc = candidate_location(cfg)
-            loc = cfg_loc if cfg_loc and cfg_loc not in {
-                "COMMERCIAL", "APARTMENT", "VILLA", "OFFICE", "RETAIL",
-                "RESTAURANT", "BANQUET", "HOTEL", "WAREHOUSE", "LAND"
-            } else None
+            loc = cfg_loc if cfg_loc else None
         if not loc:
             continue
 

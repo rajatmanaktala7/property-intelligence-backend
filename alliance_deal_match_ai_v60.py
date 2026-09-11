@@ -11,7 +11,7 @@ from sqlalchemy import text
 import alliance_phase5_canonical_matcher as phase5
 import alliance_whatsapp_first_match_v1 as whatsapp_first
 
-VERSION = "6.5.0-SYSTEM-AUDITED-WHATSAPP-MATCHER"
+VERSION = "6.6.0-FULL-INVENTORY-AUDIT"
 ROUTE = "/deal-match-ai-v60"
 ENGINE_VERSION = getattr(whatsapp_first, "VERSION", "UNKNOWN-MATCH-ENGINE")
 

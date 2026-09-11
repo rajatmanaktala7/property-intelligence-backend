@@ -5,7 +5,7 @@ from typing import Any, Dict, List
 
 import alliance_phase5_canonical_matcher as phase5
 
-VERSION = "1.3.0-SYSTEM-AUDITED-WHATSAPP-MATCHER"
+VERSION = "1.4.0-LOCATION-PURITY-CONTACT-GUARD"
 
 
 def _evaluate(
@@ -340,14 +340,13 @@ def run_match(
     if hasattr(phase5, "sanitize_public_payload"):
         result = phase5.sanitize_public_payload(result)
 
-    payload = repr(result)
-
-    if (
-        phase5.PHONE_RE.search(payload)
-        or phase5.EMAIL_RE.search(payload)
-    ):
+    leak_paths = (
+        phase5.public_payload_contact_paths(result)
+        if hasattr(phase5, "public_payload_contact_paths")
+        else []
+    )
+    if leak_paths:
         raise RuntimeError(
-            "CONTACT_LEAK_GUARD_TRIGGERED"
+            "CONTACT_LEAK_GUARD_TRIGGERED:" + ",".join(leak_paths[:20])
         )
-
     return result
