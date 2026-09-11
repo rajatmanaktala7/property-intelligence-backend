@@ -14,9 +14,11 @@ from sqlalchemy import text
 
 import alliance_phase5_canonical_matcher as phase5
 
-VERSION = "1.4.1-MASTER-LIVE-SCHEMA-MIGRATION"
-POLL_SECONDS = 90
+VERSION = "1.4.2-AUTO-RESUME-BACKGROUND-MIGRATION"
+POLL_SECONDS = 30
 BATCH_SIZE = 2500
+AUTO_MASTER_BATCHES_PER_CYCLE = 2
+JOB_LOCK_KEY = 7411042
 
 LEDGER_TABLE = "pi_whatsapp_live_clean_ledger"
 RUN_TABLE = "pi_whatsapp_live_clean_runs"
@@ -665,15 +667,19 @@ def _fetch_master_batch(engine, after_id: int, limit: int):
     return cols, rows
 
 
-def _sync_master_backlog(engine, counters: Counter, full_replay: bool = False):
+def _sync_master_backlog(engine, counters: Counter, full_replay: bool = False, max_batches: Optional[int] = None):
     if not _table_exists(engine, MASTER_TABLE):
         counters["master_missing"] += 1
         return
 
     cursor = 0 if full_replay else _get_cursor(engine, MASTER_TABLE)
     processed_this_run = 0
+    batches_this_run = 0
 
     while True:
+        if max_batches is not None and batches_this_run >= int(max_batches):
+            counters["master_cycle_limit_reached"] += 1
+            break
         cols, rows = _fetch_master_batch(engine, cursor, BATCH_SIZE)
         if not rows:
             break
@@ -748,9 +754,12 @@ def _sync_master_backlog(engine, counters: Counter, full_replay: bool = False):
                 )
 
         processed_this_run += len(rows)
+        batches_this_run += 1
         _set_cursor(engine, MASTER_TABLE, cursor, {
             "version": VERSION,
             "processed_this_run": processed_this_run,
+            "batches_this_run": batches_this_run,
+            "automatic_resume": True,
         })
         print(
             f"Master projection: processed={processed_this_run} cursor={cursor}",
@@ -1237,6 +1246,41 @@ def _count(engine, sql: str, params: Optional[dict] = None) -> int:
         return int(c.execute(text(sql), params or {}).scalar() or 0)
 
 
+
+def _try_job_lock(engine) -> bool:
+    conn = engine.connect()
+    try:
+        ok = bool(
+            conn.execute(
+                text("SELECT pg_try_advisory_lock(:k)"),
+                {"k": JOB_LOCK_KEY},
+            ).scalar()
+        )
+        if not ok:
+            conn.close()
+            return False
+        RUNTIME["_lock_connection"] = conn
+        return True
+    except Exception:
+        conn.close()
+        raise
+
+
+def _release_job_lock():
+    conn = RUNTIME.pop("_lock_connection", None)
+    if conn is None:
+        return
+    try:
+        conn.execute(
+            text("SELECT pg_advisory_unlock(:k)"),
+            {"k": JOB_LOCK_KEY},
+        )
+    except Exception:
+        pass
+    finally:
+        conn.close()
+
+
 def audit_snapshot() -> Dict[str, Any]:
     main = _main_engine()
     wa = _wa_engine()
@@ -1373,18 +1417,32 @@ def audit_snapshot() -> Dict[str, Any]:
     }
 
 
-def run_sync(full_master_replay: bool = False) -> Dict[str, Any]:
+def run_sync(full_master_replay: bool = False, max_master_batches: Optional[int] = None) -> Dict[str, Any]:
     main = _main_engine()
     wa = _wa_engine()
     _ensure_schema(main)
 
     counters = Counter()
 
-    _sync_master_backlog(main, counters, full_replay=full_master_replay)
-    _sync_live_properties(main, wa, counters)
-    _sync_requirements(main, wa, counters)
+    if not _try_job_lock(main):
+        return {
+            "version": VERSION,
+            "status": "SKIPPED_ALREADY_RUNNING",
+            "automatic_resume": True,
+        }
 
-    audit = audit_snapshot()
+    try:
+        _sync_master_backlog(
+            main,
+            counters,
+            full_replay=full_master_replay,
+            max_batches=max_master_batches,
+        )
+        _sync_live_properties(main, wa, counters)
+        _sync_requirements(main, wa, counters)
+        audit = audit_snapshot()
+    finally:
+        _release_job_lock()
     result = {
         "version": VERSION,
         "counters": dict(counters),
@@ -1396,6 +1454,10 @@ def run_sync(full_master_replay: bool = False) -> Dict[str, Any]:
             "requirement_projection": "HUMAN_GATE_MATCHER_FALSE",
             "source_mutation": False,
             "matcher_phase5_mutation": False,
+            "automatic_resume": True,
+            "background_cycle_batches": AUTO_MASTER_BATCHES_PER_CYCLE,
+            "background_cycle_seconds": POLL_SECONDS,
+            "ssh_required": False,
         },
     }
 
@@ -1420,12 +1482,21 @@ def run_sync(full_master_replay: bool = False) -> Dict[str, Any]:
 def _worker():
     while True:
         try:
-            run_sync(full_master_replay=False)
+            result = run_sync(
+                full_master_replay=False,
+                max_master_batches=AUTO_MASTER_BATCHES_PER_CYCLE,
+            )
+            audit = (result or {}).get("audit") or {}
+            master = audit.get("master_database") or {}
+            RUNTIME["master_cursor"] = master.get("cursor")
+            RUNTIME["master_backlog"] = master.get("numeric_backlog")
+            RUNTIME["automatic_resume"] = True
         except Exception as exc:
             RUNTIME.update(
                 status="ERROR",
                 last_run_at=datetime.now(timezone.utc).isoformat(),
                 last_error=f"{type(exc).__name__}: {exc}",
+                automatic_resume=True,
             )
             print("WhatsApp Unified Operational Bridge error:", repr(exc), flush=True)
         time.sleep(POLL_SECONDS)
@@ -1465,7 +1536,7 @@ def register(core):
 
     @router.post("/api/whatsapp-live-clean-os/run")
     def run_now():
-        return run_sync(full_master_replay=False)
+        return run_sync(full_master_replay=False, max_master_batches=AUTO_MASTER_BATCHES_PER_CYCLE)
 
     app.include_router(router)
 
@@ -1474,6 +1545,9 @@ def register(core):
         "version": VERSION,
         "worker_started": start_worker(),
         "poll_seconds": POLL_SECONDS,
+        "automatic_resume": True,
+        "master_batches_per_cycle": AUTO_MASTER_BATCHES_PER_CYCLE,
+        "ssh_required": False,
         "master_source": MASTER_TABLE,
         "live_property_source": "wa_properties",
         "live_requirement_source": "wa_requirements",

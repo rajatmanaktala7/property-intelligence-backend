@@ -22,6 +22,13 @@ def main():
             + str(schema.get("null_source_table_rows"))
         )
 
+    if bridge.VERSION != "1.4.2-AUTO-RESUME-BACKGROUND-MIGRATION":
+        raise SystemExit("FAIL: auto-resume bridge version not active")
+    if bridge.AUTO_MASTER_BATCHES_PER_CYCLE < 1:
+        raise SystemExit("FAIL: invalid automatic batch cadence")
+    if bridge.POLL_SECONDS < 10:
+        raise SystemExit("FAIL: unsafe background polling interval")
+
     snap = bridge.audit_snapshot()
 
     print("WHATSAPP MASTER + LIVE SCHEMA")
@@ -65,6 +72,7 @@ def main():
         raise SystemExit(2)
 
     print("")
+    print("AUTOMATIC BACKGROUND RESUME: PASS")
     print("LEDGER SCHEMA MIGRATION: PASS")
     print("MASTER DATABASE CURSOR COVERAGE: PASS")
     print("MASTER PROPERTY CLASSIFICATION: PASS")
