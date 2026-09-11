@@ -53,12 +53,18 @@ LOCATION_ALIASES = {
     "NOIDA": ["NOIDA"],
     "GREATER NOIDA": ["GREATER NOIDA", "GR NOIDA"],
     "GURUGRAM": ["GURUGRAM", "GURGAON"],
-    "DLF PHASE 1": ["DLF PHASE 1", "DLF PHASE-I", "DLF 1"],
-    "DLF PHASE 2": ["DLF PHASE 2", "DLF PHASE-II", "DLF 2"],
-    "DLF PHASE 3": ["DLF PHASE 3", "DLF PHASE-III", "DLF 3"],
-    "DLF PHASE 4": ["DLF PHASE 4", "DLF PHASE-IV", "DLF 4"],
-    "DLF PHASE 5": ["DLF PHASE 5", "DLF PHASE-V", "DLF 5"],
-    "SUSHANT LOK 1": ["SUSHANT LOK 1", "SUSHANT LOK-I"],
+    "DLF PHASE 1": ["DLF PHASE 1", "DLF PHASE-I", "DLF 1", "DLF PH 1", "DLF PH-1", "DLF PH1", "DLF PHASE1"],
+    "DLF PHASE 2": ["DLF PHASE 2", "DLF PHASE-II", "DLF 2", "DLF PH 2", "DLF PH-2", "DLF PH2", "DLF PHASE2"],
+    "DLF PHASE 3": ["DLF PHASE 3", "DLF PHASE-III", "DLF 3", "DLF PH 3", "DLF PH-3", "DLF PH3", "DLF PHASE3"],
+    "DLF PHASE 4": ["DLF PHASE 4", "DLF PHASE-IV", "DLF 4", "DLF PH 4", "DLF PH-4", "DLF PH4", "DLF PHASE4"],
+    "DLF PHASE 5": ["DLF PHASE 5", "DLF PHASE-V", "DLF 5", "DLF PH 5", "DLF PH-5", "DLF PH5", "DLF PHASE5"],
+    "SUSHANT LOK 1": ["SUSHANT LOK 1", "SUSHANT LOK-I", "SUSHANT LOK", "SUSHANT LOK A B C BLOCK", "SUSHANT LOK 1 A B C BLOCK"],
+    "SOUTH CITY 1": ["SOUTH CITY 1", "SOUTH CITY-I", "SOUTH CITY I"],
+    "GREENWOOD CITY": ["GREENWOOD CITY", "GREEN WOOD CITY"],
+    "SECTOR 27": ["SECTOR 27", "SEC 27", "SEC-27", "SEC27"],
+    "SECTOR 28": ["SECTOR 28", "SEC 28", "SEC-28", "SEC28"],
+    "SECTOR 43": ["SECTOR 43", "SEC 43", "SEC-43", "SEC43"],
+    "SECTOR 45": ["SECTOR 45", "SEC 45", "SEC-45", "SEC45"],
     "SIOLIM": ["SIOLIM"],
     "ASSAGAO": ["ASSAGAO"],
     "VAGATOR": ["VAGATOR"],
@@ -424,6 +430,17 @@ def parse_requirement(raw: str) -> Dict[str, Any]:
 
     if sub and sub not in acceptable_subtypes:
         acceptable_subtypes.insert(0, sub)
+
+    # Bare 3BHK/4BHK describes bedroom count, not apartment-only.
+    if fam == "RESIDENTIAL" and re.search(r"\b\d+\s*BHK\b", raw_norm):
+        explicit_home_type = any(
+            x in raw_norm
+            for x in ("APARTMENT", "FLAT", "VILLA", "KOTHI", "BUNGALOW")
+        )
+        if not explicit_home_type:
+            for x in ("APARTMENT", "BUILDER FLOOR"):
+                if x not in acceptable_subtypes:
+                    acceptable_subtypes.append(x)
 
     return {
         "raw": str(raw or "").strip(),
