@@ -10,9 +10,10 @@ from pydantic import BaseModel
 from sqlalchemy import text
 
 import alliance_requirement_brain_v3 as brain
+import alliance_semantic_shadow_v3 as shadow
 from alliance_semantic_schema_v3 import validate_requirement
 
-VERSION = "3.1.0-REVIEW-MODE"
+VERSION = "3.2.0-REVIEW-REPROCESS-VERSIONED"
 
 DECISIONS = {"USE_V3", "KEEP_V2", "EDITED", "REJECT"}
 
@@ -49,6 +50,9 @@ def ensure_schema(engine) -> None:
             "ALTER TABLE pi_semantic_shadow_v3_runs ADD COLUMN IF NOT EXISTS reviewed_at TIMESTAMPTZ",
             "ALTER TABLE pi_semantic_shadow_v3_runs ADD COLUMN IF NOT EXISTS approved_snapshot JSONB",
             "ALTER TABLE pi_semantic_shadow_v3_runs ADD COLUMN IF NOT EXISTS correction_reason TEXT",
+            "ALTER TABLE pi_semantic_shadow_v3_runs ADD COLUMN IF NOT EXISTS parent_run_id BIGINT",
+            "ALTER TABLE pi_semantic_shadow_v3_runs ADD COLUMN IF NOT EXISTS superseded_by BIGINT",
+            "ALTER TABLE pi_semantic_shadow_v3_runs ADD COLUMN IF NOT EXISTS reprocess_reason TEXT",
         ):
             c.execute(text(stmt))
 
@@ -70,7 +74,8 @@ def _row(engine, run_id: int) -> Dict[str, Any]:
                    v2_snapshot, v3_snapshot, comparison,
                    brain_version, reviewed, review_decision,
                    reviewer, reviewed_at, approved_snapshot,
-                   human_correction, notes, correction_reason
+                   human_correction, notes, correction_reason,
+                   parent_run_id, superseded_by, reprocess_reason
             FROM pi_semantic_shadow_v3_runs
             WHERE id=:id
         """), {"id": int(run_id)}).mappings().first()
@@ -158,6 +163,63 @@ def apply_decision(engine, run_id: int, payload: ReviewDecision) -> Dict[str, An
         "production_matcher_changed": False,
         "production_matching_brain": "V2.3",
         "approved_snapshot": approved,
+    }
+
+
+def reprocess_with_current_brain(engine, run_id: int, reviewer: str = "ALLIANCE_REPROCESS") -> Dict[str, Any]:
+    """Create a new child review row from the original raw text using the current V3 brain.
+
+    Historical snapshots are immutable. The parent row is only linked to the child via
+    superseded_by; its v2/v3/comparison payloads are never rewritten.
+    """
+    parent = _row(engine, run_id)
+    result = shadow.analyze(parent.get("raw_text") or "", source=f"REPROCESS_OF_{int(run_id)}")
+    current_v3 = result.get("v3") or {}
+    current_brain = current_v3.get("brain_version") or brain.VERSION
+
+    ensure_schema(engine)
+    with engine.begin() as c:
+        child_id = c.execute(text("""
+            INSERT INTO pi_semantic_shadow_v3_runs(
+                source, raw_text, v2_snapshot, v3_snapshot,
+                comparison, brain_version, parent_run_id, reprocess_reason
+            ) VALUES(
+                :source, :raw_text,
+                CAST(:v2 AS JSONB),
+                CAST(:v3 AS JSONB),
+                CAST(:comparison AS JSONB),
+                :brain_version, :parent_run_id, :reason
+            )
+            RETURNING id
+        """), {
+            "source": f"REPROCESS:{parent.get('source') or 'UNKNOWN'}",
+            "raw_text": parent.get("raw_text") or "",
+            "v2": json.dumps(result.get("v2") or {}, default=str),
+            "v3": json.dumps(current_v3, default=str),
+            "comparison": json.dumps(result.get("comparison") or {}, default=str),
+            "brain_version": current_brain,
+            "parent_run_id": int(run_id),
+            "reason": f"Reprocessed with current brain {current_brain}",
+        }).scalar_one()
+
+        c.execute(text("""
+            UPDATE pi_semantic_shadow_v3_runs
+               SET superseded_by=:child_id
+             WHERE id=:parent_id
+               AND superseded_by IS NULL
+        """), {"child_id": int(child_id), "parent_id": int(run_id)})
+
+    return {
+        "status": "REPROCESSED",
+        "parent_run_id": int(run_id),
+        "new_run_id": int(child_id),
+        "old_brain_version": parent.get("brain_version"),
+        "new_brain_version": current_brain,
+        "old_snapshot_preserved": True,
+        "production_matcher_changed": False,
+        "production_matching_brain": "V2.3",
+        "review_url": f"/semantic-v3/review/{int(child_id)}",
+        "comparison": result.get("comparison") or {},
     }
 
 
@@ -355,11 +417,29 @@ def review_record_html(engine, run_id: int) -> str:
     v3 = row.get("v3_snapshot") or {}
     comparison = row.get("comparison") or {}
 
+    is_stale = str(row.get("brain_version") or "") != str(brain.VERSION)
+    lineage = ""
+    if row.get("parent_run_id"):
+        lineage += f"<p><b>Reprocessed from:</b> <a href='/semantic-v3/review/{_e(row.get('parent_run_id'))}'>Review #{_e(row.get('parent_run_id'))}</a></p>"
+    if row.get("superseded_by"):
+        lineage += f"<p><b>Superseded by:</b> <a href='/semantic-v3/review/{_e(row.get('superseded_by'))}'>Review #{_e(row.get('superseded_by'))}</a></p>"
+    stale_banner = (
+        "<div class='card amber'><b>Historical V3 snapshot.</b> "
+        f"This record used brain {_e(row.get('brain_version'))}; current brain is {_e(brain.VERSION)}. "
+        "Do not approve stale output. Reprocess it first.</div>"
+        if is_stale else
+        "<div class='card green'><b>Current V3 brain snapshot.</b> This record matches the current semantic brain version.</div>"
+    )
+
     body = (
-        "<div class='card'><h2>Raw Requirement</h2>"
+        stale_banner
+        + "<div class='card'><h2>Raw Requirement</h2>"
         f"<p>{_e(row.get('raw_text'))}</p>"
         f"<p><b>Record:</b> #{_e(run_id)} · <b>Source:</b> {_e(row.get('source'))} · "
-        f"<b>Reviewed:</b> {_e(row.get('reviewed'))} · <b>Decision:</b> {_e(row.get('review_decision') or 'PENDING')}</p></div>"
+        f"<b>Snapshot Brain:</b> {_e(row.get('brain_version'))} · <b>Current Brain:</b> {_e(brain.VERSION)} · "
+        f"<b>Reviewed:</b> {_e(row.get('reviewed'))} · <b>Decision:</b> {_e(row.get('review_decision') or 'PENDING')}</p>"
+        + lineage
+        + "</div>"
         "<div class='compare'>"
         + _summary_card("Current Production Interpretation · V2.3", v2, False)
         + _summary_card("AI V3 Interpretation", v3, True)
@@ -371,6 +451,7 @@ def review_record_html(engine, run_id: int) -> str:
         "<label style='display:block;margin-top:8px'>Notes / reason</label>"
         "<textarea id='notes' rows='3' placeholder='Optional reason'></textarea>"
         "<div style='display:flex;gap:8px;flex-wrap:wrap;margin-top:12px'>"
+        f"<button onclick=\"reprocessCurrent()\">REPROCESS WITH CURRENT V3 BRAIN</button>"
         f"<button onclick=\"saveDecision('USE_V3')\">USE V3 INTERPRETATION</button>"
         f"<button onclick=\"saveDecision('KEEP_V2')\">KEEP CURRENT V2.3</button>"
         f"<button onclick=\"toggleEdit()\">EDIT V3</button>"
@@ -386,6 +467,14 @@ def review_record_html(engine, run_id: int) -> str:
         "<div class='card'><p class='green'><b>Safety:</b> Approving V3 here makes it authoritative only for this review record. "
         "It does not switch the live matcher away from V2.3.</p></div>"
         f"""<script>
+async function reprocessCurrent(){{
+  const res=await fetch('/api/semantic-v3/reprocess/{{int(run_id)}}',{{method:'POST'}});
+  const data=await res.json();
+  const box=document.getElementById('resultBox');
+  box.style.display='block';
+  box.textContent=JSON.stringify(data,null,2);
+  if(res.ok && data.review_url) setTimeout(()=>{{location.href=data.review_url;}},500);
+}}
 function toggleEdit(){{
   const el=document.getElementById('editBox');
   el.style.display = el.style.display==='none' ? 'block' : 'none';
@@ -443,6 +532,12 @@ def register(core) -> Dict[str, Any]:
         def semantic_v3_review_save(run_id: int, payload: ReviewDecision):
             return apply_decision(core.engine, run_id, payload)
         registered.append("/api/semantic-v3/review/{run_id}")
+
+    if "/api/semantic-v3/reprocess/{run_id}" not in paths:
+        @app.post("/api/semantic-v3/reprocess/{run_id}")
+        def semantic_v3_reprocess(run_id: int):
+            return reprocess_with_current_brain(core.engine, run_id)
+        registered.append("/api/semantic-v3/reprocess/{run_id}")
 
     if "/api/semantic-v3/review-stats" not in paths:
         @app.get("/api/semantic-v3/review-stats")

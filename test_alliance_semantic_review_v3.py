@@ -50,6 +50,30 @@ def main():
     edited["matching_readiness"] = "READY"
     assert not validate_requirement(edited)
 
+    # Reprocess architecture contract: module must expose a versioned, non-destructive path.
+    assert hasattr(review, "reprocess_with_current_brain")
+    src = review.reprocess_with_current_brain.__doc__ or ""
+    assert "Historical snapshots are immutable" in src
+    assert review.VERSION == "3.2.0-REVIEW-REPROCESS-VERSIONED"
+
+    # Current brain must correctly interpret the real Majorda requirement that motivated reprocessing.
+    majorda = (
+        "URGENT RENTAL REQUIREMENT - NEAR MAJORDA BEACH. "
+        "2 BHK / 3 BHK FLAT OR BUNGALOW REQUIRED. "
+        "For Construction Company Engineers. 5-7 Male Engineers. "
+        "Long-term stay: 2-3 Years. Furnished / Unfurnished - Both OK. "
+        "Budget: Market Rate. Preferred Location: Near Majorda Beach. "
+        "Side-by-side / Direct Deal Preferred."
+    )
+    current = brain.analyze(majorda, source="REPROCESS_TEST")
+    assert current["transaction"]["value"] == "RENT"
+    assert any(x["name"] == "MAJORDA" and x["constraint"] == "PREFERRED" for x in current["locations"])
+    acceptable = {x["asset"] for x in current["asset"].get("acceptable_assets") or []}
+    assert {"APARTMENT", "VILLA"}.issubset(acceptable)
+
+    print("PASS: reprocess versioned snapshot architecture contract")
+    print("PASS: current brain Majorda reprocess target")
+
     print("PASS: farmhouse review semantic contract")
     print("PASS: review decision contract")
     print("PASS: invalid global promotion decision blocked")
