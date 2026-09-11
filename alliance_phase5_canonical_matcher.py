@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy import create_engine, text
 
-VERSION = "5.0.6-ALL-WHATSAPP-REQUIREMENT-SEARCH"
+VERSION = "5.1.0-WHATSAPP-REQUIREMENT-BRAIN"
 LIVE_WA_GENERATION_FALLBACK = "159d9eab-5be5-5313-9af5-8f9913522087"
 
 # Phase 5 rules:
@@ -102,6 +102,74 @@ NORTH_GOA_LOCALITIES = {
     "MAPUSA", "PORVORIM", "SALIGAO", "ALDONA", "PARRA", "MOIRA",
     "REIS MAGOS", "NERUL GOA", "SANGOLDA", "PILERNE",
 }
+
+SOUTH_DELHI_B_CATEGORY_LOCALITIES = {
+    "DEFENCE COLONY",
+    "GEETANJALI ENCLAVE",
+    "GREATER KAILASH 1",
+    "GREATER KAILASH 2",
+    "GREATER KAILASH 3",
+    "GREATER KAILASH 4",
+    "GREEN PARK",
+    "GREEN PARK EXTENSION",
+    "GULMOHAR PARK",
+    "HAMDARD NAGAR",
+    "SAFDARJUNG DEVELOPMENT AREA",
+    "SAFDARJUNG ENCLAVE",
+    "SARVAPRIYA VIHAR",
+    "SARVODAYA ENCLAVE",
+}
+
+SOUTH_DELHI_CORE_LOCALITIES = {
+    "SAKET",
+    "MALVIYA NAGAR",
+    "HAUZ KHAS",
+    "GREEN PARK",
+    "GREATER KAILASH 1",
+    "GREATER KAILASH 2",
+    "GREATER KAILASH 3",
+    "GREATER KAILASH 4",
+    "CR PARK",
+    "KALKAJI",
+    "NEHRU PLACE",
+    "EAST OF KAILASH",
+    "KAILASH COLONY",
+    "DEFENCE COLONY",
+    "SOUTH EXTENSION",
+    "VASANT KUNJ",
+    "VASANT VIHAR",
+    "PANCHSHEEL PARK",
+    "SAFDARJUNG ENCLAVE",
+    "SAFDARJUNG DEVELOPMENT AREA",
+    "MEHRAULI",
+    "CHHATARPUR",
+    "GEETANJALI ENCLAVE",
+    "GULMOHAR PARK",
+    "SARVAPRIYA VIHAR",
+    "SARVODAYA ENCLAVE",
+}
+
+EXTRA_LOCATION_ALIASES = {
+    "GEETANJALI ENCLAVE": ["GEETANJALI ENCLAVE", "GITANJALI ENCLAVE"],
+    "GREATER KAILASH 3": ["GREATER KAILASH 3", "GREATER KAILASH III", "GK 3", "GK-3", "GK3"],
+    "GREATER KAILASH 4": ["GREATER KAILASH 4", "GREATER KAILASH IV", "GK 4", "GK-4", "GK4", "NRI COLONY"],
+    "GREEN PARK EXTENSION": ["GREEN PARK EXTENSION", "GREEN PARK EXTN", "GREEN PARK EXT"],
+    "GULMOHAR PARK": ["GULMOHAR PARK"],
+    "HAMDARD NAGAR": ["HAMDARD NAGAR"],
+    "SAFDARJUNG DEVELOPMENT AREA": ["SAFDARJUNG DEVELOPMENT AREA", "SAFDARJUNG DEV AREA", "SDA"],
+    "SAFDARJUNG ENCLAVE": ["SAFDARJUNG ENCLAVE", "SAFDARJUNG"],
+    "SARVAPRIYA VIHAR": ["SARVAPRIYA VIHAR", "SARYAPRIYA VIHAR"],
+    "SARVODAYA ENCLAVE": ["SARVODAYA ENCLAVE"],
+}
+
+
+def location_aliases(canon: str) -> List[str]:
+    out = []
+    for source in (LOCATION_ALIASES, EXTRA_LOCATION_ALIASES):
+        for value in source.get(canon, []):
+            if value not in out:
+                out.append(value)
+    return out
 
 CITY_ONLY = {
     "DELHI", "NEW DELHI", "GURUGRAM", "GURGAON", "NOIDA", "GREATER NOIDA",
@@ -251,23 +319,23 @@ def canonical_locations(*vals: Any) -> List[str]:
 
     hits = []
 
-    for canon, aliases in LOCATION_ALIASES.items():
-        positions = []
-        for a in aliases:
-            aa = norm(a)
-            m = (
-                re.search(
+    for alias_map in (LOCATION_ALIASES, EXTRA_LOCATION_ALIASES):
+        for canon, aliases in alias_map.items():
+            positions = []
+            for a in aliases:
+                aa = norm(a)
+                if not aa:
+                    continue
+                m = re.search(
                     r"(?<![A-Z0-9])" + re.escape(aa) + r"(?![A-Z0-9])",
                     blob,
                 )
-                if aa
-                else None
-            )
-            if m:
-                positions.append(m.start())
-        if positions:
-            hits.append((min(positions), canon))
+                if m:
+                    positions.append(m.start())
+            if positions:
+                hits.append((min(positions), canon))
 
+    # Generic Gurgaon/Noida/Delhi sector intelligence.
     for m in re.finditer(
         r"(?<![A-Z0-9])(?:SEC|SECTOR)\s*-?\s*(\d{1,3}[A-Z]?)(?![A-Z0-9])",
         blob,
@@ -278,7 +346,6 @@ def canonical_locations(*vals: Any) -> List[str]:
 
     out = []
     seen = set()
-
     for _, canon in hits:
         if canon not in seen:
             seen.add(canon)
@@ -347,65 +414,80 @@ def family_subtype(*vals: Any) -> Tuple[Optional[str], Optional[str]]:
         fam = "LAND"
     return fam, subtype
 
+def _area_factor(unit: Any) -> float:
+    u = norm(unit)
+
+    if any(x in u for x in ["SQ M", "SQM", "SQUARE M", "SQ MT", "SQMTR"]):
+        return 10.7639104167
+
+    if any(x in u for x in ["SQ YD", "SQYD", "YD", "YDS", "YARD", "GAJ"]):
+        return 9.0
+
+    if "ACRE" in u:
+        return 43560.0
+
+    return 1.0
+
+
 def area_to_sqft(v: Any, unit: Any = None) -> Optional[float]:
     if v in (None, ""):
         return None
+
     if isinstance(v, (int, float)):
         num = float(v)
-        u = norm(unit)
-    else:
-        s = str(v).replace(",", "")
-        m = re.search(r"(\d+(?:\.\d+)?)", s)
-        if not m:
-            return None
-        num = float(m.group(1))
-        u = norm(unit or s)
+        factor = _area_factor(unit)
+        return num * factor if num > 0 else None
+
+    s = str(v).replace(",", "")
+    m = re.search(r"(?i)(\d+(?:\.\d+)?)", s)
+    if not m:
+        return None
+
+    num = float(m.group(1))
     if num <= 0:
         return None
-    if any(x in u for x in ["SQ M", "SQM", "SQUARE M"]):
-        return num * 10.7639104167
-    if any(x in u for x in ["SQ YD", "SQYD", "YARD", "GAJ"]):
-        return num * 9.0
-    if any(x in u for x in ["ACRE"]):
-        return num * 43560.0
-    return num
+
+    return num * _area_factor(unit or s)
 
 def parse_requirement_area(raw: str) -> Tuple[Optional[float], Optional[float]]:
     s = str(raw or "").replace(",", "")
 
-    # Never interpret BHK counts such as "1-2 BHK" as area.
-    area_unit = r"(?:sq\.?\s*ft|sqft|sft|square\s*feet|sq\.?\s*m|sqm|square\s*met(?:er|re)s?|sq\.?\s*yd|sqyd|yards?|gaj|acres?)"
-
-    m = re.search(
-        rf"(?i)\b(\d+(?:\.\d+)?)\s*(?:-|to|–)\s*(\d+(?:\.\d+)?)\s*({area_unit})\b",
-        s
+    # Common WhatsApp property-area forms:
+    # 300Yd To 400Yd
+    # 300-400 Sq Yd
+    # 1680 Sq Ft
+    # 500 sqm
+    # 1-2 acres
+    area_unit = (
+        r"(?:sq\.?\s*ft|sqft|sft|square\s*feet|"
+        r"sq\.?\s*m|sqm|sq\s*mt|sqmtr|square\s*met(?:er|re)s?|"
+        r"sq\.?\s*yd|sqyd|yds?|yards?|gaj|acres?)"
     )
-    if m:
-        unit = norm(m.group(3))
-        factor = 1.0
-        if any(x in unit for x in ["SQ M", "SQM", "SQUARE MET"]):
-            factor = 10.7639104167
-        elif any(x in unit for x in ["SQ YD", "SQYD", "YARD", "GAJ"]):
-            factor = 9.0
-        elif "ACRE" in unit:
-            factor = 43560.0
-        a, b = float(m.group(1)) * factor, float(m.group(2)) * factor
+
+    range_match = re.search(
+        rf"(?i)\b(\d+(?:\.\d+)?)\s*({area_unit})?\s*"
+        rf"(?:-|to|–|—)\s*"
+        rf"(\d+(?:\.\d+)?)\s*({area_unit})\b",
+        s,
+    )
+
+    if range_match:
+        n1 = float(range_match.group(1))
+        u1 = range_match.group(2) or range_match.group(4)
+        n2 = float(range_match.group(3))
+        u2 = range_match.group(4) or u1
+
+        a = n1 * _area_factor(u1)
+        b = n2 * _area_factor(u2)
         return min(a, b), max(a, b)
 
-    m = re.search(
+    single = re.search(
         rf"(?i)\b(\d+(?:\.\d+)?)\s*({area_unit})\b",
-        s
+        s,
     )
-    if m:
-        unit = norm(m.group(2))
-        factor = 1.0
-        if any(x in unit for x in ["SQ M", "SQM", "SQUARE MET"]):
-            factor = 10.7639104167
-        elif any(x in unit for x in ["SQ YD", "SQYD", "YARD", "GAJ"]):
-            factor = 9.0
-        elif "ACRE" in unit:
-            factor = 43560.0
-        x = float(m.group(1)) * factor
+
+    if single:
+        x = float(single.group(1)) * _area_factor(single.group(2))
         return x * 0.90, x * 1.10
 
     return None, None
@@ -413,31 +495,74 @@ def parse_requirement_area(raw: str) -> Tuple[Optional[float], Optional[float]]:
 def money_value(raw: Any) -> Optional[float]:
     if raw in (None, ""):
         return None
+
     if isinstance(raw, (int, float)):
         return float(raw)
-    s = str(raw).replace(",", "")
-    m = re.search(r"(?i)(?:₹\s*)?(\d+(?:\.\d+)?)\s*(cr|crore|crores|lac|lakh|lakhs|k)\b", s)
+
+    s = sanitize_text(raw).replace(",", "")
+    m = re.search(
+        r"(?i)(?:₹\s*)?(\d+(?:\.\d+)?)\s*"
+        r"(cr|crore|crores|lac|lakh|lakhs|k)\b",
+        s,
+    )
     if not m:
         return None
-    n = float(m.group(1)); u = m.group(2).lower()
+
+    n = float(m.group(1))
+    u = m.group(2).lower()
+
     if u.startswith("cr"):
         n *= 10_000_000
     elif u in {"lac", "lakh", "lakhs"}:
         n *= 100_000
     elif u == "k":
         n *= 1_000
+
     return n
 
+
 def parse_budget(raw: str) -> Tuple[Optional[float], Optional[float]]:
+    safe = sanitize_text(raw).replace(",", "")
+
     vals = []
-    for m in re.finditer(r"(?i)(?:₹\s*)?(\d+(?:\.\d+)?)\s*(cr|crore|crores|lac|lakh|lakhs|k)\b", str(raw or "")):
+
+    for m in re.finditer(
+        r"(?i)(?:₹\s*)?(\d+(?:\.\d+)?)\s*"
+        r"(cr|crore|crores|lac|lakh|lakhs|k)\b",
+        safe,
+    ):
+        left = safe[max(0, m.start() - 28):m.start()]
+        right = safe[m.end():m.end() + 28]
+        context = norm(left + " " + right)
+
+        # Exclude rate/deposit/commission figures from total budget.
+        if any(
+            token in context
+            for token in (
+                "PER SQ FT",
+                "PER SQFT",
+                "PSF",
+                "SECURITY DEPOSIT",
+                "DEPOSIT",
+                "BROKERAGE",
+                "COMMISSION",
+                "CAM",
+                "MAINTENANCE",
+                "TOKEN AMOUNT",
+            )
+        ):
+            continue
+
         x = money_value(m.group(0))
         if x is not None:
             vals.append(x)
+
     if len(vals) >= 2:
         return min(vals), max(vals)
+
     if len(vals) == 1:
         return None, vals[0]
+
     return None, None
 
 def parse_requirement(raw: str) -> Dict[str, Any]:
@@ -445,36 +570,134 @@ def parse_requirement(raw: str) -> Dict[str, Any]:
     amin, amax = parse_requirement_area(raw)
     bmin, bmax = parse_budget(raw)
 
-    raw_norm = norm(raw)
-    location = "NORTH GOA" if "NORTH GOA" in raw_norm else canonical_location(raw)
+    raw_text = str(raw or "")
+    raw_norm = norm(raw_text)
+    explicit_locations = canonical_locations(raw_text)
+
+    south_delhi_b = (
+        "SOUTH DELHI" in raw_norm
+        and any(
+            token in raw_norm
+            for token in (
+                "B CATEGORY",
+                "B CATAEGORY",
+                "CATEGORY B",
+                "CAT B",
+            )
+        )
+    )
+
+    if "NORTH GOA" in raw_norm:
+        location = "NORTH GOA"
+        primary_locations = ["NORTH GOA"]
+        location_scope = "REGION"
+        location_resolution = "REGION_RULE"
+
+    elif south_delhi_b:
+        location = "SOUTH DELHI B CATEGORY"
+        primary_locations = sorted(SOUTH_DELHI_B_CATEGORY_LOCALITIES)
+        location_scope = "REGION"
+        location_resolution = "REGION_RULE"
+
+    elif "SOUTH DELHI" in raw_norm and not explicit_locations:
+        location = "SOUTH DELHI"
+        primary_locations = sorted(SOUTH_DELHI_CORE_LOCALITIES)
+        location_scope = "REGION"
+        location_resolution = "REGION_RULE"
+
+    else:
+        location = explicit_locations[0] if explicit_locations else None
+        primary_locations = explicit_locations
+        location_scope = "LOCALITY"
+        location_resolution = "STATIC_ALIAS" if explicit_locations else "UNRESOLVED"
+
+    transaction = canonical_transaction(raw_text)
+    transaction_source = "EXPLICIT" if transaction else None
+    transaction_confidence = 1.0 if transaction else 0.0
+
+    # Strong sale intent used in resale/property-mandate WhatsApp language.
+    if not transaction:
+        sale_signal = (
+            ("CIRCLE RATE" in raw_norm and "MARKET PRICE" in raw_norm)
+            or (
+                "CIRCLE RATE" in raw_norm
+                and ("CHEQUE" in raw_norm or "CHECK" in raw_norm)
+            )
+            or "TOTAL DEAL VALUE" in raw_norm
+            or "REGISTRY VALUE" in raw_norm
+        )
+
+        rent_signal = any(
+            token in raw_norm
+            for token in (
+                "MONTHLY RENT",
+                "SECURITY DEPOSIT",
+                "LOCK IN",
+                "LOCKIN",
+                "LEASE TERM",
+            )
+        )
+
+        if sale_signal and not rent_signal:
+            transaction = "SALE"
+            transaction_source = "INFERRED_STRONG"
+            transaction_confidence = 0.90
+
+        elif rent_signal and not sale_signal:
+            transaction = "RENT"
+            transaction_source = "INFERRED_STRONG"
+            transaction_confidence = 0.90
 
     acceptable_subtypes = []
+
     for subtype_name, words in SUBTYPE_WORDS.items():
-        if any(norm(word) and norm(word) in raw_norm for word in words):
+        if any(
+            norm(word) and norm(word) in raw_norm
+            for word in words
+        ):
             if subtype_name not in acceptable_subtypes:
                 acceptable_subtypes.append(subtype_name)
 
     if sub and sub not in acceptable_subtypes:
         acceptable_subtypes.insert(0, sub)
 
-    # Bare 3BHK/4BHK describes bedroom count, not apartment-only.
-    if fam == "RESIDENTIAL" and re.search(r"\b\d+\s*BHK\b", raw_norm):
+    # Bare BHK can be apartment or builder floor.
+    if fam == "RESIDENTIAL" and re.search(r"\b\d+(?:\.\d+)?\s*BHK\b", raw_norm):
         explicit_home_type = any(
             x in raw_norm
-            for x in ("APARTMENT", "FLAT", "VILLA", "KOTHI", "BUNGALOW")
+            for x in (
+                "APARTMENT",
+                "FLAT",
+                "VILLA",
+                "KOTHI",
+                "BUNGALOW",
+                "BUILDER FLOOR",
+                "INDEPENDENT FLOOR",
+            )
         )
+
         if not explicit_home_type:
             for x in ("APARTMENT", "BUILDER FLOOR"):
                 if x not in acceptable_subtypes:
                     acceptable_subtypes.append(x)
 
     return {
-        "raw": str(raw or "").strip(),
-        "primary_locations": (["NORTH GOA"] if location == "NORTH GOA" else canonical_locations(raw)),
+        "raw": raw_text.strip(),
+        "primary_locations": primary_locations,
         "location": location,
-        "location_intent": ("AROUND" if re.search(r"\b(AROUND|NEARBY|SURROUNDING|VICINITY)\b", raw_norm) else "EXACT"),
-        "location_scope": "REGION" if location == "NORTH GOA" else "LOCALITY",
-        "transaction": canonical_transaction(raw),
+        "location_intent": (
+            "AROUND"
+            if re.search(
+                r"\b(AROUND|NEARBY|SURROUNDING|VICINITY)\b",
+                raw_norm,
+            )
+            else "EXACT"
+        ),
+        "location_scope": location_scope,
+        "location_resolution": location_resolution,
+        "transaction": transaction,
+        "transaction_source": transaction_source,
+        "transaction_confidence": transaction_confidence,
         "family": fam,
         "subtype": sub,
         "acceptable_subtypes": acceptable_subtypes,
@@ -483,6 +706,54 @@ def parse_requirement(raw: str) -> Dict[str, Any]:
         "budget_min": bmin,
         "budget_max": bmax,
     }
+
+
+def enrich_requirement_with_inventory_locations(
+    req: Dict[str, Any],
+    raw: str,
+    candidates: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    # Static aliases remain preferred.
+    if req.get("primary_locations"):
+        return req
+
+    raw_norm = norm(raw)
+    if not raw_norm:
+        return req
+
+    hits = []
+    seen = set()
+
+    for p in candidates:
+        loc = str(p.get("location") or "").strip()
+        loc_norm = norm(loc)
+
+        if not loc or not loc_norm or loc_norm in seen:
+            continue
+
+        if loc_norm in CITY_ONLY:
+            continue
+
+        # Avoid matching tiny ambiguous location tokens.
+        if len(loc_norm) < 4:
+            continue
+
+        if re.search(
+            r"(?<![A-Z0-9])" + re.escape(loc_norm) + r"(?![A-Z0-9])",
+            raw_norm,
+        ):
+            seen.add(loc_norm)
+            hits.append(loc)
+
+    if hits:
+        out = dict(req)
+        out["primary_locations"] = hits
+        out["location"] = hits[0]
+        out["location_scope"] = "LOCALITY"
+        out["location_resolution"] = "INVENTORY_DYNAMIC"
+        return out
+
+    return req
 
 def _verified(v: Any) -> bool:
     n = norm(v)
@@ -606,7 +877,7 @@ def _whatsapp_requirement_terms(req: Dict[str, Any]) -> List[str]:
         out = []
         for requested_loc in locations:
             out.append(requested_loc)
-            out.extend(LOCATION_ALIASES.get(requested_loc, []))
+            out.extend(location_aliases(requested_loc))
     clean = []
     seen = set()
     for x in out:

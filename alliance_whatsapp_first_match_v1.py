@@ -5,7 +5,7 @@ from typing import Any, Dict, List
 
 import alliance_phase5_canonical_matcher as phase5
 
-VERSION = "1.2.0-CANONICAL-WHATSAPP-INVENTORY-RECOVERY"
+VERSION = "1.3.0-SYSTEM-AUDITED-WHATSAPP-MATCHER"
 
 
 def _evaluate(
@@ -173,9 +173,34 @@ def run_match(
 ):
     req = phase5.parse_requirement(requirement_text)
 
-    # Tier A: canonical inventory. Existing hard gates stay unchanged.
+    # Load canonical inventory first.
     pi_raw = phase5.load_pi_properties(engine)
     pi_candidates = phase5.dedupe_candidates(pi_raw)
+
+    # If a location is not in the static dictionary, use the existing
+    # inventory vocabulary before declaring the requirement unmatchable.
+    if not req.get("primary_locations"):
+        try:
+            wa_probe_raw = phase5.load_whatsapp_master_for_requirement(
+                engine,
+                {},
+                limit=20000,
+            )
+        except Exception:
+            wa_probe_raw = []
+
+        wa_probe_candidates = phase5.dedupe_candidates(wa_probe_raw)
+
+        req = phase5.enrich_requirement_with_inventory_locations(
+            req,
+            requirement_text,
+            pi_candidates + wa_probe_candidates,
+        )
+    else:
+        wa_probe_raw = None
+        wa_probe_candidates = None
+
+    # Tier A: canonical inventory. Existing hard gates stay unchanged.
     pi_selected = _evaluate(
         req,
         pi_candidates,
@@ -184,17 +209,21 @@ def run_match(
     )
 
     # Tier B: requirement-filtered WhatsApp property master.
-    # Previous version loaded this source only to count rows.
     try:
-        wa_raw = phase5.load_whatsapp_master_for_requirement(
-            engine,
-            req,
-            limit=20000,
-        )
+        if wa_probe_raw is not None and not req.get("primary_locations"):
+            wa_raw = wa_probe_raw
+            wa_candidates = wa_probe_candidates or []
+        else:
+            wa_raw = phase5.load_whatsapp_master_for_requirement(
+                engine,
+                req,
+                limit=20000,
+            )
+            wa_candidates = phase5.dedupe_candidates(wa_raw)
     except Exception:
         wa_raw = []
+        wa_candidates = []
 
-    wa_candidates = phase5.dedupe_candidates(wa_raw)
     wa_selected = _evaluate(
         req,
         wa_candidates,
@@ -217,7 +246,6 @@ def run_match(
         "CANONICAL_MASTER",
     )
 
-    # WhatsApp-master matches are always VERIFY FIRST here.
     wa_exact_all = (
         list(wa_selected["exact_verified"])
         + list(wa_selected["exact_needs_verification"])
@@ -296,6 +324,8 @@ def run_match(
             "price_used_only_when_comparable": True,
             "price_excluded_from_identity": True,
             "whatsapp_matches_forced_to_verify": True,
+            "location_resolution": req.get("location_resolution"),
+            "transaction_source": req.get("transaction_source"),
             "rejection_counts": rejection_counts,
         },
         "exact_verified": exact_verified,
