@@ -211,6 +211,45 @@ def main():
         passed += 1
     print("PASS: demand_intent_variants", len(demand_variants))
 
+    # Transaction-language equivalence: common rental phrasing must resolve to RENT.
+    rental_phrases = [
+        "Urgent rental requirement in Majorda",
+        "Rental required in Majorda",
+        "Rental needed in Majorda",
+        "Long term rental in Majorda",
+        "Requirement for rental in Majorda",
+        "Requirement for rent in Majorda",
+    ]
+    for phrase in rental_phrases:
+        rv = b.analyze(phrase + ". 2 BHK flat required.")
+        assert rv["intent"]["role"] == "REQUIREMENT", (phrase, rv["intent"])
+        assert rv["transaction"]["value"] == "RENT", (phrase, rv["transaction"])
+        passed += 1
+    print("PASS: rental_transaction_language", len(rental_phrases))
+
+    # Production-derived regression: Majorda rental with multiple acceptable residential assets.
+    majorda = "URGENT RENTAL REQUIREMENT - NEAR MAJORDA BEACH. 2 BHK / 3 BHK FLAT OR BUNGALOW REQUIRED. For Construction Company Engineers. 5-7 Male Engineers. Long-term stay: 2-3 Years. Furnished / Unfurnished - Both OK. Budget: Market Rate. Preferred Location: Near Majorda Beach. Side-by-side / Direct Deal Preferred."
+    obj=b.analyze(majorda)
+    assert obj["transaction"]["value"]=="RENT", obj["transaction"]
+    assert "MAJORDA" in names(obj), obj["locations"]
+    assert [x for x in obj["locations"] if x["name"]=="MAJORDA"][0]["constraint"]=="PREFERRED"
+    assets={x["asset"] for x in obj["asset"]["acceptable_assets"]}
+    assert {"APARTMENT","VILLA"}.issubset(assets), obj["asset"]
+    assert obj["requirement_details"]["bedrooms_bhk"]==[2,3]
+    assert obj["requirement_details"]["furnishing_options"]==["FURNISHED","UNFURNISHED"]
+    assert obj["requirement_details"]["occupants"]["min"]==5 and obj["requirement_details"]["occupants"]["max"]==7
+    assert obj["requirement_details"]["tenure"]["min_years"]==2 and obj["requirement_details"]["tenure"]["max_years"]==3
+    assert obj["budget"]["status"]=="NOT_SPECIFIED"
+    passed += 1
+    print("PASS: majorda_flat_or_bungalow_long_term")
+
+    for phrase in ["Preferred Location: Near Majorda Beach","Preferred Location: Majorda","Location: Near Majorda Beach"]:
+        v=b.analyze("Rental requirement. 2 BHK flat or bungalow required. "+phrase+". Rent required.")
+        assert "MAJORDA" in names(v), (phrase,v["locations"])
+        assert {"APARTMENT","VILLA"}.issubset({x["asset"] for x in v["asset"]["acceptable_assets"]})
+        passed += 1
+    print("PASS: majorda_location_asset_variants 3")
+
     # Generate more metamorphic location-list variants to cross 100 evaluations.
     separators = [" | ", ", ", " / ", " and "]
     loc_sets = [

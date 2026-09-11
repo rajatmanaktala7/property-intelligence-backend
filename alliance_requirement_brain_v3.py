@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from alliance_semantic_schema_v3 import assert_valid_requirement
 
-VERSION = "3.0.0-ONE-BRAIN-SHADOW"
+VERSION = "3.2.1-MULTI-ASSET-RENTAL-SEMANTICS"
 
 # Deterministic aliases are utilities, not business truth.
 LOCATION_ALIASES = {
@@ -53,6 +53,11 @@ LOCATION_ALIASES = {
     "SOUTH CITY 1": ["SOUTH CITY 1"],
     "GREENWOOD CITY": ["GREENWOOD CITY", "GREEN WOOD CITY"],
     "SIOLIM": ["SIOLIM"],
+    "MAJORDA": ["MAJORDA", "MAJORDA BEACH"],
+    "BETALBATIM": ["BETALBATIM"],
+    "COLVA": ["COLVA", "COLVA BEACH"],
+    "UTORDA": ["UTORDA", "UTORDA BEACH"],
+    "BENAULIM": ["BENAULIM", "BENAULIM BEACH"],
     "ASSAGAO": ["ASSAGAO"],
     "VAGATOR": ["VAGATOR"],
     "ANJUNA": ["ANJUNA"],
@@ -96,6 +101,7 @@ USE_PATTERNS = [
     ("OFFICE_USE", [r"\bOFFICE\b", r"\bCORPORATE\b", r"\bCOWORK(?:ING)?\b"]),
     ("RETAIL_USE", [r"\bRETAIL\b", r"\bSHOWROOM\b", r"\bSHOP\b"]),
     ("WAREHOUSE_LOGISTICS", [r"\bWAREHOUSE\b", r"\bGODOWN\b", r"\bLOGISTICS\b"]),
+    ("STAFF_ACCOMMODATION", [r"\bFOR\s+(?:CONSTRUCTION\s+COMPANY\s+)?ENGINEERS\b", r"\b(?:STAFF|EMPLOYEE|ENGINEER|ENGINEERS|WORKFORCE)\s+(?:ACCOMMODATION|STAY)\b"]),
     ("RESIDENTIAL_USE", [r"\bRESIDENTIAL\b", r"\bFAMILY\b"]),
 ]
 
@@ -152,24 +158,31 @@ def classify_intent(raw: str) -> Dict[str, Any]:
 
 
 def extract_asset(raw: str) -> Dict[str, Any]:
+    # Preserve every explicit acceptable asset, while keeping legacy primary fields.
+    matches = []
+    seen = set()
     for asset, family, patterns in ASSET_PATTERNS:
+        evidence = []
         for p in patterns:
-            ev = _evidence(raw, p)
-            if ev:
-                return {
-                    "primary_asset": asset,
-                    "asset_family": family,
-                    "status": "EXPLICIT",
-                    "confidence": 0.98,
-                    "evidence": [ev],
-                }
-    return {
-        "primary_asset": "UNKNOWN",
-        "asset_family": "UNKNOWN",
-        "status": "UNKNOWN",
-        "confidence": 0.0,
-        "evidence": [],
-    }
+            for m in re.finditer(p, str(raw or ""), re.I):
+                ev = m.group(0)
+                if ev not in evidence:
+                    evidence.append(ev)
+        if evidence and asset not in seen:
+            seen.add(asset)
+            matches.append({"asset":asset,"family":family,"status":"EXPLICIT","confidence":0.98,"evidence":evidence})
+    if not matches:
+        return {"primary_asset":"UNKNOWN","asset_family":"UNKNOWN","acceptable_assets":[],"status":"UNKNOWN","confidence":0.0,"evidence":[]}
+
+    n = semantic_norm(raw)
+    explicit_flat = bool(re.search(r"\b(?:FLAT|APARTMENT)\b", n))
+    explicit_other = bool(re.search(r"\b(?:VILLA|BUNGALOW|KOTHI|INDEPENDENT\s+HOUSE|BUILDER\s+FLOOR|INDEPENDENT\s+FLOOR)\b", n))
+    if explicit_other and not explicit_flat:
+        matches = [x for x in matches if not (x["asset"]=="APARTMENT" and all("BHK" in semantic_norm(ev) for ev in x["evidence"]))]
+    primary = matches[0]
+    if explicit_flat:
+        primary = next((x for x in matches if x["asset"]=="APARTMENT"), primary)
+    return {"primary_asset":primary["asset"],"asset_family":primary["family"],"acceptable_assets":matches,"status":"EXPLICIT","confidence":0.98,"evidence":[ev for x in matches for ev in x["evidence"]]}
 
 
 def extract_use(raw: str) -> Dict[str, Any]:
@@ -198,6 +211,11 @@ def extract_transaction(raw: str) -> Dict[str, Any]:
         r"\bFOR\s+RENT\b", r"\bON\s+RENT\b", r"\bFOR\s+LEASE\b",
         r"\bON\s+LEASE\b", r"\bLEASE\s+REQUIRED\b", r"\bRENT\s+REQUIRED\b",
         r"\bLOOKING\s+TO\s+(?:RENT|LEASE)\b",
+        r"\bRENTAL\s+REQUIREMENT\b",
+        r"\bRENTAL\s+REQUIRED\b",
+        r"\bRENTAL\s+NEED(?:ED)?\b",
+        r"\b(?:LONG[- ]?TERM\s+)?RENTAL\b",
+        r"\bREQUIREMENT\s+FOR\s+RENT(?:AL)?\b",
     ]
     sale_patterns = [
         r"\bFOR\s+SALE\b", r"\bTO\s+BUY\b", r"\bLOOKING\s+TO\s+BUY\b",
@@ -256,8 +274,8 @@ def _labelled_location_segment(raw: str) -> Optional[str]:
     text = str(raw or "")
     m = re.search(
         r"(?is)\b(?:PREFERRED\s+LOCATIONS?|LOCATIONS?)\s*:\s*(.+?)(?="
-        r"\b(?:LAND\s+REQUIREMENT|AREA\s+REQUIREMENT|BUDGET|URGENT|GENUINE|"
-        r"TRANSACTION|PROPERTY\s+TYPE|USE|REQUIREMENT)\s*:|$)",
+        r"(?:[🏠👷👥📅🛋️💰📍🤝]|\b(?:LAND\s+REQUIREMENT|AREA\s+REQUIREMENT|BUDGET|URGENT|GENUINE|"
+        r"TRANSACTION|PROPERTY\s+TYPE|USE|REQUIREMENT|FURNISHED|UNFURNISHED|LONG[- ]?TERM|SIDE[- ]?BY[- ]?SIDE|DIRECT\s+DEAL)\b\s*:?)|$)",
         text,
     )
     return m.group(1).strip() if m else None
@@ -273,6 +291,7 @@ def extract_locations(raw: str) -> List[Dict[str, Any]]:
         for piece in pieces:
             cleaned = re.sub(r"^[^\w]+|[^\w -]+$", "", piece).strip()
             cleaned = re.sub(r"\b(?:PREFERRED|LOCATION|LOCATIONS)\b", "", cleaned, flags=re.I).strip()
+            cleaned = re.sub(r"^(?:NEAR|AROUND|CLOSE\s+TO|VICINITY\s+OF)\s+", "", cleaned, flags=re.I).strip()
             if not cleaned or len(cleaned) < 2:
                 continue
             canon = _canon_location(cleaned)
@@ -504,6 +523,18 @@ def analyze(raw: str, source: str = "UNKNOWN") -> Dict[str, Any]:
         "human_verification_required_before_client_share": True,
     }
 
+    bhk_values = sorted({int(x) for x in re.findall(r"\b(\d+)\s*BHK\b", n)})
+    furnishing = []
+    if re.search(r"\bFURNISHED\b", n): furnishing.append("FURNISHED")
+    if re.search(r"\bUNFURNISHED\b", n): furnishing.append("UNFURNISHED")
+    mo = re.search(r"\b(\d+)\s*(?:-|TO)\s*(\d+)\s+(?:MALE\s+)?(?:ENGINEERS?|PEOPLE|PERSONS?|STAFF|EMPLOYEES?)\b", n)
+    occupants = {"min":int(mo.group(1)),"max":int(mo.group(2)),"status":"EXPLICIT"} if mo else None
+    mt = re.search(r"\b(\d+)\s*(?:-|TO)\s*(\d+)\s+YEARS?\b", n)
+    tenure = {"min_years":int(mt.group(1)),"max_years":int(mt.group(2)),"status":"EXPLICIT"} if mt else None
+    requirement_details = {"bedrooms_bhk":bhk_values,"furnishing_options":furnishing,"occupants":occupants,"tenure":tenure,
+        "direct_deal_preferred":bool(re.search(r"\bDIRECT\s+DEAL\s+PREFERRED\b",n)),
+        "side_by_side_preferred":bool(re.search(r"\bSIDE[- ]?BY[- ]?SIDE\b",n))}
+
     hard_constraints = [f"LOCATION:{x['name']}" for x in locations if x["constraint"] == "HARD"]
     hard_constraints += [f"EXCLUDE_LOCATION:{x['name']}" for x in locations if x["constraint"] == "EXCLUDED"]
     if block.get("constraint") == "HARD" and block.get("name"):
@@ -550,6 +581,7 @@ def analyze(raw: str, source: str = "UNKNOWN") -> Dict[str, Any]:
         "block": block,
         "urgency": urgency,
         "verification": verification,
+        "requirement_details": requirement_details,
         "hard_constraints": hard_constraints,
         "preferences": preferences,
         "unknowns": unknowns,
