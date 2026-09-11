@@ -4,6 +4,7 @@ from collections import Counter
 from typing import Any, Dict, List
 
 import alliance_phase5_canonical_matcher as phase5
+import alliance_requirement_intelligence_gate_v1 as requirement_gate
 
 VERSION = "1.4.0-LOCATION-PURITY-CONTACT-GUARD"
 
@@ -171,11 +172,22 @@ def run_match(
     min_score: float = 70.0,
     limit: int = 50,
 ):
-    req = phase5.parse_requirement(requirement_text)
+    normalized_requirement_text, requirement_intelligence = (
+        requirement_gate.normalize_for_matcher(requirement_text)
+    )
+    req = phase5.parse_requirement(normalized_requirement_text)
+    req["raw"] = requirement_text
+    req["requirement_intelligence"] = requirement_intelligence
+    if requirement_intelligence.get("transaction"):
+        req["transaction_source"] = requirement_intelligence.get("transaction_source")
+        req["transaction_confidence"] = requirement_intelligence.get("transaction_confidence")
 
-    # Load canonical inventory first.
+    # Load canonical inventory first. Frozen Phase5 eligibility/scoring stays unchanged.
     pi_raw = phase5.load_pi_properties(engine)
     pi_candidates = phase5.dedupe_candidates(pi_raw)
+    pi_candidates, pi_scope = requirement_gate.enforce_strict_scope(
+        pi_candidates, requirement_intelligence
+    )
 
     # If a location is not in the static dictionary, use the existing
     # inventory vocabulary before declaring the requirement unmatchable.
@@ -190,6 +202,9 @@ def run_match(
             wa_probe_raw = []
 
         wa_probe_candidates = phase5.dedupe_candidates(wa_probe_raw)
+        wa_probe_candidates, _wa_probe_scope = requirement_gate.enforce_strict_scope(
+            wa_probe_candidates, requirement_intelligence
+        )
 
         req = phase5.enrich_requirement_with_inventory_locations(
             req,
@@ -220,6 +235,9 @@ def run_match(
                 limit=20000,
             )
             wa_candidates = phase5.dedupe_candidates(wa_raw)
+            wa_candidates, _wa_scope = requirement_gate.enforce_strict_scope(
+                wa_candidates, requirement_intelligence
+            )
     except Exception:
         wa_raw = []
         wa_candidates = []
@@ -326,6 +344,8 @@ def run_match(
             "whatsapp_matches_forced_to_verify": True,
             "location_resolution": req.get("location_resolution"),
             "transaction_source": req.get("transaction_source"),
+            "requirement_intelligence_version": requirement_gate.VERSION,
+            "strict_scope": pi_scope,
             "rejection_counts": rejection_counts,
         },
         "exact_verified": exact_verified,
