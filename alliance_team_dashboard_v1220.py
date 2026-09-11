@@ -7,7 +7,7 @@ from fastapi import Form, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import text
 
-VERSION = "12.3.7-PREVIOUS-UI-BOTS-RESTORED"
+VERSION = "12.3.8-COMMAND-BAR-DAY-PLAN-BOTTOM"
 ROUTE = "/alliance/primary"
 
 STAFF = ["Yogesh Mehra", "Priya", "Zoya Saifi"]
@@ -178,7 +178,18 @@ def _base_css():
 .checks{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px}
 .two{display:grid;grid-template-columns:1.5fr 1fr;gap:16px}@media(max-width:950px){.two{grid-template-columns:1fr}}
 .tablebox{overflow:auto;max-height:420px}table{border-collapse:collapse;width:100%;font-size:12px}th,td{padding:8px;border-bottom:1px solid #edf1f5;text-align:left;vertical-align:top}th{background:#f8fafc;position:sticky;top:0}
-.quickgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:10px}.quick{background:white;border:1px solid #e1e7ef;border-radius:11px;padding:14px;text-decoration:none;color:#132238}.quick b{display:block;margin-bottom:4px}.quick span{font-size:12px;color:#667085}
+.quickgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(185px,1fr));gap:9px}
+.quick{background:white;border:1px solid #dbe5ee;border-radius:12px;padding:12px 13px;text-decoration:none;color:#132238;box-shadow:0 3px 12px rgba(16,42,67,.045);transition:transform .15s ease,box-shadow .15s ease,border-color .15s ease}
+.quick:hover{transform:translateY(-1px);box-shadow:0 8px 22px rgba(16,42,67,.09);border-color:#b9ccdc}
+.quick b{display:block;margin-bottom:4px;color:#102a43}.quick span{font-size:11px;color:#667085;line-height:1.35}
+.commandbar{background:linear-gradient(135deg,#ffffff,#f7fbff);border:1px solid #d9e6f0;border-radius:16px;padding:15px;box-shadow:0 8px 26px rgba(16,42,67,.06)}
+.commandbar-head{display:flex;justify-content:space-between;gap:12px;align-items:end;flex-wrap:wrap;margin-bottom:11px}
+.commandbar-head h2{margin:0}.commandbar-head p{margin:4px 0 0;color:#667085;font-size:12px}
+.commandbar-tag{font-size:11px;font-weight:800;color:#175cd3;background:#eff8ff;border-radius:999px;padding:6px 9px}
+.team-bottom{border-top:1px solid #dce6ef;padding-top:20px;margin-top:28px}
+.team-actions{margin:12px 0}
+@media(max-width:720px){.quickgrid{grid-template-columns:repeat(2,minmax(0,1fr))}.quick{padding:11px}.commandbar{padding:12px}}
+@media(max-width:470px){.quickgrid{grid-template-columns:1fr}}
 .btn,.mini{background:#102a43;color:white;text-decoration:none;border:0;border-radius:8px;padding:8px 10px;font-size:12px;display:inline-block;cursor:pointer}.goodbtn{background:#067647}
 .okpill,.warnpill,.badpill{display:inline-block;border-radius:999px;padding:4px 8px;font-size:11px;font-weight:800}
 .okpill{background:#ecfdf3;color:#067647}.warnpill{background:#fff6ed;color:#b54708}.badpill{background:#fef3f2;color:#b42318}
@@ -254,9 +265,16 @@ def _dashboard(core, req):
         ("Add Property","/property-manual","Manual property entry"),
         ("Final Link Audit","/alliance/team-link-audit","27-route production audit"),
     ]
-    quick_html = "".join(
+    team_link_labels = {"Daily Day Plan", "Staff Review", "Monthly Review"}
+    operational_quick_html = "".join(
         f"<a class='quick' href='{html.escape(path,quote=True)}'><b>{html.escape(label)}</b><span>{html.escape(desc)}</span></a>"
         for label,path,desc in quick
+        if label not in team_link_labels
+    )
+    team_quick_html = "".join(
+        f"<a class='quick' href='{html.escape(path,quote=True)}'><b>{html.escape(label)}</b><span>{html.escape(desc)}</span></a>"
+        for label,path,desc in quick
+        if label in team_link_labels
     )
 
     now = datetime.now(timezone.utc).strftime("%d %b %Y %H:%M UTC")
@@ -269,7 +287,13 @@ def _dashboard(core, req):
 </div>
 <div class='wrap'>
 
-<div class='section'><h2>Team Performance Today</h2><div class='staffgrid'>{''.join(staff_cards)}</div></div>
+<div class='section commandbar'>
+  <div class='commandbar-head'>
+    <div><h2>Everything the Team Needs</h2><p>Open any Alliance workflow directly. Existing routes are unchanged.</p></div>
+    <div class='commandbar-tag'>QUICK ACCESS</div>
+  </div>
+  <div class='quickgrid'>{operational_quick_html}</div>
+</div>
 
 <div class='section'><h2>Alliance Deal Work Queue</h2><div class='metrics'>
 {_card("Master Properties",c["properties"],"Canonical property database","/alliance/final/database/master")}
@@ -303,10 +327,17 @@ def _dashboard(core, req):
   </div>
 </div>
 
-<div class='section'><h2>Everything the Team Needs</h2><div class='quickgrid'>{quick_html}</div></div>
+<div class='section team-bottom'>
+  <div class='commandbar-head'>
+    <div><h2>Team Performance Today</h2><p>Daily accountability stays here at the bottom, separate from operational navigation.</p></div>
+    <div class='commandbar-tag'>DAY PLAN</div>
+  </div>
+  <div class='staffgrid'>{''.join(staff_cards)}</div>
+  <div class='team-actions quickgrid'>{team_quick_html}</div>
+</div>
 
-<div class='note'><b>Management rule:</b> Yogesh Mehra, Priya and Zoya Saifi day plans remain stored under their exact staff names. This UI restoration does not change Master, Gold, Matcher, Requirement Gate or the 12.4.3 route fixes.</div>
-<div class='footer'>Dashboard 12.3.5-PREVIOUS-UI-RESTORED · {now}. Previous all-in-one visual interface restored with current production routes retained.</div>
+<div class='note'><b>Management rule:</b> Yogesh Mehra, Priya and Zoya Saifi day plans remain stored under their exact staff names. This UI change does not change Master, Gold, Matcher, Requirement Gate or the 12.4.3 route fixes.</div>
+<div class='footer'>Dashboard 12.3.8-COMMAND-BAR-DAY-PLAN-BOTTOM · {now}. Operational links are at the top; Day Plan and staff review remain at the bottom with current production routes retained.</div>
 </div></body></html>""", headers={"Cache-Control":"no-store"})
 
 def _staff_shell(title, body):
