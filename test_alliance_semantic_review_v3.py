@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import json
 
 import alliance_requirement_brain_v3 as brain
@@ -70,6 +72,12 @@ def main():
     assert any(x["name"] == "MAJORDA" and x["constraint"] == "PREFERRED" for x in current["locations"])
     acceptable = {x["asset"] for x in current["asset"].get("acceptable_assets") or []}
     assert {"APARTMENT", "VILLA"}.issubset(acceptable)
+
+    review_source = Path("alliance_semantic_review_v3.py").read_text(encoding="utf-8")
+    assert "/api/semantic-v3/reprocess/{{int(run_id)}}" not in review_source
+    assert "/api/semantic-v3/reprocess/{int(run_id)}" in review_source
+    assert f"/api/semantic-v3/reprocess/{2}" == "/api/semantic-v3/reprocess/2"
+    print("PASS: reprocess numeric run-id URL contract")
 
     print("PASS: reprocess versioned snapshot architecture contract")
     print("PASS: current brain Majorda reprocess target")

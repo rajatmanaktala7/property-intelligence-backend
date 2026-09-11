@@ -468,7 +468,7 @@ def review_record_html(engine, run_id: int) -> str:
         "It does not switch the live matcher away from V2.3.</p></div>"
         f"""<script>
 async function reprocessCurrent(){{
-  const res=await fetch('/api/semantic-v3/reprocess/{{int(run_id)}}',{{method:'POST'}});
+  const res=await fetch('/api/semantic-v3/reprocess/{int(run_id)}',{{method:'POST'}});
   const data=await res.json();
   const box=document.getElementById('resultBox');
   box.style.display='block';
