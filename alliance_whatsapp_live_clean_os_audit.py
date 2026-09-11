@@ -11,8 +11,22 @@ def main():
             "FAIL: frozen Phase5 baseline changed: " + str(phase5.VERSION)
         )
 
+    schema = bridge.schema_snapshot(bridge._main_engine())
+    if not schema.get("source_table_present"):
+        raise SystemExit("FAIL: source_table migration missing")
+    if not schema.get("four_key_unique_index_present"):
+        raise SystemExit("FAIL: four-key ledger unique index missing")
+    if schema.get("null_source_table_rows"):
+        raise SystemExit(
+            "FAIL: null source_table rows remain: "
+            + str(schema.get("null_source_table_rows"))
+        )
+
     snap = bridge.audit_snapshot()
 
+    print("WHATSAPP MASTER + LIVE SCHEMA")
+    print(json.dumps(schema, indent=2, default=str))
+    print("")
     print("WHATSAPP MASTER + LIVE UNIFIED AUDIT")
     print(json.dumps(snap, indent=2, default=str))
 
@@ -51,6 +65,7 @@ def main():
         raise SystemExit(2)
 
     print("")
+    print("LEDGER SCHEMA MIGRATION: PASS")
     print("MASTER DATABASE CURSOR COVERAGE: PASS")
     print("MASTER PROPERTY CLASSIFICATION: PASS")
     print("MASTER -> OPERATIONAL PROPERTY PROJECTION: PASS")

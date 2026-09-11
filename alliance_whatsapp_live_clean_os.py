@@ -14,7 +14,7 @@ from sqlalchemy import text
 
 import alliance_phase5_canonical_matcher as phase5
 
-VERSION = "1.4.0-MASTER-LIVE-UNIFIED-OPERATIONAL-BRIDGE"
+VERSION = "1.4.1-MASTER-LIVE-SCHEMA-MIGRATION"
 POLL_SECONDS = 90
 BATCH_SIZE = 2500
 
@@ -117,9 +117,115 @@ def _columns(engine, name: str) -> List[str]:
 
 
 def _ensure_schema(engine):
+    # Backward-compatible migration for older WhatsApp Live ledger schemas.
+    # Existing rows are preserved. No DROP/TRUNCATE/DELETE is used.
     with engine.begin() as c:
-        for stmt in DDL:
-            c.execute(text(stmt))
+        c.execute(text(f"""CREATE TABLE IF NOT EXISTS {LEDGER_TABLE}(
+            id BIGSERIAL PRIMARY KEY,
+            source_entity_type TEXT NOT NULL,
+            source_id TEXT NOT NULL,
+            source_hash TEXT NOT NULL,
+            classification TEXT NOT NULL,
+            clean_status TEXT NOT NULL,
+            target_table TEXT,
+            target_id TEXT,
+            reason TEXT,
+            normalized_json JSONB NOT NULL DEFAULT '{{}}'::jsonb,
+            first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            synced_at TIMESTAMPTZ
+        )"""))
+
+        c.execute(text(
+            f"ALTER TABLE {LEDGER_TABLE} "
+            "ADD COLUMN IF NOT EXISTS source_table TEXT"
+        ))
+
+        c.execute(text(f"""
+            UPDATE {LEDGER_TABLE}
+            SET source_table = CASE
+                WHEN source_entity_type='REQUIREMENT' THEN 'wa_requirements'
+                WHEN source_entity_type='PROPERTY' THEN 'wa_properties'
+                ELSE 'LEGACY_UNKNOWN'
+            END
+            WHERE source_table IS NULL OR BTRIM(source_table)=''
+        """))
+
+        c.execute(text(
+            f"ALTER TABLE {LEDGER_TABLE} "
+            "ALTER COLUMN source_table SET NOT NULL"
+        ))
+
+        c.execute(text(
+            f"CREATE INDEX IF NOT EXISTS idx_wa_clean_ledger_source "
+            f"ON {LEDGER_TABLE}(source_entity_type,source_table,source_id)"
+        ))
+        c.execute(text(
+            f"CREATE INDEX IF NOT EXISTS idx_wa_clean_ledger_status "
+            f"ON {LEDGER_TABLE}(clean_status,classification)"
+        ))
+        c.execute(text(
+            f"CREATE UNIQUE INDEX IF NOT EXISTS uq_wa_clean_ledger_source4 "
+            f"ON {LEDGER_TABLE}"
+            f"(source_entity_type,source_table,source_id,source_hash)"
+        ))
+
+        c.execute(text(f"""CREATE TABLE IF NOT EXISTS {CURSOR_TABLE}(
+            source_table TEXT PRIMARY KEY,
+            last_numeric_id BIGINT NOT NULL DEFAULT 0,
+            last_run_at TIMESTAMPTZ,
+            details JSONB NOT NULL DEFAULT '{{}}'::jsonb
+        )"""))
+
+        c.execute(text(f"""CREATE TABLE IF NOT EXISTS {RUN_TABLE}(
+            id BIGSERIAL PRIMARY KEY,
+            version TEXT,
+            result JSONB NOT NULL DEFAULT '{{}}'::jsonb,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )"""))
+
+        c.execute(text(
+            f"ALTER TABLE {RUN_TABLE} ADD COLUMN IF NOT EXISTS version TEXT"
+        ))
+        c.execute(text(
+            f"ALTER TABLE {RUN_TABLE} "
+            "ADD COLUMN IF NOT EXISTS result JSONB NOT NULL DEFAULT '{}'::jsonb"
+        ))
+
+
+def schema_snapshot(engine) -> Dict[str, Any]:
+    _ensure_schema(engine)
+    with engine.connect() as c:
+        ledger_columns = [
+            str(x)
+            for x in c.execute(text("""
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_schema='public' AND table_name=:n
+                ORDER BY ordinal_position
+            """), {"n": LEDGER_TABLE}).scalars().all()
+        ]
+        ledger_indexes = [
+            str(x)
+            for x in c.execute(text("""
+                SELECT indexname
+                FROM pg_indexes
+                WHERE schemaname='public' AND tablename=:n
+                ORDER BY indexname
+            """), {"n": LEDGER_TABLE}).scalars().all()
+        ]
+        null_source_rows = int(c.execute(text(
+            f"SELECT COUNT(*) FROM {LEDGER_TABLE} WHERE source_table IS NULL"
+        )).scalar() or 0)
+
+    return {
+        "version": VERSION,
+        "source_table_present": "source_table" in ledger_columns,
+        "four_key_unique_index_present": "uq_wa_clean_ledger_source4" in ledger_indexes,
+        "null_source_table_rows": null_source_rows,
+        "ledger_columns": ledger_columns,
+        "ledger_indexes": ledger_indexes,
+    }
 
 
 def _safe(v: Any):
