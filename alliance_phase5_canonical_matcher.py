@@ -244,21 +244,47 @@ def sanitize_public_payload(value):
     return value
 
 def canonical_locations(*vals: Any) -> List[str]:
-    blob = norm(" ".join(str(v or "") for v in vals))
+    raw_text = " ".join(str(v or "") for v in vals)
+    blob = norm(raw_text)
     if not blob:
         return []
+
     hits = []
+
     for canon, aliases in LOCATION_ALIASES.items():
         positions = []
         for a in aliases:
             aa = norm(a)
-            m = re.search(r"(?<![A-Z0-9])" + re.escape(aa) + r"(?![A-Z0-9])", blob) if aa else None
+            m = (
+                re.search(
+                    r"(?<![A-Z0-9])" + re.escape(aa) + r"(?![A-Z0-9])",
+                    blob,
+                )
+                if aa
+                else None
+            )
             if m:
                 positions.append(m.start())
         if positions:
             hits.append((min(positions), canon))
-    hits.sort()
-    return [canon for _, canon in hits]
+
+    for m in re.finditer(
+        r"(?<![A-Z0-9])(?:SEC|SECTOR)\s*-?\s*(\d{1,3}[A-Z]?)(?![A-Z0-9])",
+        blob,
+    ):
+        hits.append((m.start(), "SECTOR " + m.group(1)))
+
+    hits.sort(key=lambda x: x[0])
+
+    out = []
+    seen = set()
+
+    for _, canon in hits:
+        if canon not in seen:
+            seen.add(canon)
+            out.append(canon)
+
+    return out
 
 def canonical_location(*vals: Any) -> Optional[str]:
     locations = canonical_locations(*vals)

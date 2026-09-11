@@ -11,9 +11,9 @@ from sqlalchemy import text
 import alliance_phase5_canonical_matcher as phase5
 import alliance_whatsapp_first_match_v1 as whatsapp_first
 
-VERSION = "6.4.0-MULTI-REQUIREMENT-DECOMPOSITION"
+VERSION = "6.4.1-EMOJI-SECTOR-DECOMPOSITION"
 ROUTE = "/deal-match-ai-v60"
-ENGINE_VERSION = "1.1.0-CANONICAL-MASTER-AUTHORITY"
+ENGINE_VERSION = getattr(whatsapp_first, "VERSION", "UNKNOWN-MATCH-ENGINE")
 
 # This file intentionally keeps the existing public route and API names.
 # Matching is delegated to the separately validated Phase 5 canonical engine.
@@ -25,9 +25,25 @@ def esc(v: Any) -> str:
 
 
 _REQ_MARKER = re.compile(
-    r"(?i)(?<![A-Z0-9])(\d+)(?:ST|ND|RD|TH)?\s*(?:HOT\s*)?REQUIREMENT\s*(?:👇|:)?"
+    r"(?i)(?:"
+    r"(?<![A-Z0-9])(\d+)(?:ST|ND|RD|TH)?\s*(?:HOT\s*)?REQUIREMENT\s*(?:👇|:)?"
+    r"|([1-9])\ufe0f?\u20e3"
+    r"|([①②③④⑤⑥⑦⑧⑨⑩])"
+    r")"
 )
 
+_CIRCLED_TO_INT = {
+    "①": 1, "②": 2, "③": 3, "④": 4, "⑤": 5,
+    "⑥": 6, "⑦": 7, "⑧": 8, "⑨": 9, "⑩": 10,
+}
+
+
+def _marker_number(marker) -> int:
+    if marker.group(1):
+        return int(marker.group(1))
+    if marker.group(2):
+        return int(marker.group(2))
+    return _CIRCLED_TO_INT[marker.group(3)]
 
 def _expand_sector_lists(value: str) -> str:
     s = str(value or "")
@@ -103,7 +119,7 @@ def split_requirement_text(raw_text: str) -> List[Dict[str, Any]]:
         if not segment:
             continue
         out.append({
-            "number": int(marker.group(1)),
+            "number": _marker_number(marker),
             "source": segment,
             "normalized": _normalize_requirement_segment(segment, inherited_phrase),
         })
