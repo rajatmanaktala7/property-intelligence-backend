@@ -1,0 +1,17 @@
+{
+  "freeze_name": "ALLIANCE_RECOVERY_CONFIDENCE_BASELINE",
+  "frozen_after_commit": "4027e7f",
+  "policy": {
+    "alliance_whatsapp_location_recovery.py": "FROZEN",
+    "alliance_whatsapp_recovery_confidence.py": "FROZEN",
+    "alliance_whatsapp_recovery_confidence_audit.py": "FROZEN",
+    "alliance_whatsapp_recovery_review_export.py": "FROZEN",
+    "matcher_v6_6_0": "FROZEN",
+    "baby_v6_4_1": "FROZEN"
+  },
+  "versions": {
+    "recovery": "1.1.0-FAST-RESUMABLE-LOCATION-RECOVERY",
+    "confidence": "1.0.0-RECOVERY-CONFIDENCE-PROMOTION-QUEUE"
+  },
+  "note": "WhatsApp Live Clean OS must be additive. Do not modify these frozen layers."
+}

@@ -398,6 +398,21 @@ def _late_register_intelligence(wrapped):
             "error": f"{type(exc).__name__}: {exc}",
         }
 
+    # WhatsApp Live Clean Operational Bridge
+    try:
+        import alliance_whatsapp_live_clean_os as wa_clean_os
+        wa_clean_result = wa_clean_os.register(core)
+        results["wa_clean_os"] = {
+            "status": "REGISTERED",
+            "error": None,
+            "result": wa_clean_result,
+        }
+    except Exception as exc:
+        results["wa_clean_os"] = {
+            "status": "ERROR",
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
     LATE_REGISTRATION.clear()
     LATE_REGISTRATION.update(results)
 
