@@ -1,0 +1,14 @@
+{
+  "engine_version": "1.4.0-LOCATION-PURITY-CONTACT-GUARD",
+  "frozen_at_utc": "2026-09-11T07:44:32.855991+00:00",
+  "frozen_commit": "a947ace9ad2993daedb0b2e3536a814a5fc52bdc",
+  "name": "Alliance WhatsApp Matcher Frozen Baseline",
+  "phase5_version": "5.2.0-LOCATION-PURITY-FULL-AUDIT",
+  "policy": {
+    "baby_v6_4_1_untouched": true,
+    "matcher_files_are_read_only": true,
+    "recovered_locations_do_not_become_match_eligible_automatically": true,
+    "recovery_is_additive_only": true
+  },
+  "route_version": "6.6.0-FULL-INVENTORY-AUDIT"
+}
