@@ -446,6 +446,18 @@ def _load_core():
 
         stabilization = production_surface.register(wrapped)
 
+        # Deal Match Intent Guard V1 - additive only; frozen V6.6 remains unchanged.
+        try:
+            import alliance_deal_match_intent_guard_v1 as deal_intent_guard_v1
+            deal_intent_result = deal_intent_guard_v1.install(wrapped.core)
+            stabilization = dict(stabilization or {})
+            stabilization["deal_match_intent_guard_v1"] = deal_intent_result
+            print("[deal-match-intent-guard-v1]", deal_intent_result)
+        except Exception as exc:
+            stabilization = dict(stabilization or {})
+            stabilization["deal_match_intent_guard_v1"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","fail_safe":True}
+            print("[deal-match-intent-guard-v1] warning:", type(exc).__name__, str(exc))
+
         # 12.3.0 Alliance Team Operations
         try:
             import alliance_team_operations_v1230 as teamops_v1230
