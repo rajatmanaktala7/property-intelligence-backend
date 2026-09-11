@@ -4,7 +4,7 @@ from collections import Counter
 from typing import Any, Dict, List
 
 import alliance_phase5_canonical_matcher as phase5
-import alliance_requirement_intelligence_gate_v1 as requirement_gate
+import alliance_requirement_intelligence_os_v2 as requirement_brain
 import alliance_master_property_match_source_v1 as master_source
 
 VERSION = "1.4.0-LOCATION-PURITY-CONTACT-GUARD"
@@ -57,14 +57,14 @@ def _evaluate(
 
     alternatives = []
 
-    if not exact_verified:
+    if not exact_verified and not req.get("location_only"):
         allowed = set(phase5.approved_alternatives(req))
 
         for p in candidates:
             if p.get("location") not in allowed:
                 continue
 
-            ok, code, gate = phase5.eligible(req, p, "ALTERNATIVE")
+            ok, _code, gate = phase5.eligible(req, p, "ALTERNATIVE")
             if not ok:
                 continue
 
@@ -96,14 +96,6 @@ def _evaluate(
     }
 
 
-def _has_match(result):
-    return bool(
-        result.get("exact_verified")
-        or result.get("exact_needs_verification")
-        or result.get("alternatives")
-    )
-
-
 def _tag(rows, stage):
     out = []
     for row in rows:
@@ -123,10 +115,8 @@ def _force_verification(rows, stage):
         item["availability_verification"] = "VERIFY_FIRST_WHATSAPP_MASTER"
 
         why = list(item.get("why") or [])
-        marker = (
-            "WhatsApp master candidate; verify current availability "
-            "before client sharing"
-        )
+        marker = "WhatsApp master candidate; verify current availability before client sharing"
+
         if marker not in why:
             why.append(marker)
 
@@ -173,34 +163,49 @@ def run_match(
     min_score: float = 70.0,
     limit: int = 50,
 ):
-    normalized_requirement_text, requirement_intelligence = (
-        requirement_gate.normalize_for_matcher(requirement_text)
+    _normalized, req, intelligence = requirement_brain.build_canonical_requirement(
+        requirement_text
     )
-    req = phase5.parse_requirement(normalized_requirement_text)
-    req["raw"] = requirement_text
-    req["requirement_intelligence"] = requirement_intelligence
-    if requirement_intelligence.get("transaction"):
-        req["transaction_source"] = requirement_intelligence.get("transaction_source")
-        req["transaction_confidence"] = requirement_intelligence.get("transaction_confidence")
 
-    # Load AUTHORITATIVE MASTER inventory first.
-    # Frozen Phase5 eligibility/scoring stays unchanged.
+    if intelligence["intent"]["role"] != "REQUIREMENT":
+        return {
+            "version": VERSION,
+            "requirement": req,
+            "summary": {
+                "blocked_by_intent_guard": True,
+                "intent_role": intelligence["intent"]["role"],
+                "intent_confidence": intelligence["intent"]["confidence"],
+                "exact_verified": 0,
+                "exact_needs_verification": 0,
+                "approved_alternatives": 0,
+                "contacts_exposed": False,
+                "requirement_intelligence_version": requirement_brain.VERSION,
+            },
+            "exact_verified": [],
+            "exact_needs_verification": [],
+            "alternatives": [],
+            "rejected_sample": [],
+        }
+
     pi_raw = master_source.load_master_properties(
         engine,
         req,
         limit=12000,
     )
+
     master_source_used = "pi_master_properties_v711"
+
     if not pi_raw:
         pi_raw = phase5.load_pi_properties(engine)
         master_source_used = "pi_properties_LEGACY_FALLBACK"
+
     pi_candidates = phase5.dedupe_candidates(pi_raw)
-    pi_candidates, pi_scope = requirement_gate.enforce_strict_scope(
-        pi_candidates, requirement_intelligence
+
+    pi_candidates, pi_scope = requirement_brain.filter_candidates_by_hard_scope(
+        pi_candidates,
+        intelligence,
     )
 
-    # If a location is not in the static dictionary, use the existing
-    # inventory vocabulary before declaring the requirement unmatchable.
     if not req.get("primary_locations"):
         try:
             wa_probe_raw = phase5.load_whatsapp_master_for_requirement(
@@ -212,8 +217,10 @@ def run_match(
             wa_probe_raw = []
 
         wa_probe_candidates = phase5.dedupe_candidates(wa_probe_raw)
-        wa_probe_candidates, _wa_probe_scope = requirement_gate.enforce_strict_scope(
-            wa_probe_candidates, requirement_intelligence
+
+        wa_probe_candidates, _ = requirement_brain.filter_candidates_by_hard_scope(
+            wa_probe_candidates,
+            intelligence,
         )
 
         req = phase5.enrich_requirement_with_inventory_locations(
@@ -221,11 +228,11 @@ def run_match(
             requirement_text,
             pi_candidates + wa_probe_candidates,
         )
+
     else:
         wa_probe_raw = None
         wa_probe_candidates = None
 
-    # Tier A: canonical inventory. Existing hard gates stay unchanged.
     pi_selected = _evaluate(
         req,
         pi_candidates,
@@ -233,21 +240,25 @@ def run_match(
         limit,
     )
 
-    # Tier B: requirement-filtered WhatsApp property master.
     try:
         if wa_probe_raw is not None and not req.get("primary_locations"):
             wa_raw = wa_probe_raw
             wa_candidates = wa_probe_candidates or []
+
         else:
             wa_raw = phase5.load_whatsapp_master_for_requirement(
                 engine,
                 req,
                 limit=20000,
             )
+
             wa_candidates = phase5.dedupe_candidates(wa_raw)
-            wa_candidates, _wa_scope = requirement_gate.enforce_strict_scope(
-                wa_candidates, requirement_intelligence
+
+            wa_candidates, _ = requirement_brain.filter_candidates_by_hard_scope(
+                wa_candidates,
+                intelligence,
             )
+
     except Exception:
         wa_raw = []
         wa_candidates = []
@@ -259,55 +270,47 @@ def run_match(
         limit,
     )
 
-    canonical_verified = _tag(
-        pi_selected["exact_verified"],
-        "MASTER_PROPERTY_DATABASE",
-    )
-
-    canonical_verify = _tag(
-        pi_selected["exact_needs_verification"],
-        "MASTER_PROPERTY_DATABASE",
-    )
-
-    canonical_alternatives = _tag(
-        pi_selected["alternatives"],
-        "MASTER_PROPERTY_DATABASE",
-    )
-
-    wa_exact_all = (
-        list(wa_selected["exact_verified"])
-        + list(wa_selected["exact_needs_verification"])
-    )
-
-    wa_verify = _force_verification(
-        wa_exact_all,
-        "WHATSAPP_PROPERTY_MASTER",
-    )
-
-    wa_alternatives = _force_verification(
-        wa_selected["alternatives"],
-        "WHATSAPP_PROPERTY_MASTER",
-    )
-
     exact_verified = _dedupe_public(
-        canonical_verified
+        _tag(
+            pi_selected["exact_verified"],
+            "MASTER_PROPERTY_DATABASE",
+        )
     )[:limit]
 
     exact_verify = _dedupe_public(
-        canonical_verify + wa_verify
+        _tag(
+            pi_selected["exact_needs_verification"],
+            "MASTER_PROPERTY_DATABASE",
+        )
+        + _force_verification(
+            list(wa_selected["exact_verified"])
+            + list(wa_selected["exact_needs_verification"]),
+            "WHATSAPP_PROPERTY_MASTER",
+        )
     )
+
     exact_verify.sort(
         key=lambda x: x.get("match_score", 0),
         reverse=True,
     )
+
     exact_verify = exact_verify[:limit]
 
-    if exact_verified:
+    if exact_verified or req.get("location_only"):
         alternatives = []
+
     else:
         alternatives = _dedupe_public(
-            canonical_alternatives + wa_alternatives
+            _tag(
+                pi_selected["alternatives"],
+                "MASTER_PROPERTY_DATABASE",
+            )
+            + _force_verification(
+                wa_selected["alternatives"],
+                "WHATSAPP_PROPERTY_MASTER",
+            )
         )
+
         alternatives.sort(
             key=lambda x: (
                 bool(x.get("send_eligible")),
@@ -315,6 +318,7 @@ def run_match(
             ),
             reverse=True,
         )
+
         alternatives = alternatives[:limit]
 
     rejection_counts = _rejection_counts(
@@ -329,7 +333,8 @@ def run_match(
             "pi_properties": len(pi_raw),
             "database_deduped_candidates": len(pi_candidates),
             "deduped_candidates": (
-                len(pi_candidates) + len(wa_candidates)
+                len(pi_candidates)
+                + len(wa_candidates)
             ),
             "pi_whatsapp_property_master": len(wa_raw),
             "whatsapp_deduped_candidates": len(wa_candidates),
@@ -341,23 +346,22 @@ def run_match(
                 or exact_verify
                 or alternatives
             ),
-            "matching_path": "MASTER_PROPERTY_DB_THEN_WHATSAPP_MASTER",
+            "matching_path": "UNIFIED_REQUIREMENT_BRAIN_TO_MASTER_PROPERTY_DB",
             "primary_source": master_source_used,
             "master_property_rows_loaded": len(pi_raw),
             "master_property_source_adapter": master_source.VERSION,
-            "evidence_source": "pi_whatsapp_property_master",
-            "fallback_source": "pi_whatsapp_property_master",
-            "fallback_used": bool(
-                wa_verify or wa_alternatives
-            ),
             "contacts_exposed": False,
             "price_used_only_when_comparable": True,
             "price_excluded_from_identity": True,
             "whatsapp_matches_forced_to_verify": True,
             "location_resolution": req.get("location_resolution"),
             "transaction_source": req.get("transaction_source"),
-            "requirement_intelligence_version": requirement_gate.VERSION,
+            "transaction_confidence": req.get("transaction_confidence"),
+            "requirement_intelligence_version": requirement_brain.VERSION,
+            "hard_constraints": intelligence.get("hard_constraints"),
+            "preferences": intelligence.get("preferences"),
             "strict_scope": pi_scope,
+            "location_only": req.get("location_only"),
             "rejection_counts": rejection_counts,
         },
         "exact_verified": exact_verified,
@@ -377,8 +381,11 @@ def run_match(
         if hasattr(phase5, "public_payload_contact_paths")
         else []
     )
+
     if leak_paths:
         raise RuntimeError(
-            "CONTACT_LEAK_GUARD_TRIGGERED:" + ",".join(leak_paths[:20])
+            "CONTACT_LEAK_GUARD_TRIGGERED:"
+            + ",".join(leak_paths[:20])
         )
+
     return result
