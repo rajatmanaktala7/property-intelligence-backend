@@ -9,7 +9,7 @@ from fastapi import Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import text
 
-VERSION="7.3.8-ALLIANCE-SOURCE-RECOVERY-REEXTRACTION"
+VERSION="7.3.9-ALLIANCE-COMMAND-BAR-UI"
 MODE="V721_CERTIFIED_PRIMARY_TEAM_WORKSPACE_VERIFY_ASSIGN_MATCH_ALTERNATIVES_REVIEW_CLIENT_SAFE_DRAFT_FOLLOWUP_SOURCE_EVIDENCE_NO_CANONICAL_MUTATION"
 STATE={"status":"STARTING","started_at":datetime.now(timezone.utc).isoformat(),"result":None,"last_error":None}
 _LOCK=threading.Lock()
@@ -131,19 +131,37 @@ def _shell(core,req,title,body):
         <a href="/status-page">System Status</a></details>"""
     return f"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{html.escape(title)}</title><style>
-*{{box-sizing:border-box}}body{{font-family:Arial,sans-serif;margin:0;background:#f4f7fb;color:#172033}}
-header{{background:#0d2238;color:white;padding:18px 22px;display:flex;justify-content:space-between;gap:15px;flex-wrap:wrap}}
-nav{{background:white;border-bottom:1px solid #dfe6ee;padding:10px 14px;display:flex;gap:7px;flex-wrap:wrap;position:sticky;top:0;z-index:2}}
-nav a,.btn,.mini{{background:#0d2238;color:white;text-decoration:none;border:0;border-radius:8px;padding:9px 11px;cursor:pointer;display:inline-block}}
-.btn.alt,.mini.alt{{background:#475467}}.btn.good,.mini.good{{background:#067647}}.btn.warn,.mini.warn{{background:#b54708}}
-.wrap{{max-width:1800px;margin:auto;padding:18px}}.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:10px}}
-.card{{background:white;border:1px solid #e1e7ee;border-radius:12px;padding:14px;margin-bottom:12px}}.num{{font-size:28px;font-weight:800}}
-.tablebox{{overflow:auto;max-height:72vh;border:1px solid #98a2b3;background:white}}table{{border-collapse:collapse;width:max-content;min-width:100%;font-size:11px}}th,td{{padding:6px 7px;border:1px solid #98a2b3;text-align:left;vertical-align:top;white-space:normal}}th{{position:sticky;top:0;background:#e9eef5;z-index:3;white-space:nowrap}}tbody tr:nth-child(even) td{{background:#f8fafc}}tbody tr:hover td{{background:#eef4ff}}
-th{{position:sticky;top:0;background:#f8fafc}}input,select,textarea{{padding:8px;border:1px solid #cfd8e3;border-radius:7px;max-width:100%}}
+*{{box-sizing:border-box}}
+:root{{--ink:#122033;--navy:#102a43;--navy2:#163d5c;--line:#dfe7ef;--soft:#f5f8fb;--muted:#64748b;--green:#067647;--amber:#b54708;--red:#b42318}}
+body{{font-family:Inter,Arial,sans-serif;margin:0;background:var(--soft);color:var(--ink)}}
+header{{background:linear-gradient(135deg,var(--navy),var(--navy2));color:white;padding:20px 26px;display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap;box-shadow:0 8px 24px rgba(16,42,67,.16)}}
+header b{{font-size:20px;letter-spacing:.1px}}header small{{opacity:.82}}
+nav{{background:rgba(255,255,255,.98);border-bottom:1px solid var(--line);padding:10px 18px;display:flex;gap:7px;flex-wrap:wrap;position:sticky;top:0;z-index:20;box-shadow:0 4px 14px rgba(16,42,67,.06)}}
+nav a{{background:transparent;color:var(--navy);text-decoration:none;border:1px solid transparent;border-radius:9px;padding:9px 11px;font-size:13px;font-weight:700;cursor:pointer;display:inline-block}}
+nav a:hover{{background:#eef5fb;border-color:#d7e5f1}}
+nav a:first-child{{background:var(--navy);color:white;border-color:var(--navy)}}
+.btn,.mini{{background:var(--navy);color:white;text-decoration:none;border:0;border-radius:9px;padding:9px 12px;cursor:pointer;display:inline-block;font-weight:700}}
+.btn:hover,.mini:hover{{filter:brightness(1.08)}}.btn.alt,.mini.alt{{background:#475467}}.btn.good,.mini.good{{background:var(--green)}}.btn.warn,.mini.warn{{background:var(--amber)}}
+.wrap{{max-width:1800px;margin:auto;padding:22px}}.wrap>h2{{font-size:24px;margin:4px 0 18px}}
+.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px}}
+.card{{background:white;border:1px solid var(--line);border-radius:14px;padding:16px;margin-bottom:14px;box-shadow:0 6px 20px rgba(16,42,67,.045)}}
+.card h3{{margin-top:0}}.num{{font-size:30px;font-weight:850;letter-spacing:-.5px}}
+.command-hero{{background:linear-gradient(135deg,#102a43,#1f4f70);color:#fff;border:0;padding:20px}}
+.command-hero h3{{font-size:22px;margin-bottom:7px}}.command-hero p{{margin:0;opacity:.86}}
+.quick-actions{{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px;margin:0 0 14px}}
+.quick-actions .card{{margin:0;min-height:126px;display:flex;flex-direction:column;justify-content:space-between}}
+.section-label{{font-size:12px;text-transform:uppercase;letter-spacing:.9px;font-weight:800;color:var(--muted);margin:20px 0 9px}}
+.day-plan{{border-left:5px solid var(--navy);background:#fff}}
+.day-plan ol{{margin:8px 0 0;padding-left:22px}}.day-plan li{{padding:5px 0}}
+.tablebox{{overflow:auto;max-height:72vh;border:1px solid #98a2b3;background:white;border-radius:10px}}
+table{{border-collapse:collapse;width:max-content;min-width:100%;font-size:11px}}th,td{{padding:6px 7px;border:1px solid #98a2b3;text-align:left;vertical-align:top;white-space:normal}}
+th{{position:sticky;top:0;background:#e9eef5;z-index:3;white-space:nowrap}}tbody tr:nth-child(even) td{{background:#f8fafc}}tbody tr:hover td{{background:#eef4ff}}
+input,select,textarea{{padding:8px;border:1px solid #cfd8e3;border-radius:7px;max-width:100%}}
 form.inline{{display:flex;gap:7px;flex-wrap:wrap;align-items:center}}.muted{{color:#667085}}.ok{{color:#08783e;font-weight:700}}.warntext{{color:#b54708;font-weight:700}}
 .bad{{color:#b42318;font-weight:700}}.pill{{padding:3px 7px;border-radius:999px;background:#eef2f6;white-space:nowrap}}pre{{white-space:pre-wrap;word-break:break-word}}
-details.admin{{background:#fff;border:1px solid #dfe6ee;padding:8px 12px}}details.admin a{{margin:5px;display:inline-block}}
+details.admin{{background:#fff;border:1px solid var(--line);padding:8px 16px}}details.admin summary{{font-weight:700;color:var(--navy);cursor:pointer}}details.admin a{{margin:5px;display:inline-block}}
 .actions{{display:flex;gap:5px;flex-wrap:wrap}}.right{{text-align:right}}
+@media(max-width:760px){{header{{padding:16px 18px}}nav{{padding:8px 10px;flex-wrap:nowrap;overflow-x:auto}}nav a{{white-space:nowrap}}.wrap{{padding:14px}}.grid,.quick-actions{{grid-template-columns:1fr}}}}
 </style></head><body>
 <header><div><b>Alliance CRE Operating System · 7.3.8</b><br><small>Capture Evidence → Structure → Assign → Verify → Match → Review → Follow-up</small></div>
 <div>{html.escape(str(role))} · <a href="/logout" style="color:white">Logout</a></div></header>
@@ -642,14 +660,33 @@ def register(core):
     def primary(req:Request):
         _role(core,req);c=_counts(engine)
         cards="".join(f"<div class='card'><div class='muted'>{html.escape(k.replace('_',' ').title())}</div><div class='num'>{v}</div></div>" for k,v in c.items())
-        body=f"""<div class='grid'>{cards}</div>
-        <div class='card'><h3>Alliance Universal Record Standard</h3><p><b>Every master record:</b> Date & Time · Source · Source Name · Name · Contact No. · Original Description/Message · Assignment · Verification · permanent Record ID · source evidence lineage. AI extraction is separate and never overwrites the original message.</p></div><div class='card'><h3>Daily Operating Flow</h3><p><b>1.</b> Open Properties and verify availability. <b>2.</b> Open Requirements and run Match.
-        <b>3.</b> Review exact and alternative options. <b>4.</b> Approve only suitable verified properties.
-        <b>5.</b> Generate client-safe draft. <b>6.</b> Assign follow-up.</p></div>
-        <div class='grid'>
-        <div class='card'><h3>Property Team</h3><p>Search canonical inventory, view internal contact/evidence, verify availability and assign responsibility.</p>{_button('/alliance/primary/properties','Open Properties','btn good')}</div>
-        <div class='card'><h3>Leasing Team</h3><p>Open requirements, run full 3,507-property matching and review fallback alternatives if exact locality is unavailable.</p>{_button('/alliance/primary/requirements','Open Requirements','btn')}</div>
-        <div class='card'><h3>Follow-up</h3><p>One queue for assigned work and scheduled follow-ups.</p>{_button('/alliance/primary/followups','Open Follow-ups','btn alt')}</div></div>"""
+        body=f"""<div class='card command-hero'>
+        <h3>Alliance Command Centre</h3>
+        <p>Verify first · Match intelligently · Review safely · Follow up consistently</p>
+        </div>
+        <div class='section-label'>Today at a glance</div>
+        <div class='grid'>{cards}</div>
+
+        <div class='section-label'>Priority work</div>
+        <div class='quick-actions'>
+        <div class='card'><div><h3>Property Team</h3><p>Search canonical inventory, view internal contact/evidence, verify availability and assign responsibility.</p></div>{_button('/alliance/primary/properties','Open Properties','btn good')}</div>
+        <div class='card'><div><h3>Leasing Team</h3><p>Open requirements, run full master matching and review fallback alternatives if exact locality is unavailable.</p></div>{_button('/alliance/primary/requirements','Open Requirements','btn')}</div>
+        <div class='card'><div><h3>Follow-up</h3><p>One queue for assigned work and scheduled follow-ups.</p></div>{_button('/alliance/primary/followups','Open Follow-ups','btn alt')}</div>
+        </div>
+
+        <div class='card'><h3>Alliance Universal Record Standard</h3><p><b>Every master record:</b> Date & Time · Source · Source Name · Name · Contact No. · Original Description/Message · Assignment · Verification · permanent Record ID · source evidence lineage. AI extraction is separate and never overwrites the original message.</p></div>
+
+        <div class='section-label'>Today's plan</div>
+        <div class='card day-plan'><h3>Daily Operating Flow</h3>
+        <ol>
+          <li>Open Properties and verify availability.</li>
+          <li>Open Requirements and run Match.</li>
+          <li>Review exact and alternative options.</li>
+          <li>Approve only suitable verified properties.</li>
+          <li>Generate client-safe draft.</li>
+          <li>Assign follow-up.</li>
+        </ol>
+        </div>"""
         return HTMLResponse(_shell(core,req,"Primary Command Centre",body))
 
     @app.get("/alliance/primary/properties",response_class=HTMLResponse)
