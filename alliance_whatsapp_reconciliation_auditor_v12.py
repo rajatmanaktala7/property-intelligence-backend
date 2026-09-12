@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import HTTPException
 from sqlalchemy import bindparam, text
 
-VERSION = "1.1.0-READ-ONLY-FAIL-SAFE-WHATSAPP-RECONCILIATION"
+VERSION = "1.2.0-READ-ONLY-AUTHORITY-PRESERVING-WHATSAPP-RECONCILIATION"
 ROUTE = "/api/alliance/whatsapp-reconciliation-v1"
 PAGE = "/alliance/admin/whatsapp-reconciliation-v1"
 WA_TABLES = ("wa_sources","wa_messages","wa_properties","wa_requirements","wa_contacts","wa_review_queue","wa_rejected")
@@ -198,10 +198,10 @@ def register(core):
                             f"<td>{g['duplicates']}</td><td>{g['requirements']}</td><td>{g['review_messages']}</td>"
                             f"<td>{g['rejected_messages']}</td><td>{g['master_promotions']}</td>"
                             f"<td>{g['matcher_eligible_verified']}</td><td>{gaps}</td></tr>")
-            return HTMLResponse(f"""<!doctype html><html><head><meta charset='utf-8'><title>Alliance WhatsApp Reconciliation V1.1</title>
+            return HTMLResponse(f"""<!doctype html><html><head><meta charset='utf-8'><title>Alliance WhatsApp Reconciliation V1.2</title>
 <style>body{{font-family:Arial;margin:20px;background:#f6f4f1}}table{{border-collapse:collapse;width:100%;background:white}}
 th,td{{padding:8px;border:1px solid #ddd;text-align:left;font-size:13px}}th{{background:#eee}}</style></head><body>
-<h2>Alliance WhatsApp Ingestion Reconciliation V1.1</h2><p><b>Status:</b> {snap.get('status')} · READ ONLY ·
+<h2>Alliance WhatsApp Ingestion Reconciliation V1.2</h2><p><b>Status:</b> {snap.get('status')} · READ ONLY ·
 <b>Groups:</b> {snap.get('totals',{}).get('configured_sources',0)}</p>
 <table><tr><th>Status</th><th>Group</th><th>Raw</th><th>Last message</th><th>Unique properties</th><th>Duplicates</th>
 <th>Requirements</th><th>Review</th><th>Rejected</th><th>Master promoted</th><th>Matcher eligible</th><th>Gaps</th></tr>
