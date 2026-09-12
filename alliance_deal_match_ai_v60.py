@@ -8,12 +8,12 @@ from fastapi import Request, Query, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy import text
 
-import alliance_phase5_canonical_matcher as phase5
+import alliance_master_matcher_contract_v1 as phase5
 import alliance_whatsapp_first_match_v1 as whatsapp_first
 
 VERSION = "6.6.0-FULL-INVENTORY-AUDIT"
 ROUTE = "/deal-match-ai-v60"
-ENGINE_VERSION = getattr(whatsapp_first, "VERSION", "UNKNOWN-MATCH-ENGINE")
+ENGINE_VERSION = getattr(phase5, "VERSION", "UNKNOWN-MATCH-ENGINE")
 
 # This file intentionally keeps the existing public route and API names.
 # Matching is delegated to the separately validated Phase 5 canonical engine.
@@ -216,7 +216,7 @@ def run_match(core, requirement_text: str, mode: str = "SMART",
     if mode not in {"SMART", "STRICT", "EXPANSION"}:
         mode = "SMART"
 
-    result = whatsapp_first.run_match(
+    result = phase5.run_match(
         core.engine,
         requirement_text=requirement_text,
         min_score=float(min_score),
@@ -325,6 +325,20 @@ def render_form():
     return HTMLResponse(_page("Alliance Deal Match AI", body))
 
 
+# ALLIANCE_MASTER_DETAIL_RENDER_V1
+def _master_detail_link(row):
+    rid = str((row or {}).get("record_id") or "").strip()
+    url = str((row or {}).get("detail_url") or "").strip()
+    if not rid:
+        return '<span class="muted">No property ID</span>'
+    if not url.startswith("/alliance/primary/property/"):
+        url = f"/alliance/primary/property/{rid}"
+    return (
+        f'<a class="btn" href="{esc(url)}" target="_self">'
+        f'View Full Property · {esc(rid)}</a>'
+    )
+
+
 def _table(rows, empty_message: str):
     if not rows:
         return f'<div class="card"><p class="muted">{esc(empty_message)}</p></div>'
@@ -346,7 +360,7 @@ def _table(rows, empty_message: str):
 <td>{esc(r.get("data_quality"))}</td>
 <td>{esc(r.get("availability_verification"))}</td>
 <td class="{send_class}">{send_text}</td>
-<td>{esc(r.get("source_bucket"))} · {esc(r.get("source_table"))} · {esc(r.get("record_id"))}</td>
+<td>{esc(r.get("source_bucket"))} · {esc(r.get("source_table"))}<br>{_master_detail_link(r)}</td>
 <td>{esc(why)}</td>
 </tr>""")
 
@@ -391,7 +405,7 @@ def render_results(core, q: str, mode: str, min_score: float):
             '<div><b>Area Max</b><br>' + esc(req.get("area_max_sqft")) + '</div>'
             '<div><b>Budget Max</b><br>' + esc(req.get("budget_max")) + '</div>'
             '<div><b>Mode</b><br>' + esc(res.get("mode")) + '</div></div></div>'
-            '<div class="card"><h3>Canonical Search Coverage</h3><p><b>' + esc(s.get("pi_properties")) + '</b> canonical property rows + <b>' + esc(s.get("pi_whatsapp_property_master")) + '</b> clean WhatsApp master rows -> <b>' + esc(s.get("deduped_candidates")) + '</b> deduped candidates.</p>'
+            '<div class="card"><h3>Master Database Search Coverage</h3><p><b>' + esc(s.get("master_rows_considered") or s.get("deduped_candidates") or 0) + '</b> eligible master rows considered from <b>' + esc(s.get("primary_source") or "pi_master_properties_v711") + '</b>. <b>Matcher source contract:</b> ' + esc(s.get("matcher_source_contract") or "MASTER_ONLY") + '. <b>Parallel WhatsApp candidates:</b> 0.</p>'
             '<p><b>' + esc(s.get("exact_verified")) + '</b> exact verified · <b>' + esc(s.get("exact_needs_verification")) + '</b> exact needs verification · <b>' + esc(s.get("approved_alternatives")) + '</b> approved alternatives</p></div>'
             '<div class="card"><h2>A. Exact Matches: VERIFIED + READY</h2>' + _table(res["exact_verified"], "No verified READY exact match found.") + '</div>'
             '<div class="card"><h2>B. Exact Matches: Verification Required</h2>' + _table(res["exact_needs_verification"], "No exact unverified candidate passed the hard gates.") + '</div>'
@@ -429,7 +443,7 @@ def render_results(core, q: str, mode: str, min_score: float):
             '<div><b>Hard Constraints</b><br>' + esc(hard) + '</div>'
             '<div><b>Preferences</b><br>' + esc(prefs) + '</div>'
             '<div><b>Mode</b><br>' + esc(res.get("mode")) + '</div></div></div>'
-            '<div class="card"><h3>Requirement ' + esc(n) + ' · Canonical Search Coverage</h3><p><b>' + esc(s.get("pi_properties")) + '</b> canonical rows · <b>' + esc(s.get("pi_whatsapp_property_master")) + '</b> WhatsApp evidence rows · <b>' + esc(s.get("deduped_candidates")) + '</b> deduped candidates.</p><p><b>' + esc(s.get("exact_verified")) + '</b> exact verified · <b>' + esc(s.get("exact_needs_verification")) + '</b> exact needs verification · <b>' + esc(s.get("approved_alternatives")) + '</b> approved alternatives</p></div>'
+            '<div class="card"><h3>Master Database Search Coverage</h3><p><b>' + esc(s.get("master_rows_considered") or s.get("deduped_candidates") or 0) + '</b> eligible master rows considered from <b>' + esc(s.get("primary_source") or "pi_master_properties_v711") + '</b>. <b>Matcher source contract:</b> ' + esc(s.get("matcher_source_contract") or "MASTER_ONLY") + '. <b>Parallel WhatsApp candidates:</b> 0.</p>'
             '<div class="card"><h3>A. Requirement ' + esc(n) + ' · Exact VERIFIED + READY</h3>' + _table(res["exact_verified"], "No verified READY exact match found.") + '</div>'
             '<div class="card"><h3>B. Requirement ' + esc(n) + ' · Exact Verification Required</h3>' + _table(res["exact_needs_verification"], "No exact unverified candidate passed the hard gates.") + '</div>'
             '<div class="card"><h3>C. Requirement ' + esc(n) + ' · Smart Approved Alternatives</h3>' + _table(res["alternatives"], "No approved alternative passed the hard gates.") + '</div>'
