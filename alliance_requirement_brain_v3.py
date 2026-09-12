@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from alliance_semantic_schema_v3 import assert_valid_requirement
 
-VERSION = "3.2.1-MULTI-ASSET-RENTAL-SEMANTICS"
+VERSION = "3.4.0-REGION-ALL-REQUIREMENTS-AUTO-TRAINER"
 
 # Deterministic aliases are utilities, not business truth.
 LOCATION_ALIASES = {
@@ -63,6 +63,20 @@ LOCATION_ALIASES = {
     "ANJUNA": ["ANJUNA"],
     "PARRA": ["PARRA"],
     "SALIGAO": ["SALIGAO"],
+    "VELSAO": ["VELSAO"],
+    "AROSSIM": ["AROSSIM", "AROSIM"],
+    "CAVELOSSIM": ["CAVELOSSIM"],
+    "MOBOR": ["MOBOR", "MABOR"],
+    "BETUL": ["BETUL"],
+    "AGONDA": ["AGONDA"],
+    "PALOLEM": ["PALOLEM"],
+    "PATNEM": ["PATNEM"],
+    "GALGIBAGA": ["GALGIBAGA", "GALJIBAGA"],
+    "ALDONA": ["ALDONA"],
+    "BASTORA": ["BASTORA"],
+    "UCASSAIM": ["UCASSAIM", "UCASSIM", "UCASIM", "UCASAIM", "UCASSAIEM"],
+    "GUIRIM": ["GUIRIM"],
+    "SOCORRO": ["SOCORRO", "SUCCOR", "SUCCOUR", "SUCCORO", "SERULA"],
     "MORJIM": ["MORJIM"],
     "ASHWEM": ["ASHWEM", "ASHVEM"],
     "MANDREM": ["MANDREM"],
@@ -79,6 +93,17 @@ LOCATION_ALIASES = {
     "KHAR WEST": ["KHAR WEST"],
 }
 
+
+REGION_ALIASES = {
+    "SOUTH GOA": ["SOUTH GOA", "SOUTHERN GOA"],
+    "NORTH GOA": ["NORTH GOA", "NORTHERN GOA"],
+}
+REGION_SEARCH_PROFILES = {
+    ("SOUTH GOA", "BEACH"): ["VELSAO","AROSSIM","UTORDA","MAJORDA","BETALBATIM","COLVA","BENAULIM","VARCA","CAVELOSSIM","MOBOR","BETUL","AGONDA","PALOLEM","PATNEM","GALGIBAGA"],
+    ("SOUTH GOA", "GENERAL"): ["MAJORDA","BETALBATIM","COLVA","BENAULIM","VARCA","CAVELOSSIM","MOBOR","BETUL","AGONDA","PALOLEM"],
+    ("NORTH GOA", "GENERAL"): ["SIOLIM","ASSAGAO","VAGATOR","ANJUNA","PARRA","SALIGAO","MORJIM","ASHWEM","MANDREM","ARAMBOL","CANDOLIM","CALANGUTE","BAGA","ARPORA","MAPUSA","PORVORIM"],
+}
+
 ASSET_PATTERNS = [
     ("FARMHOUSE", "HOSPITALITY_REAL_ESTATE", [r"\bFARM\s*HOUSE\b", r"\bFARMHOUSE\b"]),
     ("BANQUET", "HOSPITALITY_REAL_ESTATE", [r"\bBANQUET\b", r"\bMARRIAGE\s+HALL\b", r"\bWEDDING\s+VENUE\b"]),
@@ -90,7 +115,7 @@ ASSET_PATTERNS = [
     ("VILLA", "RESIDENTIAL", [r"\bVILLA\b", r"\bBUNGALOW\b", r"\bKOTHI\b", r"\bINDEPENDENT\s+HOUSE\b"]),
     ("BUILDER_FLOOR", "RESIDENTIAL", [r"\bBUILDER\s+FLOOR\b", r"\bINDEPENDENT\s+FLOOR\b"]),
     ("APARTMENT", "RESIDENTIAL", [r"\bAPARTMENT\b", r"\bFLAT\b", r"\b\d+(?:\.\d+)?\s*BHK\b"]),
-    ("LAND", "LAND", [r"\bPLOT\b", r"\bLAND\b"]),
+    ("LAND", "LAND", [r"\bPLOTS?\b", r"\bLAND\b"]),
 ]
 
 USE_PATTERNS = [
@@ -232,6 +257,30 @@ def extract_transaction(raw: str) -> Dict[str, Any]:
     if rent_ev and sale_ev:
         return {"value": None, "status": "CONFLICTING", "confidence": 0.0, "evidence": rent_ev + sale_ev, "human_confirmation_required": True}
 
+    # Controlled purchase inference for a ready client.
+    # Do NOT infer SALE merely from LAND/PLOT.
+    ready_purchase_client = (
+        bool(re.search(r"\b(?:WANTED|LOOKING\s+FOR|SEEKING|REQUIREMENT)\b", n))
+        and bool(re.search(r"\bREADY\s+(?:CLIENT|BUYER|BUYERS)\b", n))
+        and bool(re.search(
+            r"\b(?:PLOTS?|LAND|PROPERTY|VILLA|BUNGALOW|FLAT|APARTMENT|OFFICE|SHOP)\b",
+            n
+        ))
+        and not bool(re.search(
+            r"\b(?:RENT|RENTAL|LEASE|LEASING)\b",
+            n
+        ))
+    )
+
+    if ready_purchase_client:
+        return {
+            "value": "SALE",
+            "status": "INFERRED_HIGH",
+            "confidence": 0.90,
+            "evidence": ["READY_PURCHASE_CLIENT_CONTEXT"],
+            "human_confirmation_required": True,
+        }
+
     purchase_cues = []
     for p in [
         r"\bIMMEDIATE\s+PAYMENT\b",
@@ -346,11 +395,35 @@ def extract_locations(raw: str) -> List[Dict[str, Any]]:
     return list(merged.values())
 
 
+def extract_regions(raw: str) -> List[Dict[str, Any]]:
+    n=semantic_norm(raw); out=[]
+    for canon,aliases in REGION_ALIASES.items():
+        for alias in aliases:
+            a=semantic_norm(alias)
+            if re.search(rf"(?<![A-Z0-9]){re.escape(a)}(?![A-Z0-9])",n):
+                out.append({"name":canon,"kind":"REGION","constraint":"ACCEPTABLE","status":"EXPLICIT","confidence":1.0,"evidence":[alias]})
+                break
+    return out
+
+def derive_search_geography(raw: str, locations: List[Dict[str, Any]], regions: List[Dict[str, Any]]) -> Dict[str, Any]:
+    explicit=[x["name"] for x in locations if x.get("constraint")!="EXCLUDED"]
+    if explicit:
+        return {"source":"EXPLICIT_LOCALITIES","region":None,"qualifier":None,"candidate_locations":explicit,"derived":False,"client_truth":explicit}
+    if not regions:
+        return {"source":"NONE","region":None,"qualifier":None,"candidate_locations":[],"derived":False,"client_truth":[]}
+    n=semantic_norm(raw)
+    qualifier="BEACH" if re.search(r"\b(?:BEACH|NEAR THE BEACH|NEAR BEACH|BEACH SIDE|BEACHSIDE|COAST|COASTAL)\b",n) else "GENERAL"
+    region=regions[0]["name"]
+    candidates=list(REGION_SEARCH_PROFILES.get((region,qualifier)) or REGION_SEARCH_PROFILES.get((region,"GENERAL")) or [])
+    return {"source":"REGION_PROFILE","region":region,"qualifier":qualifier,"candidate_locations":candidates,"derived":True,"client_truth":[region],"safety_note":"Derived search geography is not a claim that the client named these localities."}
+
+
 def extract_area(raw: str) -> Dict[str, Any]:
     n = semantic_norm(raw)
 
     unit_patterns = [
         ("ACRE", 43560.0, r"(?:ACRE|ACRES)"),
+        ("SQM", 10.7639104167, r"(?:SQ\s*M|SQM|SQ\s*MT|SQMT|SQ\s*MTR|SQMTR|SQ\s*METRE|SQ\s*METRES|SQUARE\s*METRE|SQUARE\s*METRES)"),
         ("SQYD", 9.0, r"(?:SQ\s*YD|SQYD|SQ\s*YARD|SQ\s*YARDS|YDS|YARD|YARDS)"),
         ("SQFT", 1.0, r"(?:SQ\s*FT|SQFT|SFT)"),
     ]
@@ -419,6 +492,37 @@ def extract_area(raw: str) -> Dict[str, Any]:
         "confidence": 0.0,
         "evidence": [],
     }
+
+
+def extract_requirement_options(raw: str) -> List[Dict[str, Any]]:
+    """Preserve repeated area/location clauses as separate requirement options."""
+    n = semantic_norm(str(raw or ""))
+    units = [
+        ("ACRE",43560.0,r"(?:ACRE|ACRES)"),
+        ("SQM",10.7639104167,r"(?:SQ\s*M|SQM|SQ\s*MT|SQMT|SQ\s*MTR|SQMTR|SQ\s*METRE|SQ\s*METRES|SQUARE\s*METRE|SQUARE\s*METRES)"),
+        ("SQYD",9.0,r"(?:SQ\s*YD|SQYD|SQ\s*YARD|SQ\s*YARDS|YDS|YARD|YARDS)"),
+        ("SQFT",1.0,r"(?:SQ\s*FT|SQFT|SFT)"),
+    ]
+    hits=[]
+    for unit,factor,up in units:
+        for m in re.finditer(rf"\b(\d+(?:\.\d+)?)\s*(?:-|TO)\s*(\d+(?:\.\d+)?)\s*{up}\b",n):
+            hits.append((m.start(),m.end(),unit,factor,float(m.group(1)),float(m.group(2)),m.group(0)))
+    hits.sort(key=lambda x:x[0])
+    if len(hits)<2: return []
+    options=[]
+    for idx,hit in enumerate(hits):
+        start,end,unit,factor,lo,hi,evidence=hit
+        next_start=hits[idx+1][0] if idx+1<len(hits) else len(n)
+        segment=n[end:next_start]
+        locs=[]
+        for canon,aliases in LOCATION_ALIASES.items():
+            for alias in aliases:
+                a=semantic_norm(alias)
+                if re.search(rf"(?<![A-Z0-9]){re.escape(a)}(?![A-Z0-9])",segment):
+                    if canon not in locs: locs.append(canon)
+                    break
+        options.append({"option_number":idx+1,"area":{"dimension":"LAND_AREA" if unit=="ACRE" else "AREA","min_sqft":lo*factor,"max_sqft":hi*factor,"original_min":lo,"original_max":hi,"original_unit":unit,"constraint":"RANGE","status":"EXPLICIT","confidence":1.0,"evidence":[evidence]},"locations":locs,"status":"EXPLICIT"})
+    return options
 
 
 def extract_budget(raw: str) -> Dict[str, Any]:
@@ -509,7 +613,18 @@ def analyze(raw: str, source: str = "UNKNOWN") -> Dict[str, Any]:
     use = extract_use(raw)
     transaction = extract_transaction(raw)
     locations = extract_locations(raw)
+    regions = extract_regions(raw)
+    search_geography = derive_search_geography(raw, locations, regions)
     area = extract_area(raw)
+    requirement_options = extract_requirement_options(raw)
+    if requirement_options:
+        mins=[x["area"]["min_sqft"] for x in requirement_options]
+        maxs=[x["area"]["max_sqft"] for x in requirement_options]
+        area=dict(area)
+        area["min_sqft"]=min(mins)
+        area["max_sqft"]=max(maxs)
+        area["constraint"]="COMPOUND_ENVELOPE"
+        area["evidence"]=[e for x in requirement_options for e in x["area"]["evidence"]]
     budget = extract_budget(raw)
     project, block = extract_project_block(raw)
     n = semantic_norm(raw)
@@ -553,7 +668,7 @@ def analyze(raw: str, source: str = "UNKNOWN") -> Dict[str, Any]:
         unknowns.append("TRANSACTION")
     if asset["primary_asset"] == "UNKNOWN":
         unknowns.append("ASSET")
-    if not locations:
+    if not locations and not regions:
         unknowns.append("LOCATION")
     if budget["status"] in {"UNKNOWN", "NOT_SPECIFIED"}:
         unknowns.append("BUDGET")
@@ -575,6 +690,8 @@ def analyze(raw: str, source: str = "UNKNOWN") -> Dict[str, Any]:
         "intended_use": use,
         "transaction": transaction,
         "locations": locations,
+        "regions": regions,
+        "search_geography": search_geography,
         "area": area,
         "budget": budget,
         "project": project,
@@ -582,6 +699,7 @@ def analyze(raw: str, source: str = "UNKNOWN") -> Dict[str, Any]:
         "urgency": urgency,
         "verification": verification,
         "requirement_details": requirement_details,
+        "requirement_options": requirement_options,
         "hard_constraints": hard_constraints,
         "preferences": preferences,
         "unknowns": unknowns,

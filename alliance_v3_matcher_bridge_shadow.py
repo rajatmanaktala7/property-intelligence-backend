@@ -55,7 +55,10 @@ def _v3_locations(v3: Dict[str, Any]) -> Tuple[List[str], bool]:
     for name in preferred + acceptable:
         if name not in merged:
             merged.append(name)
-    return merged, False
+    if merged:
+        return merged, False
+    search_geo = v3.get("search_geography") or {}
+    return [str(x).upper().strip() for x in (search_geo.get("candidate_locations") or []) if str(x).strip()], False
 
 def _area(v3: Dict[str, Any]) -> Tuple[Any, Any]:
     area = v3.get("area") or {}
@@ -104,6 +107,8 @@ def build_matcher_variants_from_v3(v3: Dict[str, Any]) -> Dict[str, Any]:
             "semantic_use": _value(v3.get("intended_use") or v3.get("use") or {}, "primary_use"),
             "semantic_brain_version": v3.get("brain_version") or getattr(brain, "VERSION", "UNKNOWN"),
             "adapter_version": VERSION,
+            "region_expanded": bool((v3.get("search_geography") or {}).get("derived")),
+            "source_region": (v3.get("search_geography") or {}).get("region"),
         })
 
     if not variants:

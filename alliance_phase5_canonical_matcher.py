@@ -85,6 +85,8 @@ LOCATION_ALIASES = {
     "BAGA": ["BAGA"],
     "ARPORA": ["ARPORA"],
     "MAPUSA": ["MAPUSA"],
+    "THIVIM": ["THIVIM", "TIVIM"],
+    "COLVALE": ["COLVALE", "COMVALE"],
     "PARRA": ["PARRA"],
     "MOIRA": ["MOIRA"],
     "REIS MAGOS": ["REIS MAGOS", "REISMAGOS"],
@@ -99,7 +101,7 @@ LOCATION_ALIASES = {
 NORTH_GOA_LOCALITIES = {
     "SIOLIM", "ASSAGAO", "VAGATOR", "ANJUNA", "MORJIM", "ASHWEM",
     "MANDREM", "ARAMBOL", "CANDOLIM", "CALANGUTE", "BAGA", "ARPORA",
-    "MAPUSA", "PORVORIM", "SALIGAO", "ALDONA", "PARRA", "MOIRA",
+    "MAPUSA", "THIVIM", "COLVALE", "PORVORIM", "SALIGAO", "ALDONA", "PARRA", "MOIRA",
     "REIS MAGOS", "NERUL GOA", "SANGOLDA", "PILERNE",
 }
 
@@ -566,6 +568,17 @@ def money_value(raw: Any) -> Optional[float]:
 
 def parse_budget(raw: str) -> Tuple[Optional[float], Optional[float]]:
     safe = sanitize_text(raw).replace(",", "")
+    safe_norm = norm(safe)
+
+    if any(token in safe_norm for token in (
+        "BUDGET NO LIMIT",
+        "NO BUDGET LIMIT",
+        "UNLIMITED BUDGET",
+        "BUDGET UNLIMITED",
+        "BUDGET OPEN",
+        "OPEN BUDGET",
+    )):
+        return None, None
 
     vals = []
 
@@ -630,7 +643,13 @@ def parse_requirement(raw: str) -> Dict[str, Any]:
         )
     )
 
-    if "NORTH GOA" in raw_norm:
+    if explicit_locations:
+        location = explicit_locations[0]
+        primary_locations = explicit_locations
+        location_scope = "LOCALITY"
+        location_resolution = "STATIC_ALIAS"
+
+    elif "NORTH GOA" in raw_norm:
         location = "NORTH GOA"
         primary_locations = ["NORTH GOA"]
         location_scope = "REGION"

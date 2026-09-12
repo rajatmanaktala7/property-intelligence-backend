@@ -271,6 +271,21 @@ def main():
                 passed += 1
     print("PASS: multi_location_metamorphic", meta_count)
 
+
+    # Production-derived regression: compound North Goa land requirement.
+    goa_compound = "*Outright Requirement* - Need plots around: 500 - 1000 sqmt - Bastora , Ucassim , Guirim , Aldona ,Succor and surroundings - Need plots around ( 500 - 2000 SQMT ): Bastora , Ucassim Guirim , Saligao , and surroundings WITH VIEW OR GOOD ACCESS Few ready Buyers to close asap !!"
+    g=b.analyze(goa_compound)
+    gnames=set(names(g))
+    assert {"BASTORA","UCASSAIM","GUIRIM","ALDONA","SOCORRO","SALIGAO"}.issubset(gnames), (gnames,g)
+    assert g["transaction"]["value"]=="SALE", g["transaction"]
+    assert g["asset"]["primary_asset"]=="LAND", g["asset"]
+    assert len(g["requirement_options"])>=2, g["requirement_options"]
+    assert g["requirement_options"][0]["area"]["original_unit"]=="SQM"
+    assert g["requirement_options"][0]["area"]["original_max"]==1000.0
+    assert g["requirement_options"][1]["area"]["original_max"]==2000.0
+    passed += 1
+    print("PASS: goa_compound_land_multi_location")
+
     assert passed >= 100, passed
     print("TOTAL SEMANTIC EVALUATIONS PASS:", passed)
     print("V3 SHADOW ACCEPTANCE: PASS")

@@ -6,6 +6,7 @@ from typing import Any, Dict
 from sqlalchemy import text
 
 import alliance_requirement_brain_v3 as brain
+import alliance_semantic_trainer_v33 as trainer
 
 VERSION = "3.1.0-SHADOW-CAPTURE-REVIEW-MODE"
 MODE = "REVIEW"
@@ -126,6 +127,10 @@ def capture(engine, raw_text: str, source: str = "DEAL_MATCH") -> Dict[str, Any]
         result["persisted"] = True
         result["review_id"] = int(inserted)
         result["review_url"] = f"/semantic-v3/review/{inserted}"
+        try:
+            result["trainer_audit"] = trainer.record_audit(engine, raw_text, source=source, shadow_run_id=int(inserted))
+        except Exception as trainer_exc:
+            result["trainer_audit"] = {"persisted":False,"error":f"{type(trainer_exc).__name__}: {trainer_exc}"}
     except Exception as exc:
         result["persisted"] = False
         result["persistence_error"] = f"{type(exc).__name__}: {exc}"
@@ -143,6 +148,11 @@ def register(core) -> Dict[str, Any]:
         schema_status = f"ERROR:{type(exc).__name__}:{exc}"
 
     paths = {getattr(r, "path", None) for r in app.router.routes}
+
+    try:
+        startup_trainer_audit = trainer.audit_all_missing(core.engine)
+    except Exception as trainer_exc:
+        startup_trainer_audit = {"status":"ERROR","error":f"{type(trainer_exc).__name__}: {trainer_exc}"}
 
     if "/api/semantic-v3/status" not in paths:
         @app.get("/api/semantic-v3/status")
@@ -164,6 +174,18 @@ def register(core) -> Dict[str, Any]:
         def semantic_v3_analyze(q: str):
             return analyze(q, source="MANUAL_REVIEW_API")
         registered.append("/api/semantic-v3/analyze")
+
+    if "/api/semantic-v3/trainer-audit" not in paths:
+        @app.get("/api/semantic-v3/trainer-audit")
+        def semantic_v3_trainer_audit(limit: int = 500):
+            return trainer.audit_all_missing(core.engine, batch_size=min(max(int(limit),1),2000))
+        registered.append("/api/semantic-v3/trainer-audit")
+
+    if "/api/semantic-v3/trainer-status" not in paths:
+        @app.get("/api/semantic-v3/trainer-status")
+        def semantic_v3_trainer_status():
+            return trainer.status(core.engine)
+        registered.append("/api/semantic-v3/trainer-status")
 
     if "/api/semantic-v3/recent" not in paths:
         @app.get("/api/semantic-v3/recent")
@@ -195,4 +217,5 @@ def register(core) -> Dict[str, Any]:
         "registered_routes": registered,
         "schema_status": schema_status,
         "production_behavior_changed": False,
+        "startup_trainer_audit": startup_trainer_audit,
     }

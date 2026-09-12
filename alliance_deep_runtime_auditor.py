@@ -5,9 +5,10 @@ import httpx
 from fastapi import Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
-VERSION="2.1.0-GET-START-ROUTE-SAFE"
-BATCH_SIZE=3
-PAUSE_SECONDS=0.20
+VERSION="2.2.0-FULL-CRAWL-COVERAGE"
+BATCH_SIZE=4
+PAUSE_SECONDS=0.15
+MAX_PAGES=2000
 SEEDS=["/alliance/primary","/alliance/primary/properties","/alliance/primary/requirements","/alliance/primary/availability","/alliance/primary/matcher","/alliance/primary/followups","/property-manual","/requirement-manual","/alliance/primary/databases","/alliance/primary/requirements-hub","/alliance/final/databases","/alliance/final/requirements","/deal-match-ai-v60","/whatsapp-live","/capture-intelligence","/property-discovery","/commercial-intelligence","/hospitality-intelligence","/retail-expansion","/requirement-discovery","/marketing-contacts","/alliance/primary/ai-control","/alliance/primary/data-health","/alliance/system-doctor"]
 STATE={"running":False,"queue":[],"results":{},"discovered":set(),"error":None,"generation":0}
 
@@ -36,7 +37,9 @@ def _links(body):
     return out
 def _snap():
     vals=list(STATE["results"].values()); red=[x for x in vals if not x["ok"]]
-    return {"version":VERSION,"running":STATE["running"],"tested":len(vals),"green":len(vals)-len(red),"red":len(red),"remaining":len(STATE["queue"]),"discovered":len(STATE["discovered"]),"failures":red,"results":vals,"error":STATE["error"]}
+    tested=len(vals); discovered=len(STATE["discovered"]); remaining=len(STATE["queue"])
+    capped = tested >= MAX_PAGES and (remaining > 0 or discovered > tested)
+    return {"version":VERSION,"running":STATE["running"],"tested":tested,"green":tested-len(red),"red":len(red),"remaining":remaining,"discovered":discovered,"max_pages":MAX_PAGES,"capped":capped,"failures":red,"results":vals,"error":STATE["error"]}
 async def _worker(core,cookies,g):
     transport=httpx.ASGITransport(app=_app(core),raise_app_exceptions=False)
     try:
@@ -54,12 +57,12 @@ async def _worker(core,cookies,g):
                         item["status"]=r.status_code
                         reason=f"HTTP_{r.status_code}" if r.status_code>=400 else ("AUTH_REDIRECT" if r.url.path=="/login" else "")
                         if not reason:
-                            for marker in ("alliance is busy processing earlier requests","internal server error","traceback (most recent call last)","application error","upstream error"):
+                            for marker in ("alliance is busy processing earlier requests","internal server error","traceback (most recent call last)","application error","upstream error","database error","operationalerror"):
                                 if marker in low: reason="ERROR_CONTENT:"+marker; break
                         item["reason"]=reason or "OK"; item["ok"]=not bool(reason)
                         for x in _links(body):
                             STATE["discovered"].add(x)
-                            if x not in STATE["results"] and x not in STATE["queue"] and len(STATE["results"])+len(STATE["queue"])<300:
+                            if x not in STATE["results"] and x not in STATE["queue"] and len(STATE["results"])+len(STATE["queue"])<MAX_PAGES:
                                 STATE["queue"].append(x)
                     except Exception as exc: item["reason"]=f"{type(exc).__name__}: {exc}"
                     STATE["results"][path]=item
@@ -71,7 +74,7 @@ def _render(s):
     rows="".join(f"<tr><td>{'🟢' if x['ok'] else '🔴'}</td><td><code>{html.escape(x['path'])}</code></td><td>{x['status'] or ''}</td><td>{html.escape(x['reason'])}</td></tr>" for x in s["results"])
     failures="<br>".join(f"🔴 <code>{html.escape(x['path'])}</code> — {html.escape(x['reason'])}" for x in s["failures"]) or "None"
     refresh="<meta http-equiv='refresh' content='3'>" if s["running"] else ""
-    return f"""<!doctype html><html><head><meta charset=utf-8>{refresh}<meta name=viewport content='width=device-width,initial-scale=1'><title>Alliance Deep Audit V2.1</title><style>body{{font-family:Arial;background:#f4f7fb;margin:0}}main{{padding:18px}}.c{{background:white;border:1px solid #ddd;border-radius:10px;padding:12px;margin:10px 0}}table{{border-collapse:collapse;width:100%;background:white;font-size:11px}}th,td{{border:1px solid #aaa;padding:6px;text-align:left}}th{{background:#e9eef5}}a.btn{{display:inline-block;padding:10px 16px;background:#222;color:#fff;text-decoration:none;border-radius:7px;font-weight:700}}</style></head><body><main><h2>Alliance Deep Runtime Audit V2.1</h2><div class=c><b>{'RUNNING' if s['running'] else 'IDLE / COMPLETE'}</b> · Tested {s['tested']} · 🟢 {s['green']} · 🔴 {s['red']} · Queue {s['remaining']} · Discovered {s['discovered']}</div><a class=btn href='/alliance/deep-audit/start'>Start / Restart Audit</a><h3>Failures</h3><div class=c>{failures}</div><h3>All Results</h3><table><tr><th></th><th>Page</th><th>HTTP</th><th>Result</th></tr>{rows}</table><p><small>Read-only GET audit. No business POST/PUT/PATCH/DELETE action is executed.</small></p></main></body></html>"""
+    return f"""<!doctype html><html><head><meta charset=utf-8>{refresh}<meta name=viewport content='width=device-width,initial-scale=1'><title>Alliance Deep Audit V2.1</title><style>body{{font-family:Arial;background:#f4f7fb;margin:0}}main{{padding:18px}}.c{{background:white;border:1px solid #ddd;border-radius:10px;padding:12px;margin:10px 0}}table{{border-collapse:collapse;width:100%;background:white;font-size:11px}}th,td{{border:1px solid #aaa;padding:6px;text-align:left}}th{{background:#e9eef5}}a.btn{{display:inline-block;padding:10px 16px;background:#222;color:#fff;text-decoration:none;border-radius:7px;font-weight:700}}</style></head><body><main><h2>Alliance Deep Runtime Audit V2.2</h2><div class=c><b>{'RUNNING' if s['running'] else 'IDLE / COMPLETE'}</b> · Tested {s['tested']} · 🟢 {s['green']} · 🔴 {s['red']} · Queue {s['remaining']} · Discovered {s['discovered']} · Cap {s['max_pages']} · {'⚠️ CAPPED' if s['capped'] else 'FULL CRAWL'}</div><a class=btn href='/alliance/deep-audit/start'>Start / Restart Audit</a><h3>Failures</h3><div class=c>{failures}</div><h3>All Results</h3><table><tr><th></th><th>Page</th><th>HTTP</th><th>Result</th></tr>{rows}</table><p><small>Read-only GET audit. No business POST/PUT/PATCH/DELETE action is executed.</small></p></main></body></html>"""
 def register(core):
     app=_app(core); owned={"/alliance/deep-audit","/alliance/deep-audit/start","/api/alliance/deep-audit"}
     app.router.routes[:]=[r for r in app.router.routes if getattr(r,"path",None) not in owned]
