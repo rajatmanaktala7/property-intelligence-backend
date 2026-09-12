@@ -1391,6 +1391,15 @@ def _load_core():
             stabilization["database_rectification_v2"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","fail_safe":True}
         # ALLIANCE_DATABASE_RECTIFICATION_V2_END
 
+        # ALLIANCE_DATABASE_RECTIFICATION_V3_BEGIN
+        stabilization = dict(stabilization or {})
+        try:
+            import alliance_database_rectification_v3 as database_rectification_v3
+            stabilization["database_rectification_v3"] = database_rectification_v3.register(wrapped.core)
+        except Exception as exc:
+            stabilization["database_rectification_v3"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","fail_safe":True}
+        # ALLIANCE_DATABASE_RECTIFICATION_V3_END
+
         CORE_APP = wrapped.app
         try:
             import alliance_whatsapp_safe_ingest_v5 as safe_wa
