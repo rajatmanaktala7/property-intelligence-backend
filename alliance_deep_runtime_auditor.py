@@ -8,7 +8,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 VERSION="2.2.0-FULL-CRAWL-COVERAGE"
 BATCH_SIZE=4
 PAUSE_SECONDS=0.15
-MAX_PAGES=2000
+MAX_PAGES=5000
 SEEDS=["/alliance/primary","/alliance/primary/properties","/alliance/primary/requirements","/alliance/primary/availability","/alliance/primary/matcher","/alliance/primary/followups","/property-manual","/requirement-manual","/alliance/primary/databases","/alliance/primary/requirements-hub","/alliance/final/databases","/alliance/final/requirements","/deal-match-ai-v60","/whatsapp-live","/capture-intelligence","/property-discovery","/commercial-intelligence","/hospitality-intelligence","/retail-expansion","/requirement-discovery","/marketing-contacts","/alliance/primary/ai-control","/alliance/primary/data-health","/alliance/system-doctor"]
 STATE={"running":False,"queue":[],"results":{},"discovered":set(),"error":None,"generation":0}
 

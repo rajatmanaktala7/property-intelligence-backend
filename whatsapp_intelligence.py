@@ -1623,6 +1623,28 @@ def rejected():
     trs="".join(f"<tr><td>{esc(r['rejection_reason'])}</td><td>{esc(r['raw_text'])}</td><td>{esc(r['created_at'])}</td></tr>" for r in rows)
     return HTMLResponse(shell("Rejected Messages",f"<h2>Rejected / Noise</h2><div class=scroll><table><tr><th>Reason</th><th>Original Message</th><th>Date</th></tr>{trs}</table></div>","Rejected"))
 
+def _alliance_xlsx_safe_v1(value):
+    import datetime as _dt
+    import decimal as _decimal
+    import uuid as _uuid
+
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, _uuid.UUID):
+        return str(value)
+    if isinstance(value, _decimal.Decimal):
+        return float(value)
+    if isinstance(value, (_dt.datetime, _dt.date, _dt.time)):
+        if isinstance(value, _dt.datetime) and value.tzinfo is not None:
+            return value.isoformat()
+        return value
+    if isinstance(value, (dict, list, tuple, set)):
+        return json.dumps(value, ensure_ascii=False, default=str)
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
+
+
 @router.get("/export.xlsx")
 def export_excel():
     require_wa_db()
@@ -1645,8 +1667,7 @@ def export_excel():
                     vals=[]
                     for h in headers:
                         v=r[h]
-                        if isinstance(v,(dict,list)):v=json.dumps(v,ensure_ascii=False)
-                        vals.append(v)
+                        vals.append(_alliance_xlsx_safe_v1(v))
                     ws.append(vals)
     bio=io.BytesIO();wb.save(bio);bio.seek(0)
     headers={"Content-Disposition":'attachment; filename="whatsapp_property_intelligence.xlsx"'}

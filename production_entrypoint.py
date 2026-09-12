@@ -1351,6 +1351,31 @@ def _load_core():
             stabilization["alliance_deep_runtime_auditor"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","fail_safe":True}
             print("[alliance-deep-runtime-auditor] warning:", type(exc).__name__, str(exc))
 
+        # ALLIANCE_SEMANTIC_REVIEW_LATE_SELF_HEAL_V1
+        try:
+            import alliance_semantic_review_v3 as semantic_review_v3
+            semantic_review_result = semantic_review_v3.register(wrapped.core)
+            semantic_review_paths = {
+                getattr(r, "path", None) for r in wrapped.app.router.routes
+            }
+            if "/semantic-v3/review" not in semantic_review_paths:
+                raise RuntimeError("semantic review route missing after late registration")
+            stabilization = dict(stabilization or {})
+            stabilization["semantic_review_late_self_heal_v1"] = {
+                "status": "READY",
+                "registration": semantic_review_result,
+                "route": "/semantic-v3/review",
+            }
+            print("[semantic-review-late-self-heal-v1] READY")
+        except Exception as exc:
+            stabilization = dict(stabilization or {})
+            stabilization["semantic_review_late_self_heal_v1"] = {
+                "status": "ERROR",
+                "error": f"{type(exc).__name__}: {exc}",
+                "fail_safe": True,
+            }
+            print("[semantic-review-late-self-heal-v1] warning:", type(exc).__name__, str(exc))
+
         CORE_APP = wrapped.app
         try:
             import alliance_whatsapp_safe_ingest_v5 as safe_wa
