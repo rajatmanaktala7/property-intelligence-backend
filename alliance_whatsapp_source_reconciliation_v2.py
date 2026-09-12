@@ -9,7 +9,7 @@ from fastapi import HTTPException, Request
 from fastapi.responses import HTMLResponse
 from sqlalchemy import inspect, text
 
-VERSION = "2.0.0-READ-ONLY-MULTISTORE-WHATSAPP-FORENSICS"
+VERSION = "2.1.0-READ-ONLY-AUTHORITY-AUTH-MULTISTORE-WHATSAPP-FORENSICS"
 API_ROUTE = "/api/alliance/whatsapp-reconciliation-v2"
 PAGE_ROUTE = "/alliance/admin/whatsapp-reconciliation-v2"
 CACHE_SECONDS = 60
@@ -68,15 +68,14 @@ def _wa_engine():
             pass
     return None
 
-def _auth_guard(request: Request):
-    # Privacy-first: detailed operational routes require an existing authenticated
-    # Alliance session. We deliberately do not invent a new credential system.
-    session = getattr(request, "session", None)
-    if not session:
-        raise HTTPException(status_code=401, detail="Alliance staff authentication required")
-    keys = ("user", "username", "email", "staff", "admin", "authenticated", "is_authenticated")
-    if not any(session.get(k) for k in keys):
-        raise HTTPException(status_code=401, detail="Alliance staff authentication required")
+def _auth_guard(core, request: Request):
+    # Reuse Alliance's existing authoritative authentication contract.
+    # Avoid direct Request.session access; it may raise when SessionMiddleware
+    # is not the auth mechanism serving this application.
+    try:
+        core.need_login(request)
+    except Exception as exc:
+        raise HTTPException(status_code=401, detail="Login required") from exc
 
 def _group_forensics(wa_engine, main_engine):
     wt = _tables(wa_engine)
@@ -242,16 +241,16 @@ def register(core) -> Dict[str, Any]:
     if API_ROUTE not in paths:
         @app.get(API_ROUTE)
         def api(request: Request, force: bool=False):
-            _auth_guard(request)
+            _auth_guard(core, request)
             return audit(core, force=force)
         registered.append(API_ROUTE)
     if PAGE_ROUTE not in paths:
         @app.get(PAGE_ROUTE, response_class=HTMLResponse)
         def page(request: Request, force: bool=False):
-            _auth_guard(request)
+            _auth_guard(core, request)
             return HTMLResponse(_page(audit(core, force=force)))
         registered.append(PAGE_ROUTE)
     return {"status":"REGISTERED","version":VERSION,"mode":"READ_ONLY",
             "routes":[API_ROUTE,PAGE_ROUTE],"registered_now":registered,
             "source_mutations":0,"master_mutations":0,"matcher_mutations":0,
-            "privacy":"STAFF_SESSION_REQUIRED","cache_seconds":CACHE_SECONDS}
+            "privacy":"ALLIANCE_AUTHORITY_REQUIRED","cache_seconds":CACHE_SECONDS}

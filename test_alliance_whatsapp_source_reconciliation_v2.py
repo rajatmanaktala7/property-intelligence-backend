@@ -10,7 +10,7 @@ def load():
 
 def test_contract():
     m=load()
-    assert m.VERSION.startswith("2.0.0-READ-ONLY-MULTISTORE")
+    assert m.VERSION.startswith("2.1.0-READ-ONLY-AUTHORITY-AUTH-MULTISTORE")
     assert m.API_ROUTE=="/api/alliance/whatsapp-reconciliation-v2"
     assert m.PAGE_ROUTE=="/alliance/admin/whatsapp-reconciliation-v2"
 
@@ -27,6 +27,13 @@ def test_multistore_and_privacy():
     assert "configured_sources" not in s
     assert "observed_sources" in s
 
+
+def test_authoritative_auth_contract():
+    s=MOD.read_text(encoding="utf-8")
+    assert "core.need_login(request)" in s
+    assert 'getattr(request, "session"' not in s
+    assert "ALLIANCE_AUTHORITY_REQUIRED" in s
+
 def test_wiring_preserves_authority():
     s=ENTRY.read_text(encoding="utf-8")
     assert "# ALLIANCE_WHATSAPP_SOURCE_RECONCILIATION_V2_BEGIN" in s
@@ -39,7 +46,7 @@ def test_master_only_unchanged():
     assert "MASTER_ONLY" in s and "pi_master_properties_v711" in s
 
 def main():
-    for f in (test_contract,test_read_only,test_multistore_and_privacy,test_wiring_preserves_authority,test_master_only_unchanged):
+    for f in (test_contract,test_read_only,test_multistore_and_privacy,test_authoritative_auth_contract,test_wiring_preserves_authority,test_master_only_unchanged):
         f(); print("PASS:",f.__name__)
     print("WHATSAPP SOURCE RECONCILIATION V2 ACCEPTANCE: PASS")
 if __name__=="__main__": main()
