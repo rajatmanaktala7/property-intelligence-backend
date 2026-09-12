@@ -1380,35 +1380,60 @@ def _load_core():
                 "error":f"{type(exc).__name__}: {exc}",
             }
             print("[whatsapp-safe-queue] warning:", type(exc).__name__, str(exc))
-        # ALLIANCE_SEMANTIC_REVIEW_FINAL_AUTHORITY_V2
+        # ALLIANCE_SEMANTIC_REVIEW_AUTHORITATIVE_APP_BRIDGE_V3
         try:
+            from types import SimpleNamespace
+            import alliance_semantic_review_v3 as semantic_review_v3_final
+
+            # CORE_APP is served from wrapped.app.
+            # The semantic registrar expects an object exposing .app and .engine.
+            # Passing wrapped.core registers on wrapped.core.app, which is not
+            # necessarily the served authoritative app.
+            semantic_authority = SimpleNamespace(
+                app=wrapped.app,
+                engine=wrapped.core.engine,
+            )
+
+            semantic_registration_v3 = semantic_review_v3_final.register(
+                semantic_authority
+            )
+
             semantic_paths = {
                 getattr(r, "path", None) for r in wrapped.app.router.routes
             }
-            if "/semantic-v3/review" not in semantic_paths:
-                import alliance_semantic_review_v3 as semantic_review_v3_final
-                semantic_review_v3_final.register(wrapped.core)
-                semantic_paths = {
-                    getattr(r, "path", None) for r in wrapped.app.router.routes
-                }
-            if "/semantic-v3/review" not in semantic_paths:
-                raise RuntimeError("final semantic review authority missing")
-            stabilization = dict(stabilization or {})
-            stabilization["semantic_review_final_authority_v2"] = {
-                "status": "READY",
-                "route": "/semantic-v3/review",
-                "final_route_count": len(semantic_paths),
+            required_semantic_routes = {
+                "/semantic-v3/review",
+                "/semantic-v3/review/{run_id}",
+                "/api/semantic-v3/review/{run_id}",
+                "/api/semantic-v3/review-stats",
             }
-            print("[semantic-review-final-authority-v2] READY")
+            missing_semantic_routes = sorted(
+                required_semantic_routes - semantic_paths
+            )
+            if missing_semantic_routes:
+                raise RuntimeError(
+                    "authoritative semantic routes missing: "
+                    + ",".join(missing_semantic_routes)
+                )
+
+            stabilization = dict(stabilization or {})
+            stabilization["semantic_review_authoritative_app_bridge_v3"] = {
+                "status": "READY",
+                "owner": "wrapped.app",
+                "served_as": "CORE_APP",
+                "registration": semantic_registration_v3,
+                "routes": sorted(required_semantic_routes),
+            }
+            print("[semantic-review-authoritative-app-bridge-v3] READY")
         except Exception as exc:
             stabilization = dict(stabilization or {})
-            stabilization["semantic_review_final_authority_v2"] = {
+            stabilization["semantic_review_authoritative_app_bridge_v3"] = {
                 "status": "ERROR",
                 "error": f"{type(exc).__name__}: {exc}",
                 "fail_safe": True,
             }
             print(
-                "[semantic-review-final-authority-v2] warning:",
+                "[semantic-review-authoritative-app-bridge-v3] warning:",
                 type(exc).__name__,
                 str(exc),
             )
