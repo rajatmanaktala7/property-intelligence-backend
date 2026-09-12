@@ -1645,33 +1645,175 @@ def _alliance_xlsx_safe_v1(value):
     return str(value)
 
 
+_ALLIANCE_EXPORT_STATE = {
+    "status": "IDLE",
+    "started_at": None,
+    "completed_at": None,
+    "error": None,
+    "rows_written": 0,
+    "sheets_completed": 0,
+}
+_ALLIANCE_EXPORT_LOCK = None
+_ALLIANCE_EXPORT_CACHE_SECONDS = 900
+
+
+def _alliance_export_lock():
+    global _ALLIANCE_EXPORT_LOCK
+    if _ALLIANCE_EXPORT_LOCK is None:
+        import threading
+        _ALLIANCE_EXPORT_LOCK = threading.Lock()
+    return _ALLIANCE_EXPORT_LOCK
+
+
+def _alliance_export_cache_path():
+    import tempfile
+    from pathlib import Path
+    return Path(tempfile.gettempdir()) / "alliance_whatsapp_property_intelligence.xlsx"
+
+
+def _alliance_build_export_v2():
+    import os
+    import tempfile
+    from datetime import datetime, timezone
+    from openpyxl import Workbook
+
+    global _ALLIANCE_EXPORT_STATE
+    cache = _alliance_export_cache_path()
+    fd, tmp_name = tempfile.mkstemp(prefix="alliance-wa-export-", suffix=".xlsx")
+    os.close(fd)
+
+    queries = [
+        ("WA Properties", "SELECT * FROM wa_properties ORDER BY id"),
+        ("WA Requirements", "SELECT * FROM wa_requirements ORDER BY id"),
+        ("WA Contacts", "SELECT * FROM wa_contacts ORDER BY id"),
+        ("Needs Review", "SELECT * FROM wa_review_queue ORDER BY id"),
+        ("Rejected", "SELECT * FROM wa_rejected ORDER BY id"),
+        ("Source Messages", "SELECT * FROM wa_messages ORDER BY id"),
+    ]
+
+    lock = _alliance_export_lock()
+    if not lock.acquire(blocking=False):
+        return
+
+    try:
+        _ALLIANCE_EXPORT_STATE = {
+            "status": "RUNNING",
+            "started_at": datetime.now(timezone.utc).isoformat(),
+            "completed_at": None,
+            "error": None,
+            "rows_written": 0,
+            "sheets_completed": 0,
+        }
+
+        wb = Workbook(write_only=True)
+        default = wb.active
+        if default is not None:
+            wb.remove(default)
+
+        with wa_engine.connect().execution_options(stream_results=True) as c:
+            for name, q in queries:
+                ws = wb.create_sheet(name)
+                result = c.execute(text(q)).mappings().yield_per(1000)
+                headers = list(result.keys())
+                if headers:
+                    ws.append(headers)
+                for row in result:
+                    ws.append([_alliance_xlsx_safe_v1(row[h]) for h in headers])
+                    _ALLIANCE_EXPORT_STATE["rows_written"] += 1
+                _ALLIANCE_EXPORT_STATE["sheets_completed"] += 1
+
+        wb.save(tmp_name)
+        os.replace(tmp_name, cache)
+        _ALLIANCE_EXPORT_STATE["status"] = "READY"
+        _ALLIANCE_EXPORT_STATE["completed_at"] = datetime.now(timezone.utc).isoformat()
+
+    except Exception as exc:
+        _ALLIANCE_EXPORT_STATE["status"] = "ERROR"
+        _ALLIANCE_EXPORT_STATE["error"] = f"{type(exc).__name__}: {exc}"
+        try:
+            if os.path.exists(tmp_name):
+                os.unlink(tmp_name)
+        except Exception:
+            pass
+    finally:
+        lock.release()
+
+
+@router.get("/export-status")
+def export_status():
+    from datetime import datetime, timezone
+    cache = _alliance_export_cache_path()
+    age_seconds = None
+    if cache.exists():
+        try:
+            age_seconds = max(
+                0.0,
+                datetime.now(timezone.utc).timestamp() - cache.stat().st_mtime,
+            )
+        except Exception:
+            age_seconds = None
+    return {
+        **dict(_ALLIANCE_EXPORT_STATE),
+        "cache_exists": cache.exists(),
+        "cache_age_seconds": age_seconds,
+        "cache_ttl_seconds": _ALLIANCE_EXPORT_CACHE_SECONDS,
+        "download": "/whatsapp-intelligence/export.xlsx",
+    }
+
+
 @router.get("/export.xlsx")
 def export_excel():
+    import threading
+    from datetime import datetime, timezone
+    from fastapi.responses import FileResponse
+
     require_wa_db()
-    wb=Workbook();wb.remove(wb.active)
-    queries=[
-        ("WA Properties","SELECT * FROM wa_properties ORDER BY id"),
-        ("WA Requirements","SELECT * FROM wa_requirements ORDER BY id"),
-        ("WA Contacts","SELECT * FROM wa_contacts ORDER BY id"),
-        ("Needs Review","SELECT * FROM wa_review_queue ORDER BY id"),
-        ("Rejected","SELECT * FROM wa_rejected ORDER BY id"),
-        ("Source Messages","SELECT * FROM wa_messages ORDER BY id")
-    ]
-    with wa_engine.begin() as c:
-        for name,q in queries:
-            ws=wb.create_sheet(name)
-            rows=c.execute(text(q)).mappings().all()
-            if rows:
-                headers=list(rows[0].keys());ws.append(headers)
-                for r in rows:
-                    vals=[]
-                    for h in headers:
-                        v=r[h]
-                        vals.append(_alliance_xlsx_safe_v1(v))
-                    ws.append(vals)
-    bio=io.BytesIO();wb.save(bio);bio.seek(0)
-    headers={"Content-Disposition":'attachment; filename="whatsapp_property_intelligence.xlsx"'}
-    return StreamingResponse(bio,media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",headers=headers)
+    cache = _alliance_export_cache_path()
+    fresh = False
+    if cache.exists():
+        try:
+            age = datetime.now(timezone.utc).timestamp() - cache.stat().st_mtime
+            fresh = age <= _ALLIANCE_EXPORT_CACHE_SECONDS
+        except Exception:
+            fresh = False
+
+    if fresh:
+        return FileResponse(
+            str(cache),
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            filename="whatsapp_property_intelligence.xlsx",
+            headers={"Cache-Control": "no-store"},
+        )
+
+    if _ALLIANCE_EXPORT_STATE.get("status") != "RUNNING":
+        threading.Thread(
+            target=_alliance_build_export_v2,
+            daemon=True,
+            name="alliance-whatsapp-export-v2",
+        ).start()
+
+    if cache.exists():
+        return FileResponse(
+            str(cache),
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            filename="whatsapp_property_intelligence.xlsx",
+            headers={
+                "Cache-Control": "no-store",
+                "X-Alliance-Export-Refresh": "running",
+            },
+        )
+
+    return JSONResponse(
+        {
+            "status": "BUILDING",
+            "message": "Full WhatsApp export is building in the background. Retry shortly.",
+            "status_url": "/whatsapp-intelligence/export-status",
+            "download_url": "/whatsapp-intelligence/export.xlsx",
+        },
+        status_code=202,
+        headers={"Retry-After": "5", "Cache-Control": "no-store"},
+    )
+
 
 @router.get("/health")
 def health():

@@ -178,23 +178,14 @@ async def boot_status():
 
 @health_app.get("/runtime-status")
 async def runtime_status():
-    pool_snapshot = None
-    try:
-        if CORE_APP is not None:
-            import app as _core_app
-            p = _core_app.engine.pool
-            pool_snapshot = {
-                "class": type(p).__name__,
-                "status": p.status() if hasattr(p, "status") else "unknown",
-                "size": p.size() if hasattr(p, "size") else None,
-                "checked_in": p.checkedin() if hasattr(p, "checkedin") else None,
-                "checked_out": p.checkedout() if hasattr(p, "checkedout") else None,
-                "overflow": p.overflow() if hasattr(p, "overflow") else None,
-            }
-    except Exception as exc:
-        pool_snapshot = {"error": f"{type(exc).__name__}: {exc}"}
+    # Health-shell invariant: this endpoint must never import the core DB engine,
+    # acquire a DB connection, or wait on application work.
     return {
-        "db_pool_status": pool_snapshot,
+        "db_pool_status": {
+            "status": "DEFERRED",
+            "diagnostic": "/api/system/db-pool-status",
+            "reason": "runtime-status is intentionally nonblocking",
+        },
         "status": "OK",
         "version": VERSION,
         "boot_state": BOOT["state"],
@@ -1389,6 +1380,39 @@ def _load_core():
                 "error":f"{type(exc).__name__}: {exc}",
             }
             print("[whatsapp-safe-queue] warning:", type(exc).__name__, str(exc))
+        # ALLIANCE_SEMANTIC_REVIEW_FINAL_AUTHORITY_V2
+        try:
+            semantic_paths = {
+                getattr(r, "path", None) for r in wrapped.app.router.routes
+            }
+            if "/semantic-v3/review" not in semantic_paths:
+                import alliance_semantic_review_v3 as semantic_review_v3_final
+                semantic_review_v3_final.register(wrapped.core)
+                semantic_paths = {
+                    getattr(r, "path", None) for r in wrapped.app.router.routes
+                }
+            if "/semantic-v3/review" not in semantic_paths:
+                raise RuntimeError("final semantic review authority missing")
+            stabilization = dict(stabilization or {})
+            stabilization["semantic_review_final_authority_v2"] = {
+                "status": "READY",
+                "route": "/semantic-v3/review",
+                "final_route_count": len(semantic_paths),
+            }
+            print("[semantic-review-final-authority-v2] READY")
+        except Exception as exc:
+            stabilization = dict(stabilization or {})
+            stabilization["semantic_review_final_authority_v2"] = {
+                "status": "ERROR",
+                "error": f"{type(exc).__name__}: {exc}",
+                "fail_safe": True,
+            }
+            print(
+                "[semantic-review-final-authority-v2] warning:",
+                type(exc).__name__,
+                str(exc),
+            )
+
         BOOT["core_loaded"] = True
         BOOT["state"] = "READY" if stabilization.get("registered") else "DEGRADED"
         BOOT["stabilization"] = stabilization
