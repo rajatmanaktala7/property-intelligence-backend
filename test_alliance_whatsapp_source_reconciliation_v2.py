@@ -10,7 +10,7 @@ def load():
 
 def test_contract():
     m=load()
-    assert m.VERSION.startswith("2.1.0-READ-ONLY-AUTHORITY-AUTH-MULTISTORE")
+    assert m.VERSION.startswith("2.2.0-READ-ONLY-SAFE-HTML-MULTISTORE")
     assert m.API_ROUTE=="/api/alliance/whatsapp-reconciliation-v2"
     assert m.PAGE_ROUTE=="/alliance/admin/whatsapp-reconciliation-v2"
 
@@ -34,6 +34,19 @@ def test_authoritative_auth_contract():
     assert 'getattr(request, "session"' not in s
     assert "ALLIANCE_AUTHORITY_REQUIRED" in s
 
+
+def test_page_renderer_css_and_escaping():
+    m=load()
+    data={"status":"FAIL","totals":{"observed_sources":1,"groups_pass":0,"groups_fail":1},
+          "groups":[{"group":"<script>alert(1)</script>","declared_messages":3,"wa_messages":0,
+                      "wai_raw_messages_by_group_name":0,"wa_properties":0,"status":"FAIL",
+                      "gaps":[{"code":"SOURCE_MESSAGE_COUNT_MISMATCH"}]}]}
+    page=m._page(data)
+    assert "font-family:Arial" in page
+    assert "<script>alert(1)</script>" not in page
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in page
+    assert "SOURCE_MESSAGE_COUNT_MISMATCH" in page
+
 def test_wiring_preserves_authority():
     s=ENTRY.read_text(encoding="utf-8")
     assert "# ALLIANCE_WHATSAPP_SOURCE_RECONCILIATION_V2_BEGIN" in s
@@ -46,7 +59,7 @@ def test_master_only_unchanged():
     assert "MASTER_ONLY" in s and "pi_master_properties_v711" in s
 
 def main():
-    for f in (test_contract,test_read_only,test_multistore_and_privacy,test_authoritative_auth_contract,test_wiring_preserves_authority,test_master_only_unchanged):
+    for f in (test_contract,test_read_only,test_multistore_and_privacy,test_authoritative_auth_contract,test_page_renderer_css_and_escaping,test_wiring_preserves_authority,test_master_only_unchanged):
         f(); print("PASS:",f.__name__)
     print("WHATSAPP SOURCE RECONCILIATION V2 ACCEPTANCE: PASS")
 if __name__=="__main__": main()

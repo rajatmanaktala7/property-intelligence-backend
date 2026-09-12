@@ -9,7 +9,7 @@ from fastapi import HTTPException, Request
 from fastapi.responses import HTMLResponse
 from sqlalchemy import inspect, text
 
-VERSION = "2.1.0-READ-ONLY-AUTHORITY-AUTH-MULTISTORE-WHATSAPP-FORENSICS"
+VERSION = "2.2.0-READ-ONLY-SAFE-HTML-MULTISTORE-WHATSAPP-FORENSICS"
 API_ROUTE = "/api/alliance/whatsapp-reconciliation-v2"
 PAGE_ROUTE = "/alliance/admin/whatsapp-reconciliation-v2"
 CACHE_SECONDS = 60
@@ -215,24 +215,45 @@ def _page(data):
     rows = []
     for g in data.get("groups", []):
         gaps = ", ".join(html.escape(x.get("code","")) for x in g.get("gaps", [])) or "—"
-        rows.append("<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>".format(
-            html.escape(str(g.get("group",""))),
-            html.escape(str(g.get("declared_messages",""))),
-            html.escape(str(g.get("wa_messages",""))),
-            html.escape(str(g.get("wai_raw_messages_by_group_name",""))),
-            html.escape(str(g.get("wa_properties",""))),
-            html.escape(str(g.get("status",""))), gaps))
-    return """<!doctype html><html><head><title>Alliance WhatsApp Source Reconciliation V2</title>
-<style>body{font-family:Arial;margin:24px}table{border-collapse:collapse;width:100%}td,th{border:1px solid #ddd;padding:7px;text-align:left}.muted{color:#666}</style></head>
-<body><h1>Alliance WhatsApp Source Reconciliation V2</h1>
-<p class="muted">Read-only multi-store forensic view. “Observed sources” means wa_sources rows, not asserted connector configuration.</p>
-<p>Status: <b>{}</b> · Observed sources: {} · Pass: {} · Fail: {}</p>
-<table><tr><th>Observed source/group</th><th>Declared</th><th>wa_messages</th><th>wai_raw</th><th>wa_properties</th><th>Status</th><th>Gaps</th></tr>{}</table></body></html>""".format(
-        html.escape(str(data.get("status"))),
-        data.get("totals",{}).get("observed_sources",0),
-        data.get("totals",{}).get("groups_pass",0),
-        data.get("totals",{}).get("groups_fail",0),
-        "".join(rows))
+        cells = [
+            g.get("group",""),
+            g.get("declared_messages",""),
+            g.get("wa_messages",""),
+            g.get("wai_raw_messages_by_group_name",""),
+            g.get("wa_properties",""),
+            g.get("status",""),
+        ]
+        rows.append(
+            "<tr>" +
+            "".join("<td>" + html.escape(str(v)) + "</td>" for v in cells) +
+            "<td>" + gaps + "</td></tr>"
+        )
+
+    totals = data.get("totals", {})
+    status = html.escape(str(data.get("status", "")))
+    observed = html.escape(str(totals.get("observed_sources", 0)))
+    passed = html.escape(str(totals.get("groups_pass", 0)))
+    failed = html.escape(str(totals.get("groups_fail", 0)))
+
+    return (
+        "<!doctype html><html><head>"
+        "<title>Alliance WhatsApp Source Reconciliation V2</title>"
+        "<style>"
+        "body{font-family:Arial;margin:24px}"
+        "table{border-collapse:collapse;width:100%}"
+        "td,th{border:1px solid #ddd;padding:7px;text-align:left}"
+        ".muted{color:#666}"
+        "</style></head><body>"
+        "<h1>Alliance WhatsApp Source Reconciliation V2</h1>"
+        "<p class='muted'>Read-only multi-store forensic view. "
+        "Observed sources means wa_sources rows, not asserted connector configuration.</p>"
+        "<p>Status: <b>" + status + "</b> · Observed sources: " + observed +
+        " · Pass: " + passed + " · Fail: " + failed + "</p>"
+        "<table><tr><th>Observed source/group</th><th>Declared</th>"
+        "<th>wa_messages</th><th>wai_raw</th><th>wa_properties</th>"
+        "<th>Status</th><th>Gaps</th></tr>" + "".join(rows) +
+        "</table></body></html>"
+    )
 
 def register(core) -> Dict[str, Any]:
     app = core.app
