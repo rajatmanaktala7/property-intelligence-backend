@@ -1438,6 +1438,20 @@ def _load_core():
                 str(exc),
             )
 
+        # ALLIANCE_WHATSAPP_RECONCILIATION_AUDITOR_V11_BEGIN
+        stabilization = dict(BOOT.get("stabilization") or {})
+        try:
+            import alliance_whatsapp_reconciliation_auditor_v11 as wa_recon_v11
+            stabilization["whatsapp_reconciliation_auditor_v11"] = wa_recon_v11.register(wrapped.core)
+        except Exception as exc:
+            stabilization["whatsapp_reconciliation_auditor_v11"] = {
+                "status": "ERROR",
+                "error": f"{type(exc).__name__}: {exc}",
+                "fail_safe": True,
+            }
+        BOOT["stabilization"] = stabilization
+        # ALLIANCE_WHATSAPP_RECONCILIATION_AUDITOR_V11_END
+
         BOOT["core_loaded"] = True
         BOOT["state"] = "READY" if stabilization.get("registered") else "DEGRADED"
         BOOT["stabilization"] = stabilization
