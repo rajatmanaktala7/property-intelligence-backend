@@ -9,7 +9,7 @@ def load():
 
 def test_contract():
     m=load()
-    assert m.VERSION.startswith("1.0.0-CANONICAL-RECTIFICATION")
+    assert m.VERSION.startswith("1.1.0-CANONICAL-RECTIFICATION")
     assert m.RUN_EVERY_SECONDS==900
     assert m._canon_name("WhatsApp Chat with GOA TOP  REAL ESTATE AGENT.txt")=="goa top real estate agent"
 
@@ -23,7 +23,21 @@ def test_master_only_unchanged():
     assert "MASTER_ONLY" in p
     assert "pi_master_properties_v711" in p
 
+
+def test_core_app_adapter_contract():
+    m=load()
+    class App: pass
+    class Core: pass
+    c=Core(); c.app=App()
+    assert m._app(c) is c.app
+    assert m._app(c.app) is c.app
+    source=MOD.read_text(encoding="utf-8")
+    assert "@app.get(" in source
+    assert "@app.post(" in source
+    assert "@core.get(" not in source
+    assert "@core.post(" not in source
+
 if __name__=="__main__":
-    for f in (test_contract,test_non_destructive_policy,test_master_only_unchanged):
+    for f in (test_contract,test_non_destructive_policy,test_master_only_unchanged,test_core_app_adapter_contract):
         f(); print("PASS:",f.__name__)
     print("DATABASE RECTIFICATION V1 ACCEPTANCE: PASS")

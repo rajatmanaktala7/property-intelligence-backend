@@ -6,7 +6,7 @@ from fastapi import HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy import inspect, text
 
-VERSION = "1.0.0-CANONICAL-RECTIFICATION-SAFE-AUTO"
+VERSION = "1.1.0-CANONICAL-RECTIFICATION-CORE-APP-COMPAT"
 RUN_EVERY_SECONDS = 900
 BOOT_DELAY_SECONDS = 90
 _LOCK = threading.Lock()
@@ -14,6 +14,10 @@ _LAST = {"status":"IDLE","version":VERSION,"last_run":None,"last_error":None,"mo
 
 def _now():
     return datetime.now(timezone.utc)
+
+def _app(core):
+    app = getattr(core, "app", None)
+    return app or core
 
 def _auth(core, request: Request):
     try:
@@ -212,24 +216,38 @@ def _worker(core):
         time.sleep(RUN_EVERY_SECONDS)
 
 def register(core):
-    routes = {getattr(r,"path",None) for r in getattr(core,"routes",[])}
+    app = _app(core)
+    routes = {getattr(r, "path", None) for r in getattr(app, "routes", [])}
+    if not routes and hasattr(app, "router"):
+        routes = {getattr(r, "path", None) for r in getattr(app.router, "routes", [])}
     added = []
+
     if "/api/alliance/database-rectification-v1/status" not in routes:
-        @core.get("/api/alliance/database-rectification-v1/status")
+        @app.get("/api/alliance/database-rectification-v1/status")
         async def rect_status(request: Request):
-            _auth(core,request); return JSONResponse(_status(core))
+            _auth(core, request)
+            return JSONResponse(_status(core))
         added.append("/api/alliance/database-rectification-v1/status")
+
     if "/api/alliance/database-rectification-v1/run" not in routes:
-        @core.post("/api/alliance/database-rectification-v1/run")
+        @app.post("/api/alliance/database-rectification-v1/run")
         async def rect_run(request: Request):
-            _auth(core,request); return JSONResponse(_run(core))
+            _auth(core, request)
+            return JSONResponse(_run(core))
         added.append("/api/alliance/database-rectification-v1/run")
+
     if "/alliance/admin/database-rectification-v1" not in routes:
-        @core.get("/alliance/admin/database-rectification-v1",response_class=HTMLResponse)
+        @app.get("/alliance/admin/database-rectification-v1", response_class=HTMLResponse)
         async def rect_page(request: Request):
-            _auth(core,request); return HTMLResponse(_page(core))
+            _auth(core, request)
+            return HTMLResponse(_page(core))
         added.append("/alliance/admin/database-rectification-v1")
-    if not getattr(core.state,"alliance_rectification_worker_v1",False):
-        core.state.alliance_rectification_worker_v1=True
+
+    state = getattr(app, "state", None)
+    already_started = bool(getattr(state, "alliance_rectification_worker_v1", False)) if state is not None else False
+    if not already_started:
+        if state is not None:
+            setattr(state, "alliance_rectification_worker_v1", True)
         threading.Thread(target=_worker,args=(core,),daemon=True,name="alliance-rectification-v1").start()
-    return {"status":"REGISTERED","version":VERSION,"mode":"SAFE_CANONICAL_ONLY","routes":added,"automatic_interval_seconds":RUN_EVERY_SECONDS,"raw_source_mutations":0,"master_mutations":0,"matcher_mutations":0}
+
+    return {"status":"REGISTERED","version":VERSION,"mode":"SAFE_CANONICAL_ONLY","routes":added,"automatic_interval_seconds":RUN_EVERY_SECONDS,"raw_source_mutations":0,"master_mutations":0,"matcher_mutations":0,"core_app_compat":True}
