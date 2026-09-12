@@ -233,7 +233,7 @@ code{{background:#f5eee5;padding:4px 6px;border-radius:5px}}
 <p>The health service is online while the main application loads independently.</p>
 <p><b>Boot state:</b> <code>{BOOT["state"]}</code></p>
 <p><b>Detail:</b> <code>{err}</code></p>
-<p><a href="/healthz">Health</a> ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â· <a href="/boot-status">Boot Status</a></p>
+<p><a href="/healthz">Health</a> ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â· <a href="/boot-status">Boot Status</a></p>
 </main>
 </body>
 </html>""",
@@ -1366,6 +1366,21 @@ def _load_core():
                 "fail_safe": True,
             }
             print("[semantic-review-late-self-heal-v1] warning:", type(exc).__name__, str(exc))
+
+        # ALLIANCE_DATABASE_RECTIFICATION_V1_BEGIN
+        stabilization = dict(stabilization or {})
+        try:
+            import alliance_database_rectification_v1 as database_rectification_v1
+            stabilization["database_rectification_v1"] = database_rectification_v1.register(wrapped.core)
+        except Exception as exc:
+            stabilization = dict(stabilization or {})
+            stabilization["database_rectification_v1"] = {
+                "status":"ERROR",
+                "error":f"{type(exc).__name__}: {exc}",
+                "fail_safe":True,
+            }
+            print("[database-rectification-v1] warning:", type(exc).__name__, str(exc))
+        # ALLIANCE_DATABASE_RECTIFICATION_V1_END
 
         CORE_APP = wrapped.app
         try:
