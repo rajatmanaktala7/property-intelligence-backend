@@ -1420,6 +1420,23 @@ def _load_core():
 
         CORE_APP = wrapped.app
 
+        # ALLIANCE_TEAM_READY_CERTIFICATION_V1
+        try:
+            import alliance_team_ready_certification_v1 as _team_ready_cert_v1
+            TEAM_READY_CERTIFICATION_V1 = _team_ready_cert_v1.register(wrapped)
+            stabilization = dict(stabilization or {})
+            stabilization["team_ready_certification_v1"] = TEAM_READY_CERTIFICATION_V1
+        except Exception as _team_ready_cert_v1_exc:
+            TEAM_READY_CERTIFICATION_V1 = {
+                "status": "ERROR",
+                "version": "1.0.0-TEAM-READY-GOLD-CERTIFICATION",
+                "error": f"{type(_team_ready_cert_v1_exc).__name__}: {_team_ready_cert_v1_exc}",
+                "fail_safe": True,
+            }
+            stabilization = dict(stabilization or {})
+            stabilization["team_ready_certification_v1"] = TEAM_READY_CERTIFICATION_V1
+            print("[team-ready-cert-v1] warning:", type(_team_ready_cert_v1_exc).__name__, str(_team_ready_cert_v1_exc))
+
         # ALLIANCE_SEMANTIC_AUTO_TRAINER_V4
         try:
             import alliance_semantic_auto_trainer_v4 as _semantic_auto_trainer_v4
