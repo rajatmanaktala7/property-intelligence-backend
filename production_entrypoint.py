@@ -1033,21 +1033,6 @@ def _load_core():
             }
             print("[operations-hotfix-v1244] warning:",type(exc).__name__,str(exc))
 
-        # ALLIANCE_DASHBOARD_AUTHORITY_V12410
-        try:
-            import alliance_dashboard_authority_v12410 as dashboard_v12410
-            stabilization = dict(stabilization or {})
-            stabilization["dashboard_authority_v12410"] = dashboard_v12410.register(wrapped.core)
-            print("[dashboard-authority-v12410]", stabilization["dashboard_authority_v12410"])
-        except Exception as exc:
-            stabilization = dict(stabilization or {})
-            stabilization["dashboard_authority_v12410"] = {
-                "status":"ERROR",
-                "error":f"{type(exc).__name__}: {exc}",
-                "fail_safe":True,
-            }
-            print("[dashboard-authority-v12410] warning:", type(exc).__name__, str(exc))
-
         # ALLIANCE_ROOT_MATCHER_AUTHORITY_V12411
         try:
             import alliance_root_matcher_authority_v12411 as rootmatcher_v12411
@@ -1465,6 +1450,23 @@ def _load_core():
             stabilization = dict(stabilization or {})
             stabilization["master_consolidation_v1"]=MASTER_CONSOLIDATION_V1
             print("[master-consolidation-v1] warning:",type(_x).__name__,str(_x))
+
+        # ALLIANCE_DASHBOARD_AUTHORITY_V1
+        try:
+            import alliance_dashboard_authority_v1 as _dashboard_authority_v1
+            DASHBOARD_AUTHORITY_V1 = _dashboard_authority_v1.register(wrapped)
+            stabilization = dict(stabilization or {})
+            stabilization["dashboard_authority_v1"] = DASHBOARD_AUTHORITY_V1
+        except Exception as _dashboard_authority_exc:
+            DASHBOARD_AUTHORITY_V1 = {
+                "status":"ERROR",
+                "version":"1.0.0-CANONICAL-ALLIANCE-DASHBOARD",
+                "error":f"{type(_dashboard_authority_exc).__name__}: {_dashboard_authority_exc}",
+                "fail_safe":True,
+            }
+            stabilization = dict(stabilization or {})
+            stabilization["dashboard_authority_v1"] = DASHBOARD_AUTHORITY_V1
+            print("[dashboard-authority-v1] warning:", type(_dashboard_authority_exc).__name__, str(_dashboard_authority_exc))
 
         # ALLIANCE_TEAM_READY_CERTIFICATION_V1
         try:

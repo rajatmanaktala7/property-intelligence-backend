@@ -1,7 +1,7 @@
 from pathlib import Path
 s = Path("alliance_runtime_guardian_v1.py").read_text(encoding="utf-8")
 for token in [
-    'VERSION = "1.0.1-RUNTIME-GUARDIAN-POST-REGISTRATION"',
+    'VERSION = "1.0.2-RUNTIME-GUARDIAN-DASHBOARD-AUTHORITY"',
     'INTERVAL_SECONDS = 300',
     'SAFE_ROUTE_ALIAS',
     'CRITICAL_ROUTE_MISSING',
@@ -26,3 +26,7 @@ print("ALLIANCE RUNTIME GUARDIAN V1: PASS")
 assert 'time.sleep(8)' in s
 assert 'WAITING_FOR_FULL_ROUTER' in s
 print("GUARDIAN POST-REGISTRATION ORDER: PASS")
+
+assert 'alliance_dashboard_authority_v1.py' in s
+assert 'CANONICAL_ALLIANCE_DASHBOARD_V1' in s
+print("DASHBOARD AUTHORITY CONTRACT: PASS")

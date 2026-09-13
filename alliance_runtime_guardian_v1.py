@@ -5,7 +5,7 @@ from pathlib import Path
 from fastapi import Request
 from fastapi.responses import JSONResponse, RedirectResponse
 
-VERSION = "1.0.1-RUNTIME-GUARDIAN-POST-REGISTRATION"
+VERSION = "1.0.2-RUNTIME-GUARDIAN-DASHBOARD-AUTHORITY"
 INTERVAL_SECONDS = 300
 
 CRITICAL = {
@@ -36,6 +36,7 @@ SAFE_ALIASES = {
 }
 
 REQUIRED_CONTRACT_TOKENS = {
+    "alliance_dashboard_authority_v1.py": ["CANONICAL_ALLIANCE_DASHBOARD_V1", "pi_master_properties_v711", "pi_requirement_gate_v1191", "MASTER_ONLY"],
     "alliance_automated_deal_desk_v1.py": ["MASTER_ONLY", "automatic_send", "EVIDENCE_ONLY_NO_GUESSING"],
     "alliance_master_consolidation_v1.py": ["pi_requirement_gate_v1191", "pi_master_properties_v711", "marketing_eligible BOOLEAN NOT NULL DEFAULT FALSE"],
 }
