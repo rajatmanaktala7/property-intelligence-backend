@@ -3,7 +3,7 @@ import json, re, threading, hashlib
 from sqlalchemy import inspect, text
 import alliance_requirement_brain_v3 as brain
 
-VERSION = "4.0.0-AUTO-TRAINER-98-CERTIFICATION-GATE"
+VERSION = "4.0.1-ROUTE-FIRST-FAIL-SAFE"
 TRAIN_TABLE = "pi_requirement_semantic_training_v4"
 RUN_TABLE = "pi_requirement_semantic_training_runs_v4"
 GATE = "pi_requirement_gate_v1191"
@@ -354,24 +354,128 @@ def status():
     return dict(_STATE)
 
 def register(core):
-    app=_app(core); engine=_engine(core)
-    if app is None or engine is None: raise RuntimeError("Semantic Auto-Trainer V4 requires core app + engine")
-    _ensure(engine)
-    paths={getattr(r,"path",None) for r in app.router.routes}
-    if "/api/alliance/semantic-auto-trainer-v4/status" not in paths:
-        @app.get("/api/alliance/semantic-auto-trainer-v4/status")
+    global _STATE
+
+    app=_app(core)
+    engine=_engine(core)
+    if app is None:
+        raise RuntimeError("Semantic Auto-Trainer V4 requires authoritative FastAPI app")
+
+    status_path="/api/alliance/semantic-auto-trainer-v4/status"
+    run_path="/api/alliance/semantic-auto-trainer-v4/run"
+
+    def _paths():
+        return {getattr(r,"path",None) for r in app.router.routes}
+
+    # 1) ROUTE AUTHORITY FIRST. No DDL before this point.
+    paths=_paths()
+    if status_path not in paths:
+        @app.get(status_path)
         def semantic_auto_trainer_v4_status():
-            return status()
-    if "/api/alliance/semantic-auto-trainer-v4/run" not in paths:
-        @app.post("/api/alliance/semantic-auto-trainer-v4/run")
+            s=status()
+            s["route_authority"]="LIVE"
+            s["routes_registered"]=all(p in _paths() for p in (status_path,run_path))
+            s["database_ready"]=bool(_STATE.get("database_ready"))
+            s["worker_started"]=bool(_STATE.get("worker_started"))
+            s["startup_database_error"]=_STATE.get("startup_database_error")
+            return s
+
+    paths=_paths()
+    if run_path not in paths:
+        @app.post(run_path)
         def semantic_auto_trainer_v4_run():
-            if _STATE.get("status")=="RUNNING": return status()
-            threading.Thread(target=run_training,args=(engine,),daemon=True,name="semantic-auto-trainer-v4").start()
-            return {"status":"STARTED","version":VERSION}
-    threading.Thread(target=run_training,args=(engine,),daemon=True,name="semantic-auto-trainer-v4-boot").start()
+            if engine is None:
+                return {"status":"ERROR","version":VERSION,"error":"DATABASE_ENGINE_UNAVAILABLE","route_authority":"LIVE"}
+            if not _STATE.get("database_ready"):
+                try:
+                    _ensure(engine)
+                    _STATE["database_ready"]=True
+                    _STATE["startup_database_error"]=None
+                except Exception as exc:
+                    _STATE["status"]="ERROR"
+                    _STATE["startup_database_error"]=f"{type(exc).__name__}: {str(exc)[:500]}"
+                    _STATE["last_error"]=_STATE["startup_database_error"]
+                    return status()
+            if _STATE.get("status")=="RUNNING":
+                return status()
+            threading.Thread(target=run_training,args=(engine,),daemon=True,name="semantic-auto-trainer-v4-manual").start()
+            return {"status":"STARTED","version":VERSION,"route_authority":"LIVE"}
+
+    final_paths=_paths()
+    missing=[p for p in (status_path,run_path) if p not in final_paths]
+    if missing:
+        raise RuntimeError("Route authority registration failed: "+",".join(missing))
+
+    _STATE["route_authority"]="LIVE"
+    _STATE["routes_registered"]=True
+    _STATE["database_ready"]=False
+    _STATE["worker_started"]=False
+    _STATE["startup_database_error"]=None
+    _STATE["version"]=VERSION
+
+    # 2) DATABASE INITIALIZATION AFTER ROUTES EXIST.
+    if engine is None:
+        _STATE["status"]="ERROR"
+        _STATE["startup_database_error"]="DATABASE_ENGINE_UNAVAILABLE"
+        _STATE["last_error"]="DATABASE_ENGINE_UNAVAILABLE"
+        return {
+            "status":"ROUTES_REGISTERED_DATABASE_ERROR",
+            "version":VERSION,
+            "routes":[status_path,run_path],
+            "route_authority":"LIVE",
+            "database_ready":False,
+            "worker_started":False,
+            "error":"DATABASE_ENGINE_UNAVAILABLE",
+        }
+
+    try:
+        _ensure(engine)
+        _STATE["database_ready"]=True
+    except Exception as exc:
+        err=f"{type(exc).__name__}: {str(exc)[:500]}"
+        _STATE["status"]="ERROR"
+        _STATE["startup_database_error"]=err
+        _STATE["last_error"]=err
+        return {
+            "status":"ROUTES_REGISTERED_DATABASE_ERROR",
+            "version":VERSION,
+            "routes":[status_path,run_path],
+            "route_authority":"LIVE",
+            "database_ready":False,
+            "worker_started":False,
+            "error":err,
+        }
+
+    # 3) NON-BLOCKING TRAINER WORKER ONLY AFTER route + DB certification.
+    try:
+        threading.Thread(target=run_training,args=(engine,),daemon=True,name="semantic-auto-trainer-v4-boot").start()
+        _STATE["worker_started"]=True
+    except Exception as exc:
+        err=f"{type(exc).__name__}: {str(exc)[:500]}"
+        _STATE["status"]="ERROR"
+        _STATE["last_error"]=err
+        return {
+            "status":"ROUTES_AND_DATABASE_READY_WORKER_ERROR",
+            "version":VERSION,
+            "routes":[status_path,run_path],
+            "route_authority":"LIVE",
+            "database_ready":True,
+            "worker_started":False,
+            "error":err,
+        }
+
     return {
-        "status":"REGISTERED","version":VERSION,"brain_version":getattr(brain,"VERSION","UNKNOWN"),
-        "mode":"AUTO_AUDIT_SAFE_CORRECTION","target_accuracy_pct":98.0,
-        "min_gold_examples":MIN_GOLD,"human_verified_rows_protected":True,
-        "matcher_eligibility_auto_changed":False,"master_requirement_table":GATE,
+        "status":"REGISTERED",
+        "version":VERSION,
+        "brain_version":getattr(brain,"VERSION","UNKNOWN"),
+        "mode":"AUTO_AUDIT_SAFE_CORRECTION",
+        "target_accuracy_pct":98.0,
+        "min_gold_examples":MIN_GOLD,
+        "human_verified_rows_protected":True,
+        "matcher_eligibility_auto_changed":False,
+        "master_requirement_table":GATE,
+        "route_authority":"LIVE",
+        "routes":[status_path,run_path],
+        "database_ready":True,
+        "worker_started":True,
     }

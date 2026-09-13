@@ -1424,6 +1424,8 @@ def _load_core():
         try:
             import alliance_semantic_auto_trainer_v4 as _semantic_auto_trainer_v4
             SEMANTIC_AUTO_TRAINER_V4 = _semantic_auto_trainer_v4.register(wrapped)
+            stabilization = dict(stabilization or {})
+            stabilization["semantic_auto_trainer_v4"] = SEMANTIC_AUTO_TRAINER_V4
         except Exception as _semantic_auto_trainer_v4_exc:
             SEMANTIC_AUTO_TRAINER_V4 = {
                 "status": "ERROR",
@@ -1431,6 +1433,8 @@ def _load_core():
                 "error": f"{type(_semantic_auto_trainer_v4_exc).__name__}: {_semantic_auto_trainer_v4_exc}",
                 "fail_safe": True,
             }
+            stabilization = dict(stabilization or {})
+            stabilization["semantic_auto_trainer_v4"] = SEMANTIC_AUTO_TRAINER_V4
             print("[semantic-auto-trainer-v4] warning:", type(_semantic_auto_trainer_v4_exc).__name__, str(_semantic_auto_trainer_v4_exc))
 
         try:
