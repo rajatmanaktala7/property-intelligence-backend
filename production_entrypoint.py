@@ -1409,6 +1409,15 @@ def _load_core():
             stabilization["database_rectification_v4"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","fail_safe":True}
         # ALLIANCE_DATABASE_RECTIFICATION_V4_END
 
+        # ALLIANCE_MASTER_REQUIREMENT_AUTHORITY_V1_BEGIN
+        stabilization = dict(stabilization or {})
+        try:
+            import alliance_master_requirement_authority_v1 as master_requirement_authority_v1
+            stabilization["master_requirement_authority_v1"] = master_requirement_authority_v1.register(wrapped.core)
+        except Exception as exc:
+            stabilization["master_requirement_authority_v1"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","fail_safe":True}
+        # ALLIANCE_MASTER_REQUIREMENT_AUTHORITY_V1_END
+
         CORE_APP = wrapped.app
         try:
             import alliance_whatsapp_safe_ingest_v5 as safe_wa
