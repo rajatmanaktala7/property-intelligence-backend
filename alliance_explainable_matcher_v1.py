@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from fastapi import Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy import inspect, text
+import alliance_master_inventory_role_firewall_v1 as _inventory_firewall
 
 VERSION = "1.0.0-EXPLAINABLE-MASTER-MATCHER"
 MARKER = "ALLIANCE_EXPLAINABLE_MATCHER_V1"
@@ -227,6 +228,7 @@ FIELD_ALIASES = {
     "verified": ["is_verified","verified","verification_status","status"],
     "availability": ["availability_status","availability","workflow_status","status"],
     "updated": ["updated_at","last_verified_at","created_at"],
+    "raw_text": ["raw_text","original_message","message_text","description","property_text","text","source_text"],
 }
 
 def _pick(cols: List[str], key: str) -> Optional[str]:
@@ -428,7 +430,21 @@ def run_match(engine, raw: str, limit: int = 30) -> Dict[str, Any]:
     req = parse_requirement(raw)
     smap = _schema(engine)
     rows = _select_master(engine, smap)
-    ranked = [_rank_one(req, r) for r in rows]
+
+    role_counts = {"PROPERTY_SUPPLY": 0, "PROPERTY_DEMAND": 0, "AMBIGUOUS": 0, "NOISE": 0}
+    eligible_rows = []
+    for row in rows:
+        role = _inventory_firewall.classify_inventory_role(
+            row.get("raw_text"),
+            row.get("family"),
+            row.get("transaction"),
+        )
+        role_name = role.get("role") or "AMBIGUOUS"
+        role_counts[role_name] = role_counts.get(role_name, 0) + 1
+        if role.get("eligible_for_property_matcher") is True:
+            eligible_rows.append(row)
+
+    ranked = [_rank_one(req, r) for r in eligible_rows]
     useful = [r for r in ranked if r["category"] not in ("REJECTED_CONFLICT","LOW")]
     useful.sort(key=lambda x: (-x["score"], len(x["unknown"]), len(x["conflicts"])))
 
@@ -446,6 +462,16 @@ def run_match(engine, raw: str, limit: int = 30) -> Dict[str, Any]:
         "source_contract": SOURCE_CONTRACT,
         "master_table": MASTER_TABLE,
         "master_rows_considered": len(rows),
+        "master_supply_rows_considered": len(eligible_rows),
+        "inventory_role_firewall": {
+            "version": _inventory_firewall.VERSION,
+            "marker": _inventory_firewall.MARKER,
+            "role_counts": role_counts,
+            "requirements_excluded_from_property_matches": role_counts.get("PROPERTY_DEMAND", 0),
+            "ambiguous_excluded_from_property_matches": role_counts.get("AMBIGUOUS", 0),
+            "noise_excluded_from_property_matches": role_counts.get("NOISE", 0),
+            "supply_only": True,
+        },
         "requirement": req,
         "results": {
             "exact_or_verify": exact,
@@ -456,6 +482,7 @@ def run_match(engine, raw: str, limit: int = 30) -> Dict[str, Any]:
             "unknown_is_not_conflict": True,
             "exact_area_preserved": True,
             "preference_branches_preserved": True,
+            "inventory_role_gate": "PROPERTY_SUPPLY_ONLY",
             "hard_conflict_rejections": rejected,
             "contacts_exposed": False,
             "automatic_send": False,
@@ -568,6 +595,8 @@ def register(core):
                 "unknown_is_not_conflict": True,
                 "exact_area_preserved": True,
                 "preference_branches_preserved": True,
+                "inventory_role_firewall": "PROPERTY_SUPPLY_ONLY",
+                "inventory_role_firewall_version": _inventory_firewall.VERSION,
                 "contacts_exposed": False,
                 "automatic_send": False,
                 "data_exposed": False,

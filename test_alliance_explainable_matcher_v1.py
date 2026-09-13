@@ -42,4 +42,10 @@ assert y["category"] == "REJECTED_CONFLICT", y
 r2 = parse_requirement("Requirement plot budget 90 to 100 lakh")
 assert r2["budget_max"] == 10_000_000, r2
 
+
+from alliance_master_inventory_role_firewall_v1 import classify_inventory_role
+assert classify_inventory_role("Need Restaurant for rent long term in Panaji")["eligible_for_property_matcher"] is False
+assert classify_inventory_role("Available for Lease Prime Commercial Shop Panjim suitable for restaurant")["eligible_for_property_matcher"] is True
+assert classify_inventory_role("Need 2 bhk flat near restaurant for staff")["restaurant_asset_allowed"] is False
+
 print("ALLIANCE EXPLAINABLE MATCHER V1: PASS")

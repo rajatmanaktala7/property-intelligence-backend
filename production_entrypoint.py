@@ -1779,9 +1779,11 @@ app = HealthFirstDispatcher()
 
 # 7.3.7 HISTORICAL EVIDENCE REPAIR REGISTRATION
 
+
 # ALLIANCE_EXPLAINABLE_MATCHER_V1
 try:
     import alliance_explainable_matcher_v1 as _alliance_explainable_matcher_v1
     _alliance_explainable_matcher_v1.register(core)
+    print("ALLIANCE_EXPLAINABLE_MATCHER_V1: REGISTERED")
 except Exception as _alliance_explainable_matcher_v1_error:
-    print('ALLIANCE_EXPLAINABLE_MATCHER_V1 registration error:', type(_alliance_explainable_matcher_v1_error).__name__, _alliance_explainable_matcher_v1_error)
+    print("ALLIANCE_EXPLAINABLE_MATCHER_V1 registration error:", type(_alliance_explainable_matcher_v1_error).__name__, _alliance_explainable_matcher_v1_error)
