@@ -1,7 +1,7 @@
 from pathlib import Path
 s = Path("alliance_runtime_guardian_v1.py").read_text(encoding="utf-8")
 for token in [
-    'VERSION = "1.0.0-RUNTIME-GUARDIAN"',
+    'VERSION = "1.0.1-RUNTIME-GUARDIAN-POST-REGISTRATION"',
     'INTERVAL_SECONDS = 300',
     'SAFE_ROUTE_ALIAS',
     'CRITICAL_ROUTE_MISSING',
@@ -22,3 +22,7 @@ for banned in [
     assert banned not in s, banned
 
 print("ALLIANCE RUNTIME GUARDIAN V1: PASS")
+
+assert 'time.sleep(8)' in s
+assert 'WAITING_FOR_FULL_ROUTER' in s
+print("GUARDIAN POST-REGISTRATION ORDER: PASS")

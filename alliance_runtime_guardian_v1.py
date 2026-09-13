@@ -5,7 +5,7 @@ from pathlib import Path
 from fastapi import Request
 from fastapi.responses import JSONResponse, RedirectResponse
 
-VERSION = "1.0.0-RUNTIME-GUARDIAN"
+VERSION = "1.0.1-RUNTIME-GUARDIAN-POST-REGISTRATION"
 INTERVAL_SECONDS = 300
 
 CRITICAL = {
@@ -147,6 +147,7 @@ def audit_and_repair(app):
     return dict(STATE)
 
 def _worker(app):
+    time.sleep(8)
     while True:
         try:
             audit_and_repair(app)
@@ -178,7 +179,10 @@ def register(core):
                 return JSONResponse({"detail": "Login required"}, status_code=401)
             return audit_and_repair(app)
 
-    audit_and_repair(app)
+    with LOCK:
+        STATE["status"] = "STARTING"
+        STATE["registration_phase"] = "WAITING_FOR_FULL_ROUTER"
+        STATE["first_audit_delay_seconds"] = 8
 
     if not STATE.get("worker_started"):
         t = threading.Thread(target=_worker, args=(app,), daemon=True, name="alliance-runtime-guardian-v1")
