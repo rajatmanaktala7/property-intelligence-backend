@@ -1437,6 +1437,18 @@ def _load_core():
             stabilization["automated_deal_desk_v1"] = AUTOMATED_DEAL_DESK_V1
             print("[deal-desk-v1] warning:", type(_deal_desk_exc).__name__, str(_deal_desk_exc))
 
+        # ALLIANCE_MASTER_CONSOLIDATION_V1
+        try:
+            import alliance_master_consolidation_v1 as _amc
+            MASTER_CONSOLIDATION_V1 = _amc.register(wrapped)
+            stabilization = dict(stabilization or {})
+            stabilization["master_consolidation_v1"] = MASTER_CONSOLIDATION_V1
+        except Exception as _x:
+            MASTER_CONSOLIDATION_V1={"status":"ERROR","version":"1.0.1-MASTER-CONSOLIDATION","error":f"{type(_x).__name__}: {_x}","fail_safe":True}
+            stabilization = dict(stabilization or {})
+            stabilization["master_consolidation_v1"]=MASTER_CONSOLIDATION_V1
+            print("[master-consolidation-v1] warning:",type(_x).__name__,str(_x))
+
         # ALLIANCE_TEAM_READY_CERTIFICATION_V1
         try:
             import alliance_team_ready_certification_v1 as _team_ready_cert_v1

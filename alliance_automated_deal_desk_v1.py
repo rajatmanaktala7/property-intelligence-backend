@@ -267,6 +267,7 @@ button{padding:11px 18px;margin-right:8px}.grid{display:grid;grid-template-colum
 <p class='muted'>Team must verify properties and contacts before sending. Alliance never guesses missing phone numbers.</p>
 <script>
 let DATA=null;
+window.addEventListener('DOMContentLoaded',()=>{const q=new URLSearchParams(location.search).get('requirement_id');if(q)document.getElementById('rid').value=q;});
 function e(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 async function run(){
  const body={requirement_id:rid.value?Number(rid.value):null,requirement_text:req.value||null,min_score:70,limit:20};
