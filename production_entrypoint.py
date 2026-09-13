@@ -1437,6 +1437,23 @@ def _load_core():
             stabilization["automated_deal_desk_v1"] = AUTOMATED_DEAL_DESK_V1
             print("[deal-desk-v1] warning:", type(_deal_desk_exc).__name__, str(_deal_desk_exc))
 
+        # ALLIANCE_RUNTIME_GUARDIAN_V1
+        try:
+            import alliance_runtime_guardian_v1 as _runtime_guardian_v1
+            RUNTIME_GUARDIAN_V1 = _runtime_guardian_v1.register(wrapped)
+            stabilization = dict(stabilization or {})
+            stabilization["runtime_guardian_v1"] = RUNTIME_GUARDIAN_V1
+        except Exception as _guardian_exc:
+            RUNTIME_GUARDIAN_V1 = {
+                "status":"ERROR",
+                "version":"1.0.0-RUNTIME-GUARDIAN",
+                "error":f"{type(_guardian_exc).__name__}: {_guardian_exc}",
+                "fail_safe":True,
+            }
+            stabilization = dict(stabilization or {})
+            stabilization["runtime_guardian_v1"] = RUNTIME_GUARDIAN_V1
+            print("[runtime-guardian-v1] warning:", type(_guardian_exc).__name__, str(_guardian_exc))
+
         # ALLIANCE_MASTER_CONSOLIDATION_V1
         try:
             import alliance_master_consolidation_v1 as _amc

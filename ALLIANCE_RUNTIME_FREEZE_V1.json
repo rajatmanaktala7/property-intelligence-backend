@@ -1,0 +1,15 @@
+{
+  "freeze_version": "1.0.0-RUNTIME-GUARDIAN-FREEZE",
+  "baseline_commit": "b1c6e691c4cdb14089bbca5b5368e4a73be89e3d",
+  "baseline_short": "b1c6e69",
+  "branch": "main",
+  "policy": {
+    "feature_additions": "FROZEN",
+    "matcher_authority": "MASTER_ONLY",
+    "requirement_authority": "pi_requirement_gate_v1191",
+    "property_authority": "pi_master_properties_v711",
+    "contacts": "STAFF_ONLY_EVIDENCE_ONLY",
+    "auto_repair_scope": "SAFE_ROUTE_ALIASES_AND_OBSERVABILITY_ONLY",
+    "destructive_master_mutations": false
+  }
+}
