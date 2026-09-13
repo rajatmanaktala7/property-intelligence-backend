@@ -5,7 +5,7 @@ from fastapi import HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from sqlalchemy import inspect, text
 
-VERSION="1.2.2-WHATSAPP-SENDER-IDENTITY-SAFE"
+VERSION="1.3.0-WHATSAPP-SENDER-IDENTITY-REGISTRY"
 MASTER_REQUIREMENT_TABLE="pi_requirement_gate_v1191"
 MASTER_PROPERTY_TABLE="pi_master_properties_v711"
 MASTER_LINKS_TABLE="pi_master_source_links_v711"
@@ -180,6 +180,28 @@ def _wa_requirement_sender_map(rows):
                     d["sender_identity_status"]=ident["status"]
     return result
 
+def _resolve_sender_ids_from_registry(rows):
+    try:
+        from alliance_whatsapp_sender_identity_registry_v1 import resolve_many
+        eng=_wa_engine()
+        if eng is None:
+            return rows
+        mapping=resolve_many(eng,[r.get("whatsapp_sender_id") for r in rows])
+        for r in rows:
+            if _phone(r.get("whatsapp_sender_phone")):
+                continue
+            oid=_norm(r.get("whatsapp_sender_id"))
+            p=_phone(mapping.get(oid))
+            if p:
+                r["whatsapp_sender_phone"]=p
+                r["whatsapp_sender_status"]="REGISTRY_RESOLVED_UNIQUE_EXACT_EVIDENCE"
+                if not r.get("contacts_list"):
+                    r["contacts_list"]=[p]
+                    r["contact_fallback"]="WHATSAPP_SENDER_REGISTRY"
+        return rows
+    except Exception:
+        return rows
+
 def _apply_requirement_sender(rows):
     mp=_wa_requirement_sender_map(rows)
     for r in rows:
@@ -191,13 +213,12 @@ def _apply_requirement_sender(rows):
         r["explicit_source_contact"]=_phone(meta.get("contact_phone"))
         if not r["contacts_list"] and r["explicit_source_contact"]:
             r["contacts_list"]=[r["explicit_source_contact"]]
-        # User requirement: sender must always be available as fallback for WhatsApp records.
         if not r["contacts_list"] and r["whatsapp_sender_phone"]:
             r["contacts_list"]=[r["whatsapp_sender_phone"]]
             r["contact_fallback"]="WHATSAPP_SENDER"
         else:
             r["contact_fallback"]=""
-    return rows
+    return _resolve_sender_ids_from_registry(rows)
 
 def _find_req(rows,rid):
     for r in rows:
@@ -371,6 +392,35 @@ def _status(core):
             "master_property_table":MASTER_PROPERTY_TABLE,"matcher_source_contract":"MASTER_ONLY",
             "contacts_scope":"AUTHENTICATED_STAFF_ONLY","sender_policy":"ALWAYS_SHOW_WHATSAPP_SENDER_WHEN_SOURCE_PROVENANCE_EXISTS"}
 
+_IDENTITY_REGISTRY_STATE={"status":"IDLE","version":"1.0.0-DETERMINISTIC-LID-PHONE-REGISTRY"}
+
+def _start_identity_registry_refresh():
+    if _IDENTITY_REGISTRY_STATE.get("status") in ("RUNNING","PASS"):
+        return _IDENTITY_REGISTRY_STATE
+    try:
+        import threading
+        from alliance_whatsapp_sender_identity_registry_v1 import apply_registry
+        eng=_wa_engine()
+        if eng is None:
+            _IDENTITY_REGISTRY_STATE.update({"status":"SKIPPED","reason":"WA_ENGINE_UNAVAILABLE"})
+            return _IDENTITY_REGISTRY_STATE
+        _IDENTITY_REGISTRY_STATE.update({"status":"RUNNING"})
+        def worker():
+            try:
+                rep=apply_registry(eng)
+                _IDENTITY_REGISTRY_STATE.update({
+                    "status":"PASS",
+                    "rows_scanned":rep.get("rows_scanned",0),
+                    "resolved_unique":rep.get("resolved_unique",0),
+                    "ambiguous":rep.get("ambiguous",0),
+                })
+            except Exception as e:
+                _IDENTITY_REGISTRY_STATE.update({"status":"ERROR","error":type(e).__name__+": "+str(e)[:240]})
+        threading.Thread(target=worker,name="alliance-wa-sender-identity-registry",daemon=True).start()
+    except Exception as e:
+        _IDENTITY_REGISTRY_STATE.update({"status":"ERROR","error":type(e).__name__+": "+str(e)[:240]})
+    return _IDENTITY_REGISTRY_STATE
+
 def register(core):
     app=_app(core)
     for route in list(getattr(app.router,"routes",[])):
@@ -390,5 +440,6 @@ def register(core):
     return {"status":"REGISTERED","version":VERSION,"requirement_authority":MASTER_REQUIREMENT_TABLE,
             "property_authority":MASTER_PROPERTY_TABLE,"matcher_source_contract":"MASTER_ONLY",
             "smart_matcher_takeover":True,"whatsapp_sender_fallback":True,
+            "sender_identity_registry":_start_identity_registry_refresh(),
             "contacts_scope":"AUTHENTICATED_STAFF_ONLY",
             "routes":[WORKSPACE_ROUTE,"/api/alliance/master-requirements-v1/status",SMART_MATCHER_ROUTE]}

@@ -9,7 +9,7 @@ def load():
 
 def test_contract():
     m=load()
-    assert m.VERSION.startswith("1.2.2")
+    assert m.VERSION.startswith("1.3.0")
     assert m.MASTER_REQUIREMENT_TABLE=="pi_requirement_gate_v1191"
     assert m.MASTER_PROPERTY_TABLE=="pi_master_properties_v711"
 
