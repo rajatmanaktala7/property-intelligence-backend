@@ -81,7 +81,7 @@ def _render(counts):
     primary = "".join([
         _area("Properties", "🏢", _n(counts["master_properties"]), "Master properties, availability, Goa inventory and new property entry.", "/alliance/final/databases", "Open Properties", "blue"),
         _area("Requirements", "📋", _n(counts["master_requirements"]), "One canonical demand workspace for manual, WhatsApp and newspaper requirements.", "/alliance/final/requirements", "Open Requirements", "purple"),
-        _area("Match & Deal Desk", "🎯", _n(counts["matcher_eligible"]), "Run Smart Match, review exact / verify / alternate options and prepare the client draft.", "/alliance/primary/deal-desk", "Open Deal Desk", "green"),
+        _area("Match & Deal Desk", "🎯", _n(counts["matcher_eligible"]), "Run Smart Match, review exact / verify / alternate options and prepare the client draft.", "/alliance/primary/smart-match", "Open Smart Match", "green"),
         _area("Intelligence", "✨", "5 sources", "WhatsApp, newspaper, commercial, hospitality and retail intelligence in one section.", "#intelligence", "View Sources", "orange"),
         _area("Contacts", "☎", _n(counts["contact_master"]), "Evidence-backed internal contact master with source segregation.", "/alliance/primary/contact-master", "Open Contacts", "cyan"),
         _area("Team", "👥", "Today", "Follow-ups, day plans, staff review, monthly review and reports.", "#team", "View Team", "pink"),

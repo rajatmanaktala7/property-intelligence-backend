@@ -21,7 +21,7 @@ for token in [
     'FEATURE FREEZE ACTIVE',
     '/alliance/final/databases',
     '/alliance/final/requirements',
-    '/alliance/primary/deal-desk',
+    '/alliance/primary/smart-match',
     '/alliance/primary/contact-master',
     '/property-manual',
     '/requirements-workbench',
