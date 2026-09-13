@@ -8,7 +8,7 @@ from fastapi import Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy import text
 
-VERSION = "1.0.0-CANONICAL-ALLIANCE-DASHBOARD"
+VERSION = "2.0.0-SIMPLE-ATTRACTIVE-HUB"
 MARKER = "CANONICAL_ALLIANCE_DASHBOARD_V1"
 STATE: Dict[str, Any] = {
     "status": "INIT",
@@ -16,10 +16,12 @@ STATE: Dict[str, Any] = {
     "authority": "CANONICAL_MASTER_DATA",
     "dashboard_marker": MARKER,
     "legacy_dashboard_replaced": True,
+    "navigation_model": "8-AREA-SIMPLE-HUB",
     "matcher_authority": "MASTER_ONLY",
     "property_authority": "pi_master_properties_v711",
     "requirement_authority": "pi_requirement_gate_v1191",
     "contacts_scope": "AUTHENTICATED_STAFF_ONLY",
+    "feature_freeze": "ACTIVE",
     "last_render_at": None,
     "last_error": None,
 }
@@ -47,85 +49,163 @@ def _counts(engine):
     return {
         "master_properties": _scalar(engine, "SELECT COUNT(*) FROM pi_master_properties_v711"),
         "master_requirements": _scalar(engine, "SELECT COUNT(*) FROM pi_requirement_gate_v1191"),
+        "matcher_eligible": _scalar(engine, "SELECT COUNT(*) FROM pi_requirement_gate_v1191 WHERE matcher_eligible IS TRUE"),
         "manual_requirements": _scalar(engine, "SELECT COUNT(*) FROM pi_requirement_gate_v1191 WHERE UPPER(COALESCE(source_type,'')) LIKE '%MANUAL%'"),
         "whatsapp_requirements": _scalar(engine, "SELECT COUNT(*) FROM pi_requirement_gate_v1191 WHERE UPPER(COALESCE(source_type,'')) LIKE '%WHATSAPP%'"),
         "newspaper_requirements": _scalar(engine, "SELECT COUNT(*) FROM pi_requirement_gate_v1191 WHERE UPPER(COALESCE(source_type,'')) LIKE '%NEWSPAPER%' OR UPPER(COALESCE(source_type,'')) LIKE '%MAGAZINE%'"),
-        "discovery_requirements": _scalar(engine, "SELECT COUNT(*) FROM pi_requirement_gate_v1191 WHERE UPPER(COALESCE(source_type,'')) LIKE '%DISCOVERY%'"),
-        "matcher_eligible_requirements": _scalar(engine, "SELECT COUNT(*) FROM pi_requirement_gate_v1191 WHERE matcher_eligible IS TRUE"),
         "contact_master": _scalar(engine, "SELECT COUNT(*) FROM pi_alliance_contact_master_v1"),
     }
 
 def _n(v):
     return "—" if v is None else f"{int(v):,}"
 
-def _card(title, value, subtitle, href):
-    return f'<a class="card" href="{escape(href)}"><div class="label">{escape(title)}</div><div class="value">{escape(str(value))}</div><div class="sub">{escape(subtitle)}</div><div class="open">Open →</div></a>'
+def _area(title, icon, stat, desc, href, action, tone):
+    return f"""
+    <a class="area {tone}" href="{escape(href)}">
+      <div class="area-top"><div class="icon">{icon}</div><div class="stat">{escape(str(stat))}</div></div>
+      <div class="area-title">{escape(title)}</div>
+      <div class="area-desc">{escape(desc)}</div>
+      <div class="area-action">{escape(action)} →</div>
+    </a>"""
 
-def _link(title, desc, href):
-    return f'<a class="workflow" href="{escape(href)}"><strong>{escape(title)}</strong><span>{escape(desc)}</span></a>'
+def _mini(title, href, desc):
+    return f"""
+    <a class="mini" href="{escape(href)}">
+      <strong>{escape(title)}</strong>
+      <span>{escape(desc)}</span>
+    </a>"""
 
 def _render(counts):
     now = datetime.now(timezone.utc).strftime("%d %b %Y %H:%M UTC")
-    cards = "".join([
-        _card("Master Properties", _n(counts["master_properties"]), "Canonical property authority", "/alliance/final/databases"),
-        _card("Master Requirements", _n(counts["master_requirements"]), "Canonical requirement authority", "/alliance/final/requirements"),
-        _card("Manual Requirements", _n(counts["manual_requirements"]), "Canonical manual-source view", "/alliance/final/requirements/manual"),
-        _card("WhatsApp Requirements", _n(counts["whatsapp_requirements"]), "Canonical WhatsApp-source view", "/alliance/final/requirements/whatsapp"),
-        _card("Newspaper Requirements", _n(counts["newspaper_requirements"]), "Canonical newspaper/magazine view", "/alliance/final/requirements/newspaper"),
-        _card("Matcher Eligible", _n(counts["matcher_eligible_requirements"]), "Human-verified requirement gate", "/alliance/primary/matcher"),
-        _card("Contact Master", _n(counts["contact_master"]), "Evidence-only, source-segregated contacts", "/alliance/primary/contact-master"),
-        _card("Availability", "LIVE", "Master-property verification workflow", "/alliance/primary/availability"),
+
+    primary = "".join([
+        _area("Properties", "🏢", _n(counts["master_properties"]), "Master properties, availability, Goa inventory and new property entry.", "/alliance/final/databases", "Open Properties", "blue"),
+        _area("Requirements", "📋", _n(counts["master_requirements"]), "One canonical demand workspace for manual, WhatsApp and newspaper requirements.", "/alliance/final/requirements", "Open Requirements", "purple"),
+        _area("Match & Deal Desk", "🎯", _n(counts["matcher_eligible"]), "Run Smart Match, review exact / verify / alternate options and prepare the client draft.", "/alliance/primary/deal-desk", "Open Deal Desk", "green"),
+        _area("Intelligence", "✨", "5 sources", "WhatsApp, newspaper, commercial, hospitality and retail intelligence in one section.", "#intelligence", "View Sources", "orange"),
+        _area("Contacts", "☎", _n(counts["contact_master"]), "Evidence-backed internal contact master with source segregation.", "/alliance/primary/contact-master", "Open Contacts", "cyan"),
+        _area("Team", "👥", "Today", "Follow-ups, day plans, staff review, monthly review and reports.", "#team", "View Team", "pink"),
+        _area("System", "🛡", "PASS", "Guardian, data health, diagnostics and production link audit.", "#system", "View Health", "slate"),
+        _area("Add New", "＋", "Quick", "Add a property or requirement without hunting through menus.", "#quick-add", "Create Record", "gold"),
     ])
-    workflow = "".join([
-        _link("Master Properties", "Canonical master property database", "/alliance/final/databases"),
-        _link("Availability", "Verify matched properties before client sharing", "/alliance/primary/availability"),
-        _link("Add Property", "Manual property entry", "/property-manual"),
-        _link("Master Requirements", "Canonical requirement database", "/alliance/final/requirements"),
-        _link("Add Requirement", "Capture a new requirement", "/requirements-workbench"),
-        _link("Manual Requirement DB", "Manual-source canonical requirements", "/alliance/final/requirements/manual"),
-        _link("WhatsApp Requirement DB", "WhatsApp-source canonical requirements", "/alliance/final/requirements/whatsapp"),
-        _link("Smart Matcher", "Match requirements only against Master Property DB", "/alliance/primary/matcher"),
-        _link("Automated Deal Desk", "Exact, verification-needed and alternate options", "/alliance/primary/deal-desk"),
-        _link("WhatsApp Live", "WhatsApp ingestion and review", "/whatsapp-live"),
-        _link("Newspaper Capture", "Newspaper intelligence capture", "/capture-intelligence"),
-        _link("Commercial Intelligence", "Commercial opportunity intelligence", "/commercial-intelligence"),
-        _link("Hospitality Intelligence", "Hospitality intelligence", "/hospitality-intelligence"),
-        _link("Retail Intelligence", "Retail expansion intelligence", "/retail-expansion"),
-        _link("Requirement Discovery", "Requirement discovery evidence", "/requirement-discovery"),
-        _link("Marketing / Contact Master", "Deduped evidence-backed internal contacts", "/alliance/primary/contact-master"),
-        _link("Follow-ups", "Team action queue", "/alliance/primary/followups"),
-        _link("Reports", "Operational reports", "/alliance/primary/reports"),
-        _link("Data Health", "Production data-health workspace", "/alliance/primary/data-health"),
-        _link("System Doctor", "Runtime diagnostics", "/alliance/system-doctor"),
+
+    attention = "".join([
+        _mini("Verify Requirements", "/alliance/final/requirements", f"{_n(counts['master_requirements'])} canonical requirements · {_n(counts['matcher_eligible'])} matcher eligible"),
+        _mini("Check Availability", "/alliance/primary/availability", "Verify only the properties you are preparing to share"),
+        _mini("Open Deal Desk", "/alliance/primary/deal-desk", "Exact matches, verification-needed options, alternates and draft"),
     ])
-    staff = "".join([
-        _link("Daily Day Plan", "Yogesh · Priya · Zoya", "/alliance/primary/day-plan"),
-        _link("Staff Review", "Review daily work by staff", "/alliance/primary/staff-review"),
-        _link("Monthly Review", "Monthly staff performance", "/alliance/primary/monthly-review"),
+
+    intelligence = "".join([
+        _mini("WhatsApp", "/whatsapp-live", "Live source ingestion and review"),
+        _mini("Newspaper", "/capture-intelligence", "Capture newspaper intelligence"),
+        _mini("Commercial", "/commercial-intelligence", "Commercial opportunity intelligence"),
+        _mini("Hospitality", "/hospitality-intelligence", "Hotels, restaurants, banquets and hospitality"),
+        _mini("Retail", "/retail-expansion", "Retail brand expansion intelligence"),
+        _mini("Requirement Discovery", "/requirement-discovery", "External demand evidence"),
     ])
+
+    reqtabs = "".join([
+        _mini("All Requirements", "/alliance/final/requirements", "Canonical master requirement workspace"),
+        _mini("Manual", "/alliance/final/requirements/manual", f"{_n(counts['manual_requirements'])} canonical manual-source rows"),
+        _mini("WhatsApp", "/alliance/final/requirements/whatsapp", f"{_n(counts['whatsapp_requirements'])} canonical WhatsApp-source rows"),
+        _mini("Newspaper", "/alliance/final/requirements/newspaper", f"{_n(counts['newspaper_requirements'])} canonical newspaper/magazine rows"),
+    ])
+
+    team = "".join([
+        _mini("Follow-ups", "/alliance/primary/followups", "Team action queue"),
+        _mini("Day Plan", "/alliance/primary/day-plan", "Yogesh · Priya · Zoya"),
+        _mini("Staff Review", "/alliance/primary/staff-review", "Daily work review"),
+        _mini("Monthly Review", "/alliance/primary/monthly-review", "Monthly staff performance"),
+        _mini("Reports", "/alliance/primary/reports", "Operational reports"),
+    ])
+
+    system = "".join([
+        _mini("Data Health", "/alliance/primary/data-health", "Production data-health workspace"),
+        _mini("System Doctor", "/alliance/system-doctor", "Runtime diagnostics"),
+        _mini("Link Audit", "/alliance/team-link-audit", "Production route audit"),
+    ])
+
     return f"""<!doctype html>
-<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Alliance · Master Command Centre</title>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Alliance · Command Centre</title>
 <style>
-:root{{--bg:#f6f7f9;--panel:#fff;--ink:#142033;--muted:#637083;--line:#e5e9ef}}
-*{{box-sizing:border-box}}body{{margin:0;background:var(--bg);color:var(--ink);font:15px/1.45 Arial,sans-serif}}
-.wrap{{max-width:1240px;margin:auto;padding:28px 20px 60px}}.top{{display:flex;justify-content:space-between;gap:16px;align-items:flex-start;margin-bottom:24px}}
-h1{{margin:0 0 6px;font-size:30px}}h2{{margin:34px 0 14px;font-size:20px}}.badge{{display:inline-block;padding:7px 10px;border:1px solid var(--line);border-radius:999px;background:#fff;font-weight:700}}
-.muted{{color:var(--muted)}}.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}}
-.card,.workflow{{display:block;text-decoration:none;color:inherit;background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:16px}}
-.card:hover,.workflow:hover{{border-color:#9aa8ba}}.label{{font-weight:700}}.value{{font-size:27px;font-weight:800;margin:7px 0}}
-.sub,.workflow span{{display:block;color:var(--muted);font-size:13px}}.open{{margin-top:12px;font-weight:700}}.workflow strong{{display:block;margin-bottom:4px}}
-.notice{{background:#fff;border:1px solid var(--line);border-radius:14px;padding:16px;margin-top:18px}}.footer{{margin-top:34px;color:var(--muted);font-size:12px}}
-</style></head>
+:root{{
+ --bg:#f5f7fb;--panel:#fff;--ink:#182235;--muted:#6b7586;--line:#e6eaf0;
+ --shadow:0 10px 30px rgba(30,44,70,.07)
+}}
+*{{box-sizing:border-box}}html{{scroll-behavior:smooth}}
+body{{margin:0;background:linear-gradient(180deg,#f8faff 0,#f5f7fb 240px);color:var(--ink);font:15px/1.5 Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}}
+.wrap{{max-width:1240px;margin:auto;padding:28px 20px 70px}}
+.header{{display:flex;justify-content:space-between;gap:18px;align-items:flex-start;margin-bottom:22px}}
+.eyebrow{{font-size:12px;letter-spacing:.09em;text-transform:uppercase;font-weight:800;color:#6f7d92;margin-bottom:7px}}
+h1{{font-size:34px;line-height:1.15;margin:0 0 8px}}h2{{font-size:21px;margin:34px 0 13px}}.muted{{color:var(--muted)}}
+.badges{{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}}.badge{{background:#fff;border:1px solid var(--line);padding:8px 11px;border-radius:999px;font-size:12px;font-weight:800;white-space:nowrap}}
+.grid{{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px}}
+.area{{text-decoration:none;color:inherit;background:var(--panel);border:1px solid var(--line);border-radius:20px;padding:18px;min-height:190px;box-shadow:var(--shadow);transition:.18s ease}}
+.area:hover{{transform:translateY(-3px);box-shadow:0 16px 38px rgba(30,44,70,.11)}}
+.area-top{{display:flex;align-items:center;justify-content:space-between;gap:10px}}.icon{{font-size:27px}}.stat{{font-size:13px;font-weight:850;padding:6px 9px;border-radius:999px;background:#f4f6fa}}
+.area-title{{font-size:20px;font-weight:850;margin-top:18px}}.area-desc{{color:var(--muted);font-size:13px;margin-top:6px;min-height:58px}}.area-action{{font-weight:800;margin-top:12px}}
+.blue{{border-top:4px solid #3b82f6}}.purple{{border-top:4px solid #8b5cf6}}.green{{border-top:4px solid #10b981}}.orange{{border-top:4px solid #f59e0b}}
+.cyan{{border-top:4px solid #06b6d4}}.pink{{border-top:4px solid #ec4899}}.slate{{border-top:4px solid #64748b}}.gold{{border-top:4px solid #eab308}}
+.section{{background:#fff;border:1px solid var(--line);border-radius:20px;padding:18px;box-shadow:var(--shadow)}}
+.mini-grid{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}}
+.mini{{display:block;text-decoration:none;color:inherit;border:1px solid var(--line);border-radius:14px;padding:14px;background:#fbfcfe}}
+.mini:hover{{background:#fff;border-color:#bac4d2}}.mini strong{{display:block;margin-bottom:3px}}.mini span{{display:block;color:var(--muted);font-size:12.5px}}
+.quick{{display:grid;grid-template-columns:1fr 1fr;gap:12px}}
+.quick a{{text-decoration:none;color:#fff;border-radius:16px;padding:17px 18px;font-weight:850;background:#182235}}
+.quick a:last-child{{background:#3157d5}}
+.rule{{margin-top:20px;padding:13px 15px;border-radius:14px;background:#eef4ff;color:#32415b;font-size:13px}}
+.footer{{margin-top:32px;color:var(--muted);font-size:12px}}
+@media(max-width:950px){{.grid{{grid-template-columns:repeat(2,minmax(0,1fr))}}.mini-grid{{grid-template-columns:repeat(2,minmax(0,1fr))}}}}
+@media(max-width:620px){{.header{{display:block}}.badges{{justify-content:flex-start;margin-top:12px}}.grid,.mini-grid,.quick{{grid-template-columns:1fr}}h1{{font-size:28px}}}}
+</style>
+</head>
 <body data-alliance-dashboard-authority="{MARKER}">
 <div class="wrap">
-<div class="top"><div><h1>Alliance · Master Command Centre</h1><div class="muted">Single canonical operational workspace. Legacy dashboard counters and duplicate command bars are retired.</div></div><div class="badge">MASTER-ONLY · FROZEN</div></div>
-<div class="notice"><strong>Production authorities:</strong> Master Properties = <code>pi_master_properties_v711</code> · Master Requirements = <code>pi_requirement_gate_v1191</code> · Matcher = <strong>MASTER_ONLY</strong> · Contacts = authenticated staff only.</div>
-<h2>Live Canonical Counts</h2><div class="grid">{cards}</div>
-<h2>Alliance Workflow</h2><div class="grid">{workflow}</div>
-<h2>Team Operations</h2><div class="grid">{staff}</div>
-<div class="footer">{MARKER} · {VERSION} · rendered {now}. Counts come from canonical master authorities; the legacy “17 requirements” counter is not used.</div>
-</div></body></html>"""
+  <div class="header">
+    <div>
+      <div class="eyebrow">Alliance Infrastructure</div>
+      <h1>Command Centre</h1>
+      <div class="muted">Everything the team needs, grouped into simple workflows.</div>
+    </div>
+    <div class="badges">
+      <div class="badge">MASTER-ONLY MATCHER</div>
+      <div class="badge">FEATURE FREEZE ACTIVE</div>
+      <div class="badge">STAFF ONLY</div>
+    </div>
+  </div>
+
+  <div class="grid">{primary}</div>
+
+  <h2>Needs Attention</h2>
+  <div class="section"><div class="mini-grid">{attention}</div></div>
+
+  <h2 id="quick-add">Quick Add</h2>
+  <div class="quick">
+    <a href="/property-manual">＋ Add Property</a>
+    <a href="/requirements-workbench">＋ Add Requirement</a>
+  </div>
+
+  <h2>Requirement Views</h2>
+  <div class="section"><div class="mini-grid">{reqtabs}</div></div>
+
+  <h2 id="intelligence">Intelligence Sources</h2>
+  <div class="section"><div class="mini-grid">{intelligence}</div></div>
+
+  <h2 id="team">Team</h2>
+  <div class="section"><div class="mini-grid">{team}</div></div>
+
+  <h2 id="system">System Health</h2>
+  <div class="section"><div class="mini-grid">{system}</div></div>
+
+  <div class="rule"><strong>Simple navigation rule:</strong> legacy URLs remain available for compatibility, but the dashboard exposes only the grouped workflows above. Availability stays a Master Property workflow; Smart Match stays MASTER_ONLY; contacts stay internal.</div>
+  <div class="footer">{MARKER} · {VERSION} · rendered {now}</div>
+</div>
+</body>
+</html>"""
 
 def register(core):
     app = _app(core)
@@ -147,6 +227,7 @@ def register(core):
                 "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
                 "Pragma": "no-cache",
                 "X-Alliance-Dashboard-Authority": MARKER,
+                "X-Alliance-Navigation-Model": "8-AREA-SIMPLE-HUB",
             })
         except Exception as exc:
             STATE["status"] = "ERROR"
@@ -163,10 +244,12 @@ def register(core):
                 "version": VERSION,
                 "dashboard_marker": MARKER,
                 "legacy_dashboard_replaced": True,
+                "navigation_model": "8-AREA-SIMPLE-HUB",
                 "matcher_authority": "MASTER_ONLY",
                 "property_authority": "pi_master_properties_v711",
                 "requirement_authority": "pi_requirement_gate_v1191",
                 "contacts_scope": "AUTHENTICATED_STAFF_ONLY",
+                "feature_freeze": "ACTIVE",
                 "data_exposed": False,
             }
 
