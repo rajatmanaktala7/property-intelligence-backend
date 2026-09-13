@@ -5,7 +5,7 @@ from fastapi import HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from sqlalchemy import inspect, text
 
-VERSION="1.2.0-WHATSAPP-SENDER-CONTACT-PROVENANCE"
+VERSION="1.2.1-WHATSAPP-SENDER-CONNECTION-SAFE"
 MASTER_REQUIREMENT_TABLE="pi_requirement_gate_v1191"
 MASTER_PROPERTY_TABLE="pi_master_properties_v711"
 MASTER_LINKS_TABLE="pi_master_source_links_v711"
@@ -127,18 +127,20 @@ def _wa_requirement_sender_map(rows):
         if mmid and sender_phone:
             mids={_norm(v.get("mid")) for v in result.values() if _norm(v.get("mid"))}
             mvals=list(mids)
-            for i in range(0,len(mvals),B):
-                chunk=mvals[i:i+B]; params={f"m{j}":v for j,v in enumerate(chunk)}
-                holders=",".join(":"+k for k in params)
-                sel=f'"{mmid}" AS mid,"{sender_phone}" AS sender_phone'
-                if sender_name: sel+=f',"{sender_name}" AS sender_name'
-                q=text(f'SELECT {sel} FROM "wa_messages" WHERE CAST("{mmid}" AS TEXT) IN ({holders})')
-                bymid={str(x["mid"]):dict(x) for x in c.execute(q,params).mappings()}
-                for d in result.values():
-                    md=bymid.get(_norm(d.get("mid")))
-                    if md:
-                        d["sender_phone"]=_phone(md.get("sender_phone"))
-                        d["sender_name"]=_norm(md.get("sender_name"))
+            bymid={}
+            with eng.connect() as c:
+                for i in range(0,len(mvals),B):
+                    chunk=mvals[i:i+B]; params={f"m{j}":v for j,v in enumerate(chunk)}
+                    holders=",".join(":"+k for k in params)
+                    sel=f'"{mmid}" AS mid,"{sender_phone}" AS sender_phone'
+                    if sender_name: sel+=f',"{sender_name}" AS sender_name'
+                    q=text(f'SELECT {sel} FROM "wa_messages" WHERE CAST("{mmid}" AS TEXT) IN ({holders})')
+                    bymid.update({str(x["mid"]):dict(x) for x in c.execute(q,params).mappings()})
+            for d in result.values():
+                md=bymid.get(_norm(d.get("mid")))
+                if md:
+                    d["sender_phone"]=_phone(md.get("sender_phone"))
+                    d["sender_name"]=_norm(md.get("sender_name"))
     return result
 
 def _apply_requirement_sender(rows):
