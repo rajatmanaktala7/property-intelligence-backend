@@ -17,10 +17,19 @@ print("ALLIANCE SEMANTIC AUTO-TRAINER V4 ACCEPTANCE: PASS")
 
 # V4.0.1 route-authority invariants
 src=P.read_text(encoding="utf-8")
-assert 'VERSION = "4.0.1-ROUTE-FIRST-FAIL-SAFE"' in src
+assert 'VERSION = "4.0.2-FOUNDATION-ENGINE-AUTHORITY"' in src
 assert src.index("@app.get(status_path)") < src.index("# 2) DATABASE INITIALIZATION AFTER ROUTES EXIST.")
 assert src.index("@app.post(run_path)") < src.index("# 2) DATABASE INITIALIZATION AFTER ROUTES EXIST.")
 assert "ROUTES_REGISTERED_DATABASE_ERROR" in src
 assert '"route_authority":"LIVE"' in src
 assert '"matcher_eligibility_auto_changed":False' in src
-print("ALLIANCE SEMANTIC AUTO-TRAINER V4.0.1 ROUTE AUTHORITY: PASS")
+print("ALLIANCE SEMANTIC AUTO-TRAINER V4.0.2 ROUTE AUTHORITY: PASS")
+
+# V4.0.2 production engine authority invariants
+_v402=P.read_text(encoding="utf-8")
+assert 'VERSION = "4.0.2-FOUNDATION-ENGINE-AUTHORITY"' in _v402
+assert "import alliance_property_brain_foundation_v1 as foundation" in _v402
+assert "return foundation._engine_from_core(core)" in _v402
+assert "ROUTES_REGISTERED_DATABASE_ERROR" in _v402
+assert '"matcher_eligibility_auto_changed":False' in _v402
+print("ALLIANCE SEMANTIC AUTO-TRAINER V4.0.2 FOUNDATION ENGINE AUTHORITY: PASS")

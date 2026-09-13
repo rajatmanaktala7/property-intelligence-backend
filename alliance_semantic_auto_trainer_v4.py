@@ -3,7 +3,9 @@ import json, re, threading, hashlib
 from sqlalchemy import inspect, text
 import alliance_requirement_brain_v3 as brain
 
-VERSION = "4.0.1-ROUTE-FIRST-FAIL-SAFE"
+import alliance_property_brain_foundation_v1 as foundation
+
+VERSION = "4.0.2-FOUNDATION-ENGINE-AUTHORITY"
 TRAIN_TABLE = "pi_requirement_semantic_training_v4"
 RUN_TABLE = "pi_requirement_semantic_training_runs_v4"
 GATE = "pi_requirement_gate_v1191"
@@ -44,7 +46,8 @@ def _app(core):
     return getattr(core, "app", None) or getattr(core, "CORE_APP", None)
 
 def _engine(core):
-    return getattr(core, "engine", None) or getattr(core, "db_engine", None)
+    return foundation._engine_from_core(core)
+
 
 def _json(v, default):
     if v is None: return default
