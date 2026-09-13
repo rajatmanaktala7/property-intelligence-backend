@@ -10,6 +10,7 @@ from fastapi import Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy import inspect, text
 import alliance_master_inventory_role_firewall_v1 as _inventory_firewall
+import alliance_requirement_advisor_v1 as _requirement_advisor
 
 VERSION = "1.0.0-EXPLAINABLE-MASTER-MATCHER"
 MARKER = "ALLIANCE_EXPLAINABLE_MATCHER_V1"
@@ -453,6 +454,9 @@ def run_match(engine, raw: str, limit: int = 30) -> Dict[str, Any]:
     alt = [r for r in useful if r["category"] == "ALTERNATIVE"][:limit]
 
     rejected = len([r for r in ranked if r["category"] == "REJECTED_CONFLICT"])
+    advice = _requirement_advisor.build_advice(
+        req, exact, strong, alt, role_counts
+    )
     STATE["status"] = "PASS"
     STATE["last_run_at"] = datetime.now(timezone.utc).isoformat()
     STATE["last_error"] = None
@@ -473,6 +477,7 @@ def run_match(engine, raw: str, limit: int = 30) -> Dict[str, Any]:
             "supply_only": True,
         },
         "requirement": req,
+        "advisor": advice,
         "results": {
             "exact_or_verify": exact,
             "strong": strong,
@@ -597,6 +602,7 @@ def register(core):
                 "preference_branches_preserved": True,
                 "inventory_role_firewall": "PROPERTY_SUPPLY_ONLY",
                 "inventory_role_firewall_version": _inventory_firewall.VERSION,
+                "advisor_version": _requirement_advisor.VERSION,
                 "contacts_exposed": False,
                 "automatic_send": False,
                 "data_exposed": False,
