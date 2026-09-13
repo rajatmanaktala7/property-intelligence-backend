@@ -3,7 +3,7 @@ import re, json
 from collections import defaultdict
 from sqlalchemy import text
 
-VERSION='1.1.0-SQLALCHEMY-INSPECTOR-DISCOVERY'
+VERSION='1.2.0-EXACT-LEDGER-RECONCILIATION'
 REGISTRY_TABLE='pi_whatsapp_sender_identity_registry_v1'
 PHONE_COLS=('sender_phone','phone_number','sender_number','author_phone','contact_phone','mobile','phone','whatsapp_phone')
 ID_COLS=('sender_jid','jid','author','participant','remote_jid','sender_id','lid','participant_id','author_id')
@@ -67,35 +67,152 @@ def _rows(engine,table,limit=250000):
     with engine.connect() as c:
         return [dict(r) for r in c.execute(q,{'lim':limit}).mappings()]
 
-def build_plan(engine):
-    ev=defaultdict(lambda:{'phones':defaultdict(int),'tables':set(),'samples':[]})
-    scanned=0; tables=_tables(engine)
-    for table in tables:
-        try: rows=_rows(engine,table)
-        except Exception: continue
-        scanned+=len(rows)
-        for r in rows:
-            oid=_opaque(r.get('opaque_raw'))
-            if not oid: continue
-            p=_phone(r.get('phone_raw')) or _phone(r.get('name_raw'))
-            if not p: continue
-            e=ev[oid]; e['phones'][p]+=1; e['tables'].add(table)
-            if len(e['samples'])<5: e['samples'].append({'table':table,'phone':p,'opaque':_norm(r.get('opaque_raw'))})
-    plan=[]
-    for oid,e in ev.items():
-        pc=dict(e['phones']); total=sum(pc.values())
-        if len(pc)==1:
-            phone=next(iter(pc)); status='RESOLVED_UNIQUE_EXACT_EVIDENCE'; confidence=100; conflicts=0
-        else:
-            phone=None; status='AMBIGUOUS_CONFLICT'; confidence=0; conflicts=len(pc)
-        plan.append({'opaque_id':oid,'resolved_phone':phone,'resolution_status':status,'confidence':confidence,
-                     'evidence_count':total,'conflicting_phones':conflicts,'source_tables':sorted(e['tables']),
-                     'evidence_json':{'phones':pc,'samples':e['samples']}})
-    return {'version':VERSION,'tables_scanned':len(tables),'tables_discovered':tables,
-            'rows_scanned':scanned,
-            'resolved_unique':sum(1 for x in plan if x['resolution_status']=='RESOLVED_UNIQUE_EXACT_EVIDENCE'),
-            'ambiguous':sum(1 for x in plan if x['resolution_status']=='AMBIGUOUS_CONFLICT'),'plan':plan}
+def _sender_value(r):
+    return _norm((r or {}).get("sender"))
 
+def _pair_evidence(wa_rows, wai_rows):
+    try:
+        import alliance_database_rectification_v3 as rect
+    except Exception:
+        return {}, {"rectification_available":False,"exact_pairs":0,"candidate_pairs":0}
+
+    wa_exact=defaultdict(list)
+    wai_exact=defaultdict(list)
+
+    for r in wa_rows:
+        try:
+            k=(rect._fingerprints(r) or {}).get("exact")
+        except Exception:
+            k=None
+        if k:
+            wa_exact[k].append(r)
+
+    for r in wai_rows:
+        try:
+            k=(rect._fingerprints(r) or {}).get("exact")
+        except Exception:
+            k=None
+        if k:
+            wai_exact[k].append(r)
+
+    evidence=defaultdict(lambda:{"phones":defaultdict(int),"tables":set(),"samples":[]})
+    exact_pairs=0
+    candidate_pairs=0
+
+    for k,left in wa_exact.items():
+        right=wai_exact.get(k) or []
+        if len(left)!=1 or len(right)!=1:
+            continue
+        exact_pairs+=1
+        a,b=left[0],right[0]
+        av=_sender_value(a); bv=_sender_value(b)
+        ao=_opaque(av); bo=_opaque(bv)
+        ap=_phone(av); bp=_phone(bv)
+
+        pairs=[]
+        if ao and bp:
+            pairs.append((ao,bp,"wa_messages","wai_raw_messages"))
+        if bo and ap:
+            pairs.append((bo,ap,"wai_raw_messages","wa_messages"))
+
+        for oid,phone,otable,ptable in pairs:
+            candidate_pairs+=1
+            e=evidence[oid]
+            e["phones"][phone]+=1
+            e["tables"].update((otable,ptable))
+            if len(e["samples"])<5:
+                e["samples"].append({"opaque_source":otable,"phone_source":ptable,"phone":phone})
+
+    return evidence, {
+        "rectification_available":True,
+        "exact_pairs":exact_pairs,
+        "candidate_pairs":candidate_pairs,
+    }
+
+def build_plan(engine):
+    try:
+        import alliance_database_rectification_v3 as rect
+        wa_rows,wai_rows=rect._load()
+    except Exception as e:
+        return {
+            "version":VERSION,
+            "tables_scanned":0,
+            "tables_discovered":_tables(engine),
+            "rows_scanned":0,
+            "wa_rows":0,
+            "wai_rows":0,
+            "exact_pairs":0,
+            "candidate_pairs":0,
+            "resolved_unique":0,
+            "ambiguous":0,
+            "plan":[],
+            "loader_error":type(e).__name__+": "+str(e)[:300],
+        }
+
+    evidence,diag=_pair_evidence(wa_rows,wai_rows)
+
+    for table in ("wa_messages","wai_raw_messages"):
+        try:
+            cols=_cols(engine,table)
+            sender_col=next((c for c in PHONE_COLS if c in cols),None)
+            name_col=next((c for c in NAME_COLS if c in cols),None)
+            if not sender_col or not name_col:
+                continue
+            q=text(f'SELECT "{sender_col}" AS sender_raw, "{name_col}" AS name_raw FROM "{table}" WHERE "{sender_col}" IS NOT NULL')
+            with engine.connect() as c:
+                rows=c.execute(q).mappings().all()
+            for r in rows:
+                oid=_opaque(r.get("sender_raw"))
+                phone=_phone(r.get("name_raw"))
+                if not oid or not phone:
+                    continue
+                e=evidence[oid]
+                e["phones"][phone]+=1
+                e["tables"].add(table)
+                if len(e["samples"])<5:
+                    e["samples"].append({"opaque_source":table,"phone_source":table,"phone":phone,"method":"SAME_ROW_NAME"})
+        except Exception:
+            continue
+
+    plan=[]
+    for oid,e in evidence.items():
+        pc=dict(e["phones"])
+        total=sum(pc.values())
+        if len(pc)==1:
+            phone=next(iter(pc))
+            status="RESOLVED_UNIQUE_EXACT_EVIDENCE"
+            confidence=100
+            conflicts=0
+        else:
+            phone=None
+            status="AMBIGUOUS_CONFLICT"
+            confidence=0
+            conflicts=len(pc)
+        plan.append({
+            "opaque_id":oid,
+            "resolved_phone":phone,
+            "resolution_status":status,
+            "confidence":confidence,
+            "evidence_count":total,
+            "conflicting_phones":conflicts,
+            "source_tables":sorted(e["tables"]),
+            "evidence_json":{"phones":pc,"samples":e["samples"]},
+        })
+
+    tables=_tables(engine)
+    return {
+        "version":VERSION,
+        "tables_scanned":len(tables),
+        "tables_discovered":tables,
+        "rows_scanned":len(wa_rows)+len(wai_rows),
+        "wa_rows":len(wa_rows),
+        "wai_rows":len(wai_rows),
+        "exact_pairs":diag.get("exact_pairs",0),
+        "candidate_pairs":diag.get("candidate_pairs",0),
+        "resolved_unique":sum(1 for x in plan if x["resolution_status"]=="RESOLVED_UNIQUE_EXACT_EVIDENCE"),
+        "ambiguous":sum(1 for x in plan if x["resolution_status"]=="AMBIGUOUS_CONFLICT"),
+        "plan":plan,
+    }
 def apply_registry(engine):
     ensure_registry(engine); rep=build_plan(engine)
     sql=text(f"INSERT INTO {REGISTRY_TABLE} (opaque_id,resolved_phone,resolution_status,confidence,evidence_count,conflicting_phones,source_tables,evidence_json,updated_at) VALUES(:opaque_id,:resolved_phone,:resolution_status,:confidence,:evidence_count,:conflicting_phones,:source_tables,:evidence_json,NOW()) ON CONFLICT (opaque_id) DO UPDATE SET resolved_phone=EXCLUDED.resolved_phone,resolution_status=EXCLUDED.resolution_status,confidence=EXCLUDED.confidence,evidence_count=EXCLUDED.evidence_count,conflicting_phones=EXCLUDED.conflicting_phones,source_tables=EXCLUDED.source_tables,evidence_json=EXCLUDED.evidence_json,updated_at=NOW()")

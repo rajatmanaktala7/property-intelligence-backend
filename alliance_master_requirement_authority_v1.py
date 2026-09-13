@@ -5,7 +5,7 @@ from fastapi import HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from sqlalchemy import inspect, text
 
-VERSION="1.3.1-WHATSAPP-SENDER-REGISTRY-DISCOVERY-FIX"
+VERSION="1.3.2-WHATSAPP-SENDER-EXACT-LEDGER-RECOVERY"
 MASTER_REQUIREMENT_TABLE="pi_requirement_gate_v1191"
 MASTER_PROPERTY_TABLE="pi_master_properties_v711"
 MASTER_LINKS_TABLE="pi_master_source_links_v711"
@@ -409,12 +409,17 @@ def _start_identity_registry_refresh():
             try:
                 rep=apply_registry(eng)
                 _IDENTITY_REGISTRY_STATE.update({
-                    "status":"PASS" if rep.get("tables_scanned",0)>0 else "NO_TABLES_DISCOVERED",
+                    "status":"PASS" if rep.get("rows_scanned",0)>0 else ("ERROR" if rep.get("loader_error") else "NO_ROWS_SCANNED"),
                     "tables_scanned":rep.get("tables_scanned",0),
                     "tables_discovered":rep.get("tables_discovered",[]),
                     "rows_scanned":rep.get("rows_scanned",0),
+                    "wa_rows":rep.get("wa_rows",0),
+                    "wai_rows":rep.get("wai_rows",0),
+                    "exact_pairs":rep.get("exact_pairs",0),
+                    "candidate_pairs":rep.get("candidate_pairs",0),
                     "resolved_unique":rep.get("resolved_unique",0),
                     "ambiguous":rep.get("ambiguous",0),
+                    "loader_error":rep.get("loader_error"),
                 })
             except Exception as e:
                 _IDENTITY_REGISTRY_STATE.update({"status":"ERROR","error":type(e).__name__+": "+str(e)[:240]})

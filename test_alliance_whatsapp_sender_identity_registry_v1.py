@@ -10,7 +10,12 @@ assert m._opaque('9810060315@s.whatsapp.net')==''
 assert m.REGISTRY_TABLE=='pi_whatsapp_sender_identity_registry_v1'
 print('WHATSAPP SENDER IDENTITY REGISTRY V1 ACCEPTANCE: PASS')
 
-assert m.VERSION.startswith("1.1.0")
+assert m.VERSION.startswith("1.2.0")
 src=P.read_text(encoding="utf-8")
 assert "inspect(engine)" in src
 assert "information_schema.tables" not in src
+
+src=P.read_text(encoding="utf-8")
+assert "alliance_database_rectification_v3" in src
+assert "exact_pairs" in src
+assert "candidate_pairs" in src
