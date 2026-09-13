@@ -5,7 +5,7 @@ from fastapi import HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy import inspect, text
 
-VERSION = "3.0.0-EXACT-MESSAGE-RECOVERY-LEDGER"
+VERSION = "3.1.0-SCHEMA-AWARE-EXACT-MESSAGE-RECOVERY"
 RUN_EVERY_SECONDS = 900
 BOOT_DELAY_SECONDS = 150
 _LOCK = threading.Lock()
@@ -122,39 +122,93 @@ def _ensure_schema(engine):
         for s in stmts:
             cx.execute(text(s))
 
-def _select_rows(engine, table, mapping):
-    cols=_cols(engine,table)
-    chosen={}
-    for out,names in mapping.items():
-        c=_pick(cols,*names)
-        if c:
-            chosen[out]=c
-    required=("raw_text","source")
-    if not all(k in chosen for k in required):
-        return []
-    select=", ".join(f'"{c}" AS "{o}"' for o,c in chosen.items())
+def _ident(name):
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", str(name or "")):
+        raise RuntimeError("Unsafe SQL identifier")
+    return '"' + str(name) + '"'
+
+def _table_count(engine, table):
     with engine.connect() as cx:
-        return [dict(r) for r in cx.execute(text(f'SELECT {select} FROM "{table}"')).mappings()]
+        return int(cx.execute(text("SELECT COUNT(*) FROM " + _ident(table))).scalar() or 0)
+
+def _load_joined(engine, message_table, source_table, message_candidates, source_candidates):
+    mcols=_cols(engine,message_table)
+    if not mcols:
+        raise RuntimeError(message_table + " missing")
+    scols=_cols(engine,source_table) if source_table else set()
+
+    mid=_pick(mcols,*message_candidates["message_id"])
+    raw=_pick(mcols,*message_candidates["raw_text"])
+    sender=_pick(mcols,*message_candidates["sender"])
+    sent=_pick(mcols,*message_candidates["sent_at"])
+    direct_source=_pick(mcols,*message_candidates["source"])
+    fk=_pick(mcols,*message_candidates["source_fk"])
+
+    sid=_pick(scols,*source_candidates["source_id"]) if scols else None
+    sname=_pick(scols,*source_candidates["source"]) if scols else None
+
+    if not raw:
+        raise RuntimeError(message_table + " has no supported message text column")
+
+    fields=[]
+    fields.append(("m."+_ident(mid) if mid else "NULL")+" AS message_id")
+    if direct_source and sname and fk and sid:
+        source_expr="COALESCE(NULLIF(CAST(m."+_ident(direct_source)+" AS TEXT),''), CAST(s."+_ident(sname)+" AS TEXT))"
+    elif direct_source:
+        source_expr="CAST(m."+_ident(direct_source)+" AS TEXT)"
+    elif sname and fk and sid:
+        source_expr="CAST(s."+_ident(sname)+" AS TEXT)"
+    else:
+        source_expr="''"
+    fields.append(source_expr+" AS source")
+    fields.append("m."+_ident(raw)+" AS raw_text")
+    fields.append(("m."+_ident(sender) if sender else "NULL")+" AS sender")
+    fields.append(("m."+_ident(sent) if sent else "NULL")+" AS sent_at")
+
+    sql="SELECT "+", ".join(fields)+" FROM "+_ident(message_table)+" m"
+    if sname and fk and sid:
+        sql+=" LEFT JOIN "+_ident(source_table)+" s ON m."+_ident(fk)+" = s."+_ident(sid)
+
+    with engine.connect() as cx:
+        return [dict(r) for r in cx.execute(text(sql)).mappings()]
 
 def _load():
     wa=_wa_engine()
-    wa_map={
-        "message_id":("message_id","id","source_message_id"),
-        "source":("group_name","source_name","source","group","filename"),
-        "raw_text":("raw_text","message_text","text","body"),
-        "sender":("sender_phone","sender","author_phone","phone_number","sender_number","author","participant"),
-        "sent_at":("timestamp","sent_at","captured_at","created_at","message_timestamp"),
-    }
-    wai_map={
-        "message_id":("message_id","id","source_message_id"),
-        "source":("group_name","source_name","source","group","filename"),
-        "raw_text":("message_text","raw_text","text","body"),
-        "sender":("sender_phone","sender","author_phone","phone_number","sender_number","author","participant"),
-        "sent_at":("sent_at","timestamp","captured_at","created_at","message_timestamp"),
-    }
-    wa_rows=_select_rows(wa,"wa_messages",wa_map)
-    wai_rows=_select_rows(wa,"wai_raw_messages",wai_map)
+
+    wa_rows=_load_joined(
+        wa,"wa_messages","wa_sources",
+        {
+            "message_id":("message_id","id","source_message_id"),
+            "source":("group_name","source_name","source","group","filename"),
+            "source_fk":("source_id","group_id"),
+            "raw_text":("raw_text","message_text","text","body"),
+            "sender":("sender_phone","sender","author_phone","phone_number","sender_number","author","participant"),
+            "sent_at":("timestamp","sent_at","captured_at","created_at","message_timestamp"),
+        },
+        {"source_id":("source_id","id","group_id"),"source":("group_name","source_name","name","group","filename")},
+    )
+
+    wai_rows=_load_joined(
+        wa,"wai_raw_messages","wai_groups",
+        {
+            "message_id":("message_id","id","source_message_id"),
+            "source":("group_name","source_name","source","group","filename"),
+            "source_fk":("group_id","source_id"),
+            "raw_text":("message_text","raw_text","text","body"),
+            "sender":("sender_phone","sender","author_phone","phone_number","sender_number","author","participant"),
+            "sent_at":("sent_at","timestamp","captured_at","created_at","message_timestamp"),
+        },
+        {"source_id":("group_id","id","source_id"),"source":("group_name","source_name","name","group","filename")},
+    )
+
+    wa_count=_table_count(wa,"wa_messages")
+    wai_count=_table_count(wa,"wai_raw_messages")
+    if wa_count and not wa_rows:
+        raise RuntimeError("wa_messages contains rows but schema-aware loader returned zero")
+    if wai_count and not wai_rows:
+        raise RuntimeError("wai_raw_messages contains rows but schema-aware loader returned zero")
     return wa_rows,wai_rows
+
 
 def _fingerprints(r):
     mid=_norm(r.get("message_id"))
@@ -176,6 +230,8 @@ def _run(core):
     try:
         _ensure_schema(core.engine)
         wa_rows,wai_rows=_load()
+        if not wa_rows and not wai_rows:
+            raise RuntimeError("RECTIFICATION_INPUT_EMPTY: both WhatsApp ledgers loaded zero rows")
         wai_mid={}
         wai_exact={}
         wai_relaxed={}

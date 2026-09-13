@@ -33,7 +33,15 @@ def test_protected():
     assert "_auth(core,request)" in s
     assert "@app.get(" in s and "@app.post(" in s
 
+def test_schema_aware_loader_contract():
+    s=MOD.read_text(encoding="utf-8")
+    assert '"wa_sources"' in s
+    assert '"wai_groups"' in s
+    assert "LEFT JOIN" in s
+    assert "RECTIFICATION_INPUT_EMPTY" in s
+    assert "schema-aware loader returned zero" in s
+
 if __name__=="__main__":
-    for f in (test_identity,test_alias_relaxed,test_non_destructive,test_protected):
+    for f in (test_identity,test_alias_relaxed,test_non_destructive,test_protected,test_schema_aware_loader_contract):
         f(); print("PASS:",f.__name__)
     print("DATABASE RECTIFICATION V3 ACCEPTANCE: PASS")
