@@ -5,7 +5,7 @@ from fastapi import HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from sqlalchemy import inspect, text
 
-VERSION="1.2.1-WHATSAPP-SENDER-CONNECTION-SAFE"
+VERSION="1.2.2-WHATSAPP-SENDER-IDENTITY-SAFE"
 MASTER_REQUIREMENT_TABLE="pi_requirement_gate_v1191"
 MASTER_PROPERTY_TABLE="pi_master_properties_v711"
 MASTER_LINKS_TABLE="pi_master_source_links_v711"
@@ -22,11 +22,43 @@ def _e(v): return html.escape(str(v or ""))
 def _norm(v): return re.sub(r"\s+"," ",str(v or "").replace("\u00a0"," ")).strip()
 
 def _phone(v):
-    d=re.sub(r"\D+","",str(v or ""))
-    if d.startswith("00"): d=d[2:]
-    if len(d)==12 and d.startswith("91"): d=d[-10:]
-    if len(d)==11 and d.startswith("0"): d=d[-10:]
-    return d
+    raw=str(v or "").strip()
+    digits=re.sub(r"\D+","",raw)
+    if digits.startswith("00"): digits=digits[2:]
+    if len(digits)==12 and digits.startswith("91"): digits=digits[-10:]
+    if len(digits)==11 and digits.startswith("0"): digits=digits[-10:]
+    # India operational contact rule. Opaque WhatsApp LID/JID numeric IDs
+    # are commonly 13-15 digits and must never be rendered as phone numbers.
+    if len(digits)==10 and digits[0] in "6789":
+        return digits
+    return ""
+
+def _sender_identity(sender_phone="", sender_name="", sender_jid=""):
+    raw_phone=_norm(sender_phone)
+    raw_name=_norm(sender_name)
+    raw_jid=_norm(sender_jid)
+    jid_local=raw_jid.split("@",1)[0] if "@" in raw_jid else raw_jid
+    jid_domain=raw_jid.split("@",1)[1].lower() if "@" in raw_jid else ""
+
+    # 1) phone-shaped value in the sender_phone field
+    p=_phone(raw_phone)
+    if p:
+        return {"phone":p,"name":raw_name,"sender_id":"","status":"PHONE_FROM_SENDER_PHONE"}
+
+    # 2) some exports put the actual formatted number in sender/display name
+    p=_phone(raw_name)
+    if p:
+        return {"phone":p,"name":raw_name,"sender_id":"","status":"PHONE_FROM_SENDER_NAME"}
+
+    # 3) only traditional user JIDs are allowed to yield a phone number.
+    # @lid, group and other opaque identifiers remain IDs, never contacts.
+    if jid_domain in ("s.whatsapp.net","c.us"):
+        p=_phone(jid_local)
+        if p:
+            return {"phone":p,"name":raw_name,"sender_id":"","status":"PHONE_FROM_USER_JID"}
+
+    opaque=raw_jid or raw_phone
+    return {"phone":"","name":raw_name,"sender_id":opaque,"status":"OPAQUE_SENDER_ID"}
 
 def _json_list(v):
     if isinstance(v,list): return v
@@ -124,6 +156,7 @@ def _wa_requirement_sender_map(rows):
         mmid=_first(mc,"message_id","id","wa_message_id")
         sender_phone=_first(mc,"sender_phone","phone_number","sender_number","author_phone")
         sender_name=_first(mc,"sender_name","sender_display_name","author_name","sender")
+        sender_jid=_first(mc,"sender_jid","jid","author","participant","remote_jid")
         if mmid and sender_phone:
             mids={_norm(v.get("mid")) for v in result.values() if _norm(v.get("mid"))}
             mvals=list(mids)
@@ -134,13 +167,17 @@ def _wa_requirement_sender_map(rows):
                     holders=",".join(":"+k for k in params)
                     sel=f'"{mmid}" AS mid,"{sender_phone}" AS sender_phone'
                     if sender_name: sel+=f',"{sender_name}" AS sender_name'
+                    if sender_jid: sel+=f',"{sender_jid}" AS sender_jid'
                     q=text(f'SELECT {sel} FROM "wa_messages" WHERE CAST("{mmid}" AS TEXT) IN ({holders})')
                     bymid.update({str(x["mid"]):dict(x) for x in c.execute(q,params).mappings()})
             for d in result.values():
                 md=bymid.get(_norm(d.get("mid")))
                 if md:
-                    d["sender_phone"]=_phone(md.get("sender_phone"))
-                    d["sender_name"]=_norm(md.get("sender_name"))
+                    ident=_sender_identity(md.get("sender_phone"),md.get("sender_name"),md.get("sender_jid"))
+                    d["sender_phone"]=ident["phone"]
+                    d["sender_name"]=ident["name"]
+                    d["sender_id"]=ident["sender_id"]
+                    d["sender_identity_status"]=ident["status"]
     return result
 
 def _apply_requirement_sender(rows):
@@ -149,6 +186,8 @@ def _apply_requirement_sender(rows):
         meta=mp.get(_norm(r.get("source_pk"))) or {}
         r["whatsapp_sender_phone"]=_phone(meta.get("sender_phone"))
         r["whatsapp_sender_name"]=_norm(meta.get("sender_name"))
+        r["whatsapp_sender_id"]=_norm(meta.get("sender_id"))
+        r["whatsapp_sender_status"]=_norm(meta.get("sender_identity_status"))
         r["explicit_source_contact"]=_phone(meta.get("contact_phone"))
         if not r["contacts_list"] and r["explicit_source_contact"]:
             r["contacts_list"]=[r["explicit_source_contact"]]
@@ -297,7 +336,7 @@ def _page(core,request:Request):
         trs.append("<tr>"
           f"<td>{_e(rid)}</td><td>{_e(r['category'])}</td><td>{_e(r.get('source_type'))}</td><td>{_e(loc)}</td>"
           f"<td>{_e(r.get('property_category'))}</td><td>{_e(r.get('transaction_type'))}</td><td>{_e(r.get('budget_min'))} - {_e(r.get('budget_max'))}</td>"
-          f"<td>{_e(explicit)}</td><td>{_e(sender)}</td><td>{_e(r.get('whatsapp_sender_name') or '—')}</td>"
+          f"<td>{_e(explicit)}</td><td>{_e(sender)}</td><td>{_e(r.get('whatsapp_sender_name') or '—')}</td><td>{_e(r.get('whatsapp_sender_id') or '—')}</td>"
           f"<td>{_e(r.get('classification'))}</td><td>{_e(_norm(r.get('original_message'))[:260])}</td>"
           f"<td><a class='btn' href='{WORKSPACE_ROUTE}?category={cat}&requirement_id={quote(rid)}#results'>Run Matcher</a></td></tr>")
     rid=_norm(request.query_params.get("requirement_id")); results=""
@@ -314,7 +353,7 @@ def _page(core,request:Request):
 <p><a href='/alliance/primary'>← Dashboard</a></p><h1>Alliance Master Requirement Matcher</h1>
 <div class='card'>Requirement authority: <b>{MASTER_REQUIREMENT_TABLE}</b> · Property authority: <b>{MASTER_PROPERTY_TABLE}</b> · WhatsApp sender provenance: <b>LIVE FALLBACK</b> · Contacts: <b>authenticated staff only</b>.</div>
 <div>{tabs}</div><h3>{_e(cat)} requirements: {_e(len(filtered))}</h3>
-<table><tr><th>ID</th><th>Category</th><th>Source</th><th>Location</th><th>Asset</th><th>Transaction</th><th>Budget</th><th>Contact</th><th>WhatsApp Sender</th><th>Sender Name</th><th>Status</th><th>Original Requirement</th><th>Action</th></tr>{''.join(trs)}</table>
+<table><tr><th>ID</th><th>Category</th><th>Source</th><th>Location</th><th>Asset</th><th>Transaction</th><th>Budget</th><th>Contact</th><th>WhatsApp Sender Phone</th><th>Sender Name</th><th>Sender ID (not phone)</th><th>Status</th><th>Original Requirement</th><th>Action</th></tr>{''.join(trs)}</table>
 {results}</body></html>"""
 
 def _status(core):
