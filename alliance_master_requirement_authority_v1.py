@@ -5,7 +5,7 @@ from fastapi import HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from sqlalchemy import inspect, text
 
-VERSION="1.3.2-WHATSAPP-SENDER-EXACT-LEDGER-RECOVERY"
+VERSION="1.4.0-WHATSAPP-UPSTREAM-IDENTITY-BRIDGE"
 MASTER_REQUIREMENT_TABLE="pi_requirement_gate_v1191"
 MASTER_PROPERTY_TABLE="pi_master_properties_v711"
 MASTER_LINKS_TABLE="pi_master_source_links_v711"
@@ -408,6 +408,11 @@ def _start_identity_registry_refresh():
         def worker():
             try:
                 rep=apply_registry(eng)
+                try:
+                    from alliance_whatsapp_identity_bridge_v1 import run as run_identity_bridge
+                    bridge_rep=run_identity_bridge(eng)
+                except Exception as bridge_error:
+                    bridge_rep={"status":"ERROR","error":type(bridge_error).__name__+": "+str(bridge_error)[:300]}
                 _IDENTITY_REGISTRY_STATE.update({
                     "status":"PASS" if rep.get("rows_scanned",0)>0 else ("ERROR" if rep.get("loader_error") else "NO_ROWS_SCANNED"),
                     "tables_scanned":rep.get("tables_scanned",0),
@@ -420,6 +425,7 @@ def _start_identity_registry_refresh():
                     "resolved_unique":rep.get("resolved_unique",0),
                     "ambiguous":rep.get("ambiguous",0),
                     "loader_error":rep.get("loader_error"),
+                    "upstream_identity_bridge":bridge_rep,
                 })
             except Exception as e:
                 _IDENTITY_REGISTRY_STATE.update({"status":"ERROR","error":type(e).__name__+": "+str(e)[:240]})
