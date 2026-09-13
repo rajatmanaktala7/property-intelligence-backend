@@ -3,7 +3,7 @@ import re, json
 from collections import defaultdict
 from sqlalchemy import text
 
-VERSION='1.0.0-DETERMINISTIC-LID-PHONE-REGISTRY'
+VERSION='1.1.0-SQLALCHEMY-INSPECTOR-DISCOVERY'
 REGISTRY_TABLE='pi_whatsapp_sender_identity_registry_v1'
 PHONE_COLS=('sender_phone','phone_number','sender_number','author_phone','contact_phone','mobile','phone','whatsapp_phone')
 ID_COLS=('sender_jid','jid','author','participant','remote_jid','sender_id','lid','participant_id','author_id')
@@ -27,15 +27,25 @@ def _opaque(v):
     if domain=='lid': return local
     return digits if len(digits)>=13 else ''
 
+def _inspector(engine):
+    from sqlalchemy import inspect
+    return inspect(engine)
+
 def _cols(engine,table):
-    q=text("SELECT column_name FROM information_schema.columns WHERE table_schema='public' AND table_name=:t")
-    with engine.connect() as c:
-        return {str(x) for x in c.execute(q,{'t':table}).scalars().all()}
+    ins=_inspector(engine)
+    return {str(c["name"]) for c in ins.get_columns(table)}
 
 def _tables(engine):
-    q=text("SELECT table_name FROM information_schema.tables WHERE table_schema='public' AND table_type='BASE TABLE' AND (table_name ILIKE 'wa_%' OR table_name ILIKE 'wai_%' OR table_name ILIKE 'pi_whatsapp%')")
-    with engine.connect() as c:
-        return [str(x) for x in c.execute(q).scalars().all()]
+    ins=_inspector(engine)
+    names=set(ins.get_table_names())
+    try:
+        names.update(ins.get_view_names())
+    except Exception:
+        pass
+    return sorted(
+        str(n) for n in names
+        if str(n).lower().startswith(("wa_","wai_","pi_whatsapp"))
+    )
 
 def ensure_registry(engine):
     ddl=(f"CREATE TABLE IF NOT EXISTS {REGISTRY_TABLE}("
@@ -81,7 +91,8 @@ def build_plan(engine):
         plan.append({'opaque_id':oid,'resolved_phone':phone,'resolution_status':status,'confidence':confidence,
                      'evidence_count':total,'conflicting_phones':conflicts,'source_tables':sorted(e['tables']),
                      'evidence_json':{'phones':pc,'samples':e['samples']}})
-    return {'version':VERSION,'tables_scanned':len(tables),'rows_scanned':scanned,
+    return {'version':VERSION,'tables_scanned':len(tables),'tables_discovered':tables,
+            'rows_scanned':scanned,
             'resolved_unique':sum(1 for x in plan if x['resolution_status']=='RESOLVED_UNIQUE_EXACT_EVIDENCE'),
             'ambiguous':sum(1 for x in plan if x['resolution_status']=='AMBIGUOUS_CONFLICT'),'plan':plan}
 

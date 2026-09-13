@@ -5,7 +5,7 @@ from fastapi import HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from sqlalchemy import inspect, text
 
-VERSION="1.3.0-WHATSAPP-SENDER-IDENTITY-REGISTRY"
+VERSION="1.3.1-WHATSAPP-SENDER-REGISTRY-DISCOVERY-FIX"
 MASTER_REQUIREMENT_TABLE="pi_requirement_gate_v1191"
 MASTER_PROPERTY_TABLE="pi_master_properties_v711"
 MASTER_LINKS_TABLE="pi_master_source_links_v711"
@@ -409,7 +409,9 @@ def _start_identity_registry_refresh():
             try:
                 rep=apply_registry(eng)
                 _IDENTITY_REGISTRY_STATE.update({
-                    "status":"PASS",
+                    "status":"PASS" if rep.get("tables_scanned",0)>0 else "NO_TABLES_DISCOVERED",
+                    "tables_scanned":rep.get("tables_scanned",0),
+                    "tables_discovered":rep.get("tables_discovered",[]),
                     "rows_scanned":rep.get("rows_scanned",0),
                     "resolved_unique":rep.get("resolved_unique",0),
                     "ambiguous":rep.get("ambiguous",0),
