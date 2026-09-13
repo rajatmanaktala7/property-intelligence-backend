@@ -265,6 +265,12 @@ async def ingest(req:Request,authorization:Optional[str]=Header(None),x_bridge_t
     _auth(authorization,x_bridge_token)
     init_db()
     payload=await req.json()
+    # Alliance V1.5.1: preserve provider identity immediately after request JSON parse
+    try:
+        from alliance_whatsapp_live_identity_capture_v1 import capture_identity_event
+        capture_identity_event(payload, wa_engine)
+    except Exception:
+        pass
     account_phone=str(payload.get("account_phone") or "").strip()
     group_name=str(payload.get("group_name") or "").strip()
     if not account_phone or not group_name or not str(payload.get("text") or "").strip():
