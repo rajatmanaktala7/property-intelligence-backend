@@ -1419,6 +1419,20 @@ def _load_core():
         # ALLIANCE_MASTER_REQUIREMENT_AUTHORITY_V1_END
 
         CORE_APP = wrapped.app
+
+        # ALLIANCE_SEMANTIC_AUTO_TRAINER_V4
+        try:
+            import alliance_semantic_auto_trainer_v4 as _semantic_auto_trainer_v4
+            SEMANTIC_AUTO_TRAINER_V4 = _semantic_auto_trainer_v4.register(wrapped)
+        except Exception as _semantic_auto_trainer_v4_exc:
+            SEMANTIC_AUTO_TRAINER_V4 = {
+                "status": "ERROR",
+                "version": "4.0.0-AUTO-TRAINER-98-CERTIFICATION-GATE",
+                "error": f"{type(_semantic_auto_trainer_v4_exc).__name__}: {_semantic_auto_trainer_v4_exc}",
+                "fail_safe": True,
+            }
+            print("[semantic-auto-trainer-v4] warning:", type(_semantic_auto_trainer_v4_exc).__name__, str(_semantic_auto_trainer_v4_exc))
+
         try:
             import alliance_whatsapp_safe_ingest_v5 as safe_wa
             safe_wa.start_worker()
