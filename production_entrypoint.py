@@ -1420,6 +1420,23 @@ def _load_core():
 
         CORE_APP = wrapped.app
 
+        # ALLIANCE_AUTOMATED_DEAL_DESK_V1
+        try:
+            import alliance_automated_deal_desk_v1 as _alliance_deal_desk_v1
+            AUTOMATED_DEAL_DESK_V1 = _alliance_deal_desk_v1.register(wrapped)
+            stabilization = dict(stabilization or {})
+            stabilization["automated_deal_desk_v1"] = AUTOMATED_DEAL_DESK_V1
+        except Exception as _deal_desk_exc:
+            AUTOMATED_DEAL_DESK_V1 = {
+                "status":"ERROR",
+                "version":"1.0.0-AUTOMATED-DEAL-DESK",
+                "error":f"{type(_deal_desk_exc).__name__}: {_deal_desk_exc}",
+                "fail_safe":True,
+            }
+            stabilization = dict(stabilization or {})
+            stabilization["automated_deal_desk_v1"] = AUTOMATED_DEAL_DESK_V1
+            print("[deal-desk-v1] warning:", type(_deal_desk_exc).__name__, str(_deal_desk_exc))
+
         # ALLIANCE_TEAM_READY_CERTIFICATION_V1
         try:
             import alliance_team_ready_certification_v1 as _team_ready_cert_v1
