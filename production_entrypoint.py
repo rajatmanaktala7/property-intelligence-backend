@@ -444,6 +444,22 @@ def _load_core():
         except Exception as _alliance_explainable_matcher_v1_error:
             print("ALLIANCE_EXPLAINABLE_MATCHER_V1 registration error:", type(_alliance_explainable_matcher_v1_error).__name__, _alliance_explainable_matcher_v1_error)
 
+        # ALLIANCE_COMMERCIAL_INTELLIGENCE_AI_POST_CORE
+        # Restore the existing Commercial Intelligence router after wrapped.core is live.
+        try:
+            import alliance_commercial_intelligence_ai as _alliance_commercial_ai
+            _commercial_ai_result = _alliance_commercial_ai.register(wrapped.core)
+            stabilization = dict(stabilization or {})
+            stabilization["commercial_intelligence_ai"] = _commercial_ai_result
+            print("[commercial-intelligence-ai]", _commercial_ai_result)
+        except Exception as _commercial_ai_exc:
+            stabilization = dict(stabilization or {})
+            stabilization["commercial_intelligence_ai"] = {
+                "status":"ERROR",
+                "error":f"{type(_commercial_ai_exc).__name__}: {_commercial_ai_exc}",
+                "fail_safe":True,
+            }
+            print("[commercial-intelligence-ai] warning:", type(_commercial_ai_exc).__name__, str(_commercial_ai_exc))
         # Deal Match Intent Guard V1 - additive only; frozen V6.6 remains unchanged.
         try:
             import alliance_deal_match_intent_guard_v1 as deal_intent_guard_v1
