@@ -6,7 +6,7 @@ import json
 import re
 from typing import Any
 
-from fastapi import HTTPException, Query, Request
+from fastapi import Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
 from sqlalchemy import text
 
