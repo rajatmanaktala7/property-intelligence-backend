@@ -419,7 +419,82 @@ def _load(engine,view,city):
     return rows[:180]
 
 def _render(engine,view,city,message):
-    return govsrc.render_commercial(engine, view, city, message)
+    html = govsrc.render_commercial(engine, view, city, message)
+    ui = r"""
+<style id="ALLIANCE_COMMERCIAL_UI_RECTIFIER_V1">
+html{scroll-behavior:smooth}
+.wrap{max-width:1680px!important}
+article,.asset,.card{scroll-margin-top:95px}
+article{padding-top:10px!important;padding-bottom:10px!important;margin-top:8px!important;margin-bottom:8px!important}
+article h2,article h3{margin-top:0!important;margin-bottom:6px!important}
+article p{margin:5px 0!important}
+th,td{padding-top:6px!important;padding-bottom:6px!important;vertical-align:top}
+.alliance-research-toast{position:sticky;top:8px;z-index:9999;background:#fff;border:1px solid #cbd5e1;border-radius:10px;padding:10px 12px;margin:8px 0;box-shadow:0 4px 16px rgba(15,23,42,.12)}
+.alliance-research-working{opacity:.65;pointer-events:none}
+</style>
+<script>
+(function(){
+ function safe(v){return String(v||'').replace(/[^A-Za-z0-9_-]+/g,'-')}
+ function start(){
+  var forms=[].slice.call(document.querySelectorAll('form[action^="/commercial-intelligence/research/"]'));
+  forms.forEach(function(f){
+   var action=f.getAttribute('action')||'';
+   if(action.indexOf('/research-all')>=0)return;
+   var raw=action.split('/').pop()||'';
+   var id='asset-'+safe(decodeURIComponent(raw));
+   var box=f.closest('article,.asset,.card')||f.parentElement;
+   if(box&&!box.id)box.id=id;
+   var b=f.querySelector('button');
+   if(b){
+    f.addEventListener('submit',function(){
+     b.disabled=true;
+     b.classList.add('alliance-research-working');
+     b.textContent='Researching?';
+     try{sessionStorage.setItem('alliance-commercial-last-asset',id)}catch(e){}
+    });
+   }
+  });
+
+  var q=new URLSearchParams(location.search);
+  var msg=q.get('message')||'';
+  if(msg){
+   var host=document.querySelector('.wrap')||document.body;
+   if(host&&!document.getElementById('alliance-research-toast')){
+    var n=document.createElement('div');
+    n.id='alliance-research-toast';
+    n.className='alliance-research-toast';
+    n.textContent=msg+' Selected asset remains in view while the result updates.';
+    host.insertBefore(n,host.firstChild);
+   }
+  }
+
+  var target=null;
+  if(location.hash)target=document.getElementById(location.hash.substring(1));
+  if(!target){
+   try{
+    var last=sessionStorage.getItem('alliance-commercial-last-asset');
+    if(last)target=document.getElementById(last);
+   }catch(e){}
+  }
+  if(target)setTimeout(function(){target.scrollIntoView({block:'center'})},150);
+
+  if(msg.toLowerCase().indexOf('asset research started')>=0 && location.hash){
+   var key='alliance-commercial-refresh:'+location.hash;
+   var count=0;
+   try{count=parseInt(sessionStorage.getItem(key)||'0',10)||0}catch(e){}
+   if(count<2){
+    try{sessionStorage.setItem(key,String(count+1))}catch(e){}
+    setTimeout(function(){location.reload()},count===0?7000:14000);
+   }else{
+    try{sessionStorage.removeItem(key)}catch(e){}
+   }
+  }
+ }
+ if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',start);else start();
+})();
+</script>
+"""
+    return html.replace("</body>",ui+"</body>") if "</body>" in html else html+ui
 
 def register(core):
     engine,app=core.engine,core.app; router=APIRouter(); ensure_schema(engine)
@@ -459,7 +534,8 @@ def register(core):
     @router.post("/commercial-intelligence/research/{asset_code}")
     def research_one(asset_code:str,req:Request,background_tasks:BackgroundTasks):
         core.need_login(req); background_tasks.add_task(_research_asset,engine,asset_code)
-        return RedirectResponse("/commercial-intelligence?message=Asset+research+started.+Refresh+shortly.",status_code=303)
+        anchor = "".join(ch if (ch.isalnum() or ch in "-_") else "-" for ch in str(asset_code))
+        return RedirectResponse(f"/commercial-intelligence?message=Asset+research+started.+Refresh+shortly.#asset-{anchor}",status_code=303)
     @router.get("/api/commercial-intelligence/status")
     def status(req:Request):
         core.need_login(req)
