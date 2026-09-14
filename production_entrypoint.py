@@ -1623,18 +1623,6 @@ def _load_core():
         # ALLIANCE_WHATSAPP_SOURCE_RECONCILIATION_V2_END
 
         BOOT["core_loaded"] = True
-        # ALLIANCE_REQUIREMENT_FINAL_RECTIFIER_V1
-        try:
-            import alliance_requirement_restore_v1235 as _req_final
-            _req_final_result = _req_final.register(wrapped.core)
-            stabilization = dict(stabilization or {})
-            stabilization["requirement_final_rectifier_v1"] = {"status":"READY","result":_req_final_result}
-            print("[requirement-final-rectifier-v1] READY")
-        except Exception as _req_final_exc:
-            stabilization = dict(stabilization or {})
-            stabilization["requirement_final_rectifier_v1"] = {"status":"ERROR","error":f"{type(_req_final_exc).__name__}: {_req_final_exc}"}
-            print("[requirement-final-rectifier-v1] ERROR",type(_req_final_exc).__name__,str(_req_final_exc))
-
         BOOT["state"] = "READY" if stabilization.get("registered") else "DEGRADED"
         BOOT["stabilization"] = stabilization
         BOOT["completed_at"] = _utcnow()
