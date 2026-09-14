@@ -425,18 +425,6 @@ def _late_register_intelligence(wrapped):
         "same_app_object": authoritative_app is core.app,
     }
 
-# ALLIANCE_EXPLAINABLE_MATCHER_V1
-try:
-    import alliance_explainable_matcher_v1 as _alliance_explainable_matcher_v1
-    _alliance_explainable_matcher_v1.register(core)
-    print("ALLIANCE_EXPLAINABLE_MATCHER_V1: REGISTERED")
-except Exception as _alliance_explainable_matcher_v1_error:
-    print("ALLIANCE_EXPLAINABLE_MATCHER_V1 registration error:", type(_alliance_explainable_matcher_v1_error).__name__, _alliance_explainable_matcher_v1_error)
-
-
-
-
-
 def _load_core():
     global CORE_APP
 
@@ -447,6 +435,14 @@ def _load_core():
         import alliance_production_surface as production_surface
 
         stabilization = production_surface.register(wrapped)
+
+        # ALLIANCE_EXPLAINABLE_MATCHER_V1 - register only after wrapped.core exists
+        try:
+            import alliance_explainable_matcher_v1 as _alliance_explainable_matcher_v1
+            _alliance_explainable_matcher_v1.register(wrapped.core)
+            print("ALLIANCE_EXPLAINABLE_MATCHER_V1: REGISTERED_AFTER_CORE_LOAD")
+        except Exception as _alliance_explainable_matcher_v1_error:
+            print("ALLIANCE_EXPLAINABLE_MATCHER_V1 registration error:", type(_alliance_explainable_matcher_v1_error).__name__, _alliance_explainable_matcher_v1_error)
 
         # Deal Match Intent Guard V1 - additive only; frozen V6.6 remains unchanged.
         try:
