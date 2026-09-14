@@ -1416,7 +1416,7 @@ def _load_core():
         # ALLIANCE_REGIONAL_NEWSPAPER_AUTHORITY_V1 - post-core authority
         try:
             import alliance_regional_newspaper_authority_v1 as _alliance_regional_newspaper_authority_v1
-            _regional_newspaper_result = _alliance_regional_newspaper_authority_v1.register(wrapped.core)
+            _regional_newspaper_result = _alliance_regional_newspaper_authority_v1.register(wrapped.core, served_app=wrapped.app)
             stabilization = dict(stabilization or {})
             stabilization["regional_newspaper_authority_v1"] = _regional_newspaper_result
             print("ALLIANCE_REGIONAL_NEWSPAPER_AUTHORITY_V1: REGISTERED", _regional_newspaper_result)

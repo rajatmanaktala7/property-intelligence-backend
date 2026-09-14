@@ -13,11 +13,12 @@ REQUIREMENT_AUTHORITY="pi_requirement_gate_v1191"
 REGION_AUTHORITY="pi_alliance_region_authority_v1"
 MATCHER_SOURCE_CONTRACT="MASTER_ONLY"
 _STATE={"status":"STARTING","last_audit_at":None,"last_error":None,"property_counts":{},"requirement_counts":{},"routes":{},"worker_started":False}
+_SERVED_APP=None
 GOA=("goa","panjim","panaji","mapusa","thivim","tivim","colvale","comvale","siolim","assagao","anjuna","vagator","morjim","parra","sangolda","candolim","calangute","porvorim","dona paula","margao","madgaon","colva","benaulim","vasco","verna","salcete","bardez","pernem","north goa","south goa")
 DELHI=("delhi ncr","new delhi","delhi","gurugram","gurgaon","noida","greater noida","ghaziabad","faridabad","dwarka","aerocity","connaught place","saket","vasant kunj","nehru place","janakpuri","rohini","rajouri garden","south delhi","north delhi","west delhi","east delhi")
 OTHER=("mumbai","bombay","pune","bengaluru","bangalore","hyderabad","chennai","kolkata","jaipur","ahmedabad","chandigarh")
-TEXT_FIELDS=("city","location","locality","address","project_name","project","title","description","details","raw_text","original_message","requirement_text","source_name","source_group")
-PID=("record_id","property_id","id","master_id")
+TEXT_FIELDS=("city","location","locality","address","project_name","project","title","description","details","raw_text","original_message","requirement_text","source_name","source_group","clean_record")
+PID=("master_property_id","canonical_id","record_id","property_id","id","master_id")
 RID=("requirement_id","record_id","id","master_id")
 
 def _app(core): return getattr(core,"app",None) or core
@@ -32,6 +33,16 @@ def _need_login(core,req):
 def _route_exists(app,path,method="GET"):
     m=method.upper()
     return any(getattr(r,"path",None)==path and m in set(getattr(r,"methods",set()) or set()) for r in list(app.router.routes))
+def _route_exists_any(primary,path,method="GET"):
+    if _route_exists(primary,path,method):
+        return True
+    other=_SERVED_APP
+    if other is not None and other is not primary:
+        try:
+            return _route_exists(other,path,method)
+        except Exception:
+            return False
+    return False
 def _remove(app,path,method="GET"):
     m=method.upper(); kept=[]; n=0
     for r in list(app.router.routes):
@@ -108,7 +119,7 @@ def audit(core):
     app=_app(core); eng=_engine(core)
     try:
         _ensure(eng); pc=_refresh(eng,PROPERTY_AUTHORITY,"PROPERTY"); rc=_refresh(eng,REQUIREMENT_AUTHORITY,"REQUIREMENT")
-        routes={"newspaper_workspace":_route_exists(app,"/newspaper-v83"),"newspaper_process":_route_exists(app,"/api/newspaper-v83/process","POST"),"newspaper_health":_route_exists(app,"/api/newspaper-v83/health"),"canonical_newspaper_capture":_route_exists(app,"/alliance/newspaper-capture"),"goa_properties":_route_exists(app,"/alliance/properties/goa"),"delhi_properties":_route_exists(app,"/alliance/properties/delhi-ncr"),"goa_requirements":_route_exists(app,"/alliance/requirements/goa"),"delhi_requirements":_route_exists(app,"/alliance/requirements/delhi-ncr"),"home":_route_exists(app,"/")}
+        routes={"newspaper_workspace":_route_exists_any(app,"/newspaper-v83"),"newspaper_process":_route_exists_any(app,"/api/newspaper-v83/process","POST"),"newspaper_health":_route_exists_any(app,"/api/newspaper-v83/health"),"canonical_newspaper_capture":_route_exists(app,"/alliance/newspaper-capture"),"goa_properties":_route_exists(app,"/alliance/properties/goa"),"delhi_properties":_route_exists(app,"/alliance/properties/delhi-ncr"),"goa_requirements":_route_exists(app,"/alliance/requirements/goa"),"delhi_requirements":_route_exists(app,"/alliance/requirements/delhi-ncr"),"home":_route_exists(app,"/")}
         ok=all(routes.values()) and _table_exists(eng,PROPERTY_AUTHORITY) and _table_exists(eng,REQUIREMENT_AUTHORITY) and _table_exists(eng,REGION_AUTHORITY)
         _STATE.update(status="PASS" if ok else "FAIL",last_audit_at=datetime.now(timezone.utc).isoformat(),last_error=None,property_counts=pc,requirement_counts=rc,routes=routes)
     except Exception as exc: _STATE.update(status="FAIL",last_audit_at=datetime.now(timezone.utc).isoformat(),last_error=f"{type(exc).__name__}: {exc}")
@@ -155,14 +166,16 @@ def _wrap_dashboard(app):
         if inspect.isawaitable(result): result=await result
         return _inject(result)
     return True
-def register(core):
+def register(core,served_app=None):
+    global _SERVED_APP
+    _SERVED_APP=served_app
     app=_app(core); eng=_engine(core); _remove(app,"/")
     @app.get("/",response_class=HTMLResponse,include_in_schema=False)
     def home(): return _access()
     @app.get("/alliance/newspaper-capture",include_in_schema=False)
     def newspaper_capture(req:Request):
         _need_login(core,req)
-        if not (_route_exists(app,"/newspaper-v83") and _route_exists(app,"/api/newspaper-v83/process","POST")): return HTMLResponse("<h1>Newspaper Capture unavailable</h1><p>Pipeline audit failed. No upload attempted.</p>",503)
+        if not (_route_exists_any(app,"/newspaper-v83") and _route_exists_any(app,"/api/newspaper-v83/process","POST")): return HTMLResponse("<h1>Newspaper Capture unavailable</h1><p>Pipeline audit failed. No upload attempted.</p>",503)
         return RedirectResponse("/newspaper-v83",307)
     @app.get("/alliance/regions",response_class=HTMLResponse,include_in_schema=False)
     def regions(req:Request):
@@ -184,4 +197,4 @@ def register(core):
     if not _STATE["worker_started"]:
         _STATE["worker_started"]=True
         threading.Thread(target=_worker,args=(core,),daemon=True,name="alliance-region-newspaper-auditor").start()
-    return {"status":"REGISTERED","version":VERSION,"matcher_source_contract":"MASTER_ONLY","property_authority":PROPERTY_AUTHORITY,"requirement_authority":REQUIREMENT_AUTHORITY,"region_authority":REGION_AUTHORITY,"dashboard_wrapped":wrapped,"master_business_mutations":0}
+    return {"status":"REGISTERED","version":VERSION,"matcher_source_contract":"MASTER_ONLY","property_authority":PROPERTY_AUTHORITY,"requirement_authority":REQUIREMENT_AUTHORITY,"region_authority":REGION_AUTHORITY,"dashboard_wrapped":wrapped,"served_app_audit":served_app is not None,"master_business_mutations":0}

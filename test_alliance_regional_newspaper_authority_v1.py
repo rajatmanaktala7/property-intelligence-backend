@@ -9,3 +9,8 @@ for row,want in [
     got=classify_region(row)["market_region"]; assert got==want,(row,got,want)
 assert classify_region({"description":"occupancy certificate ready"})["market_region"]=="REVIEW_REQUIRED"
 print("ALLIANCE REGIONAL + NEWSPAPER AUTHORITY V1: PASS")
+
+assert "master_property_id" in PID
+assert "canonical_id" in PID
+assert "clean_record" in TEXT_FIELDS
+assert classify_region({"clean_record":{"original_message":"Villa available in Assagao Goa"}})["market_region"]=="GOA"
