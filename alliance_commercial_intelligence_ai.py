@@ -419,7 +419,156 @@ def _load(engine,view,city):
     return rows[:180]
 
 def _render(engine,view,city,message):
-    return govsrc.render_commercial(engine, view, city, message)
+    page = govsrc.render_commercial(engine, view, city, message)
+    if "ALLIANCE_COMMERCIAL_DOCTOR_V2" in page:
+        return page
+    doctor_ui = r"""
+<style id="ALLIANCE_COMMERCIAL_DOCTOR_V2">
+html{scroll-behavior:smooth}
+article,.asset,.card{scroll-margin-top:105px}
+article{padding-top:9px!important;padding-bottom:9px!important;margin-top:7px!important;margin-bottom:7px!important}
+article p{margin-top:4px!important;margin-bottom:4px!important}
+th,td{padding-top:6px!important;padding-bottom:6px!important;vertical-align:top}
+#allianceCommercialDoctorBar{position:sticky;top:0;z-index:9999;background:#fff;border:1px solid #d8e0ea;border-radius:10px;padding:9px;margin:8px 0;box-shadow:0 3px 14px rgba(0,0,0,.10);display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+#allianceCommercialDoctorBar input{flex:1;min-width:260px;padding:9px;border:1px solid #cbd5e1;border-radius:8px}
+.allianceResearchState{margin-top:6px;padding:7px 9px;background:#f1f5f9;border-radius:7px}
+.allianceBusy{opacity:.65;pointer-events:none}
+</style>
+<script id="ALLIANCE_COMMERCIAL_DOCTOR_V2">
+(function(){
+ const safe=v=>String(v||'').replace(/[^A-Za-z0-9_-]+/g,'-');
+
+ function researchForms(root){
+   return Array.from((root||document).querySelectorAll('form[action^="/commercial-intelligence/research/"]'))
+     .filter(f=>!(f.getAttribute('action')||'').includes('/research-all'));
+ }
+
+ function cards(){
+   return researchForms(document).map(f=>f.closest('article,.asset,.card')||f.parentElement).filter(Boolean);
+ }
+
+ function installToolbar(){
+   if(document.getElementById('allianceCommercialDoctorBar'))return;
+   const host=document.querySelector('.wrap')||document.body;
+   const bar=document.createElement('div');
+   bar.id='allianceCommercialDoctorBar';
+   bar.innerHTML='<b>Commercial Intelligence</b><input id="allianceCommercialSearch" placeholder="Search asset, city, location, developer, status or contact"><span id="allianceCommercialCount"></span>';
+   host.insertBefore(bar,host.firstChild);
+
+   const q=bar.querySelector('#allianceCommercialSearch');
+   const n=bar.querySelector('#allianceCommercialCount');
+
+   function filter(){
+     const term=(q.value||'').trim().toLowerCase();
+     let visible=0;
+     cards().forEach(card=>{
+       const ok=!term || (card.innerText||'').toLowerCase().includes(term);
+       card.style.display=ok?'':'none';
+       if(ok)visible++;
+     });
+     n.textContent=visible+' assets visible';
+   }
+   q.addEventListener('input',filter);
+   filter();
+ }
+
+ async function refreshAsset(action,box){
+   try{
+     const response=await fetch('/commercial-intelligence',{credentials:'same-origin',cache:'no-store'});
+     if(!response.ok)return false;
+     const doc=new DOMParser().parseFromString(await response.text(),'text/html');
+     const incoming=Array.from(doc.querySelectorAll('form[action^="/commercial-intelligence/research/"]'))
+       .find(f=>(f.getAttribute('action')||'')===action);
+     if(!incoming)return false;
+     const fresh=incoming.closest('article,.asset,.card')||incoming.parentElement;
+     if(!fresh)return false;
+     box.innerHTML=fresh.innerHTML;
+     bind(box);
+     return true;
+   }catch(e){return false}
+ }
+
+ function bind(root){
+   researchForms(root).forEach(form=>{
+     if(form.dataset.allianceDoctorBound)return;
+     form.dataset.allianceDoctorBound='1';
+
+     const action=form.getAttribute('action')||'';
+     const code=decodeURIComponent(action.split('/').pop()||'');
+     const box=form.closest('article,.asset,.card')||form.parentElement;
+     const id='asset-'+safe(code);
+     if(box&&!box.id)box.id=id;
+
+     form.addEventListener('submit',async function(ev){
+       ev.preventDefault();
+
+       const button=form.querySelector('button');
+       if(button){
+         button.disabled=true;
+         button.classList.add('allianceBusy');
+         button.textContent='Researching?';
+       }
+
+       let state=box.querySelector('.allianceResearchState');
+       if(!state){
+         state=document.createElement('div');
+         state.className='allianceResearchState';
+         form.insertAdjacentElement('afterend',state);
+       }
+       state.textContent='Research started. Alliance will update this asset here.';
+
+       try{
+         const result=await fetch(action,{
+           method:'POST',
+           credentials:'same-origin',
+           redirect:'follow'
+         });
+
+         if(result.status===401){
+           state.textContent='Session expired ? log in again.';
+           return;
+         }
+         if(!result.ok){
+           state.textContent='Research request failed: HTTP '+result.status;
+           return;
+         }
+
+         history.replaceState(null,'','#'+id);
+         box.scrollIntoView({block:'center'});
+
+         setTimeout(()=>refreshAsset(action,box),6000);
+         setTimeout(async()=>{
+           const ok=await refreshAsset(action,box);
+           if(!ok)state.textContent='Research completed/requested. Use refresh if new evidence is still processing.';
+         },14000);
+
+       }catch(err){
+         state.textContent='Research request error: '+err;
+       }finally{
+         if(button){
+           button.disabled=false;
+           button.classList.remove('allianceBusy');
+           button.textContent='Research this asset';
+         }
+       }
+     });
+   });
+ }
+
+ function start(){
+   installToolbar();
+   bind(document);
+   if(location.hash){
+     const target=document.getElementById(location.hash.substring(1));
+     if(target)setTimeout(()=>target.scrollIntoView({block:'center'}),120);
+   }
+ }
+ if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',start);
+ else start();
+})();
+</script>
+"""
+    return page.replace("</body>",doctor_ui+"</body>",1) if "</body>" in page else page+doctor_ui
 
 def register(core):
     engine,app=core.engine,core.app; router=APIRouter(); ensure_schema(engine)
