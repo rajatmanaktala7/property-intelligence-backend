@@ -623,6 +623,50 @@ def register(core, served_app=None):
     if app is None or e is None:
         raise RuntimeError("Requirement restore requires FastAPI app + SQLAlchemy engine")
 
+    # REQUIREMENT_AUTH_PROBE_V1
+    probe_path = "/api/alliance/requirement-auth-probe"
+    for route in list(getattr(app.router, "routes", [])):
+        if getattr(route, "path", None) == probe_path:
+            app.router.routes.remove(route)
+
+    @app.get(probe_path, include_in_schema=False)
+    def requirement_auth_probe(req: Request):
+        result = {
+            "status": "OK",
+            "module": __name__,
+            "version": VERSION,
+            "cookie_present": bool(req.cookies.get("pi_session")),
+            "cookie_length": len(req.cookies.get("pi_session") or ""),
+            "page_role": None,
+            "get_role": None,
+            "need_login_role": None,
+            "errors": {},
+        }
+
+        for label, function_name in (
+            ("page_role", "page_role_or_redirect"),
+            ("get_role", "get_role"),
+            ("need_login_role", "need_login"),
+        ):
+            function = getattr(core, function_name, None)
+            if not callable(function):
+                result["errors"][label] = "NOT_CALLABLE"
+                continue
+
+            try:
+                value = function(req)
+                result[label] = (
+                    value if isinstance(value, str)
+                    else type(value).__name__ if value is not None
+                    else None
+                )
+            except Exception as exc:
+                result["errors"][label] = (
+                    f"{type(exc).__name__}: {str(exc)[:160]}"
+                )
+
+        return result
+
     for path in ("/alliance/final/requirements", "/alliance/final/requirements/{source}"):
         _remove_get(app, path)
 
