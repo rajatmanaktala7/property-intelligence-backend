@@ -261,7 +261,13 @@ async def core_route_status():
             p = getattr(r, "path", None)
             methods = sorted(list(getattr(r, "methods", set()) or set()))
             if p:
-                routes.append({"path": p, "methods": methods})
+                endpoint = getattr(r, "endpoint", None)
+                routes.append({
+                    "path": p,
+                    "methods": methods,
+                    "endpoint_name": getattr(endpoint, "__name__", None),
+                    "endpoint_module": getattr(endpoint, "__module__", None),
+                })
 
     wanted = [
         "/api/v383/status",
