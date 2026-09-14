@@ -233,7 +233,7 @@ code{{background:#f5eee5;padding:4px 6px;border-radius:5px}}
 <p>The health service is online while the main application loads independently.</p>
 <p><b>Boot state:</b> <code>{BOOT["state"]}</code></p>
 <p><b>Detail:</b> <code>{err}</code></p>
-<p><a href="/healthz">Health</a> ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â· <a href="/boot-status">Boot Status</a></p>
+<p><a href="/healthz">Health</a> ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â· <a href="/boot-status">Boot Status</a></p>
 </main>
 </body>
 </html>""",
@@ -1427,6 +1427,34 @@ def _load_core():
             stabilization["master_requirement_authority_v1"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","fail_safe":True}
         # ALLIANCE_MASTER_REQUIREMENT_AUTHORITY_V1_END
 
+        # ALLIANCE_FINAL_REQUIREMENT_ROUTE_AUTHORITY_V1
+        # Final takeover runs after all legacy requirement route registrars.
+        try:
+            import alliance_requirement_restore_v1235 as final_reqrestore_v1235
+            final_reqrestore_result = final_reqrestore_v1235.register(wrapped.core)
+            stabilization = dict(stabilization or {})
+            stabilization["final_requirement_route_authority_v1"] = {
+                "status": "READY",
+                "owner": "alliance_requirement_restore_v1235",
+                "registered_after_legacy_routes": True,
+                "registration": final_reqrestore_result,
+            }
+            print(
+                "[final-requirement-route-authority-v1]",
+                stabilization["final_requirement_route_authority_v1"],
+            )
+        except Exception as exc:
+            stabilization = dict(stabilization or {})
+            stabilization["final_requirement_route_authority_v1"] = {
+                "status": "ERROR",
+                "error": f"{type(exc).__name__}: {exc}",
+                "fail_safe": True,
+            }
+            print(
+                "[final-requirement-route-authority-v1] warning:",
+                type(exc).__name__,
+                str(exc),
+            )
         CORE_APP = wrapped.app
 
         # ALLIANCE_REGIONAL_NEWSPAPER_AUTHORITY_V1 - post-core authority
