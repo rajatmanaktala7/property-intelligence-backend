@@ -1622,22 +1622,6 @@ def _load_core():
             }
         # ALLIANCE_WHATSAPP_SOURCE_RECONCILIATION_V2_END
 
-        # ALLIANCE_AI_DOCTOR_V2
-        try:
-            import alliance_ai_doctor_v2 as _alliance_ai_doctor_v2
-            _doctor_v2_result = _alliance_ai_doctor_v2.register(wrapped.core, served_app=wrapped.app)
-            stabilization = dict(stabilization or {})
-            stabilization["alliance_ai_doctor_v2"] = _doctor_v2_result
-            print("[alliance-ai-doctor-v2]", _doctor_v2_result)
-        except Exception as _doctor_v2_exc:
-            stabilization = dict(stabilization or {})
-            stabilization["alliance_ai_doctor_v2"] = {
-                "status":"ERROR",
-                "error":f"{type(_doctor_v2_exc).__name__}: {_doctor_v2_exc}",
-                "fail_safe":True,
-            }
-            print("[alliance-ai-doctor-v2] ERROR",type(_doctor_v2_exc).__name__,str(_doctor_v2_exc))
-
         BOOT["core_loaded"] = True
         BOOT["state"] = "READY" if stabilization.get("registered") else "DEGRADED"
         BOOT["stabilization"] = stabilization

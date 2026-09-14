@@ -6,7 +6,7 @@ import json
 import re
 from typing import Any
 
-from fastapi import HTTPException, Query, Request
+from fastapi import Query, Request
 from fastapi.responses import HTMLResponse
 from sqlalchemy import text
 
@@ -25,24 +25,9 @@ def _app(core):
 def _engine(core):
     return getattr(core, "engine", None)
 
-# ALLIANCE_CANONICAL_AUTH_V2\ndef _login(core, req):
-    # Canonical Alliance login authority. This is the same app.py authority
-    # that issues and validates the pi_session cookie used by /alliance/primary.
-    try:
-        import app as canonical_app
-        fn = getattr(canonical_app, "need_login", None)
-        if callable(fn):
-            return fn(req)
-    except HTTPException:
-        raise
-    except Exception:
-        pass
-
-    # Fail-safe compatibility only; never bypass authentication.
+def _login(core, req):
     fn = getattr(core, "need_login", None)
-    if callable(fn):
-        return fn(req)
-    raise HTTPException(401, "Login required")
+    return fn(req) if fn else "team"
 
 def _e(v: Any) -> str:
     return html.escape("" if v is None else str(v))
