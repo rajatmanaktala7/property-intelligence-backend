@@ -10,7 +10,7 @@ from fastapi import Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
 from sqlalchemy import text
 
-VERSION = "12.3.7-CANONICAL-SESSION-AUTH"
+VERSION = "12.3.8-STABLE-PAGE-SESSION-AUTH"
 SOURCES = ("MASTER", "NEWSPAPER", "WHATSAPP", "MAGAZINE", "MANUAL")
 
 EXCLUDE_TOKENS = (
@@ -25,36 +25,39 @@ def _app(core):
 def _engine(core):
     return getattr(core, "engine", None)
 
-# ALLIANCE_REQUIREMENT_CANONICAL_AUTH_V22
+# ALLIANCE_REQUIREMENT_CANONICAL_AUTH_V23
 def _login(core, req):
-    """Use the same pi_session authority as the primary Alliance dashboard."""
-    need_login = getattr(core, "need_login", None)
+    """Resolve the same stable page session used by working Alliance pages."""
+    page_role = getattr(core, "page_role_or_redirect", None)
 
-    if callable(need_login):
-        need_login(req)
-
-        role_fn = getattr(core, "get_role", None)
-        if callable(role_fn):
-            try:
-                return role_fn(req) or "authenticated"
-            except Exception:
-                pass
-
-        return "authenticated"
-
-    role_fn = getattr(core, "get_role", None)
-    if callable(role_fn):
+    if callable(page_role):
         try:
-            role = role_fn(req)
-            if role:
+            role = page_role(req)
+            if role in {"admin", "team"}:
                 return role
         except Exception:
             pass
 
+    get_role = getattr(core, "get_role", None)
+
+    if callable(get_role):
+        try:
+            role = get_role(req)
+            if role in {"admin", "team"}:
+                return role
+        except Exception:
+            pass
+
+    need_login = getattr(core, "need_login", None)
+
+    if callable(need_login):
+        role = need_login(req)
+        if role in {"admin", "team"}:
+            return role
+
     raise HTTPException(
-        status_code=303,
+        status_code=401,
         detail="Login required",
-        headers={"Location": "/login"},
     )
 
 def _e(v: Any) -> str:
