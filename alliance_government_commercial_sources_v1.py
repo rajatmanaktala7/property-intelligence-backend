@@ -275,3 +275,96 @@ def render_commercial(engine,view,city,message=""):
         devhtml=f'''<div class="card"><h2>Developer / Lessee Portfolio</h2><p>Historical developer relationships are kept separate from current vacancy status.</p><table><tr><th>Authority</th><th>Developer</th><th>Properties</th><th>Public Phones</th></tr>{rows}</table></div>'''
     note=f"{len(assets)} result(s). "+(f"Strict filter: {city2} / {v}" if city2 else f"View: {v}")
     return f'''<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Commercial Intelligence</title><style>*{{box-sizing:border-box}}body{{font-family:Arial;margin:0;background:#f4f7fb;color:#172437}}header{{background:#102235;color:white;padding:18px}}.wrap{{max-width:1500px;margin:auto;padding:18px}}.bar{{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0}}.btn,button{{padding:9px 12px;border:0;border-radius:8px;background:#1677ff;color:white;text-decoration:none;font-weight:bold;cursor:pointer}}input{{padding:9px;border:1px solid #ccd6e0;border-radius:8px;min-width:230px}}.card{{background:white;border:1px solid #e1e7ee;border-radius:14px;padding:16px;margin:12px 0}}.grid{{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px}}.grid>div{{background:#f8fafc;padding:10px;border-radius:10px}}table{{width:100%;border-collapse:collapse}}th,td{{padding:8px;border-bottom:1px solid #e7edf3;text-align:left}}.note{{background:#fff6df;padding:10px;border-radius:9px}}@media(max-width:900px){{.grid{{grid-template-columns:1fr}}}}</style></head><body><header><a class="btn" style="float:right;background:white;color:#102235" href="/team-dashboard-v376">Back to Main Dashboard</a><h1>Commercial Intelligence</h1><div>Malls + Government Commercial Opportunities + Developer Intelligence</div></header><div class="wrap"><div class="bar"><a class="btn" href="/commercial-intelligence?view=ALL">All</a><a class="btn" href="/commercial-intelligence?view=MALLS">Malls</a><a class="btn" href="/commercial-intelligence?view=GOV">Government</a><form method="get" action="/commercial-intelligence"><input type="hidden" name="view" value="{escape(v)}"><input name="city" value="{escape(city or '')}" placeholder="e.g. Gurgaon malls"><button>Filter</button></form><form method="post" action="/commercial-intelligence/government-sync"><button>Sync Government Sources</button></form></div><div class="note">{escape(note)}. Gurgaon/Gurugram mall searches are restricted to Gurgaon/Gurugram mall records only.</div>{devhtml}{''.join(cards) if cards else '<div class="card"><h2>No matching results</h2><p>Run research/sync or change the filter.</p></div>'}</div></body></html>'''
+
+
+# ALLIANCE_COMMERCIAL_RENDERER_V21
+_alliance_render_commercial_v21_base = render_commercial
+
+_ALLIANCE_COMMERCIAL_V21_UI = r"""
+<style id="ALLIANCE_COMMERCIAL_RENDERER_V21">
+html{scroll-behavior:smooth}
+article,.asset,.card{scroll-margin-top:105px}
+article{padding-top:9px!important;padding-bottom:9px!important;margin-top:7px!important;margin-bottom:7px!important}
+article p{margin-top:4px!important;margin-bottom:4px!important}
+th,td{padding-top:6px!important;padding-bottom:6px!important;vertical-align:top}
+#allianceCommercialV21Bar{position:sticky;top:0;z-index:9999;background:#fff;border:1px solid #d8e0ea;border-radius:10px;padding:9px;margin:8px 0;box-shadow:0 3px 14px rgba(0,0,0,.10);display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+#allianceCommercialV21Bar input{flex:1;min-width:260px;padding:9px;border:1px solid #cbd5e1;border-radius:8px}
+.allianceResearchState{margin-top:6px;padding:7px 9px;background:#f1f5f9;border-radius:7px}
+.allianceBusy{opacity:.65;pointer-events:none}
+</style>
+<script id="ALLIANCE_COMMERCIAL_V21_SCRIPT">
+(function(){
+ const safe=v=>String(v||'').replace(/[^A-Za-z0-9_-]+/g,'-');
+ function forms(root){
+   return Array.from((root||document).querySelectorAll('form[action^="/commercial-intelligence/research/"]'))
+     .filter(f=>!(f.getAttribute('action')||'').includes('/research-all'));
+ }
+ function cards(){return forms(document).map(f=>f.closest('article,.asset,.card')||f.parentElement).filter(Boolean);}
+ function toolbar(){
+   if(document.getElementById('allianceCommercialV21Bar'))return;
+   const host=document.querySelector('.wrap')||document.body;
+   const bar=document.createElement('div');
+   bar.id='allianceCommercialV21Bar';
+   bar.innerHTML='<b>Commercial Intelligence</b><input id="allianceCommercialV21Search" placeholder="Search asset, city, location, developer, status or contact"><span id="allianceCommercialV21Count"></span>';
+   host.insertBefore(bar,host.firstChild);
+   const q=bar.querySelector('#allianceCommercialV21Search'), n=bar.querySelector('#allianceCommercialV21Count');
+   function filter(){
+     const term=(q.value||'').trim().toLowerCase(); let visible=0;
+     cards().forEach(card=>{const ok=!term||(card.innerText||'').toLowerCase().includes(term);card.style.display=ok?'':'none';if(ok)visible++;});
+     n.textContent=visible+' assets visible';
+   }
+   q.addEventListener('input',filter);filter();
+ }
+ async function refreshAsset(action,box){
+   try{
+     const response=await fetch('/commercial-intelligence',{credentials:'same-origin',cache:'no-store'});
+     if(!response.ok)return false;
+     const doc=new DOMParser().parseFromString(await response.text(),'text/html');
+     const incoming=Array.from(doc.querySelectorAll('form[action^="/commercial-intelligence/research/"]')).find(f=>(f.getAttribute('action')||'')===action);
+     if(!incoming)return false;
+     const fresh=incoming.closest('article,.asset,.card')||incoming.parentElement;
+     if(!fresh)return false;
+     box.innerHTML=fresh.innerHTML;bind(box);return true;
+   }catch(e){return false;}
+ }
+ function bind(root){
+   forms(root).forEach(form=>{
+     if(form.dataset.allianceV21Bound)return;
+     form.dataset.allianceV21Bound='1';
+     const action=form.getAttribute('action')||'';
+     const code=decodeURIComponent(action.split('/').pop()||'');
+     const box=form.closest('article,.asset,.card')||form.parentElement;
+     const id='asset-'+safe(code);
+     if(box&&!box.id)box.id=id;
+     form.addEventListener('submit',async function(ev){
+       ev.preventDefault();
+       const button=form.querySelector('button');
+       if(button){button.disabled=true;button.classList.add('allianceBusy');button.textContent='Researching…';}
+       let state=box.querySelector('.allianceResearchState');
+       if(!state){state=document.createElement('div');state.className='allianceResearchState';form.insertAdjacentElement('afterend',state);}
+       state.textContent='Research started. Alliance will update this asset here.';
+       try{
+         const result=await fetch(action,{method:'POST',credentials:'same-origin',redirect:'follow'});
+         if(result.status===401){state.textContent='Session expired — log in again.';return;}
+         if(!result.ok){state.textContent='Research request failed: HTTP '+result.status;return;}
+         history.replaceState(null,'','#'+id);box.scrollIntoView({block:'center'});
+         setTimeout(()=>refreshAsset(action,box),6000);
+         setTimeout(async()=>{const ok=await refreshAsset(action,box);if(!ok)state.textContent='Research was accepted. Refresh this asset if external evidence is still processing.';},14000);
+       }catch(err){state.textContent='Research request error: '+err;}
+       finally{if(button){button.disabled=false;button.classList.remove('allianceBusy');button.textContent='Research this asset';}}
+     });
+   });
+ }
+ function start(){toolbar();bind(document);if(location.hash){const t=document.getElementById(location.hash.substring(1));if(t)setTimeout(()=>t.scrollIntoView({block:'center'}),120);}}
+ if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',start);else start();
+})();
+</script>
+"""
+
+def render_commercial(engine, view, city, message=""):
+    page = _alliance_render_commercial_v21_base(engine, view, city, message)
+    if "ALLIANCE_COMMERCIAL_RENDERER_V21" in page:
+        return page
+    if "</body>" in page:
+        return page.replace("</body>", _ALLIANCE_COMMERCIAL_V21_UI + "</body>", 1)
+    return page + _ALLIANCE_COMMERCIAL_V21_UI
