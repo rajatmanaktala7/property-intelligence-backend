@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import hashlib
 import html
@@ -27,32 +27,22 @@ def _engine(core):
 
 # ALLIANCE_REQUIREMENT_CANONICAL_AUTH_V21
 def _login(core, req):
-    checks = []
-    fn = getattr(core, "need_login", None)
-    if callable(fn):
-        checks.append(fn)
+    # Use the canonical app.py auth authority that issues pi_session.
     try:
         import app as canonical_app
-        canonical = getattr(canonical_app, "need_login", None)
-        if callable(canonical) and canonical not in checks:
-            checks.append(canonical)
+        fn = getattr(canonical_app, "need_login", None)
+        if callable(fn):
+            return fn(req)
+    except HTTPException:
+        raise
     except Exception:
         pass
 
-    for check in checks:
-        try:
-            return check(req)
-        except HTTPException as exc:
-            if int(getattr(exc, "status_code", 0) or 0) != 401:
-                raise
+    fn = getattr(core, "need_login", None)
+    if callable(fn):
+        return fn(req)
+    raise HTTPException(401, "Login required")
 
-    raise HTTPException(
-        status_code=303,
-        detail="Login required",
-        headers={"Location": "/login"},
-    )
-
-# ALLIANCE_REQUIREMENT_AUTH_REDIRECT_V250
 def _e(v: Any) -> str:
     return html.escape("" if v is None else str(v))
 
