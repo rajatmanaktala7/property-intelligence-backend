@@ -258,7 +258,7 @@ def _v810_magazine_detail_recovery(e):
                     area_sqft=COALESCE(area_sqft,:area),
                     area_value=COALESCE(area_value,:area),
                     area_unit=COALESCE(area_unit,CASE WHEN :area IS NULL THEN NULL ELSE 'SQFT' END),
-                    phones=CASE WHEN (phones IS NULL OR phones='[]'::jsonb) AND :ph IS NOT NULL
+                    phones=CASE WHEN (phones IS NULL OR phones='[]'::jsonb) AND CAST(:ph AS JSONB) IS NOT NULL
                                THEN CAST(:ph AS JSONB) ELSE phones END,
                     updated_at=NOW()
                 WHERE canonical_id=:id
