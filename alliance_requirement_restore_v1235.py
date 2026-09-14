@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import hashlib
 import html
@@ -27,21 +27,32 @@ def _engine(core):
 
 # ALLIANCE_REQUIREMENT_CANONICAL_AUTH_V21
 def _login(core, req):
-    # Use the canonical app.py auth authority that issues pi_session.
+    role = None
     try:
-        import app as canonical_app
-        fn = getattr(canonical_app, "need_login", None)
+        fn = getattr(core, "get_role", None)
         if callable(fn):
-            return fn(req)
-    except HTTPException:
-        raise
+            role = fn(req)
     except Exception:
-        pass
+        role = None
 
-    fn = getattr(core, "need_login", None)
-    if callable(fn):
-        return fn(req)
-    raise HTTPException(401, "Login required")
+    if not role:
+        try:
+            import app as canonical_app
+            fn = getattr(canonical_app, "get_role", None)
+            if callable(fn):
+                role = fn(req)
+        except Exception:
+            role = None
+
+    if role:
+        return role
+
+    raise HTTPException(
+        status_code=303,
+        detail="Login required",
+        headers={"Location": "/login"},
+    )
+
 
 def _e(v: Any) -> str:
     return html.escape("" if v is None else str(v))
@@ -490,6 +501,116 @@ def _table(e, source, q, location, transaction, status, assigned, limit):
     <tbody>{''.join(trs) if trs else '<tr><td colspan="16">No requirements found.</td></tr>'}</tbody></table></div>"""
     return _shell(f"{source.title()} Requirements", body)
 
+
+def _gate_tx(v):
+    s = str(v or "").strip().upper()
+    if s in {"RENT", "LEASE", "LEASING"}:
+        return "LEASE"
+    if s in {"SALE", "PURCHASE", "BUY"}:
+        return "PURCHASE"
+    return ""
+
+def _json_list_text(v):
+    if isinstance(v, list):
+        return ", ".join(str(x) for x in v if str(x).strip())
+    if v is None:
+        return ""
+    if isinstance(v, str):
+        try:
+            x = json.loads(v)
+            if isinstance(x, list):
+                return ", ".join(str(y) for y in x if str(y).strip())
+        except Exception:
+            return v
+    return str(v)
+
+def _ensure_gate_row(e, selected):
+    import alliance_requirement_gate_v1191 as gate
+    import alliance_requirement_master_bridge_v1199 as bridge
+
+    with e.begin() as c:
+        for ddl in getattr(gate, "DDL", []):
+            c.execute(text(ddl))
+    bridge.ensure_schema(e)
+
+    message = str(selected.get("message") or "").strip()
+    if not message:
+        raise HTTPException(400, "Source requirement has no original message")
+
+    source_table = str(selected.get("source_table") or "").strip()
+    source_pk = str(selected.get("source_pk") or "").strip()
+    source_type = str(selected.get("source") or "SOURCE").strip().upper()
+    message_hash = gate._hash(message)
+
+    with e.connect() as c:
+        existing = c.execute(text("""
+            SELECT * FROM pi_requirement_gate_v1191
+            WHERE (source_table=:tb AND source_pk=:pk) OR message_hash=:mh
+            ORDER BY CASE WHEN source_table=:tb AND source_pk=:pk THEN 0 ELSE 1 END, id
+            LIMIT 1
+        """), {"tb": source_table, "pk": source_pk, "mh": message_hash}).mappings().first()
+    if existing:
+        return dict(existing)
+
+    ex = gate.extract(message)
+    if not ex.get("transaction_type"):
+        ex["transaction_type"] = _gate_tx(selected.get("transaction"))
+    if not ex.get("locations") and selected.get("location"):
+        ex["locations"] = [str(selected.get("location")).strip()]
+    if not ex.get("contact_numbers") and selected.get("contact"):
+        ex["contact_numbers"] = gate._phone_list_from_form(str(selected.get("contact")))
+    if not ex.get("intended_use") and selected.get("category"):
+        ex["intended_use"] = str(selected.get("category")).strip().upper()
+    if not ex.get("property_category") and selected.get("property_type"):
+        ex["property_category"] = str(selected.get("property_type")).strip().upper()
+    if not ex.get("company_brand_person"):
+        ex["company_brand_person"] = str(selected.get("company") or selected.get("contact_name") or "").strip() or None
+
+    evidence_key = f"RESTORED:{source_type}:{source_table}:{source_pk or message_hash[:20]}"
+    with e.begin() as c:
+        gid = c.execute(text("""
+            INSERT INTO pi_requirement_gate_v1191(
+                evidence_key,source_type,source_table,source_pk,original_message,message_hash,
+                classification,genuine_confidence,rejection_reason,transaction_type,
+                property_category,intended_use,locations,alternate_locations,
+                area_min_sqft,area_max_sqft,budget_min,budget_max,floor_requirement,
+                frontage_requirement,parking_requirement,company_brand_person,
+                contact_numbers,extracted_fields,evidence_quality,matcher_eligible,
+                created_at,updated_at
+            )
+            VALUES(
+                :ek,:st,:tb,:pk,:msg,:mh,:cls,:conf,:rej,:tx,:pc,:use,
+                CAST(:loc AS JSONB),CAST(:alt AS JSONB),:amin,:amax,:bmin,:bmax,
+                :floor,:frontage,:parking,:company,CAST(:phones AS JSONB),
+                CAST(:fields AS JSONB),:eq,FALSE,NOW(),NOW()
+            )
+            ON CONFLICT(evidence_key) DO UPDATE SET updated_at=NOW()
+            RETURNING id
+        """), {
+            "ek": evidence_key, "st": source_type, "tb": source_table, "pk": source_pk,
+            "msg": message, "mh": message_hash,
+            "cls": ex.get("classification") or "NEEDS VERIFICATION",
+            "conf": ex.get("genuine_confidence") or 0,
+            "rej": ex.get("rejection_reason"),
+            "tx": ex.get("transaction_type"),
+            "pc": ex.get("property_category"),
+            "use": ex.get("intended_use"),
+            "loc": json.dumps(ex.get("locations") or []),
+            "alt": json.dumps(ex.get("alternate_locations") or []),
+            "amin": ex.get("area_min_sqft"), "amax": ex.get("area_max_sqft"),
+            "bmin": ex.get("budget_min"), "bmax": ex.get("budget_max"),
+            "floor": ex.get("floor_requirement"),
+            "frontage": ex.get("frontage_requirement"),
+            "parking": ex.get("parking_requirement"),
+            "company": ex.get("company_brand_person"),
+            "phones": json.dumps(ex.get("contact_numbers") or []),
+            "fields": json.dumps(ex, ensure_ascii=False, default=str),
+            "eq": ex.get("evidence_quality") or "UNKNOWN",
+        }).scalar_one()
+        row = c.execute(text("SELECT * FROM pi_requirement_gate_v1191 WHERE id=:id"), {"id": gid}).mappings().first()
+    return dict(row)
+
+
 def register(core):
     app = _app(core)
     e = _engine(core)
@@ -525,6 +646,154 @@ def register(core):
             headers={"Cache-Control":"no-store","X-Alliance-Requirement-Restore":VERSION},
         )
 
+
+    @app.get("/alliance/final/requirements/run-match", response_class=HTMLResponse, include_in_schema=False)
+    def source_run_match(req: Request, source: str = Query(""), source_pk: str = Query("")):
+        _login(core, req)
+        src = source.upper().strip()
+        if src not in SOURCES or src == "MASTER":
+            return HTMLResponse(_shell("Run Match", '<div class="notice">Invalid source requirement.</div>'), status_code=400)
+
+        rows, _ = _source_rows(e, src)
+        selected = next((row for row in rows if str(row.get("source_pk") or "") == str(source_pk or "")), None)
+        if not selected:
+            return HTMLResponse(_shell("Run Match", '<div class="notice"><b>Requirement not found.</b></div>'), status_code=404)
+
+        gate_row = _ensure_gate_row(e, selected)
+        gid = int(gate_row["id"])
+        locations = _json_list_text(gate_row.get("locations"))
+        phones = _json_list_text(gate_row.get("contact_numbers"))
+        tx = str(gate_row.get("transaction_type") or "")
+
+        body = (
+            '<div class="notice"><b>Review this exact requirement before matching.</b><br>'
+            'Nothing is promoted until you press <b>Verify & Run Match</b>. '
+            'The existing Requirement Gate and Master Bridge will deduplicate, preserve source evidence, '
+            'mark the canonical requirement VERIFIED and then open Smart Matcher.</div>'
+            '<div class="card">'
+            f'<p><b>Source:</b> {_e(selected.get("source_table"))} · ID {_e(selected.get("source_pk"))}</p>'
+            f'<p><b>Original Requirement:</b><br>{_e(selected.get("message"))}</p>'
+            '<form method="post" action="/alliance/final/requirements/verify-and-match">'
+            f'<input type="hidden" name="gate_id" value="{gid}">'
+            f'<input type="hidden" name="return_source" value="{_e(src)}">'
+            '<label>Transaction</label><select name="transaction_type" required>'
+            '<option value="">Select</option>'
+            f'<option value="LEASE" {"selected" if tx=="LEASE" else ""}>LEASE / RENT</option>'
+            f'<option value="PURCHASE" {"selected" if tx=="PURCHASE" else ""}>PURCHASE / SALE</option>'
+            '</select><br><br>'
+            f'<label>Location</label><input name="location" value="{_e(locations)}" required><br><br>'
+            f'<label>Contact number(s)</label><input name="contact_numbers" value="{_e(phones)}" required><br><br>'
+            f'<label>Use / Category</label><input name="intended_use" value="{_e(gate_row.get("intended_use"))}"><br><br>'
+            f'<label>Area Min Sqft</label><input name="area_min_sqft" value="{_e(gate_row.get("area_min_sqft"))}">'
+            f'<label>Area Max Sqft</label><input name="area_max_sqft" value="{_e(gate_row.get("area_max_sqft"))}"><br><br>'
+            f'<label>Budget Max ₹</label><input name="budget_max" value="{_e(gate_row.get("budget_max"))}"><br><br>'
+            f'<label>Notes</label><input name="notes" value="{_e(gate_row.get("verification_notes"))}"><br><br>'
+            '<button type="submit">Verify & Run Match</button></form><br>'
+            '<form method="post" action="/alliance/final/requirements/reject-source">'
+            f'<input type="hidden" name="gate_id" value="{gid}">'
+            f'<input type="hidden" name="return_source" value="{_e(src)}">'
+            '<button type="submit">Reject</button></form></div>'
+        )
+        return HTMLResponse(_shell("Verify & Run Match", body), headers={"Cache-Control":"no-store"})
+
+    @app.post("/alliance/final/requirements/verify-and-match", include_in_schema=False)
+    def verify_and_match(
+        req: Request,
+        gate_id: int = Form(...),
+        return_source: str = Form("WHATSAPP"),
+        transaction_type: str = Form(...),
+        location: str = Form(...),
+        contact_numbers: str = Form(...),
+        intended_use: str = Form(""),
+        area_min_sqft: str = Form(""),
+        area_max_sqft: str = Form(""),
+        budget_max: str = Form(""),
+        notes: str = Form(""),
+    ):
+        _login(core, req)
+        import alliance_requirement_gate_v1191 as gate
+        import alliance_requirement_master_bridge_v1199 as bridge
+
+        actor_fn = getattr(core, "actor_name", None)
+        actor = actor_fn(req) if actor_fn else "team"
+
+        tx = str(transaction_type or "").strip().upper()
+        if tx not in {"LEASE", "PURCHASE"}:
+            raise HTTPException(400, "Transaction must be LEASE or PURCHASE")
+
+        locations = [x.strip() for x in re.split(r"[,;/\n]+", str(location or "")) if x.strip()]
+        phones = gate._phone_list_from_form(contact_numbers)
+        if not locations:
+            raise HTTPException(400, "At least one verified location is required")
+        if not phones:
+            raise HTTPException(400, "At least one verified contact number is required")
+
+        def num(v):
+            try:
+                return float(str(v).replace(",", "").strip()) if str(v or "").strip() else None
+            except Exception:
+                return None
+
+        amin, amax = num(area_min_sqft), num(area_max_sqft)
+        if amin is not None and amax is not None and amin > amax:
+            amin, amax = amax, amin
+        bmax = num(budget_max)
+
+        with e.begin() as c:
+            row = c.execute(text("SELECT id FROM pi_requirement_gate_v1191 WHERE id=:id FOR UPDATE"), {"id": gate_id}).mappings().first()
+            if not row:
+                raise HTTPException(404, "Requirement Gate row not found")
+
+            c.execute(text("""
+                UPDATE pi_requirement_gate_v1191
+                SET classification='VERIFIED ACTIVE',
+                    matcher_eligible=TRUE,
+                    transaction_type=:tx,
+                    locations=CAST(:loc AS JSONB),
+                    contact_numbers=CAST(:phones AS JSONB),
+                    intended_use=:use,
+                    area_min_sqft=:amin,
+                    area_max_sqft=:amax,
+                    budget_max=:bmax,
+                    verification_notes=:notes,
+                    verified_by=:actor,
+                    verified_at=NOW(),
+                    updated_at=NOW()
+                WHERE id=:id
+            """), {
+                "id": gate_id, "tx": tx, "loc": json.dumps(locations), "phones": json.dumps(phones),
+                "use": str(intended_use or "").strip().upper() or None,
+                "amin": amin, "amax": amax, "bmax": bmax,
+                "notes": str(notes or "").strip() or None, "actor": actor,
+            })
+            result = bridge.sync(c, gate_id, actor, "VERIFIED ACTIVE")
+
+        cid = str(result.get("canonical_id") or "")
+        if not cid:
+            raise HTTPException(500, "No canonical requirement ID returned")
+        return RedirectResponse(f"/alliance/primary/matcher?requirement_id={cid}", status_code=303)
+
+    @app.post("/alliance/final/requirements/reject-source", include_in_schema=False)
+    def reject_source(req: Request, gate_id: int = Form(...), return_source: str = Form("WHATSAPP")):
+        _login(core, req)
+        import alliance_requirement_master_bridge_v1199 as bridge
+        actor_fn = getattr(core, "actor_name", None)
+        actor = actor_fn(req) if actor_fn else "team"
+        with e.begin() as c:
+            row = c.execute(text("SELECT classification FROM pi_requirement_gate_v1191 WHERE id=:id FOR UPDATE"), {"id": gate_id}).mappings().first()
+            if not row:
+                raise HTTPException(404, "Requirement Gate row not found")
+            c.execute(text("""
+                UPDATE pi_requirement_gate_v1191
+                SET classification='REJECTED/EXPIRED',matcher_eligible=FALSE,
+                    verified_by=NULL,verified_at=NULL,updated_at=NOW()
+                WHERE id=:id
+            """), {"id": gate_id})
+            bridge.sync(c, gate_id, actor, "REJECTED/EXPIRED")
+        src = str(return_source or "WHATSAPP").lower()
+        return RedirectResponse(f"/alliance/final/requirements/{src}", status_code=303)
+
+
     @app.get("/api/alliance/requirement-restore/status", include_in_schema=False)
     def restore_status(req: Request):
         _login(core, req)
@@ -547,6 +816,7 @@ def register(core):
 
     _move_front(app, "/alliance/final/requirements")
     _move_front(app, "/alliance/final/requirements/{source}")
+    _move_front(app, "/alliance/final/requirements/run-match")
     _move_front(app, "/api/alliance/requirement-restore/status")
 
     return {
@@ -557,3 +827,5 @@ def register(core):
         "matcher_master_only":True,
         "master_mutation":False,
     }
+
+# ALLIANCE_APP_RECTIFIER_V402
