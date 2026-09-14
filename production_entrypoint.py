@@ -727,6 +727,14 @@ def _load_core():
                 else:
                     async def _redir(request: Request, _target=target):
                         qs=request.url.query
+                        # ALLIANCE_REGIONAL_NEWSPAPER_AUTHORITY_V1 - post-core authority
+                        try:
+                            import alliance_regional_newspaper_authority_v1 as _alliance_regional_newspaper_authority_v1
+                            _regional_newspaper_result = _alliance_regional_newspaper_authority_v1.register(wrapped.core)
+                            print("ALLIANCE_REGIONAL_NEWSPAPER_AUTHORITY_V1: REGISTERED", _regional_newspaper_result)
+                        except Exception as _regional_newspaper_error:
+                            print("ALLIANCE_REGIONAL_NEWSPAPER_AUTHORITY_V1 registration error:", type(_regional_newspaper_error).__name__, str(_regional_newspaper_error))
+
                         return RedirectResponse(_target+("?" + qs if qs else ""),status_code=307)
                     wrapped.app.add_api_route(old_path,_redir,methods=["GET"],include_in_schema=False)
             print("[final-5x5-v910]", final_5x5_result)
