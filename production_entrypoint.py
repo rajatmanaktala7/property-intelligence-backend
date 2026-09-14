@@ -1412,18 +1412,6 @@ def _load_core():
         # ALLIANCE_MASTER_REQUIREMENT_AUTHORITY_V1_END
 
         CORE_APP = wrapped.app
-        # ALLIANCE_APP_RECTIFIER_V1 - operational rectifier
-        try:
-            import alliance_app_rectifier_v1 as _alliance_app_rectifier_v1
-            _rectifier_result=_alliance_app_rectifier_v1.register(wrapped.core,served_app=wrapped.app)
-            stabilization=dict(stabilization or {})
-            stabilization['app_rectifier_v1']=_rectifier_result
-            print('ALLIANCE_APP_RECTIFIER_V1: REGISTERED',_rectifier_result)
-        except Exception as _rectifier_error:
-            stabilization=dict(stabilization or {})
-            stabilization['app_rectifier_v1']={'status':'ERROR','error':f'{type(_rectifier_error).__name__}: {_rectifier_error}','fail_safe':True}
-            print('ALLIANCE_APP_RECTIFIER_V1 registration error:',type(_rectifier_error).__name__,str(_rectifier_error))
-
 
         # ALLIANCE_REGIONAL_NEWSPAPER_AUTHORITY_V1 - post-core authority
         try:
