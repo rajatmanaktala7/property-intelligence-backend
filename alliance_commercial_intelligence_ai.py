@@ -11,7 +11,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import text
 import alliance_government_commercial_sources_v1 as govsrc
 
-VERSION = "5.0.1-SINGLE-FLIGHT-RUNTIME-SAFETY"
+VERSION = "5.0.2-CANONICAL-ROUTE-OWNERSHIP"
 
 FULL_RUN_STALE_MINUTES = 45
 
@@ -421,8 +421,37 @@ def _load(engine,view,city):
 def _render(engine,view,city,message):
     return govsrc.render_commercial(engine, view, city, message)
 
+def _remove_owned_routes(app):
+    """Remove only routes owned by this module before canonical registration."""
+    owned = {
+        ("/commercial-intelligence", "GET"),
+        ("/commercial-intelligence/research-all", "POST"),
+        ("/commercial-intelligence/research/{asset_code}", "POST"),
+        ("/api/commercial-intelligence/status", "GET"),
+        ("/commercial-intelligence/government-sync", "POST"),
+        ("/api/commercial-intelligence/government-source-status", "GET"),
+    }
+
+    removed = 0
+    for route in list(getattr(app.router, "routes", [])):
+        path = getattr(route, "path", None)
+        methods = getattr(route, "methods", set()) or set()
+
+        if any(
+            path == owned_path and method in methods
+            for owned_path, method in owned
+        ):
+            app.router.routes.remove(route)
+            removed += 1
+
+    return removed
+
+
 def register(core):
-    engine,app=core.engine,core.app; router=APIRouter(); ensure_schema(engine)
+    engine,app=core.engine,core.app
+    removed_routes=_remove_owned_routes(app)
+    router=APIRouter()
+    ensure_schema(engine)
     @router.get("/commercial-intelligence",response_class=HTMLResponse)
     def dashboard(req:Request,view:str=Query("ALL"),city:str=Query(""),message:str=Query("")):
         role=_page_role(core,req)
@@ -494,4 +523,4 @@ def register(core):
         import alliance_commercial_intelligence_network as network
         network._dashboard_link_patch(app)
     except Exception: pass
-    return {"registered":True,"version":VERSION,"route":"/commercial-intelligence"}
+    return {"registered":True,"version":VERSION,"route":"/commercial-intelligence","removed_duplicate_routes":removed_routes,"canonical_owner":"alliance_commercial_intelligence_ai"}

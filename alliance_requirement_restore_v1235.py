@@ -10,7 +10,7 @@ from fastapi import HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
 from sqlalchemy import text
 
-VERSION = "12.3.6-REQUIREMENT-RUN-MATCH-DASHBOARD-FIX"
+VERSION = "12.3.7-CANONICAL-SESSION-AUTH"
 SOURCES = ("MASTER", "NEWSPAPER", "WHATSAPP", "MAGAZINE", "MANUAL")
 
 EXCLUDE_TOKENS = (
@@ -25,34 +25,37 @@ def _app(core):
 def _engine(core):
     return getattr(core, "engine", None)
 
-# ALLIANCE_REQUIREMENT_CANONICAL_AUTH_V21
+# ALLIANCE_REQUIREMENT_CANONICAL_AUTH_V22
 def _login(core, req):
-    role = None
-    try:
-        fn = getattr(core, "get_role", None)
-        if callable(fn):
-            role = fn(req)
-    except Exception:
-        role = None
+    """Use the same pi_session authority as the primary Alliance dashboard."""
+    need_login = getattr(core, "need_login", None)
 
-    if not role:
+    if callable(need_login):
+        need_login(req)
+
+        role_fn = getattr(core, "get_role", None)
+        if callable(role_fn):
+            try:
+                return role_fn(req) or "authenticated"
+            except Exception:
+                pass
+
+        return "authenticated"
+
+    role_fn = getattr(core, "get_role", None)
+    if callable(role_fn):
         try:
-            import app as canonical_app
-            fn = getattr(canonical_app, "get_role", None)
-            if callable(fn):
-                role = fn(req)
+            role = role_fn(req)
+            if role:
+                return role
         except Exception:
-            role = None
-
-    if role:
-        return role
+            pass
 
     raise HTTPException(
         status_code=303,
         detail="Login required",
         headers={"Location": "/login"},
     )
-
 
 def _e(v: Any) -> str:
     return html.escape("" if v is None else str(v))

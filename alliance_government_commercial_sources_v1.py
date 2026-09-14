@@ -2,9 +2,9 @@ from __future__ import annotations
 import io, re, urllib.request
 from html import escape
 from urllib.parse import urlparse
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 
-VERSION="1.0.0-GOV-SOURCES-STRICT-CITY"
+VERSION="1.1.0-BOUNDED-BULK-RENDER"
 
 CITY_ALIASES={
  "gurgaon":("gurgaon","gurugram"),"gurugram":("gurgaon","gurugram"),
@@ -257,14 +257,63 @@ def render_commercial(engine,view,city,message=""):
             ors.append(f"LOWER(TRIM(COALESCE(city,'')))=:c{i}")
             ors.append(f"(COALESCE(city,'')='' AND LOWER(COALESCE(location,'')) LIKE '%' || :c{i} || '%')")
         where.append("("+" OR ".join(ors)+")")
+    # Bounded bulk loading: three queries total instead of two queries per asset.
     with engine.connect() as c:
-        assets=[dict(x) for x in c.execute(text(f"SELECT * FROM aci_intel_assets WHERE {' AND '.join(where)} ORDER BY confidence DESC,asset_name LIMIT 500"),p).mappings().all()]
-        devs=[dict(x) for x in c.execute(text("SELECT authority,developer_name,COUNT(*) property_count,STRING_AGG(DISTINCT COALESCE(phone,''),', ') phones FROM aci_gov_developer_portfolio GROUP BY authority,developer_name ORDER BY COUNT(*) DESC,developer_name LIMIT 100")).mappings().all()]
+        assets=[dict(x) for x in c.execute(
+            text(f"SELECT * FROM aci_intel_assets WHERE {' AND '.join(where)} ORDER BY confidence DESC,asset_name LIMIT 300"),
+            p,
+        ).mappings().all()]
+        devs=[dict(x) for x in c.execute(text(
+            "SELECT authority,developer_name,COUNT(*) property_count,"
+            "STRING_AGG(DISTINCT COALESCE(phone,''),', ') phones "
+            "FROM aci_gov_developer_portfolio "
+            "GROUP BY authority,developer_name "
+            "ORDER BY COUNT(*) DESC,developer_name LIMIT 100"
+        )).mappings().all()]
+
+        asset_codes=[a["asset_code"] for a in assets]
+        vacancy_rows=[]
+        contact_rows=[]
+
+        if asset_codes:
+            vacancy_query=text(
+                "SELECT * FROM aci_intel_vacancies "
+                "WHERE asset_code IN :asset_codes "
+                "ORDER BY asset_code,last_verified_at DESC NULLS LAST"
+            ).bindparams(bindparam("asset_codes", expanding=True))
+
+            contact_query=text(
+                "SELECT * FROM aci_intel_contacts "
+                "WHERE asset_code IN :asset_codes "
+                "ORDER BY asset_code,confidence DESC,last_verified_at DESC NULLS LAST"
+            ).bindparams(bindparam("asset_codes", expanding=True))
+
+            vacancy_rows=[
+                dict(x) for x in
+                c.execute(vacancy_query, {"asset_codes":asset_codes}).mappings().all()
+            ]
+            contact_rows=[
+                dict(x) for x in
+                c.execute(contact_query, {"asset_codes":asset_codes}).mappings().all()
+            ]
+
+    vacancies_by_asset={}
+    contacts_by_asset={}
+
+    for row in vacancy_rows:
+        bucket=vacancies_by_asset.setdefault(row.get("asset_code"),[])
+        if len(bucket)<5:
+            bucket.append(row)
+
+    for row in contact_rows:
+        bucket=contacts_by_asset.setdefault(row.get("asset_code"),[])
+        if len(bucket)<6:
+            bucket.append(row)
+
     cards=[]
     for a in assets:
-        with engine.connect() as c:
-            vac=[dict(x) for x in c.execute(text("SELECT * FROM aci_intel_vacancies WHERE asset_code=:a ORDER BY last_verified_at DESC NULLS LAST LIMIT 5"),{"a":a["asset_code"]}).mappings().all()]
-            con=[dict(x) for x in c.execute(text("SELECT * FROM aci_intel_contacts WHERE asset_code=:a ORDER BY confidence DESC,last_verified_at DESC NULLS LAST LIMIT 6"),{"a":a["asset_code"]}).mappings().all()]
+        vac=vacancies_by_asset.get(a["asset_code"],[])
+        con=contacts_by_asset.get(a["asset_code"],[])
         vh="".join(f"<div><b>{escape(_clean(x.get('availability_status')))}</b> {escape(_clean(x.get('area_text')))} {escape(_clean(x.get('rent_text')))}</div>" for x in vac) or "No verified availability."
         ch="".join(f"<div><b>{escape(_clean(x.get('company_name') or x.get('contact_name')))}</b> {escape(_clean(x.get('phone')))} {escape(_clean(x.get('email')))}</div>" for x in con) or "No public contact verified."
         src=f'<a class="btn" target="_blank" href="{escape(_clean(a.get("source_url")))}">Open source</a>' if a.get("source_url") else ""
