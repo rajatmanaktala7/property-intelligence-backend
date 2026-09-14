@@ -6,7 +6,7 @@ import json
 import re
 from typing import Any
 
-from fastapi import Query, Request
+from fastapi import HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
 from sqlalchemy import text
 
@@ -25,9 +25,23 @@ def _app(core):
 def _engine(core):
     return getattr(core, "engine", None)
 
+# ALLIANCE_REQUIREMENT_CANONICAL_AUTH_V21
 def _login(core, req):
+    # Use the canonical app.py auth authority that issues pi_session.
+    try:
+        import app as canonical_app
+        fn = getattr(canonical_app, "need_login", None)
+        if callable(fn):
+            return fn(req)
+    except HTTPException:
+        raise
+    except Exception:
+        pass
+
     fn = getattr(core, "need_login", None)
-    return fn(req) if fn else "team"
+    if callable(fn):
+        return fn(req)
+    raise HTTPException(401, "Login required")
 
 def _e(v: Any) -> str:
     return html.escape("" if v is None else str(v))
