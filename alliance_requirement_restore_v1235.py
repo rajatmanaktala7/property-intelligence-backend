@@ -614,8 +614,8 @@ def _ensure_gate_row(e, selected):
     return dict(row)
 
 
-def register(core):
-    app = _app(core)
+def register(core, served_app=None):
+    app = served_app or _app(core)
     e = _engine(core)
     if app is None or e is None:
         raise RuntimeError("Requirement restore requires FastAPI app + SQLAlchemy engine")
