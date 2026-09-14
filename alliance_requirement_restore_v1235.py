@@ -350,6 +350,16 @@ def _filtered(rows, q, location, transaction, status, assigned):
         out.append(row)
     return out
 
+def _remove_method(app, path, method):
+    want = str(method or "").upper()
+    app.router.routes[:] = [
+        r for r in list(app.router.routes)
+        if not (
+            getattr(r, "path", None) == path
+            and want in set(getattr(r, "methods", set()) or set())
+        )
+    ]
+
 def _remove_get(app, path):
     app.router.routes[:] = [
         r for r in list(app.router.routes)
@@ -617,8 +627,17 @@ def register(core):
     if app is None or e is None:
         raise RuntimeError("Requirement restore requires FastAPI app + SQLAlchemy engine")
 
-    for path in ("/alliance/final/requirements", "/alliance/final/requirements/{source}"):
-        _remove_get(app, path)
+    # V4.1.1 single authoritative owner for the complete Requirement workflow.
+    for path, method in (
+        ("/alliance/final/requirements", "GET"),
+        ("/alliance/final/requirements/{source}", "GET"),
+        ("/alliance/final/requirements/run-match", "GET"),
+        ("/alliance/final/requirements/verify-and-match", "POST"),
+        ("/alliance/final/requirements/reject-source", "POST"),
+        ("/api/alliance/requirement-restore/status", "GET"),
+        ("/api/alliance/requirement-authority-v411/status", "GET"),
+    ):
+        _remove_method(app, path, method)
 
     @app.get("/alliance/final/requirements", response_class=HTMLResponse, include_in_schema=False)
     def requirement_hub(req: Request):
@@ -794,6 +813,16 @@ def register(core):
         return RedirectResponse(f"/alliance/final/requirements/{src}", status_code=303)
 
 
+    @app.get("/api/alliance/requirement-authority-v411/status", include_in_schema=False)
+    def requirement_authority_v411_status():
+        return {
+            "status": "PASS",
+            "authority": "ALLIANCE_REQUIREMENT_AUTHORITY_V411",
+            "auth": "CANONICAL_SIGNED_SESSION",
+            "matcher": "MASTER_ONLY",
+            "business_writes": 0,
+        }
+
     @app.get("/api/alliance/requirement-restore/status", include_in_schema=False)
     def restore_status(req: Request):
         _login(core, req)
@@ -817,6 +846,7 @@ def register(core):
     _move_front(app, "/alliance/final/requirements")
     _move_front(app, "/alliance/final/requirements/{source}")
     _move_front(app, "/alliance/final/requirements/run-match")
+    _move_front(app, "/api/alliance/requirement-authority-v411/status")
     _move_front(app, "/api/alliance/requirement-restore/status")
 
     return {

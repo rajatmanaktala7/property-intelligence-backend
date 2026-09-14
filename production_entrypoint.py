@@ -1427,6 +1427,18 @@ def _load_core():
             stabilization["master_requirement_authority_v1"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","fail_safe":True}
         # ALLIANCE_MASTER_REQUIREMENT_AUTHORITY_V1_END
 
+        # ALLIANCE_REQUIREMENT_AUTHORITY_V411
+        # Final route-authority pass after feature registration.
+        try:
+            import alliance_requirement_restore_v1235 as _req_authority_v411
+            _req_v411_result = _req_authority_v411.register(wrapped.core)
+            stabilization = dict(stabilization or {})
+            stabilization["requirement_authority_v411"] = _req_v411_result
+        except Exception as _req_v411_exc:
+            stabilization = dict(stabilization or {})
+            stabilization["requirement_authority_v411"] = {"status":"ERROR","error":f"{type(_req_v411_exc).__name__}: {_req_v411_exc}"}
+            raise
+
         CORE_APP = wrapped.app
 
         # ALLIANCE_REGIONAL_NEWSPAPER_AUTHORITY_V1 - post-core authority

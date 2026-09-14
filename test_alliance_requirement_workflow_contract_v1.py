@@ -24,3 +24,11 @@ form=fm.group(0)
 assert re.search(r'name=["\']role["\']',form,re.I)
 assert re.search(r'name=["\']code["\']',form,re.I)
 print("REQUIREMENT_WORKFLOW_CONTRACT_TEST=PASS")
+
+ENTRY = (ROOT / "production_entrypoint.py").read_text(encoding="utf-8-sig")
+ast.parse(ENTRY, filename="production_entrypoint.py")
+assert "ALLIANCE_REQUIREMENT_AUTHORITY_V411" in REQ
+assert "def _remove_method(app, path, method):" in REQ
+assert "ALLIANCE_REQUIREMENT_AUTHORITY_V411" in ENTRY
+assert "_req_authority_v411.register(wrapped.core)" in ENTRY
+print("REQUIREMENT_ROUTE_AUTHORITY_V411_CONTRACT=PASS")
