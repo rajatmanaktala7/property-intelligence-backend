@@ -3,7 +3,7 @@ import json, re
 from fastapi import APIRouter, HTTPException, Query, Request
 from sqlalchemy import text
 
-VERSION='1.0.0-EVIDENCE-ONLY-HISTORICAL-CONTACT-RECOVERY'
+VERSION='1.0.1-IDEMPOTENT-EVIDENCE-ONLY-CONTACT-RECOVERY'
 CONFIRM='APPLY_EVIDENCE_ONLY'
 PHONE=re.compile(r'\D+')
 
@@ -72,11 +72,32 @@ def plan(engine,limit=50000):
 def audit(engine,limit=50000):
     rows,eligible,ambiguous,no_evidence=plan(engine,limit)
     prop=req=event=0
-    for row,phone,opaque,paths in eligible:
-        entity=str(row.get('entity_id') or '')
-        if entity.startswith('WAP-'): prop+=1
-        elif entity.startswith('WAR-'): req+=1
-        if not _phone(row.get('sender_phone')): event+=1
+    with engine.connect() as c:
+        for row,phone,opaque,paths in eligible:
+            entity=str(row.get('entity_id') or '')
+
+            if not _phone(row.get('sender_phone')):
+                event+=1
+
+            if entity.startswith('WAP-'):
+                missing=c.execute(text("""
+                    SELECT 1 FROM wa_properties
+                    WHERE wa_property_id=:id
+                      AND (sender_phone IS NULL OR BTRIM(sender_phone)='')
+                    LIMIT 1
+                """),{'id':entity}).first()
+                if missing:
+                    prop+=1
+
+            elif entity.startswith('WAR-'):
+                missing=c.execute(text("""
+                    SELECT 1 FROM wa_requirements
+                    WHERE wa_requirement_id=:id
+                      AND (contact_phone IS NULL OR BTRIM(contact_phone)='')
+                    LIMIT 1
+                """),{'id':entity}).first()
+                if missing:
+                    req+=1
     return {'status':'READY','version':VERSION,'rows_scanned':len(rows),
       'unique_sender_phone_evidence':len(eligible),'ambiguous_identity_rows':ambiguous,
       'no_sender_phone_evidence':no_evidence,'event_updates_available':event,
@@ -96,7 +117,8 @@ def apply(engine,limit=5000):
               (event_id,entity_id,resolved_phone,evidence_paths,version)
               VALUES(:e,:x,:p,CAST(:j AS JSONB),:v) ON CONFLICT(event_id) DO NOTHING'''),
               {'e':eid,'x':entity or None,'p':phone,'j':json.dumps(paths),'v':VERSION}).rowcount
-            if not ins: continue
+            # The recovery ledger is idempotent. An existing ledger row
+            # must not prevent the guarded target updates from completing.
             counts['events']+=c.execute(text('''UPDATE wa_bridge_events SET sender_phone=:p
               WHERE id=:id AND (sender_phone IS NULL OR BTRIM(sender_phone)='')'''),
               {'p':phone,'id':row['id']}).rowcount
