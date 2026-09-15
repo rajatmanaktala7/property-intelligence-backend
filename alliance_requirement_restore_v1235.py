@@ -25,35 +25,19 @@ def _app(core):
 def _engine(core):
     return getattr(core, "engine", None)
 
-# ALLIANCE_REQUIREMENT_DIRECT_SESSION_AUTH_V24
+# ALLIANCE_REQUIREMENT_CANONICAL_APP_AUTH_V25
 def _login(core, req):
-    """Validate the canonical pi_session without relying on a wrapper module."""
-    import base64
-    import hashlib
-    import hmac
-    import os
+    """Authenticate through app.py, the confirmed owner of POST /login."""
+    import importlib
 
-    token = req.cookies.get("pi_session")
+    canonical_auth = importlib.import_module("app")
+    get_role = getattr(canonical_auth, "get_role", None)
 
-    if token:
-        try:
-            raw = base64.urlsafe_b64decode(token.encode("utf-8")).decode("utf-8")
-            role, signature = raw.rsplit("|", 1)
+    if callable(get_role):
+        role = get_role(req)
 
-            secret = os.getenv("SESSION_SECRET", "change-this-secret")
-            expected = hmac.new(
-                secret.encode("utf-8"),
-                role.encode("utf-8"),
-                hashlib.sha256,
-            ).hexdigest()
-
-            if (
-                role in {"admin", "team"}
-                and hmac.compare_digest(signature, expected)
-            ):
-                return role
-        except Exception:
-            pass
+        if role in {"admin", "team"}:
+            return role
 
     raise HTTPException(
         status_code=401,
