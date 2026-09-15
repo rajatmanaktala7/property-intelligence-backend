@@ -1735,6 +1735,11 @@ def _load_core():
             stabilization["alliance_ai_doctor_v21"] = {"status":"ERROR","error":f"{type(_doctor_v21_exc).__name__}: {_doctor_v21_exc}","fail_safe":True}
             print("[alliance-ai-doctor-v21] ERROR", type(_doctor_v21_exc).__name__, str(_doctor_v21_exc))
 
+        # ALLIANCE_COMMERCIAL_CANONICAL_RESEARCH_V51
+        import alliance_commercial_intelligence_ai as commercial_v51
+        stabilization = dict(stabilization or {})
+        stabilization["commercial_intelligence_v51"] = commercial_v51.register(wrapped.core)
+
         # ALLIANCE_RELEASE_STABILITY_V1
         # Runs last. A critical route-owner regression blocks the new release.
         try:
