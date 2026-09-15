@@ -656,6 +656,27 @@ def register(core, served_app=None):
 
     @app.get("/alliance/final/requirements", response_class=HTMLResponse, include_in_schema=False)
     def requirement_hub(req: Request):
+        # ALLIANCE_REQUIREMENT_EXACT_HANDLER_DIAGNOSTIC_V2
+        if req.query_params.get("__auth_diagnostic") == "1":
+            import importlib
+            from fastapi.responses import JSONResponse
+
+            canonical_auth = importlib.import_module("app")
+            token = req.cookies.get("pi_session")
+            role = canonical_auth.get_role(req)
+
+            return JSONResponse({
+                "diagnostic": "ALLIANCE_REQUIREMENT_EXACT_HANDLER_V2",
+                "request_path": req.url.path,
+                "cookie_header_present": bool(req.headers.get("cookie")),
+                "pi_session_present": bool(token),
+                "pi_session_length": len(token or ""),
+                "canonical_module": canonical_auth.__name__,
+                "canonical_role": role,
+                "handler_module": __name__,
+                "auth_mode": "CANONICAL_APP_AUTH_V25",
+                "database_changed": False,
+            })
         _login(core, req)
         page, _ = _hub(e)
         return HTMLResponse(page, headers={"Cache-Control":"no-store","X-Alliance-Requirement-Restore":VERSION})
