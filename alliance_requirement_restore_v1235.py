@@ -10,7 +10,7 @@ from fastapi import Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
 from sqlalchemy import text
 
-VERSION = "12.3.9-FAST-REQUIREMENT-HUB"
+VERSION = "12.3.10-FAST-DATABASE-COUNTS"
 SOURCES = ("MASTER", "NEWSPAPER", "WHATSAPP", "MAGAZINE", "MANUAL")
 
 EXCLUDE_TOKENS = (
@@ -407,27 +407,86 @@ th,td{{border:1px solid #d0d5dd;padding:7px;text-align:left;vertical-align:top;w
 {_nav()}<div class="wrap"><h2>{_e(title)}</h2>{body}<p><a class="btn" href="/team-dashboard-v376">â† Back to Dashboard</a></p></div>
 </body></html>"""
 
+def _fast_requirement_counts(e):
+    """Count database rows without loading or normalizing complete records."""
+    counts = {source: 0 for source in SOURCES}
+    errors = {}
+
+    tables = _discover_tables(e)
+
+    try:
+        with e.connect() as c:
+            if _table_exists(e, "pi_master_requirements_v711"):
+                counts["MASTER"] = int(
+                    c.execute(
+                        text("SELECT COUNT(*) FROM pi_master_requirements_v711")
+                    ).scalar() or 0
+                )
+
+            for table in tables:
+                source = _classify(table)
+
+                if source not in {"NEWSPAPER", "WHATSAPP", "MAGAZINE", "MANUAL"}:
+                    continue
+
+                try:
+                    value = c.execute(
+                        text(f"SELECT COUNT(*) FROM {_qident(table)}")
+                    ).scalar()
+
+                    counts[source] += int(value or 0)
+                except Exception as exc:
+                    errors[table] = type(exc).__name__
+    except Exception as exc:
+        errors["connection"] = type(exc).__name__
+
+    return counts, errors
+
+
 def _hub(e):
-    # ALLIANCE_REQUIREMENT_ZERO_SCAN_HUB_V1
-    # The landing page performs no database scan. Detailed rows load only
-    # after the user selects one requirement database.
+    # ALLIANCE_REQUIREMENT_FAST_COUNTS_V1
+    counts, count_errors = _fast_requirement_counts(e)
     cards = []
     details = {}
+
     for source in SOURCES:
-        note = ("Canonical matcher requirement inventory" if source == "MASTER"
-                else "Restored source database - open to view records")
+        count = counts.get(source, 0)
+
+        note = (
+            "Canonical matcher requirement inventory"
+            if source == "MASTER"
+            else "Restored source database rows"
+        )
+
         details[source] = {
-            "loading": "ON_DEMAND",
-            "database_scan": False,
+            "count": count,
+            "count_method": "SQL_COUNT_ONLY",
+            "full_record_scan": False,
         }
+
         cards.append(f"""<a class="dbcard" href="/alliance/final/requirements/{source.lower()}">
-          <b>{_e(source.title())} Requirements</b><div class="num">Open</div>
-          <div class="sub">{_e(note)}</div><div class="open">View Database</div></a>""")
+          <b>{_e(source.title())} Requirements</b>
+          <div class="num">{count:,}</div>
+          <div class="sub">{_e(note)}</div>
+          <div class="open">View Database</div>
+        </a>""")
+
+    warning = ""
+    if count_errors:
+        warning = (
+            '<div class="notice">Some source counters could not be read. '
+            'The underlying databases remain available.</div>'
+        )
+
     body = f"""<div class="notice"><b>All requirement databases are available.</b>
-    Master remains canonical. Source records are loaded only when their database is opened.
-    Nothing is automatically copied into Master and no duplicate Master records are created.</div>
+    Counts use lightweight database queries. Complete records load only after
+    a database is opened. Nothing is automatically copied into Master and no
+    duplicate Master records are created.</div>
+    {warning}
     <div class="grid">{''.join(cards)}</div>"""
+
     return _shell("5 Requirement Databases", body), details
+
 
 def _table(e, source, q, location, transaction, status, assigned, limit):
     rows, meta = _combined(e, source)
