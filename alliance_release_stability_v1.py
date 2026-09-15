@@ -5,7 +5,7 @@ from typing import Any
 from fastapi import APIRouter, Request
 from sqlalchemy import inspect, text
 
-VERSION = "1.1.0-COMMERCIAL-RESEARCH-ROUTE-GATE"
+VERSION = "1.0.3-NONBLOCKING-BOOT-ROUTE-GATE"
 TARGET_SCORE = 99.0
 
 CANONICAL_ROUTES = (
@@ -20,8 +20,8 @@ CANONICAL_ROUTES = (
     (
         "/commercial-intelligence",
         "GET",
-        "alliance_commercial_intelligence_ai",
-        "dashboard",
+        "alliance_final_dashboard_v1241",
+        "commercial_fallback",
     ),
     (
         "/alliance/primary/matcher",

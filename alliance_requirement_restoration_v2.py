@@ -196,7 +196,6 @@ def audit(core, sample_limit: int = 20) -> dict:
                         "classification": extracted.get("classification"),
                         "evidence_quality": extracted.get("evidence_quality"),
                         "message_preview": message[:240],
-                        "restoration_evidence": extracted.get("_restoration_evidence", {}),
                         "restoration_evidence":
                             extracted.get("_restoration_evidence", {}),
                     })
