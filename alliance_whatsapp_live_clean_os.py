@@ -1521,17 +1521,27 @@ def register(core):
     app = getattr(core, "app", None) or core
     router = APIRouter()
 
+    # ALLIANCE_WHATSAPP_STATUS_SERIALIZATION_FIX_V1
     @router.get("/api/whatsapp-live-clean-os/status")
     def status():
         try:
             audit = audit_snapshot()
         except Exception as exc:
             audit = {"error": f"{type(exc).__name__}: {exc}"}
+
+        # Internal lock connections are deliberately held in RUNTIME while a
+        # worker owns the advisory lock. They are not JSON data and must never
+        # be exposed by the public status contract.
+        public_runtime = {
+            key: _safe(value)
+            for key, value in list(RUNTIME.items())
+            if not str(key).startswith("_")
+        }
         return {
             "status": RUNTIME.get("status"),
             "version": VERSION,
-            "runtime": dict(RUNTIME),
-            "audit": audit,
+            "runtime": public_runtime,
+            "audit": _safe(audit),
         }
 
     @router.post("/api/whatsapp-live-clean-os/run")

@@ -182,7 +182,8 @@ def _claim_one():
     with wb.wa_engine.begin() as c:
         row = c.execute(text("""
             SELECT e.id,e.event_id,e.group_id,e.external_message_id,e.sender_name,e.sender_phone,
-                   e.message_timestamp,e.raw_text,e.retry_count,g.account_id,g.group_name,g.source_id
+                   e.message_timestamp,e.raw_text,e.retry_count,e.payload_json,
+                   g.account_id,g.group_name,g.source_id
             FROM wa_bridge_events e
             JOIN wa_bridge_groups g ON g.group_id=e.group_id
             WHERE e.status IN ('QUEUED','RETRY')
@@ -200,13 +201,27 @@ def _claim_one():
 
 def _process_one(row):
     wb = _bridge()
-    ev = {
+
+    # ALLIANCE_WHATSAPP_QUEUE_IDENTITY_PRESERVATION_V1
+    payload = row.get("payload_json") or {}
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except Exception:
+            payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+
+    ev = dict(payload)
+    for key, value in {
         "text": row.get("raw_text"),
         "sender_name": row.get("sender_name"),
         "sender_phone": row.get("sender_phone"),
         "timestamp": row.get("message_timestamp"),
         "external_message_id": row.get("external_message_id"),
-    }
+    }.items():
+        if value not in (None, ""):
+            ev[key] = value
     try:
         with wb.wa_engine.begin() as c:
             group = c.execute(text("""
@@ -231,6 +246,16 @@ def _process_one(row):
                 c.execute(text("UPDATE wa_bridge_groups SET requirements_found=COALESCE(requirements_found,0)+1,updated_at=NOW() WHERE group_id=:g"), {"g": row["group_id"]})
             elif classification in ("REJECTED", "REVIEW"):
                 c.execute(text("UPDATE wa_bridge_groups SET rejected_found=COALESCE(rejected_found,0)+1,updated_at=NOW() WHERE group_id=:g"), {"g": row["group_id"]})
+
+        # Capture only identity evidence present in the original event.
+        # Ambiguous LID/phone pairs remain quarantined by the capture module.
+        try:
+            from alliance_whatsapp_live_identity_capture_v1 import capture_identity_event
+            capture_identity_event(payload, wb.wa_engine)
+        except Exception as identity_exc:
+            STATE["identity_capture_error"] = (
+                f"{type(identity_exc).__name__}: {identity_exc}"
+            )[:500]
 
         STATE["processed"] += 1
         STATE["last_processed_at"] = _utcnow()
