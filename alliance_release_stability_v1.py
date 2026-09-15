@@ -26,8 +26,8 @@ CANONICAL_ROUTES = (
     (
         "/alliance/primary/matcher",
         "GET",
-        "alliance_deal_match_ai_v60",
-        "deal_match_page",
+        "alliance_master_requirement_authority_v1",
+        "smart_matcher_redirect",
     ),
 )
 
