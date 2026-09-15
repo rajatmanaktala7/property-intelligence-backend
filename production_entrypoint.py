@@ -1490,6 +1490,15 @@ def _load_core():
             stabilization = dict(stabilization or {})
             stabilization["requirement_source_truth_auditor_v1"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","fail_safe":True}
 
+        # ALLIANCE_MASTER_RECONCILIATION_AUDITOR_V1
+        try:
+            import alliance_master_reconciliation_auditor_v1 as master_recon_v1
+            stabilization = dict(stabilization or {})
+            stabilization["master_reconciliation_auditor_v1"] = master_recon_v1.register(wrapped.core)
+        except Exception as exc:
+            stabilization = dict(stabilization or {})
+            stabilization["master_reconciliation_auditor_v1"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","fail_safe":True}
+
         CORE_APP = wrapped.app
 
         # ALLIANCE_REGIONAL_NEWSPAPER_AUTHORITY_V1 - post-core authority
