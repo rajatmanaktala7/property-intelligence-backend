@@ -8,7 +8,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query, Request
 from sqlalchemy import inspect, text
 
-VERSION = "2.1.0-STRICT-EVIDENCE-CANONICAL-RESTORATION"
+VERSION = "2.2.0-HIGH-CONFIDENCE-CANONICAL-RESTORATION"
 CONFIRM = "APPLY_REQUIREMENT_RESTORATION_V2"
 SOURCE_TABLES = (
     ("pi_unified_manual_requirements", "MANUAL"),
@@ -158,9 +158,10 @@ def _decision(gate, obj: dict, message: str) -> tuple[str, dict]:
     )
     signals = _structured_signals(obj)
     signal_count = sum(bool(value) for value in signals.values())
-    structured_demand = signal_count >= 2 and (
-        signals["asset_or_use"]
-        or (signals["location"] and signals["transaction"])
+    structured_demand = (
+        signal_count >= 3
+        and signals["asset_or_use"]
+        and (signals["location"] or signals["transaction"])
     )
 
     extracted["_restoration_evidence"] = {
@@ -229,6 +230,8 @@ def audit(core, sample_limit: int = 20) -> dict:
                         "classification": extracted.get("classification"),
                         "evidence_quality": extracted.get("evidence_quality"),
                         "message_preview": message[:240],
+                        "restoration_evidence":
+                            extracted.get("_restoration_evidence", {}),
                     })
             totals["rows"] += len(source_rows)
             summaries.append(summary)
