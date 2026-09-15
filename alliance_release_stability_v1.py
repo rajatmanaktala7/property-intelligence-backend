@@ -5,7 +5,7 @@ from typing import Any
 from fastapi import APIRouter, Request
 from sqlalchemy import inspect, text
 
-VERSION = "1.0.3-NONBLOCKING-BOOT-ROUTE-GATE"
+VERSION = "1.0.2-NONBLOCKING-BOOT-ROUTE-GATE"
 TARGET_SCORE = 99.0
 
 CANONICAL_ROUTES = (

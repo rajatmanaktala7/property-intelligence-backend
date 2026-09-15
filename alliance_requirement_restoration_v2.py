@@ -8,7 +8,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query, Request
 from sqlalchemy import inspect, text
 
-VERSION = "2.3.0-TRUTH-FIRST-CANONICAL-RESTORATION"
+VERSION = "2.2.0-HIGH-CONFIDENCE-CANONICAL-RESTORATION"
 CONFIRM = "APPLY_REQUIREMENT_RESTORATION_V2"
 SOURCE_TABLES = (
     ("pi_unified_manual_requirements", "MANUAL"),
@@ -106,17 +106,29 @@ def _message(obj: dict) -> str:
 
 def _structured_signals(obj: dict) -> dict:
     return {
-        "asset_or_use":_first(obj,("property_type","required_property_type","asset_type","intended_use","use_case","category","business_category")),
-        "location":_first(obj,("preferred_location","preferred_locations","location","locality","city","area_name","micro_market")),
-        "transaction":_first(obj,("transaction_type","transaction","rent_sale","rent_or_sale","deal_type")),
-        "area":_first(obj,("requirement_sqft","required_area","area_sqft","area","area_min_sqft","area_max_sqft","minimum_area","maximum_area")),
-        "budget":_first(obj,("budget","max_budget","rent_budget","sale_budget","budget_min","budget_max")),
-        "company":_first(obj,("company_name","brand_name","retailer_name","client_company")),
-        "contact":_first(obj,("contact_number","contact_no","phone","mobile","email")),
+        "asset_or_use": bool(_first(obj, (
+            "property_type", "required_property_type", "asset_type",
+            "intended_use", "use_case", "category", "business_category",
+        ))),
+        "location": bool(_first(obj, (
+            "preferred_location", "preferred_locations", "location",
+            "locality", "city", "area_name", "micro_market",
+        ))),
+        "transaction": bool(_first(obj, (
+            "transaction_type", "transaction", "rent_sale",
+            "rent_or_sale", "deal_type",
+        ))),
+        "area": bool(_first(obj, (
+            "requirement_sqft", "required_area", "area_sqft", "area",
+            "area_min_sqft", "area_max_sqft", "minimum_area",
+            "maximum_area",
+        ))),
+        "budget": bool(_first(obj, (
+            "budget", "max_budget", "rent_budget", "sale_budget",
+            "budget_min", "budget_max",
+        ))),
     }
 
-_DEMAND_RE=re.compile(r"\b(?:need(?:ed)?|require(?:d|ment)?|looking\s+for|seeking|want(?:ed|s)?\s+to\s+(?:buy|purchase|rent|lease)|interested\s+in|client\s+(?:needs|requires|looking))\b",re.I)
-_FRAGMENT_RE=re.compile(r"^(?:good\s+frontage|park(?:/north-east)?\s+facing|premium\s+office\s+space|\d+(?:\.\d+)?\s*(?:cr|crore)(?:\s+to\s+\d+(?:\.\d+)?\s*(?:cr|crore))?\s+commercials?)\b",re.I)
 
 def _rows(engine, table: str, limit: int = 10000) -> list[dict]:
     if not _exists(engine, table):
@@ -129,17 +141,39 @@ def _rows(engine, table: str, limit: int = 10000) -> list[dict]:
     return [_dict(value) for value in raw if _dict(value)]
 
 
-def _decision(gate,obj,message):
-    if not message.strip(): return "SKIP_EMPTY",{}
-    x=gate.extract(message); cls=str(x.get("classification") or "RAW").upper()
-    if cls=="REJECTED/EXPIRED": return "SKIP_SUPPLY_OR_NOISE",x
-    direct=" ".join(_direct_message(obj).split()); signals=_structured_signals(obj)
-    names=[k for k,v in signals.items() if v]; explicit=bool(_DEMAND_RE.search(direct)); fragment=bool(_FRAGMENT_RE.search(direct.strip()))
-    context=bool(signals["asset_or_use"] and (signals["location"] or signals["transaction"])); support=sum(bool(signals[k]) for k in ("area","budget","company","contact"))
-    direct_safe=bool(explicit and context and not fragment and len(direct)>=18)
-    structured_safe=bool(not direct and cls in {"AI-QUALIFIED","NEEDS VERIFICATION","VERIFIED ACTIVE"} and signals["asset_or_use"] and signals["location"] and signals["transaction"] and support>=1)
-    x["_restoration_evidence"]={"explicit_demand_language":explicit,"fragment_rejected":fragment,"matched_signal_names":names,"structured_signal_values":signals,"structured_signal_count":len(names),"core_context_present":context,"supporting_signal_count":support,"decision_rule":"EXPLICIT_DEMAND_PLUS_CONTEXT" if direct_safe else "COMPLETE_STRUCTURED_RECORD" if structured_safe else "HUMAN_REVIEW"}
-    return ("RESTORE_TO_GATE" if direct_safe or structured_safe else "NEEDS_HUMAN_REVIEW"),x
+def _decision(gate, obj: dict, message: str) -> tuple[str, dict]:
+    if not message.strip():
+        return "SKIP_EMPTY", {}
+    extracted = gate.extract(message)
+    classification = str(extracted.get("classification") or "RAW").upper()
+    if classification == "REJECTED/EXPIRED":
+        return "SKIP_SUPPLY_OR_NOISE", extracted
+
+    direct = " ".join(_direct_message(obj).split())
+    direct_extract = gate.extract(direct) if direct else {}
+    explicit_demand = (
+        direct_extract.get("requirement_intent") == "REQUIREMENT"
+        and str(direct_extract.get("classification") or "").upper()
+            != "REJECTED/EXPIRED"
+    )
+    signals = _structured_signals(obj)
+    signal_count = sum(bool(value) for value in signals.values())
+    structured_demand = (
+        signal_count >= 3
+        and signals["asset_or_use"]
+        and (signals["location"] or signals["transaction"])
+    )
+
+    extracted["_restoration_evidence"] = {
+        "explicit_demand_language": explicit_demand,
+        "structured_signals": signals,
+        "structured_signal_count": signal_count,
+    }
+
+    if explicit_demand or structured_demand:
+        return "RESTORE_TO_GATE", extracted
+    return "NEEDS_HUMAN_REVIEW", extracted
+
 
 def _gate_match(conn, table: str, pk: str, message_hash: str):
     return conn.execute(text("""
