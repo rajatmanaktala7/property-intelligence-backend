@@ -3,7 +3,7 @@ import json, re
 from fastapi import APIRouter, HTTPException, Query, Request
 from sqlalchemy import text
 
-VERSION='1.0.1-IDEMPOTENT-EVIDENCE-ONLY-CONTACT-RECOVERY'
+VERSION='1.0.2-ACCURATE-OPAQUE-IDENTITY-REPORTING'
 CONFIRM='APPLY_EVIDENCE_ONLY'
 PHONE=re.compile(r'\D+')
 
@@ -72,12 +72,21 @@ def plan(engine,limit=50000):
 def audit(engine,limit=50000):
     rows,eligible,ambiguous,no_evidence=plan(engine,limit)
     prop=req=event=0
+    opaque_identity_preserved=0
     with engine.connect() as c:
         for row,phone,opaque,paths in eligible:
             entity=str(row.get('entity_id') or '')
 
-            if not _phone(row.get('sender_phone')):
+            current_sender=str(
+                row.get('sender_phone') or ''
+            ).strip()
+
+            if not current_sender:
                 event+=1
+            elif not _phone(current_sender):
+                # Non-empty LID/JID evidence is intentionally preserved.
+                # It is not a pending phone-number update.
+                opaque_identity_preserved+=1
 
             if entity.startswith('WAP-'):
                 missing=c.execute(text("""
@@ -102,6 +111,7 @@ def audit(engine,limit=50000):
       'unique_sender_phone_evidence':len(eligible),'ambiguous_identity_rows':ambiguous,
       'no_sender_phone_evidence':no_evidence,'event_updates_available':event,
       'property_updates_available':prop,'requirement_updates_available':req,
+      'opaque_identity_evidence_preserved':opaque_identity_preserved,
       'policy':'UNIQUE_SENDER_FIELDS_ONLY_NO_GUESSING','database_changed':False}
 
 def apply(engine,limit=5000):
