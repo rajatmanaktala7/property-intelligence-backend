@@ -1437,7 +1437,7 @@ def _load_core():
         # Final takeover runs after all legacy requirement route registrars.
         try:
             import alliance_requirement_restore_v1235 as final_reqrestore_v1235
-            final_reqrestore_result = final_reqrestore_v1235.register(wrapped.core, served_app=wrapped.app)
+            final_reqrestore_result = final_reqrestore_v1235.register(wrapped.core)
             stabilization = dict(stabilization or {})
             stabilization["final_requirement_route_authority_v1"] = {
                 "status": "READY",
