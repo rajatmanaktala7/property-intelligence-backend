@@ -1472,6 +1472,15 @@ def _load_core():
                 type(exc).__name__,
                 str(exc),
             )
+        # ALLIANCE_WHATSAPP_HISTORICAL_CONTACT_RECOVERY_V1
+        try:
+            import alliance_whatsapp_historical_contact_recovery_v1 as wa_contact_recovery_v1
+            stabilization = dict(stabilization or {})
+            stabilization["whatsapp_historical_contact_recovery_v1"] = wa_contact_recovery_v1.register(wrapped.core)
+        except Exception as exc:
+            stabilization = dict(stabilization or {})
+            stabilization["whatsapp_historical_contact_recovery_v1"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","fail_safe":True}
+
         CORE_APP = wrapped.app
 
         # ALLIANCE_REGIONAL_NEWSPAPER_AUTHORITY_V1 - post-core authority
