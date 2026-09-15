@@ -1516,6 +1516,20 @@ def _load_core():
 
         CORE_APP = wrapped.app
 
+        # ALLIANCE_REQUIREMENT_RESTORATION_V2
+        try:
+            import alliance_requirement_restoration_v2 as req_restore_v2
+            stabilization = dict(stabilization or {})
+            stabilization["requirement_restoration_v2"] = (
+                req_restore_v2.register(wrapped.core)
+            )
+        except Exception as exc:
+            stabilization = dict(stabilization or {})
+            stabilization["requirement_restoration_v2"] = {
+                "status": "ERROR",
+                "error": f"{type(exc).__name__}: {exc}",
+                "fail_safe": True,
+            }
         # ALLIANCE_REGIONAL_NEWSPAPER_AUTHORITY_V1 - post-core authority
         try:
             import alliance_regional_newspaper_authority_v1 as _alliance_regional_newspaper_authority_v1
