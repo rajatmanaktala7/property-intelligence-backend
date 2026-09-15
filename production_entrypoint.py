@@ -11,7 +11,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 
 
-VERSION = "3.4-SAFE-WHATSAPP-QUEUE"
+VERSION = "3.5-ISOLATED-REQUIREMENT-ROUTER"
 
 BOOT = {
     "state": "STARTING",
@@ -24,6 +24,7 @@ BOOT = {
 }
 
 CORE_APP = None
+REQUIREMENT_APP = None
 
 LATE_REGISTRATION = {
     "v383": {"status": "NOT_RUN", "error": None},
@@ -432,7 +433,7 @@ def _late_register_intelligence(wrapped):
     }
 
 def _load_core():
-    global CORE_APP
+    global CORE_APP, REQUIREMENT_APP
 
     BOOT["state"] = "LOADING_CORE"
 
@@ -1437,7 +1438,17 @@ def _load_core():
         # Final takeover runs after all legacy requirement route registrars.
         try:
             import alliance_requirement_restore_v1235 as final_reqrestore_v1235
-            final_reqrestore_result = final_reqrestore_v1235.register(wrapped.core)
+            isolated_requirement_app = FastAPI(
+                title="Alliance Requirement Authority",
+                docs_url=None,
+                redoc_url=None,
+                openapi_url=None,
+            )
+            final_reqrestore_result = final_reqrestore_v1235.register(
+                wrapped.core,
+                served_app=isolated_requirement_app,
+            )
+            REQUIREMENT_APP = isolated_requirement_app
             stabilization = dict(stabilization or {})
             stabilization["final_requirement_route_authority_v1"] = {
                 "status": "READY",
@@ -1852,6 +1863,16 @@ class HealthFirstDispatcher:
 
         if path in self.FRESHNESS_PATHS:
             await self._serve_freshness(scope, receive, send)
+            return
+
+        # ALLIANCE_ISOLATED_REQUIREMENT_DISPATCH_V1
+        # Preserve the original ASGI scope and pi_session cookie.
+        if (
+            path.startswith("/alliance/final/requirements")
+            and REQUIREMENT_APP is not None
+            and BOOT["core_loaded"]
+        ):
+            await REQUIREMENT_APP(scope, receive, send)
             return
 
         await self._serve_core(scope, receive, send)
