@@ -8,7 +8,7 @@ from fastapi import Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy import text
 
-VERSION = "2.1.0-CLEAN-TEAM-OPERATIONS-HUB"
+VERSION = "2.2.0-FIVE-SOURCE-INTELLIGENCE-HUB"
 MARKER = "CANONICAL_ALLIANCE_DASHBOARD_V1"
 STATE: Dict[str, Any] = {
     "status": "INIT",
@@ -16,7 +16,7 @@ STATE: Dict[str, Any] = {
     "authority": "CANONICAL_MASTER_DATA",
     "dashboard_marker": MARKER,
     "legacy_dashboard_replaced": True,
-    "navigation_model": "7-AREA-CLEAN-TEAM-HUB",
+    "navigation_model": "7-AREA-FIVE-SOURCE-HUB",
     "matcher_authority": "MASTER_ONLY",
     "property_authority": "pi_master_properties_v711",
     "requirement_authority": "pi_requirement_gate_v1191",
@@ -89,11 +89,13 @@ def _render(counts):
     ])
 
     intelligence = "".join([
-        _mini("WhatsApp", "/whatsapp-live", "Live source ingestion and review"),
-        _mini("Newspaper", "/capture-intelligence", "Capture newspaper intelligence"),
-        _mini("Commercial", "/commercial-intelligence", "Commercial opportunity intelligence"),
-        _mini("Run Hospitality Bot", "/hospitality-intelligence", "Open bot controls, run discovery and review saved hospitality records"),
-        _mini("Run Retail Bot", "/retail-expansion", "Open bot controls, run retail discovery and review expansion prospects"),
+        _mini("WhatsApp Intelligence", "/whatsapp-live", "Live messages, contacts and classified intelligence"),
+        _mini("Newspaper Intelligence", "/newspaper-v83", "Upload, process and review newspaper intelligence"),
+        _mini("Commercial Intelligence", "/commercial-intelligence", "Research assets and review the commercial database"),
+        _mini("Hospitality Bot", "/hospitality-intelligence#bot-controls", "Run hospitality discovery"),
+        _mini("Hospitality Intelligence", "/hospitality-intelligence#intelligence-database", "Review saved hospitality intelligence"),
+        _mini("Retail Bot", "/retail-expansion#bot-controls", "Run retail discovery"),
+        _mini("Retail Intelligence", "/retail-expansion#intelligence-database", "Review saved retail intelligence"),
     ])
 
     team = "".join([
@@ -205,7 +207,7 @@ def register(core):
                 "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
                 "Pragma": "no-cache",
                 "X-Alliance-Dashboard-Authority": MARKER,
-                "X-Alliance-Navigation-Model": "7-AREA-CLEAN-TEAM-HUB",
+                "X-Alliance-Navigation-Model": "7-AREA-FIVE-SOURCE-HUB",
             })
         except Exception as exc:
             STATE["status"] = "ERROR"
@@ -222,7 +224,7 @@ def register(core):
                 "version": VERSION,
                 "dashboard_marker": MARKER,
                 "legacy_dashboard_replaced": True,
-                "navigation_model": "7-AREA-CLEAN-TEAM-HUB",
+                "navigation_model": "7-AREA-FIVE-SOURCE-HUB",
                 "matcher_authority": "MASTER_ONLY",
                 "property_authority": "pi_master_properties_v711",
                 "requirement_authority": "pi_requirement_gate_v1191",
