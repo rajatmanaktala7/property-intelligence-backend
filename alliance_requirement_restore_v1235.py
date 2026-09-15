@@ -10,7 +10,7 @@ from fastapi import Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
 from sqlalchemy import text
 
-VERSION = "12.3.8-STABLE-PAGE-SESSION-AUTH"
+VERSION = "12.3.9-FAST-REQUIREMENT-HUB"
 SOURCES = ("MASTER", "NEWSPAPER", "WHATSAPP", "MAGAZINE", "MANUAL")
 
 EXCLUDE_TOKENS = (
@@ -408,20 +408,24 @@ th,td{{border:1px solid #d0d5dd;padding:7px;text-align:left;vertical-align:top;w
 </body></html>"""
 
 def _hub(e):
+    # ALLIANCE_REQUIREMENT_ZERO_SCAN_HUB_V1
+    # The landing page performs no database scan. Detailed rows load only
+    # after the user selects one requirement database.
     cards = []
     details = {}
     for source in SOURCES:
-        rows, meta = _combined(e, source)
-        details[source] = meta
-        note = "Canonical inventory Â· matcher authority" if source == "MASTER" else (
-            f"Master linked: {meta['master']} Â· Restored source-only: {meta['source_only']}"
-        )
+        note = ("Canonical matcher requirement inventory" if source == "MASTER"
+                else "Restored source database - open to view records")
+        details[source] = {
+            "loading": "ON_DEMAND",
+            "database_scan": False,
+        }
         cards.append(f"""<a class="dbcard" href="/alliance/final/requirements/{source.lower()}">
-          <b>{_e(source.title())} Requirements</b><div class="num">{len(rows)}</div>
-          <div class="sub">{_e(note)}</div><div class="open">Open â†’</div></a>""")
-    body = f"""<div class="notice"><b>All requirements restored for visibility.</b>
-    Master remains canonical. Source-only records are read-only here and must be human verified/promoted before Smart Matcher can use them.
-    Nothing is auto-copied into Master and no duplicate Master records are created.</div>
+          <b>{_e(source.title())} Requirements</b><div class="num">Open</div>
+          <div class="sub">{_e(note)}</div><div class="open">View Database</div></a>""")
+    body = f"""<div class="notice"><b>All requirement databases are available.</b>
+    Master remains canonical. Source records are loaded only when their database is opened.
+    Nothing is automatically copied into Master and no duplicate Master records are created.</div>
     <div class="grid">{''.join(cards)}</div>"""
     return _shell("5 Requirement Databases", body), details
 
