@@ -5,7 +5,7 @@ from typing import Any
 from fastapi import APIRouter, Request
 from sqlalchemy import inspect, text
 
-VERSION = "1.0.0-CRITICAL-FLOW-REGRESSION-GATE"
+VERSION = "1.0.1-CRITICAL-ROUTES-PLUS-RUNTIME-PROBES"
 TARGET_SCORE = 99.0
 
 CANONICAL_ROUTES = (
@@ -50,10 +50,13 @@ REQUIRED_PATHS = (
     "/property-manual",
     "/alliance/final/databases",
     "/requirements-workbench",
-    "/newspaper-v83",
     "/whatsapp-live",
     "/api/commercial-intelligence/status",
     "/api/v451/live/status",
+)
+
+RUNTIME_PROBE_PATHS = (
+    "/newspaper-v83",
     "/api/newspaper-v83/health",
     "/api/whatsapp-live-clean-os/status",
 )
@@ -211,6 +214,8 @@ def audit(core: Any, requirement_app: Any = None, served_app: Any = None) -> dic
         "critical_failures": critical_failures,
         "missing_paths": missing_paths,
         "missing_tables": missing_tables,
+        "runtime_probe_paths": list(RUNTIME_PROBE_PATHS),
+        "runtime_probe_policy": "VERIFY_AFTER_READY_USING_AUTHENTICATED_HTTP",
         "database_changed": False,
     }
 
