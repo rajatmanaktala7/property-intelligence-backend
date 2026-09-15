@@ -7,10 +7,10 @@ import re
 from typing import Any
 
 from fastapi import Form, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import text
 
-VERSION = "12.3.10-FAST-DATABASE-COUNTS"
+VERSION = "12.3.11-GATE-MASTER-AUTHORITY"
 SOURCES = ("MASTER", "NEWSPAPER", "WHATSAPP", "MAGAZINE", "MANUAL")
 
 EXCLUDE_TOKENS = (
@@ -416,10 +416,24 @@ def _fast_requirement_counts(e):
 
     try:
         with e.connect() as c:
-            if _table_exists(e, "pi_master_requirements_v711"):
+            if _table_exists(e, "pi_requirement_gate_v1191"):
                 counts["MASTER"] = int(
                     c.execute(
-                        text("SELECT COUNT(*) FROM pi_master_requirements_v711")
+                        text("""
+                            SELECT COUNT(*)
+                            FROM pi_requirement_gate_v1191
+                            WHERE COALESCE(classification,'')
+                                  NOT IN ('REJECTED','NOISE')
+                        """)
+                    ).scalar() or 0
+                )
+            elif _table_exists(e, "pi_master_requirements_v711"):
+                counts["MASTER"] = int(
+                    c.execute(
+                        text(
+                            "SELECT COUNT(*) "
+                            "FROM pi_master_requirements_v711"
+                        )
                     ).scalar() or 0
                 )
 
@@ -763,6 +777,11 @@ def register(core, served_app=None):
         src = source.upper()
         if src not in SOURCES:
             return HTMLResponse("Unknown requirement database", status_code=404)
+        if src == "MASTER":
+            return RedirectResponse(
+                "/alliance/master-requirement-matcher",
+                status_code=302,
+            )
         return HTMLResponse(
             _table(e, src, q, location, transaction, status, assigned, limit),
             headers={"Cache-Control":"no-store","X-Alliance-Requirement-Restore":VERSION},
