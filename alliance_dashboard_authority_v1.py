@@ -8,7 +8,7 @@ from fastapi import Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy import text
 
-VERSION = "2.0.0-SIMPLE-ATTRACTIVE-HUB"
+VERSION = "2.1.0-CLEAN-TEAM-OPERATIONS-HUB"
 MARKER = "CANONICAL_ALLIANCE_DASHBOARD_V1"
 STATE: Dict[str, Any] = {
     "status": "INIT",
@@ -16,7 +16,7 @@ STATE: Dict[str, Any] = {
     "authority": "CANONICAL_MASTER_DATA",
     "dashboard_marker": MARKER,
     "legacy_dashboard_replaced": True,
-    "navigation_model": "8-AREA-SIMPLE-HUB",
+    "navigation_model": "7-AREA-CLEAN-TEAM-HUB",
     "matcher_authority": "MASTER_ONLY",
     "property_authority": "pi_master_properties_v711",
     "requirement_authority": "pi_requirement_gate_v1191",
@@ -86,37 +86,21 @@ def _render(counts):
         _area("Contacts", "☎", _n(counts["contact_master"]), "Evidence-backed internal contact master with source segregation.", "/alliance/primary/contact-master", "Open Contacts", "cyan"),
         _area("Team", "👥", "Today", "Follow-ups, day plans, staff review, monthly review and reports.", "#team", "View Team", "pink"),
         _area("System", "🛡", "PASS", "Guardian, data health, diagnostics and production link audit.", "#system", "View Health", "slate"),
-        _area("Add New", "＋", "Quick", "Add a property or requirement without hunting through menus.", "#quick-add", "Create Record", "gold"),
-    ])
-
-    attention = "".join([
-        _mini("Verify Requirements", "/alliance/final/requirements", f"{_n(counts['master_requirements'])} canonical requirements · {_n(counts['matcher_eligible'])} matcher eligible"),
-        _mini("Check Availability", "/alliance/primary/availability", "Verify only the properties you are preparing to share"),
-        _mini("Open Deal Desk", "/alliance/primary/deal-desk", "Exact matches, verification-needed options, alternates and draft"),
     ])
 
     intelligence = "".join([
         _mini("WhatsApp", "/whatsapp-live", "Live source ingestion and review"),
         _mini("Newspaper", "/capture-intelligence", "Capture newspaper intelligence"),
         _mini("Commercial", "/commercial-intelligence", "Commercial opportunity intelligence"),
-        _mini("Hospitality", "/hospitality-intelligence", "Hotels, restaurants, banquets and hospitality"),
-        _mini("Retail", "/retail-expansion", "Retail brand expansion intelligence"),
-        _mini("Requirement Discovery", "/requirement-discovery", "External demand evidence"),
-    ])
-
-    reqtabs = "".join([
-        _mini("All Requirements", "/alliance/final/requirements", "Canonical master requirement workspace"),
-        _mini("Manual", "/alliance/final/requirements/manual", f"{_n(counts['manual_requirements'])} canonical manual-source rows"),
-        _mini("WhatsApp", "/alliance/final/requirements/whatsapp", f"{_n(counts['whatsapp_requirements'])} canonical WhatsApp-source rows"),
-        _mini("Newspaper", "/alliance/final/requirements/newspaper", f"{_n(counts['newspaper_requirements'])} canonical newspaper/magazine rows"),
+        _mini("Run Hospitality Bot", "/hospitality-intelligence", "Open bot controls, run discovery and review saved hospitality records"),
+        _mini("Run Retail Bot", "/retail-expansion", "Open bot controls, run retail discovery and review expansion prospects"),
     ])
 
     team = "".join([
-        _mini("Follow-ups", "/alliance/primary/followups", "Team action queue"),
-        _mini("Day Plan", "/alliance/primary/day-plan", "Yogesh · Priya · Zoya"),
-        _mini("Staff Review", "/alliance/primary/staff-review", "Daily work review"),
-        _mini("Monthly Review", "/alliance/primary/monthly-review", "Monthly staff performance"),
-        _mini("Reports", "/alliance/primary/reports", "Operational reports"),
+        _mini("Team Tasks", "/alliance/primary/followups", "Sorted work queue: overdue, due today, upcoming, then completed"),
+        _mini("Day Plan", "/alliance/primary/day-plan", "Staff priorities and assignments for today"),
+        _mini("Daily Staff Performance", "/alliance/primary/staff-review", "Tasks assigned, completed, overdue, follow-ups and last activity"),
+        _mini("Monthly Staff Performance", "/alliance/primary/monthly-review", "Task completion and follow-up performance by staff member"),
     ])
 
     system = "".join([
@@ -180,17 +164,11 @@ h1{{font-size:34px;line-height:1.15;margin:0 0 8px}}h2{{font-size:21px;margin:34
 
   <div class="grid">{primary}</div>
 
-  <h2>Needs Attention</h2>
-  <div class="section"><div class="mini-grid">{attention}</div></div>
-
   <h2 id="quick-add">Quick Add</h2>
   <div class="quick">
-    <a href="/property-manual">＋ Add Property</a>
+    <a href="/property-manual">＋ Add Inventory</a>
     <a href="/requirements-workbench">＋ Add Requirement</a>
   </div>
-
-  <h2>Requirement Views</h2>
-  <div class="section"><div class="mini-grid">{reqtabs}</div></div>
 
   <h2 id="intelligence">Intelligence Sources</h2>
   <div class="section"><div class="mini-grid">{intelligence}</div></div>
@@ -227,7 +205,7 @@ def register(core):
                 "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
                 "Pragma": "no-cache",
                 "X-Alliance-Dashboard-Authority": MARKER,
-                "X-Alliance-Navigation-Model": "8-AREA-SIMPLE-HUB",
+                "X-Alliance-Navigation-Model": "7-AREA-CLEAN-TEAM-HUB",
             })
         except Exception as exc:
             STATE["status"] = "ERROR"
@@ -244,7 +222,7 @@ def register(core):
                 "version": VERSION,
                 "dashboard_marker": MARKER,
                 "legacy_dashboard_replaced": True,
-                "navigation_model": "8-AREA-SIMPLE-HUB",
+                "navigation_model": "7-AREA-CLEAN-TEAM-HUB",
                 "matcher_authority": "MASTER_ONLY",
                 "property_authority": "pi_master_properties_v711",
                 "requirement_authority": "pi_requirement_gate_v1191",
