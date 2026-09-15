@@ -1744,6 +1744,7 @@ def _load_core():
                 release_stability_v1.register(
                     wrapped.core,
                     requirement_app=REQUIREMENT_APP,
+                    served_app=wrapped.app,
                 )
             )
         except Exception as exc:

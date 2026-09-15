@@ -115,7 +115,7 @@ def _check_owner(app: Any, specification: tuple[str, str, str, str]) -> dict:
     }
 
 
-def audit(core: Any, requirement_app: Any = None) -> dict:
+def audit(core: Any, requirement_app: Any = None, served_app: Any = None) -> dict:
     app = getattr(core, "app", None) or core
     route_checks = [_check_owner(app, spec) for spec in CANONICAL_ROUTES]
     requirement_checks = (
@@ -136,10 +136,17 @@ def audit(core: Any, requirement_app: Any = None) -> dict:
     )
 
     presence = []
+    presence_apps = [app]
+    if served_app is not None and served_app is not app:
+        presence_apps.append(served_app)
+
     for path in REQUIRED_PATHS:
         found = any(
-            getattr(route, "path", None) == path
-            for route in list(app.router.routes)
+            any(
+                getattr(route, "path", None) == path
+                for route in list(candidate.router.routes)
+            )
+            for candidate in presence_apps
         )
         presence.append({"path": path, "passed": found})
 
@@ -218,7 +225,7 @@ def assert_critical_route_ownership(core: Any, requirement_app: Any) -> dict:
     return report
 
 
-def register(core: Any, requirement_app: Any = None) -> dict:
+def register(core: Any, requirement_app: Any = None, served_app: Any = None) -> dict:
     app = getattr(core, "app", None) or core
     router = APIRouter()
 
@@ -232,7 +239,7 @@ def register(core: Any, requirement_app: Any = None) -> dict:
         if role not in {"admin", "team"}:
             from fastapi import HTTPException
             raise HTTPException(401, "Login required")
-        return audit(core, requirement_app)
+        return audit(core, requirement_app, served_app)
 
     app.include_router(router)
     report = assert_critical_route_ownership(core, requirement_app)
