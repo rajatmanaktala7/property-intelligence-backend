@@ -403,8 +403,8 @@ input,select{{width:100%;padding:8px;border:1px solid #98a2b3;border-radius:6px}
 th,td{{border:1px solid #d0d5dd;padding:7px;text-align:left;vertical-align:top;white-space:normal}}th{{position:sticky;top:0;background:#e9eef5;z-index:4}}
 .desc{{min-width:300px;max-width:500px}}.sourceonly{{background:#fff8e8}}.masterrow{{background:#f8fff9}}
 </style></head><body>
-<header><b>Alliance CRE Intelligence OS 11</b><small>PROPERTY â†’ VERIFY â†’ REQUIREMENT â†’ MATCH â†’ CLIENT â†’ FOLLOW-UP â†’ DEAL</small></header>
-{_nav()}<div class="wrap"><h2>{_e(title)}</h2>{body}<p><a class="btn" href="/team-dashboard-v376">â† Back to Dashboard</a></p></div>
+<header><b>Alliance CRE Intelligence OS 11</b><small>PROPERTY → VERIFY → REQUIREMENT → MATCH → CLIENT → FOLLOW-UP → DEAL</small></header>
+{_nav()}<div class="wrap"><h2>{_e(title)}</h2>{body}<p><a class="btn" href="/team-dashboard-v376">← Back to Dashboard</a></p></div>
 </body></html>"""
 
 def _fast_requirement_counts(e):
@@ -452,11 +452,15 @@ def _hub(e):
     for source in SOURCES:
         count = counts.get(source, 0)
 
-        note = (
-            "Canonical matcher requirement inventory"
-            if source == "MASTER"
-            else "Restored source database rows"
-        )
+        if source == "MASTER":
+            note = "Canonical matcher requirement inventory"
+        elif source in {"NEWSPAPER", "MAGAZINE"} and count == 0:
+            note = (
+                "No genuine demand records detected. "
+                "Property advertisements remain in the Property Database."
+            )
+        else:
+            note = "Source requirement records awaiting Master verification"
 
         details[source] = {
             "count": count,
@@ -540,7 +544,7 @@ def _table(e, source, q, location, transaction, status, assigned, limit):
                 cells.append(f"<td{css}>{_e(value)}</td>")
         trs.append(f"<tr class='{cls}'>{''.join(cells)}</tr>")
     note = (
-        f"<b>{len(rows)}</b> rows shown. Canonical linked: <b>{meta['master']}</b> Â· "
+        f"<b>{len(rows)}</b> rows shown. Canonical linked: <b>{meta['master']}</b> · "
         f"Restored source-only: <b>{meta['source_only']}</b>. "
         "Green rows are Master. Verified Master requirements show Run Match. Yellow source-only rows must be verified/promoted first."
     )
