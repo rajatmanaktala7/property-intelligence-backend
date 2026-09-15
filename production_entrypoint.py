@@ -1481,6 +1481,15 @@ def _load_core():
             stabilization = dict(stabilization or {})
             stabilization["whatsapp_historical_contact_recovery_v1"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","fail_safe":True}
 
+        # ALLIANCE_REQUIREMENT_SOURCE_TRUTH_AUDITOR_V1
+        try:
+            import alliance_requirement_source_truth_auditor_v1 as req_truth_v1
+            stabilization = dict(stabilization or {})
+            stabilization["requirement_source_truth_auditor_v1"] = req_truth_v1.register(wrapped.core)
+        except Exception as exc:
+            stabilization = dict(stabilization or {})
+            stabilization["requirement_source_truth_auditor_v1"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","fail_safe":True}
+
         CORE_APP = wrapped.app
 
         # ALLIANCE_REGIONAL_NEWSPAPER_AUTHORITY_V1 - post-core authority
