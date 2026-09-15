@@ -1735,6 +1735,22 @@ def _load_core():
             stabilization["alliance_ai_doctor_v21"] = {"status":"ERROR","error":f"{type(_doctor_v21_exc).__name__}: {_doctor_v21_exc}","fail_safe":True}
             print("[alliance-ai-doctor-v21] ERROR", type(_doctor_v21_exc).__name__, str(_doctor_v21_exc))
 
+        # ALLIANCE_RELEASE_STABILITY_V1
+        # Runs last. A critical route-owner regression blocks the new release.
+        try:
+            import alliance_release_stability_v1 as release_stability_v1
+            stabilization = dict(stabilization or {})
+            stabilization["release_stability_v1"] = (
+                release_stability_v1.register(
+                    wrapped.core,
+                    requirement_app=REQUIREMENT_APP,
+                )
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                "Alliance critical-flow release gate failed: "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
         BOOT["core_loaded"] = True
         BOOT["state"] = "READY" if stabilization.get("registered") else "DEGRADED"
         BOOT["stabilization"] = stabilization

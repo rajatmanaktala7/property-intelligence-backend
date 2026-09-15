@@ -8,7 +8,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query, Request
 from sqlalchemy import inspect, text
 
-VERSION = "2.0.0-CANONICAL-GATE-LINEAGE-RESTORATION"
+VERSION = "2.1.0-STRICT-EVIDENCE-CANONICAL-RESTORATION"
 CONFIRM = "APPLY_REQUIREMENT_RESTORATION_V2"
 SOURCE_TABLES = (
     ("pi_unified_manual_requirements", "MANUAL"),
@@ -74,12 +74,16 @@ def _source_pk(obj: dict, fallback: int) -> str:
     return _first(obj, ("id", "requirement_id", "record_id", "source_id", "pk")) or str(fallback)
 
 
-def _message(obj: dict) -> str:
-    direct = _first(obj, (
+def _direct_message(obj: dict) -> str:
+    return _first(obj, (
         "original_message", "requirement_message", "message", "raw_message",
         "raw_text", "source_text", "requirement_text", "requirement",
         "description", "additional_points", "remarks", "notes", "content",
     ))
+
+
+def _message(obj: dict) -> str:
+    direct = _direct_message(obj)
     if direct:
         return " ".join(direct.split())
 
@@ -100,6 +104,32 @@ def _message(obj: dict) -> str:
     return "; ".join(fields)
 
 
+def _structured_signals(obj: dict) -> dict:
+    return {
+        "asset_or_use": bool(_first(obj, (
+            "property_type", "required_property_type", "asset_type",
+            "intended_use", "use_case", "category", "business_category",
+        ))),
+        "location": bool(_first(obj, (
+            "preferred_location", "preferred_locations", "location",
+            "locality", "city", "area_name", "micro_market",
+        ))),
+        "transaction": bool(_first(obj, (
+            "transaction_type", "transaction", "rent_sale",
+            "rent_or_sale", "deal_type",
+        ))),
+        "area": bool(_first(obj, (
+            "requirement_sqft", "required_area", "area_sqft", "area",
+            "area_min_sqft", "area_max_sqft", "minimum_area",
+            "maximum_area",
+        ))),
+        "budget": bool(_first(obj, (
+            "budget", "max_budget", "rent_budget", "sale_budget",
+            "budget_min", "budget_max",
+        ))),
+    }
+
+
 def _rows(engine, table: str, limit: int = 10000) -> list[dict]:
     if not _exists(engine, table):
         return []
@@ -111,14 +141,37 @@ def _rows(engine, table: str, limit: int = 10000) -> list[dict]:
     return [_dict(value) for value in raw if _dict(value)]
 
 
-def _decision(gate, message: str) -> tuple[str, dict]:
+def _decision(gate, obj: dict, message: str) -> tuple[str, dict]:
     if not message.strip():
         return "SKIP_EMPTY", {}
     extracted = gate.extract(message)
     classification = str(extracted.get("classification") or "RAW").upper()
     if classification == "REJECTED/EXPIRED":
         return "SKIP_SUPPLY_OR_NOISE", extracted
-    return "RESTORE_TO_GATE", extracted
+
+    direct = " ".join(_direct_message(obj).split())
+    direct_extract = gate.extract(direct) if direct else {}
+    explicit_demand = (
+        direct_extract.get("requirement_intent") == "REQUIREMENT"
+        and str(direct_extract.get("classification") or "").upper()
+            != "REJECTED/EXPIRED"
+    )
+    signals = _structured_signals(obj)
+    signal_count = sum(bool(value) for value in signals.values())
+    structured_demand = signal_count >= 2 and (
+        signals["asset_or_use"]
+        or (signals["location"] and signals["transaction"])
+    )
+
+    extracted["_restoration_evidence"] = {
+        "explicit_demand_language": explicit_demand,
+        "structured_signals": signals,
+        "structured_signal_count": signal_count,
+    }
+
+    if explicit_demand or structured_demand:
+        return "RESTORE_TO_GATE", extracted
+    return "NEEDS_HUMAN_REVIEW", extracted
 
 
 def _gate_match(conn, table: str, pk: str, message_hash: str):
@@ -142,17 +195,17 @@ def audit(core, sample_limit: int = 20) -> dict:
     lineage_exists = _exists(engine, "pi_requirement_restoration_lineage_v2")
     summaries = []
     samples = []
-    totals = {"rows": 0, "restorable": 0, "already_represented": 0, "skipped_supply_or_noise": 0, "skipped_empty": 0}
+    totals = {"rows": 0, "restorable": 0, "already_represented": 0, "needs_human_review": 0, "skipped_supply_or_noise": 0, "skipped_empty": 0}
 
     with engine.connect() as conn:
         for table, source_type in SOURCE_TABLES:
             source_rows = _rows(engine, table)
-            summary = {"table": table, "source_type": source_type, "rows": len(source_rows), "restorable": 0, "already_represented": 0, "skipped_supply_or_noise": 0, "skipped_empty": 0}
+            summary = {"table": table, "source_type": source_type, "rows": len(source_rows), "restorable": 0, "already_represented": 0, "needs_human_review": 0, "skipped_supply_or_noise": 0, "skipped_empty": 0}
             for index, obj in enumerate(source_rows, 1):
                 pk = _source_pk(obj, index)
                 message = _message(obj)
                 message_hash = gate._hash(message) if message else hashlib.sha256(b"").hexdigest()
-                decision, extracted = _decision(gate, message)
+                decision, extracted = _decision(gate, obj, message)
                 represented = False
                 if decision == "RESTORE_TO_GATE":
                     represented = bool(_gate_match(conn, table, pk, message_hash))
@@ -164,7 +217,8 @@ def audit(core, sample_limit: int = 20) -> dict:
                 key = "already_represented" if represented else (
                     "restorable" if decision == "RESTORE_TO_GATE" else
                     "skipped_supply_or_noise" if decision == "SKIP_SUPPLY_OR_NOISE" else
-                    "skipped_empty"
+                    "skipped_empty" if decision == "SKIP_EMPTY" else
+                    "needs_human_review"
                 )
                 summary[key] += 1
                 totals[key] += 1
@@ -213,9 +267,17 @@ def apply(core) -> dict:
         for index, obj in enumerate(_rows(engine, table), 1):
             pk = _source_pk(obj, index)
             message = _message(obj)
-            decision, extracted = _decision(gate, message)
+            decision, extracted = _decision(gate, obj, message)
             if decision != "RESTORE_TO_GATE":
-                counts["skipped_supply_or_noise" if decision == "SKIP_SUPPLY_OR_NOISE" else "skipped_empty"] += 1
+                key = (
+                    "skipped_supply_or_noise"
+                    if decision == "SKIP_SUPPLY_OR_NOISE"
+                    else "skipped_empty"
+                    if decision == "SKIP_EMPTY"
+                    else "needs_human_review"
+                )
+                counts.setdefault(key, 0)
+                counts[key] += 1
                 continue
 
             message_hash = gate._hash(message)
