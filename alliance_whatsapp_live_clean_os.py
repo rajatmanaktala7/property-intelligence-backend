@@ -1480,7 +1480,17 @@ def run_sync(full_master_replay: bool = False, max_master_batches: Optional[int]
 
 
 def _worker():
+    # ALLIANCE_WHATSAPP_WORKER_COORDINATOR_V1
+    # Core boot registers many database modules. Allow those short-lived
+    # migrations to release their connections before this heavy replay begins.
+    RUNTIME.update(
+        status="WAITING_FOR_STARTUP_DRAIN",
+        worker_alive=True,
+        startup_delay_seconds=75,
+    )
+    time.sleep(75)
     while True:
+        RUNTIME["status"] = "RUNNING"
         try:
             result = run_sync(
                 full_master_replay=False,
@@ -1509,6 +1519,12 @@ def start_worker():
             return False
         _STARTED = True
 
+    RUNTIME.update(
+        status="SCHEDULED",
+        worker_started=True,
+        worker_alive=False,
+        startup_delay_seconds=75,
+    )
     threading.Thread(
         target=_worker,
         name="whatsapp-master-live-unified-bridge",

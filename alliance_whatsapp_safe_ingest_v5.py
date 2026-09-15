@@ -284,11 +284,37 @@ def _process_one(row):
 
 
 def _worker():
+    # ALLIANCE_WHATSAPP_SAFE_QUEUE_STARTUP_COORDINATOR_V1
     STATE["worker_alive"] = True
+    STATE["worker_state"] = "WAITING_FOR_STARTUP_DRAIN"
+    STATE["startup_delay_seconds"] = 45
+    _worker_stop.wait(45)
+    if _worker_stop.is_set():
+        STATE["worker_alive"] = False
+        STATE["worker_state"] = "STOPPED"
+        return
     try:
+        STATE["worker_state"] = "INITIALIZING"
         _ensure_queue_schema_sync()
+
+        # A deployment can interrupt a claim after it becomes PROCESSING.
+        # Only claims older than 15 minutes and never completed are released.
+        wb = _bridge()
+        with wb.wa_engine.begin() as c:
+            recovered = c.execute(text("""
+                UPDATE wa_bridge_events
+                SET status='RETRY',next_retry_at=NOW(),
+                    error_message='Recovered stale processing claim after deployment'
+                WHERE status='PROCESSING'
+                  AND processed_at IS NULL
+                  AND created_at < NOW() - INTERVAL '15 minutes'
+            """)).rowcount
+        STATE["stale_processing_recovered"] = int(recovered or 0)
+        STATE["worker_state"] = "RUNNING"
+
         while not _worker_stop.is_set():
             STATE["last_poll_at"] = _utcnow()
+            STATE["worker_state"] = "RUNNING"
             try:
                 row = _claim_one()
                 if not row:
@@ -301,6 +327,7 @@ def _worker():
                 _worker_stop.wait(2.0)
     finally:
         STATE["worker_alive"] = False
+        STATE["worker_state"] = "STOPPED"
 
 
 def start_worker():
