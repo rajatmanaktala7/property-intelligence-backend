@@ -25,35 +25,35 @@ def _app(core):
 def _engine(core):
     return getattr(core, "engine", None)
 
-# ALLIANCE_REQUIREMENT_CANONICAL_AUTH_V23
+# ALLIANCE_REQUIREMENT_DIRECT_SESSION_AUTH_V24
 def _login(core, req):
-    """Resolve the same stable page session used by working Alliance pages."""
-    page_role = getattr(core, "page_role_or_redirect", None)
+    """Validate the canonical pi_session without relying on a wrapper module."""
+    import base64
+    import hashlib
+    import hmac
+    import os
 
-    if callable(page_role):
+    token = req.cookies.get("pi_session")
+
+    if token:
         try:
-            role = page_role(req)
-            if role in {"admin", "team"}:
+            raw = base64.urlsafe_b64decode(token.encode("utf-8")).decode("utf-8")
+            role, signature = raw.rsplit("|", 1)
+
+            secret = os.getenv("SESSION_SECRET", "change-this-secret")
+            expected = hmac.new(
+                secret.encode("utf-8"),
+                role.encode("utf-8"),
+                hashlib.sha256,
+            ).hexdigest()
+
+            if (
+                role in {"admin", "team"}
+                and hmac.compare_digest(signature, expected)
+            ):
                 return role
         except Exception:
             pass
-
-    get_role = getattr(core, "get_role", None)
-
-    if callable(get_role):
-        try:
-            role = get_role(req)
-            if role in {"admin", "team"}:
-                return role
-        except Exception:
-            pass
-
-    need_login = getattr(core, "need_login", None)
-
-    if callable(need_login):
-        role = need_login(req)
-        if role in {"admin", "team"}:
-            return role
 
     raise HTTPException(
         status_code=401,
