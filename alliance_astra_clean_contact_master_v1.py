@@ -140,6 +140,7 @@ FIELD_RULES = {
     "city": ("city", "district", "location_city"),
     "locations": ("locations", "location", "locality", "micro_market", "city"),
     "transaction_type": ("transaction_type", "transaction", "rent_or_sale", "deal_type"),
+    "rent_or_sale": ("rent_or_sale", "transaction_type", "transaction", "deal_type"),
     "lead_type": ("lead_type", "classification", "record_type"),
     "property_type": ("property_type", "asset_type", "category", "property_category"),
     "property_category": ("property_category", "property_type", "asset_type", "category"),
@@ -530,7 +531,7 @@ def _candidate(obj, target):
             return value, "structured identity", value
         return None, "", ""
 
-    if target == "transaction_type":
+    if target in {"transaction_type", "rent_or_sale"}:
         value = _explicit_transaction(structured + evidence)
         if value:
             return value, "explicit transaction language", value
@@ -593,6 +594,8 @@ def _serialize(value, column, target):
         return json.dumps(value if isinstance(value, (list, dict)) else [value], ensure_ascii=False), "json"
     if data_type == "ARRAY" or str(udt_name).startswith("_"):
         return value if isinstance(value, list) else [value], "array"
+    if isinstance(value, (list, dict)):
+        return json.dumps(value, ensure_ascii=False), "plain"
     return value, "plain"
 
 
@@ -687,6 +690,10 @@ def _recover_table(engine, run_id, table, spec, limit):
             if not _is_blank(obj.get(target)):
                 continue
             value, evidence_source, excerpt = _candidate(obj, target)
+            if value in (None, "", [], {}) and target in {"source", "source_type", "source_name"}:
+                value = _source_kind(table)
+                evidence_source = "source table identity"
+                excerpt = table
             if value in (None, "", [], {}):
                 continue
             bound, kind = _serialize(value, columns[target], target)
