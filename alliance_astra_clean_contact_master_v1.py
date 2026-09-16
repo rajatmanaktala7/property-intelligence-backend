@@ -14,8 +14,8 @@ from sqlalchemy import text
 VERSION = "1.0.0-EVIDENCE-ONLY-CLEAN-CONTACT-MASTER"
 MARKER = "ALLIANCE_ASTRA_CLEAN_CONTACT_MASTER_V1"
 SOURCE_TOKENS = ("whatsapp", "newspaper", "magazine", "hospitality", "retail", "commercial", "manual")
-PHONE_RE = re.compile(r"(?<!\\d)(?:\\+?91[\\s.-]?)?([6-9](?:[\\s.-]?\\d){9})(?!\\d)")
-EMAIL_RE = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}", re.I)
+PHONE_RE = re.compile(r"(?<!\d)(?:\+?91[\s.-]?)?([6-9](?:[\s.-]?\d){9})(?!\d)")
+EMAIL_RE = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.I)
 
 def _app(core): return getattr(core, "app", core)
 def _engine(core): return getattr(core, "engine", None)
@@ -51,7 +51,7 @@ def _phones(value):
     found=[]
     for raw in value if isinstance(value,list) else [value]:
         for m in PHONE_RE.finditer(str(raw or "").replace("@s.whatsapp.net","")):
-            digits=re.sub(r"\\D","",m.group(1))
+            digits=re.sub(r"\D","",m.group(1))
             if len(digits)==10 and digits not in found: found.append(digits)
     return found[:5]
 def _email(value):
@@ -110,7 +110,7 @@ def sync(engine, limit_per_table=3000):
             source_id=_first(obj,["id","record_id","event_id","message_id","source_id","requirement_id"]) or str(pos)
             captured=_first(obj,["captured_at","created_at","message_timestamp","timestamp","date"])
             for phone in phones or [""]:
-                keyseed="|".join([phone,email.lower(),re.sub(r"\\s+"," ",name.lower()),re.sub(r"\\s+"," ",company.lower())])
+                keyseed="|".join([phone,email.lower(),re.sub(r"\s+"," ",name.lower()),re.sub(r"\s+"," ",company.lower())])
                 key="CONTACT-"+hashlib.sha256(keyseed.encode("utf-8","ignore")).hexdigest()[:24].upper()
                 with engine.begin() as c:
                     c.execute(text("""INSERT INTO pi_clean_contacts_v1(canonical_key,contact_name,company_name,phone,whatsapp_phone,email,designation,location,source_count)
