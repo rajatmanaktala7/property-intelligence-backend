@@ -93,8 +93,8 @@ def _contact(obj):
     found = []
     for value in values:
         text_value = str(value or "").replace("@s.whatsapp.net", "")
-        for match in re.finditer(r"(?<!\\d)(?:\\+?91[\\s.-]?)?([6-9](?:[\\s.-]?\\d){9})(?!\\d)", text_value):
-            digits = re.sub(r"\\D", "", match.group(1))
+        for match in re.finditer(r"(?<!\d)(?:\+?91[\s.-]?)?([6-9](?:[\s.-]?\d){9})(?!\d)", text_value):
+            digits = re.sub(r"\D", "", match.group(1))
             if len(digits) == 10 and digits not in found:
                 found.append(digits)
     if found:
