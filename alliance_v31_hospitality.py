@@ -314,7 +314,7 @@ def run_discovery(engine,category,location="Delhi NCR",count=8):
                 },
                 {
                     "source_type":"WEB_DISCOVERY",
-                    "source_name":"LANGSEARCH",
+                    "source_name":result.get("provider") or "WEB_DISCOVERY",
                     "source_url":item.get("url"),
                     "evidence_text":_norm(item.get("summary") or item.get("snippet")),
                     "raw_payload":item,
@@ -348,6 +348,7 @@ def run_discovery(engine,category,location="Delhi NCR",count=8):
         "provider_status":result["status"],
         "fetched_count":len(result["results"]),
         "saved_permanently":saved,
+        "error_message":result.get("message"),
         "next_step":"VERIFY_CONTACTS" if saved else "NO_RESULTS",
     }
 
