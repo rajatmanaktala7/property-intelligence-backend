@@ -8,7 +8,7 @@ from sqlalchemy import text
 from fastapi import Request, Body
 from fastapi.responses import HTMLResponse
 
-MODULE_VERSION = "3.1.1-PROVIDER-FALLBACK-RESULT-TRUTH"
+MODULE_VERSION = "3.1.2-EVIDENCE-CONTACT-EXTRACTION"
 
 CATEGORIES = {
     "RESTAURANT","CAFE","LOUNGE","CLUB","BANQUET",
@@ -274,6 +274,25 @@ def _langsearch(query,count=8):
             "results":[],
         }
 
+def _public_contact_evidence(item):
+    """Extract only contact fields explicitly present in public result evidence."""
+    blob=_norm(" ".join(str(item.get(k) or "") for k in ("name","title","summary","snippet")))
+    phones=[]
+    for match in re.finditer(r"(?<!\d)(?:\+?91[\s.-]?)?([6-9](?:[\s.-]?\d){9})(?!\d)",blob):
+        value=re.sub(r"\D","",match.group(1))
+        if len(value)==10 and value not in phones:
+            phones.append(value)
+    email_match=re.search(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b",blob,re.I)
+    url=_norm(item.get("url") or item.get("link"))
+    website=url if url.startswith(("http://","https://")) else None
+    return {
+        "contact_phone":phones[0] if phones else None,
+        "whatsapp_phone":phones[0] if phones else None,
+        "email":email_match.group(0) if email_match else None,
+        "website":website,
+    }
+
+
 def run_discovery(engine,category,location="Delhi NCR",count=8):
     ensure_schema_safe(engine)
 
@@ -304,12 +323,17 @@ def run_discovery(engine,category,location="Delhi NCR",count=8):
             if not title:
                 continue
 
+            contacts=_public_contact_evidence(item)
             upsert_hospitality(
                 engine,
                 {
                     "business_name":title,
                     "category":category,
                     "location":location,
+                    "contact_phone":contacts.get("contact_phone"),
+                    "whatsapp_phone":contacts.get("whatsapp_phone"),
+                    "email":contacts.get("email"),
+                    "website":contacts.get("website"),
                     "verification_status":"UNVERIFIED",
                 },
                 {
