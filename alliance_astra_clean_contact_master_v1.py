@@ -14,7 +14,7 @@ from fastapi.responses import HTMLResponse
 from sqlalchemy import text
 
 
-VERSION = "2.0.3-ASTRA-APPLICABILITY-AWARE-DATABASE-CLEAN"
+VERSION = "2.0.4-ASTRA-PRIMARY-KEY-AWARE-DATABASE-CLEAN"
 MARKER = "ALLIANCE_ASTRA_DATABASE_CLEAN_V2"
 SOURCE_TOKENS = (
     "whatsapp", "newspaper", "magazine", "hospitality", "retail",
@@ -682,9 +682,6 @@ def _recover_table(engine, run_id, table, spec, limit):
             "cycle_complete": True, "not_applicable": True,
             "recovery_status": "AUDIT_ONLY",
         }
-    pk = _pk_for(spec, columns)
-    if not pk:
-        return {"table": table, "scanned": 0, "updated": 0, "skipped": 0, "error": "No safe primary key"}
     targets = [field for field in spec["critical"] if field in columns and field in FIELD_RULES]
     if not targets:
         return {
@@ -693,6 +690,23 @@ def _recover_table(engine, run_id, table, spec, limit):
             "recovery_status": "NO_APPLICABLE_TARGET_COLUMNS",
         }
     where = " OR ".join(_blank_sql(field) for field in targets)
+    pk = _pk_for(spec, columns)
+    if not pk:
+        with engine.connect() as connection:
+            blank_row_exists = bool(connection.execute(text(
+                f"SELECT EXISTS(SELECT 1 FROM {_qident(table)} WHERE {where} LIMIT 1)"
+            )).scalar())
+        if not blank_row_exists:
+            return {
+                "table": table, "scanned": 0, "updated": 0, "skipped": 0,
+                "cycle_complete": True, "not_applicable": True,
+                "recovery_status": "NO_BLANK_TARGET_ROWS",
+            }
+        return {
+            "table": table, "scanned": 0, "updated": 0, "skipped": 0,
+            "cycle_complete": False, "error": "No safe primary key for blank target rows",
+            "recovery_status": "BLOCKED_NO_SAFE_PRIMARY_KEY",
+        }
     with engine.begin() as connection:
         connection.execute(text("""INSERT INTO pi_astra_scan_cursor_v2(table_name)
             VALUES(:table) ON CONFLICT(table_name) DO NOTHING"""), {"table": table})
