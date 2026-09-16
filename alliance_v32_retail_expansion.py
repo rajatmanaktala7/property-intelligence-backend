@@ -4,11 +4,12 @@ import re
 import json
 import hashlib
 import urllib.request
+from urllib.parse import urlparse
 from sqlalchemy import text
 from fastapi import Request, Body
 from fastapi.responses import HTMLResponse
 
-MODULE_VERSION = "3.2A-HEALTH-FIRST-RETAIL-EXPANSION-BOT"
+MODULE_VERSION = "3.2B-MULTI-CATEGORY-PROVIDER-FALLBACK"
 
 TARGET_ROLES = [
     "business development manager","business development officer",
@@ -139,26 +140,60 @@ def ensure_schema_safe(engine):
         )"""))
     return {"status":"READY","created":True}
 
+def _normalize_search_rows(rows,count):
+    out=[]
+    for row in rows or []:
+        title=_norm(row.get("name") or row.get("title"))
+        url=_norm(row.get("url") or row.get("link"))
+        if not title or not url.startswith(("http://","https://")):
+            continue
+        out.append({
+            "name":title,
+            "url":url,
+            "summary":_norm(row.get("summary") or row.get("snippet")),
+            "snippet":_norm(row.get("summary") or row.get("snippet")),
+            "datePublished":row.get("datePublished") or row.get("published_at"),
+            "source_provider":row.get("source_provider") or row.get("provider"),
+        })
+        if len(out)>=max(1,min(int(count),20)):
+            break
+    return out
+
+
 def _langsearch(query,count=8):
     key=os.getenv("LANGSEARCH_API_KEY","").strip()
-    if not key:
-        return {"status":"NO_KEY","provider":"LANGSEARCH","results":[]}
-    body=json.dumps({
-        "query":query,"freshness":"noLimit","summary":True,
-        "count":max(1,min(int(count),8)),
-    }).encode("utf-8")
-    req=urllib.request.Request(
-        "https://api.langsearch.com/v1/web-search",
-        data=body,method="POST",
-        headers={"Authorization":f"Bearer {key}","Content-Type":"application/json"},
-    )
+    primary_error=None
+    if key:
+        body=json.dumps({
+            "query":query,"freshness":"noLimit","summary":True,
+            "count":max(1,min(int(count),20)),
+        }).encode("utf-8")
+        req=urllib.request.Request(
+            "https://api.langsearch.com/v1/web-search",
+            data=body,method="POST",
+            headers={"Authorization":f"Bearer {key}","Content-Type":"application/json"},
+        )
+        try:
+            with urllib.request.urlopen(req,timeout=10) as r:
+                data=json.loads(r.read().decode("utf-8","replace"))
+            vals=data.get("data",{}).get("webPages",{}).get("value",[])
+            normalized=_normalize_search_rows(vals,count)
+            if normalized:
+                return {"status":"OK","provider":"LANGSEARCH","results":normalized}
+            primary_error="LangSearch returned zero usable results"
+        except Exception as exc:
+            primary_error=f"{type(exc).__name__}: {exc}"
+    else:
+        primary_error="LANGSEARCH_API_KEY is not configured"
     try:
-        with urllib.request.urlopen(req,timeout=4) as r:
-            data=json.loads(r.read().decode("utf-8","replace"))
-        vals=data.get("data",{}).get("webPages",{}).get("value",[])
-        return {"status":"OK","provider":"LANGSEARCH","results":vals}
+        import property_discovery
+        rows,logs=property_discovery.search_waterfall([query],deep=False)
+        normalized=_normalize_search_rows(rows,count)
+        if normalized:
+            return {"status":"OK","provider":"SEARCH_WATERFALL","results":normalized,"primary_error":primary_error}
+        return {"status":"NO_RESULTS","provider":"SEARCH_WATERFALL","message":primary_error or "No usable public results","provider_logs":logs or [],"results":[]}
     except Exception as exc:
-        return {"status":"ERROR","provider":"LANGSEARCH","message":str(exc),"results":[]}
+        return {"status":"ERROR","provider":"LANGSEARCH+SEARCH_WATERFALL","message":f"{primary_error}; fallback {type(exc).__name__}: {exc}","results":[]}
 
 def _guess_category(text_blob):
     t=_norm(text_blob).lower()
@@ -288,8 +323,15 @@ def _intent_score(headline,evidence):
 def discover_indiaretailing_signals(engine,category="ALL",count=8):
     ensure_schema_safe(engine)
     category=str(category or "ALL").upper()
-    cat_query="" if category=="ALL" else category.replace("_"," ")
-    query=f'site:indiaretailing.com {cat_query} expansion new stores new outlets retail footprint India'
+    cat_query=(
+        "retail restaurant qsr cafe grocery fashion footwear beauty electronics "
+        "fitness home decor jewellery speciality retail"
+        if category=="ALL" else category.replace("_"," ")
+    )
+    query=(
+        f'{cat_query} India expansion "new stores" OR "new outlets" OR '
+        '"retail footprint" OR "looking for space"'
+    )
     with engine.begin() as c:
         run_id=c.execute(text("""
           INSERT INTO ai_retail_bot_run(run_type,query_text,provider,status)
@@ -303,7 +345,7 @@ def discover_indiaretailing_signals(engine,category="ALL",count=8):
     if result["status"]=="OK":
         for item in result["results"]:
             url=str(item.get("url") or "")
-            if "indiaretailing.com" not in url.lower():
+            if not url.startswith(("http://","https://")):
                 continue
             headline=_norm(item.get("name"))
             evidence=_norm(item.get("summary") or item.get("snippet"))
@@ -319,7 +361,7 @@ def discover_indiaretailing_signals(engine,category="ALL",count=8):
                     location_signal,outlet_target,raw_payload,first_seen_at,last_seen_at
                   )
                   VALUES(
-                    :signal_key,:company_name,:category,:headline,'IndiaRetailing',
+                    :signal_key,:company_name,:category,:headline,:source_name,
                     :source_url,:published_at,:evidence,:score,:status,
                     :location_signal,:outlet_target,CAST(:raw AS jsonb),NOW(),NOW()
                   )
@@ -331,6 +373,7 @@ def discover_indiaretailing_signals(engine,category="ALL",count=8):
                 """),{
                     "signal_key":sigkey,"company_name":company,
                     "category":detected_category,"headline":headline,
+                    "source_name":urlparse(url).netloc.lower().removeprefix("www.") or result.get("provider"),
                     "source_url":url,
                     "published_at":item.get("datePublished") or item.get("published_at"),
                     "evidence":evidence,"score":score,"status":status,
@@ -357,7 +400,7 @@ def discover_indiaretailing_signals(engine,category="ALL",count=8):
         })
     return {
         "version":MODULE_VERSION,"run_id":int(run_id),
-        "source":"IndiaRetailing","provider_status":result["status"],
+        "source":"MULTI_SOURCE_PUBLIC_WEB","provider":result.get("provider"),"provider_status":result["status"],
         "signals_found":saved,"high_intent_signals":high_intent,
         "saved_permanently":saved,
         "next_step":"QUALIFY_HIGH_INTENT_SIGNALS" if high_intent else "REVIEW_SIGNALS",
@@ -503,7 +546,8 @@ def register_v32_retail_routes(core):
         with engine.connect() as c:
             rows=c.execute(text("""
               SELECT retail_contact_id,person_name,designation,company_name,category,
-                     linkedin_profile_url,public_profile_evidence,city,
+                     linkedin_profile_url,public_profile_evidence,contact_phone,
+                     email,website,city,source_url,
                      verification_status,first_seen_at,last_seen_at
               FROM ai_retail_contact
               WHERE active=TRUE
@@ -552,7 +596,7 @@ def register_v32_retail_routes(core):
         return HTMLResponse("""<!doctype html><html><head><meta charset="utf-8"><title>Retail Intelligence</title>
 <style>body{font:14px Arial;margin:0;background:#f5f7fb;color:#172437}.wrap{max-width:1400px;margin:auto;padding:22px}.card{background:#fff;border:1px solid #e1e7ef;border-radius:14px;padding:16px;margin:12px 0}.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}input,select,button{padding:9px;border:1px solid #ccd7e4;border-radius:7px;margin:3px}button{background:#1769e0;color:#fff;border:0;font-weight:bold;cursor:pointer}.muted{color:#637085}table{border-collapse:collapse;width:100%;font-size:12px}th,td{padding:8px;border-bottom:1px solid #e9edf2;text-align:left}@media(max-width:700px){.grid{grid-template-columns:1fr}}</style></head><body><div class="wrap">
 <h1>Retail Expansion Intelligence</h1><p class="muted">Run source discovery separately from reviewing saved expansion signals. Test/demo records are hidden.</p>
-<div class="grid"><div class="card" id="bot-controls"><h2>1. Run Retail Bot</h2><select id="cat"><option>RETAIL</option><option>FASHION</option><option>FNB</option><option>JEWELLERY</option><option>GROCERY</option><option>OTHER</option></select><input id="loc" value="Delhi NCR" placeholder="Location"><input id="cnt" type="number" value="8" min="1" max="30"><button onclick="runLinkedIn()">Run Public Profile Discovery</button><button onclick="runNews()">Run Retail News Discovery</button><pre id="run"></pre></div>
+<div class="grid"><div class="card" id="bot-controls"><h2>1. Run Retail Bot</h2><select id="cat"><option>ALL</option><option>RETAIL</option><option>RESTAURANT</option><option>QSR</option><option>CAFE</option><option>GROCERY</option><option>FASHION</option><option>FOOTWEAR</option><option>BEAUTY</option><option>ELECTRONICS</option><option>FITNESS</option><option>HOME_DECOR</option><option>JEWELLERY</option><option>OTHER</option></select><input id="loc" value="Delhi NCR" placeholder="Location"><input id="cnt" type="number" value="8" min="1" max="30"><button onclick="runLinkedIn()">Run Public Profile Discovery</button><button onclick="runNews()">Run Retail News Discovery</button><pre id="run"></pre></div>
 <div class="card"><h2>How it works</h2><p>Only public signals and entered data are retained. A signal becomes a requirement only after team verification.</p><button onclick="loadData()">Refresh Intelligence</button></div></div>
 <div class="card" id="intelligence-database"><h2>2. Intelligence Database</h2><p id="summary" class="muted">Loading...</p><table><thead><tr><th>Brand / Company</th><th>Signal</th><th>Location</th><th>Source</th><th>Status</th><th>Date</th></tr></thead><tbody id="rows"></tbody></table></div>
 </div><script>
