@@ -4,7 +4,7 @@ from fastapi import Form, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import text
 
-VERSION="9.1.4-PROPERTY-TABLE-COLUMNS-RESTORED"
+VERSION="9.1.5-CLEAN-PROPERTY-DATABASE-HUB"
 SOURCES=("MASTER","NEWSPAPER","WHATSAPP","MAGAZINE","MANUAL")
 CATEGORY_OPTIONS=("Residential Sale","Residential Rent","Commercial Sale","Commercial Rent","Industrial Sale","Industrial Rent","Farmhouse Sale","Farmhouse Rent")
 
@@ -124,7 +124,7 @@ tbody tr:nth-child(even) td{{background:#f8fafc}}tbody tr:hover td{{background:#
 details.pop{{position:relative}}details.pop>div{{position:absolute;z-index:20;background:white;border:1px solid #667085;padding:9px;min-width:430px}}details.pop summary{{list-style:none}}
 @media(max-width:1000px){{.searchgrid{{grid-template-columns:1fr 1fr}}}}
 </style></head><body><header><b>Alliance CRE Operating System</b><br><small>5 Property Databases + 5 Requirement Databases · Master-only Matcher</small></header>
-<nav><a href="/alliance/primary">Command Centre</a><a href="/alliance/primary/databases">Property Databases</a><a class="good" href="/fast-property-entry?division=DELHI_NCR">+ Add Delhi NCR Property</a><a class="good" href="/fast-property-entry?division=GOA">+ Add Goa Property</a><a href="/alliance/primary/requirements-hub">Requirement Databases</a><a href="/alliance/primary/matcher">Matcher</a><a href="/alliance/primary/availability">Verification</a><a href="/alliance/primary/followups">Follow-ups</a></nav>
+<nav><a href="/alliance/primary">Command Centre</a><a href="/alliance/final/databases">Property Databases</a></nav>
 <div class="wrap"><h2>{_e(title)}</h2>{body}</div></body></html>"""
 def _filter_form(q,location,category,transaction,status,assigned,limit):
     cats="<option value=''>All Categories</option>"+"".join(f"<option {'selected' if category==x else ''}>{_e(x)}</option>" for x in CATEGORY_OPTIONS)
@@ -208,7 +208,7 @@ def register(core):
     def dbhub(req:Request):
         _login(core,req)
         cards="".join(f'<div class="dbcard"><h3>{s.title()} Database</h3><a class="btn good" href="/alliance/final/database/{s.lower()}">Open</a>' + ('<div style="margin-top:8px"><a class="btn light" href="/alliance/final/database/newspaper?location=Delhi">Delhi Newspaper</a> <a class="btn light" href="/alliance/final/database/newspaper?location=Goa">Goa Newspaper</a></div>' if s=="NEWSPAPER" else "") + '</div>' for s in SOURCES)
-        actions='<div class="card"><b>Manual Property Entry</b><br><br><a class="btn good" href="/fast-property-entry?division=DELHI_NCR">+ Add Delhi NCR Property</a> <a class="btn good" href="/fast-property-entry?division=GOA">+ Add Goa Property</a><br><small>Both forms support pictures, multiple videos and brochures.</small></div>'
+        actions = '<div class="card"><b>Add to Property Database</b><br><br><a class="btn good" href="/property-manual">+ Add Manual Property</a> <a class="btn good" href="/newspaper-v83">+ Add Newspaper Property</a> <a class="btn good" href="/magazine-master-import">+ Add Magazine Property</a><br><small>Use the correct source page. Existing databases remain separate below.</small></div>'
         return HTMLResponse(_shell("5 Property Databases",actions+f'<div class="grid">{cards}</div><div class="card"><b>Matcher rule:</b> Matcher searches Master Property Database only. Source databases remain separate evidence views.</div>'))
     @app.get("/alliance/final/database/{source}",response_class=HTMLResponse)
     def db(req:Request,source:str,q:str=Query(""),location:str=Query(""),category:str=Query(""),transaction:str=Query(""),status:str=Query(""),assigned:str=Query(""),limit:int=Query(500,ge=1,le=1500)):

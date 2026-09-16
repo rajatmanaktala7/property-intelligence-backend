@@ -10,8 +10,8 @@ from fastapi import Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import text
 
-VERSION = "12.3.11-GATE-MASTER-AUTHORITY"
-SOURCES = ("MASTER", "NEWSPAPER", "WHATSAPP", "MAGAZINE", "MANUAL")
+VERSION = "12.3.12-CLEAN-REQUIREMENT-DATABASE-HUB"
+SOURCES = ("MASTER", "NEWSPAPER", "WHATSAPP", "MAGAZINE", "MANUAL", "SOCIAL")
 
 EXCLUDE_TOKENS = (
     "match", "workflow", "action", "audit", "review", "repair", "task", "journal",
@@ -119,6 +119,8 @@ def _classify(value):
         return "WHATSAPP"
     if "MAGAZINE" in s:
         return "MAGAZINE"
+    if any(token in s for token in ("SOCIAL", "LINKEDIN", "FACEBOOK", "INSTAGRAM")):
+        return "SOCIAL"
     if "MANUAL" in s:
         return "MANUAL"
     return "OTHER"
@@ -365,21 +367,7 @@ def _move_front(app, path):
 
 def _nav():
     return """
-    <nav>
-      <a href="/team-dashboard-v376">Dashboard</a>
-      <a href="/alliance/primary">Command Centre</a>
-      <a href="/property-manual">Add Property</a>
-      <a href="/alliance/final/databases">Property Databases</a>
-      <a href="/alliance/primary/availability">Verification</a>
-      <a href="/requirements-workbench">Add Requirement</a>
-      <a href="/alliance/final/requirements">Requirement Databases</a>
-      <a href="/alliance/primary/matcher">Smart Matcher</a>
-      <a href="/alliance/primary/followups">Follow-ups</a>
-      <a href="/alliance/primary/reports">Deals & Reports</a>
-      <a href="/alliance/primary/contacts">Contacts</a>
-      <a href="/alliance/primary/ai-control">AI Control</a>
-      <a href="/alliance/primary/data-health">Data Health</a>
-    </nav>
+    <nav><a href="/alliance/primary">Command Centre</a><a href="/alliance/final/requirements">Requirement Databases</a></nav>
     """
 
 def _shell(title, body):
@@ -440,7 +428,7 @@ def _fast_requirement_counts(e):
             for table in tables:
                 source = _classify(table)
 
-                if source not in {"NEWSPAPER", "WHATSAPP", "MAGAZINE", "MANUAL"}:
+                if source not in {"NEWSPAPER", "WHATSAPP", "MAGAZINE", "MANUAL", "SOCIAL"}:
                     continue
 
                 try:
@@ -465,6 +453,7 @@ def _hub(e):
 
     for source in SOURCES:
         count = counts.get(source, 0)
+        label = "Social Media" if source == "SOCIAL" else source.title()
 
         if source == "MASTER":
             note = "Canonical matcher requirement inventory"
@@ -483,7 +472,7 @@ def _hub(e):
         }
 
         cards.append(f"""<a class="dbcard" href="/alliance/final/requirements/{source.lower()}">
-          <b>{_e(source.title())} Requirements</b>
+          <b>{_e(label)} Requirements</b>
           <div class="num">{count:,}</div>
           <div class="sub">{_e(note)}</div>
           <div class="open">View Database</div>
@@ -496,14 +485,20 @@ def _hub(e):
             'The underlying databases remain available.</div>'
         )
 
-    body = f"""<div class="notice"><b>All requirement databases are available.</b>
+    actions = """<div class="card"><b>Add or view requirement sources</b><br><br>
+    <a class="btn" href="/requirements-workbench">+ Add Requirement Manually</a>
+    <a class="btn" href="/alliance/final/requirements/newspaper">Newspaper Requirements</a>
+    <a class="btn" href="/alliance/final/requirements/whatsapp">WhatsApp Requirements</a>
+    <a class="btn" href="/alliance/final/requirements/social">Social Media Requirements</a>
+    <br><small>Social Media includes LinkedIn, Facebook, Instagram or Social source evidence only. No records are copied into Master automatically.</small></div>"""
+    body = f"""{actions}<div class="notice"><b>All requirement databases are available.</b>
     Counts use lightweight database queries. Complete records load only after
     a database is opened. Nothing is automatically copied into Master and no
     duplicate Master records are created.</div>
     {warning}
     <div class="grid">{''.join(cards)}</div>"""
 
-    return _shell("5 Requirement Databases", body), details
+    return _shell("6 Requirement Databases", body), details
 
 
 def _table(e, source, q, location, transaction, status, assigned, limit):
