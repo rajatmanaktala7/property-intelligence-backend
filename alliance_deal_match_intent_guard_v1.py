@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import alliance_requirement_intelligence_os_v2 as brain
 
-VERSION = "3.1.0-V2-PRODUCTION-V3-REVIEW"
+VERSION = "3.1.1-STABLE-V60-COMPATIBILITY-CONTRACT"
 
 
 def classify(raw: str):
@@ -185,8 +185,9 @@ def install(core):
                 item["source"] = v60.phase5.sanitize_text(part["source"])
             out.append(item)
 
-        return {
+        payload = {
             "version": v60.VERSION,
+            "route_version": v60.VERSION,
             "engine_version": v60.ENGINE_VERSION,
             "intent_guard_version": VERSION,
             "requirement_brain_version": brain.VERSION,
@@ -197,6 +198,22 @@ def install(core):
             "results": out,
             "contacts_exposed": False,
         }
+
+        # Preserve the intent-guard envelope while exposing the canonical V6.6
+        # single-requirement contract expected by the UI and operational doctor.
+        # No matcher calculations or safety gates are changed here.
+        if len(out) == 1 and out[0].get("matched"):
+            canonical = out[0].get("result") or {}
+            payload.update({
+                "mode": canonical.get("mode") or str(mode or "SMART").upper(),
+                "requirement": canonical.get("requirement") or {},
+                "summary": canonical.get("summary") or {},
+                "exact_verified": canonical.get("exact_verified") or [],
+                "exact_needs_verification": canonical.get("exact_needs_verification") or [],
+                "alternatives": canonical.get("alternatives") or [],
+                "rejected_sample": canonical.get("rejected_sample") or [],
+            })
+        return payload
 
     v60._constraint_summary = unified_constraint_summary
     v60.render_results = guarded_render
