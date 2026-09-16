@@ -1514,6 +1514,19 @@ def _load_core():
                 "fail_safe": True,
             }
 
+        # ALLIANCE_ASTRA_CLEAN_CONTACT_MASTER_V1
+        try:
+            import alliance_astra_clean_contact_master_v1 as astra_clean_contact_master_v1
+            stabilization = dict(stabilization or {})
+            stabilization["astra_clean_contact_master_v1"] = astra_clean_contact_master_v1.register(wrapped.core)
+        except Exception as exc:
+            stabilization = dict(stabilization or {})
+            stabilization["astra_clean_contact_master_v1"] = {
+                "status": "ERROR",
+                "error": f"{type(exc).__name__}: {exc}",
+                "fail_safe": True,
+            }
+
         CORE_APP = wrapped.app
 
         # ALLIANCE_REQUIREMENT_RESTORATION_V2
