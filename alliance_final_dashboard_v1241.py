@@ -259,7 +259,23 @@ def _register_hospitality(core):
             _login(core, req)
             return RedirectResponse("/v3/hospitality-intelligence", status_code=302)
 
-def _commercial_fallback_page(engine):
+def _commercial_value(row, keys):
+    for key in keys:
+        value = row.get(key)
+        if value not in (None, "", [], {}):
+            return str(value)
+    return ""
+
+def _commercial_json_rows(engine, table, limit=500):
+    if not _table_exists(engine, table):
+        return []
+    try:
+        with engine.connect() as c:
+            return [dict(x) for x in c.execute(text(f'SELECT to_jsonb(t) AS data FROM "{table}" t LIMIT :n'), {"n": int(limit)}).mappings().all()]
+    except Exception:
+        return []
+
+def _commercial_fallback_page(engine, asset_code=""):
     rows = []
     if _table_exists(engine, "aci_intel_assets"):
         try:
@@ -270,39 +286,52 @@ def _commercial_fallback_page(engine):
                            last_researched_at,visibility_status,purity_score
                     FROM aci_intel_assets
                     WHERE COALESCE(visibility_status,'ACTIVE')='ACTIVE'
-                    ORDER BY COALESCE(purity_score,0) DESC,
-                             last_researched_at DESC NULLS LAST,
-                             updated_at DESC
+                    ORDER BY COALESCE(purity_score,0) DESC,last_researched_at DESC NULLS LAST,updated_at DESC
                     LIMIT 400
                 """)).mappings().all()]
         except Exception:
             rows = []
+    selected = next((r for r in rows if str(r.get("asset_code") or "") == str(asset_code or "")), None)
+    brief = ""
+    if selected:
+        token = " ".join([str(selected.get("asset_code") or ""), str(selected.get("asset_name") or "")]).lower()
+        brand_rows = _commercial_json_rows(engine, "aci_intel_brands")
+        contact_rows = _commercial_json_rows(engine, "aci_intel_contacts")
+        brands = []
+        for wrap in brand_rows:
+            data = wrap.get("data") or {}
+            blob = json.dumps(data, ensure_ascii=False, default=str).lower()
+            if token and any(x and x in blob for x in token.split() if len(x) > 3):
+                name = _commercial_value(data, ("brand_name","company_name","name","brand"))
+                if name and name not in brands:
+                    brands.append(name)
+        contacts = []
+        for wrap in contact_rows:
+            data = wrap.get("data") or {}
+            blob = json.dumps(data, ensure_ascii=False, default=str).lower()
+            if token and any(x and x in blob for x in token.split() if len(x) > 3):
+                name = _commercial_value(data, ("contact_name","name","person_name"))
+                phone = _commercial_value(data, ("phone","contact_phone","mobile","whatsapp_phone"))
+                email = _commercial_value(data, ("email","contact_email"))
+                value = " · ".join(x for x in (name, phone, email) if x)
+                if value and value not in contacts:
+                    contacts.append(value)
+        asset_class = str(selected.get("asset_class") or "COMMERCIAL").upper()
+        category_targets = "F&B, fashion, beauty, services and experience-led retail" if any(x in asset_class for x in ("MALL","RETAIL","COMMERCIAL")) else "office, services and relevant commercial occupiers"
+        brand_html = "".join(f"<li>{_e(x)}</li>" for x in brands[:20]) or "<li>No brand-presence evidence is currently linked to this asset.</li>"
+        contact_html = "".join(f"<li>{_e(x)}</li>" for x in contacts[:20]) or "<li>No public contact evidence is currently linked to this asset.</li>"
+        brief = f"""<div class="card"><h2>Asset Research Brief</h2><p><b>{_e(selected.get("asset_name"))}</b> · {_e(selected.get("city"))} · {_e(selected.get("location"))}</p>
+        <div class="grid2"><div><h3>Brands present / announced</h3><ul>{brand_html}</ul></div><div><h3>Public business contacts</h3><ul>{contact_html}</ul></div></div>
+        <h3>Pitch guidance</h3><p>Suggested categories: <b>{_e(category_targets)}</b>. These are category targets, not claims that any brand is present or interested. Add verified tenant, vacancy or leasing-contact evidence before outreach.</p>
+        <p><a class="btn" href="/commercial-intelligence">Back to assets</a></p></div>"""
     trs = []
     for r in rows:
-        trs.append(
-            "<tr>"
-            f"<td>{_e(r.get('asset_name'))}</td>"
-            f"<td>{_e(r.get('asset_class'))}</td>"
-            f"<td>{_e(r.get('city'))}</td>"
-            f"<td>{_e(r.get('location'))}</td>"
-            f"<td>{_e(r.get('developer_or_authority'))}</td>"
-            f"<td>{_e(r.get('lifecycle_status'))}</td>"
-            f"<td>{_e(r.get('confidence'))}</td>"
-            f"<td>{_e(r.get('last_researched_at'))}</td>"
-            "</tr>"
-        )
-    body = "".join(trs) or "<tr><td colspan='8'>No active commercial intelligence assets found.</td></tr>"
+        action = f'<a class="btn" href="/commercial-intelligence?asset_code={_e(r.get("asset_code"))}">Research this asset</a>'
+        trs.append("<tr>"+f"<td>{_e(r.get('asset_name'))}</td><td>{_e(r.get('asset_class'))}</td><td>{_e(r.get('city'))}</td><td>{_e(r.get('location'))}</td><td>{_e(r.get('developer_or_authority'))}</td><td>{_e(r.get('lifecycle_status'))}</td><td>{_e(r.get('confidence'))}</td><td>{_e(r.get('last_researched_at'))}</td><td>{action}</td></tr>")
+    body = "".join(trs) or "<tr><td colspan='9'>No active commercial intelligence assets found.</td></tr>"
     return f"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Commercial Intelligence</title><style>
-body{{font-family:Arial;margin:0;background:#f4f7fb;color:#172033}}header{{background:#10223f;color:#fff;padding:18px 22px}}
-nav{{background:white;padding:10px;border-bottom:1px solid #dfe6ee}}nav a{{display:inline-block;margin:2px;padding:8px 10px;background:#10223f;color:#fff;text-decoration:none;border-radius:7px}}
-.wrap{{max-width:1800px;margin:auto;padding:18px}}.card{{background:#fff;border:1px solid #dfe6ee;border-radius:12px;padding:14px;margin-bottom:12px}}
-.tablebox{{overflow:auto;max-height:72vh}}table{{border-collapse:collapse;width:100%;font-size:12px}}th,td{{padding:8px;border-bottom:1px solid #edf0f4;text-align:left;vertical-align:top}}th{{background:#f8fafc;position:sticky;top:0}}
-</style></head><body><header><b>Alliance Commercial Intelligence</b><br><small>Malls, commercial premises, government opportunities and leasing intelligence</small></header>
-<nav><a href="/alliance/primary">Command Centre</a><a href="/alliance/goa-properties">Goa Properties</a><a href="/retail-expansion">Retail Expansion</a><a href="/alliance/team-link-audit">Link Audit</a></nav>
-<div class="wrap"><div class="card"><b>{len(rows)} active intelligence assets visible.</b><br>
-This safe fallback is read-only and uses the existing ACI intelligence database. No commercial records are changed.</div>
-<div class="card tablebox"><table><thead><tr><th>Asset</th><th>Class</th><th>City</th><th>Location</th><th>Developer / Authority</th><th>Status</th><th>Confidence</th><th>Last Researched</th></tr></thead><tbody>{body}</tbody></table></div></div></body></html>"""
+<title>Commercial Intelligence</title><style>body{{font-family:Arial;margin:0;background:#f4f7fb;color:#172033}}header{{background:#10223f;color:#fff;padding:18px 22px}}nav{{background:white;padding:10px;border-bottom:1px solid #dfe6ee}}nav a,.btn{{display:inline-block;margin:2px;padding:8px 10px;background:#10223f;color:#fff;text-decoration:none;border-radius:7px}}.wrap{{max-width:1800px;margin:auto;padding:18px}}.card{{background:#fff;border:1px solid #dfe6ee;border-radius:12px;padding:14px;margin-bottom:12px}}.tablebox{{overflow:auto;max-height:72vh}}table{{border-collapse:collapse;width:100%;font-size:12px}}th,td{{padding:8px;border-bottom:1px solid #edf0f4;text-align:left;vertical-align:top}}th{{background:#f8fafc;position:sticky;top:0}}.grid2{{display:grid;grid-template-columns:1fr 1fr;gap:12px}}@media(max-width:700px){{.grid2{{grid-template-columns:1fr}}}}</style></head><body><header><b>Alliance Commercial Intelligence</b><br><small>Evidence-backed asset research and retail pitch preparation</small></header><nav><a href="/alliance/primary">Command Centre</a><a href="/v3/retail-expansion-intelligence">Retail Intelligence</a><a href="/alliance/marketing-contacts">Marketing Contacts</a></nav><div class="wrap">{brief}<div class="card"><b>{len(rows)} active intelligence assets visible.</b><br>Research briefs show only linked evidence. Unknown is shown as unknown.</div><div class="card tablebox"><table><thead><tr><th>Asset</th><th>Class</th><th>City</th><th>Location</th><th>Developer / Authority</th><th>Status</th><th>Confidence</th><th>Last Researched</th><th>Action</th></tr></thead><tbody>{body}</tbody></table></div></div></body></html>"""
+
 
 def _register_commercial(core):
     app = _app(core)
@@ -319,9 +348,9 @@ def _register_commercial(core):
     # If the full module cannot register, keep the team surface usable and expose the error.
     if not _route_exists(app, "/commercial-intelligence"):
         @app.get("/commercial-intelligence", response_class=HTMLResponse, include_in_schema=False)
-        def commercial_fallback(req: Request):
+        def commercial_fallback(req: Request, asset_code: str = ""):
             _login(core, req)
-            return HTMLResponse(_commercial_fallback_page(engine), headers={"Cache-Control": "no-store"})
+            return HTMLResponse(_commercial_fallback_page(engine, asset_code), headers={"Cache-Control": "no-store"})
 
     if not _route_exists(app, "/api/commercial-intelligence/status"):
         @app.get("/api/commercial-intelligence/status")
