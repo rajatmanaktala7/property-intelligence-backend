@@ -549,10 +549,19 @@ def register_v32_retail_routes(core):
     @app.get("/v3/retail-expansion-intelligence",response_class=HTMLResponse)
     def dashboard(req:Request):
         if hasattr(core,"need_login"): core.need_login(req)
-        return HTMLResponse("""<!doctype html><html><body style="font-family:Arial">
-        <h1>V3.2 Retail Expansion Intent Bot</h1>
-        <p>Public LinkedIn profile discovery + IndiaRetailing expansion signals.</p>
-        <p>No unauthorized LinkedIn scraping. Permanent storage enabled.</p>
-        </body></html>""")
+        return HTMLResponse("""<!doctype html><html><head><meta charset="utf-8"><title>Retail Intelligence</title>
+<style>body{font:14px Arial;margin:0;background:#f5f7fb;color:#172437}.wrap{max-width:1400px;margin:auto;padding:22px}.card{background:#fff;border:1px solid #e1e7ef;border-radius:14px;padding:16px;margin:12px 0}.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}input,select,button{padding:9px;border:1px solid #ccd7e4;border-radius:7px;margin:3px}button{background:#1769e0;color:#fff;border:0;font-weight:bold;cursor:pointer}.muted{color:#637085}table{border-collapse:collapse;width:100%;font-size:12px}th,td{padding:8px;border-bottom:1px solid #e9edf2;text-align:left}@media(max-width:700px){.grid{grid-template-columns:1fr}}</style></head><body><div class="wrap">
+<h1>Retail Expansion Intelligence</h1><p class="muted">Run source discovery separately from reviewing saved expansion signals. Test/demo records are hidden.</p>
+<div class="grid"><div class="card" id="bot-controls"><h2>1. Run Retail Bot</h2><select id="cat"><option>RETAIL</option><option>FASHION</option><option>FNB</option><option>JEWELLERY</option><option>GROCERY</option><option>OTHER</option></select><input id="loc" value="Delhi NCR" placeholder="Location"><input id="cnt" type="number" value="8" min="1" max="30"><button onclick="runLinkedIn()">Run Public Profile Discovery</button><button onclick="runNews()">Run Retail News Discovery</button><pre id="run"></pre></div>
+<div class="card"><h2>How it works</h2><p>Only public signals and entered data are retained. A signal becomes a requirement only after team verification.</p><button onclick="loadData()">Refresh Intelligence</button></div></div>
+<div class="card" id="intelligence-database"><h2>2. Intelligence Database</h2><p id="summary" class="muted">Loading...</p><table><thead><tr><th>Brand / Company</th><th>Signal</th><th>Location</th><th>Source</th><th>Status</th><th>Date</th></tr></thead><tbody id="rows"></tbody></table></div>
+</div><script>
+const esc=v=>String(v??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const demo=v=>/\b(test|demo|sample|example)\b/i.test(String(v??''));
+async function loadData(){const r=await fetch('/api/v3/retail/signals?limit=200');const x=await r.json();const a=(x.signals||[]).filter(v=>!demo(v.company_name||v.brand_name||v.title));document.querySelector('#summary').textContent=a.length+' real signals visible';document.querySelector('#rows').innerHTML=a.map(v=>'<tr><td>'+esc(v.company_name||v.brand_name)+'</td><td>'+esc(v.title||v.signal_type||v.summary)+'</td><td>'+esc(v.location||v.city)+'</td><td>'+esc(v.source_url||v.source_name)+'</td><td>'+esc(v.status)+'</td><td>'+esc(v.created_at||v.captured_at)+'</td></tr>').join('')||'<tr><td colspan="6">No real retail intelligence records yet. Run a bot or add approved source evidence.</td></tr>'}
+async function call(path){document.querySelector('#run').textContent='Running…';const r=await fetch(path,{method:'POST'});document.querySelector('#run').textContent=JSON.stringify(await r.json(),null,2);loadData()}
+function runLinkedIn(){call('/api/v3/retail/discover/linkedin?category='+encodeURIComponent(document.querySelector('#cat').value)+'&location='+encodeURIComponent(document.querySelector('#loc').value)+'&count='+document.querySelector('#cnt').value)}
+function runNews(){call('/api/v3/retail/discover/news?category='+encodeURIComponent(document.querySelector('#cat').value)+'&count='+document.querySelector('#cnt').value)}
+loadData();</script></body></html>""")
 
     return app
