@@ -10,7 +10,7 @@ from fastapi import Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import text
 
-VERSION = "12.4.0-ALL-SOURCE-REQUIREMENT-DATABASE-HUB"
+VERSION = "12.4.1-MANUAL-GATE-SOURCE-SYNC"
 SOURCES = ("MASTER", "NEWSPAPER", "MANUAL", "MAGAZINE", "WHATSAPP", "SOCIAL")
 
 EXCLUDE_TOKENS = (
@@ -563,7 +563,7 @@ def _hub(e):
         )
 
     actions = """<div class="card"><b>Add or open requirement sources</b><br><br>
-    <a class="btn" href="/requirements-workbench">+ Add Manual Requirement</a>
+    <a class="btn" href="/alliance/final/requirements/add-manual">+ Add Manual Requirement</a>
     <a class="btn" href="/alliance/final/requirements/newspaper">Newspaper</a>
     <a class="btn" href="/alliance/final/requirements/manual">Manual</a>
     <a class="btn" href="/alliance/final/requirements/magazine">Magazine</a>
@@ -840,6 +840,72 @@ def register(core, served_app=None):
         _login(core, req)
         page, _ = _hub(e)
         return HTMLResponse(page, headers={"Cache-Control":"no-store","X-Alliance-Requirement-Restore":VERSION})
+
+    @app.get("/alliance/final/requirements/add-manual", response_class=HTMLResponse, include_in_schema=False)
+    def add_manual_requirement_page(req: Request):
+        _login(core, req)
+        body = """<div class="notice"><b>Manual Requirement Entry</b><br>
+        Saving creates one source-evidence row visible immediately in Manual and Master.
+        Smart Matcher remains locked until the requirement is verified.</div>
+        <div class="card"><form method="post" action="/alliance/final/requirements/add-manual">
+        <label>Date / Time</label><input type="datetime-local" name="created_at"><br><br>
+        <label>Original Requirement *</label><input name="message" required placeholder="Exact client requirement"><br><br>
+        <label>Client / Company</label><input name="company"><br><br>
+        <label>Contact Name</label><input name="contact_name"><br><br>
+        <label>Contact No.</label><input name="contact"><br><br>
+        <label>Location</label><input name="location"><br><br>
+        <label>Category / Use</label><input name="category"><br><br>
+        <label>Property Type</label><input name="property_type"><br><br>
+        <label>Area</label><input name="area"><br><br>
+        <label>Rent / Sale</label><select name="transaction"><option value="">Select</option><option>RENT</option><option>LEASE</option><option>SALE</option><option>PURCHASE</option></select><br><br>
+        <label>Budget</label><input name="budget"><br><br>
+        <label>Assigned To</label><input name="assigned_to"><br><br>
+        <button type="submit">Save to Manual + Master</button>
+        </form></div>"""
+        return HTMLResponse(_shell("Add Manual Requirement", body), headers={"Cache-Control":"no-store"})
+
+    @app.post("/alliance/final/requirements/add-manual", include_in_schema=False)
+    def add_manual_requirement(
+        req: Request,
+        message: str = Form(...),
+        company: str = Form(""),
+        contact_name: str = Form(""),
+        contact: str = Form(""),
+        location: str = Form(""),
+        category: str = Form(""),
+        property_type: str = Form(""),
+        area: str = Form(""),
+        transaction: str = Form(""),
+        budget: str = Form(""),
+        assigned_to: str = Form(""),
+        created_at: str = Form(""),
+    ):
+        _login(core, req)
+        clean_message = re.sub(r"\s+", " ", str(message or "")).strip()
+        if not clean_message:
+            raise HTTPException(400, "Original requirement is required")
+        source_pk = hashlib.sha1(
+            "|".join((clean_message, str(contact or ""), str(created_at or ""))).encode("utf-8", "ignore")
+        ).hexdigest()[:24]
+        selected = {
+            "source": "MANUAL",
+            "source_table": "alliance_manual_requirement_entry",
+            "source_pk": source_pk,
+            "message": clean_message,
+            "company": str(company or "").strip(),
+            "contact_name": str(contact_name or "").strip(),
+            "contact": str(contact or "").strip(),
+            "location": str(location or "").strip(),
+            "category": str(category or "").strip(),
+            "property_type": str(property_type or "").strip(),
+            "area": str(area or "").strip(),
+            "transaction": str(transaction or "").strip(),
+            "budget": str(budget or "").strip(),
+            "assigned_to": str(assigned_to or "").strip(),
+            "created_at": str(created_at or "").strip(),
+        }
+        _ensure_gate_row(e, selected)
+        return RedirectResponse("/alliance/final/requirements/manual", status_code=303)
 
     @app.get("/alliance/final/requirements/{source}", response_class=HTMLResponse, include_in_schema=False)
     def requirement_db(
