@@ -10,7 +10,7 @@ from fastapi import Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import text
 
-VERSION = "12.4.1-MANUAL-GATE-SOURCE-SYNC"
+VERSION = "12.5.0-CANONICAL-SOURCE-MATCH-ACTIONS"
 SOURCES = ("MASTER", "NEWSPAPER", "MANUAL", "MAGAZINE", "WHATSAPP", "SOCIAL")
 
 EXCLUDE_TOKENS = (
@@ -46,6 +46,11 @@ def _login(core, req):
 
 def _e(v: Any) -> str:
     return html.escape("" if v is None else str(v))
+
+def _shown(v: Any) -> str:
+    if v in (None, "", [], {}):
+        return "Not captured"
+    return str(v)
 
 def _dict(v):
     if isinstance(v, dict):
@@ -333,6 +338,7 @@ def _gate_rows(e, limit=10000):
         canonical_id = _first(merged, ["canonical_id", "master_requirement_id", "master_id"], "")
         row = _normalize_source_row(source_table, merged, idx)
         row.update({
+            "gate_id": obj.get("id"),
             "canonical_id": str(canonical_id or ""),
             "source_pk": str(obj.get("source_pk") or obj.get("id") or row.get("source_pk") or idx),
             "source": source,
@@ -580,6 +586,32 @@ def _hub(e):
     return _shell("6 Requirement Databases", body), details
 
 
+def _match_action(row, source):
+    is_master = bool(row.get("is_master"))
+    cid = str(row.get("canonical_id") or "")
+    src = str(row.get("source") or source).upper()
+    spk = str(row.get("source_pk") or "")
+    if is_master and cid:
+        verification = str(row.get("verification") or "").upper()
+        if verification == "VERIFIED":
+            return (
+                f'<a class="btn" href="/alliance/primary/requirement/{_e(cid)}">Open</a> '
+                f'<a class="btn" href="/alliance/primary/matcher?requirement_id={_e(cid)}">Run Match</a>'
+            )
+        return f'<a class="btn" href="/alliance/primary/requirement/{_e(cid)}">Verify &amp; Run Match</a>'
+    if row.get("gate_id"):
+        return (
+            f'<a class="btn" href="/alliance/final/requirements/run-match?gate_id='
+            f'{_e(row.get("gate_id"))}">Verify &amp; Run Match</a>'
+        )
+    if src in SOURCES and src != "MASTER" and spk:
+        return (
+            f'<a class="btn" href="/alliance/final/requirements/run-match?source={_e(src)}'
+            f'&source_pk={_e(spk)}">Verify &amp; Run Match</a>'
+        )
+    return '<span>Review source evidence</span>'
+
+
 def _table(e, source, q, location, transaction, status, assigned, limit):
     rows, meta = _combined(e, source)
     rows = _filtered(rows, q, location, transaction, status, assigned)[:limit]
@@ -603,22 +635,7 @@ def _table(e, source, q, location, transaction, status, assigned, limit):
         cid = str(row.get("canonical_id") or "")
         src = str(row.get("source") or source).upper()
         spk = str(row.get("source_pk") or "")
-        if is_master and cid:
-            verification = str(row.get("verification") or "").upper()
-            if verification == "VERIFIED":
-                action = (
-                    f'<a class="btn" href="/alliance/primary/requirement/{_e(cid)}">Open</a> '
-                    f'<a class="btn" href="/alliance/primary/matcher?requirement_id={_e(cid)}">Run Match</a>'
-                )
-            else:
-                action = f'<a class="btn" href="/alliance/primary/requirement/{_e(cid)}">Verify</a>'
-        elif src in SOURCES and src != "MASTER" and spk:
-            action = (
-                f'<a class="btn" href="/alliance/final/requirements/run-match?source={_e(src)}'
-                f'&source_pk={_e(spk)}">Verify & Run Match</a>'
-            )
-        else:
-            action = '<span>Review source evidence</span>'
+        action = _match_action(row, source)
         cls = "masterrow" if is_master else "sourceonly"
         vals = [
             row.get("created_at"), row.get("message"), row.get("company"),
@@ -634,7 +651,7 @@ def _table(e, source, q, location, transaction, status, assigned, limit):
                 cells.append(f"<td>{value}</td>")
             else:
                 css = " class='desc'" if i == 1 else ""
-                cells.append(f"<td{css}>{_e(value)}</td>")
+                cells.append(f"<td{css}>{_e(_shown(value))}</td>")
         trs.append(f"<tr class='{cls}'>{''.join(cells)}</tr>")
     note = (
         f"<b>{len(rows)}</b> rows shown. Verified/canonical linked: <b>{meta['master']}</b> · "
@@ -759,6 +776,23 @@ def _ensure_gate_row(e, selected):
         }).scalar_one()
         row = c.execute(text("SELECT * FROM pi_requirement_gate_v1191 WHERE id=:id"), {"id": gid}).mappings().first()
     return dict(row)
+
+def _gate_selection(row):
+    obj = dict(row or {})
+    extracted = _dict(obj.get("extracted_fields"))
+    merged = dict(extracted)
+    merged.update({k: v for k, v in obj.items() if v not in (None, "", [], {})})
+    source_table = str(obj.get("source_table") or "pi_requirement_gate_v1191")
+    selected = _normalize_source_row(source_table, merged, int(obj.get("id") or 0))
+    selected.update({
+        "source": _classify(obj.get("source_type") or source_table),
+        "source_table": source_table,
+        "source_pk": str(obj.get("source_pk") or obj.get("id") or ""),
+        "message": str(obj.get("original_message") or selected.get("message") or ""),
+        "contact": _contact(merged) or _json_list_text(obj.get("contact_numbers")),
+        "location": _json_list_text(obj.get("locations")) or selected.get("location"),
+    })
+    return selected
 
 
 def register(core, served_app=None):
@@ -929,18 +963,38 @@ def register(core, served_app=None):
 
 
     @app.get("/alliance/final/requirements/run-match", response_class=HTMLResponse, include_in_schema=False)
-    def source_run_match(req: Request, source: str = Query(""), source_pk: str = Query("")):
+    def source_run_match(
+        req: Request,
+        source: str = Query(""),
+        source_pk: str = Query(""),
+        gate_id: int = Query(0, ge=0),
+    ):
         _login(core, req)
-        src = source.upper().strip()
-        if src not in SOURCES or src == "MASTER":
-            return HTMLResponse(_shell("Run Match", '<div class="notice">Invalid source requirement.</div>'), status_code=400)
-
-        rows, _ = _source_rows(e, src)
-        selected = next((row for row in rows if str(row.get("source_pk") or "") == str(source_pk or "")), None)
-        if not selected:
-            return HTMLResponse(_shell("Run Match", '<div class="notice"><b>Requirement not found.</b></div>'), status_code=404)
-
-        gate_row = _ensure_gate_row(e, selected)
+        if gate_id:
+            with e.connect() as c:
+                direct = c.execute(
+                    text("SELECT * FROM pi_requirement_gate_v1191 WHERE id=:id"),
+                    {"id": gate_id},
+                ).mappings().first()
+            if not direct:
+                return HTMLResponse(
+                    _shell("Run Match", '<div class="notice"><b>Requirement not found.</b></div>'),
+                    status_code=404,
+                )
+            gate_row = dict(direct)
+            selected = _gate_selection(gate_row)
+            src = str(selected.get("source") or "OTHER").upper()
+            if src not in SOURCES or src == "MASTER":
+                src = "SOCIAL"
+        else:
+            src = source.upper().strip()
+            if src not in SOURCES or src == "MASTER":
+                return HTMLResponse(_shell("Run Match", '<div class="notice">Invalid source requirement.</div>'), status_code=400)
+            rows, _ = _source_rows(e, src)
+            selected = next((row for row in rows if str(row.get("source_pk") or "") == str(source_pk or "")), None)
+            if not selected:
+                return HTMLResponse(_shell("Run Match", '<div class="notice"><b>Requirement not found.</b></div>'), status_code=404)
+            gate_row = _ensure_gate_row(e, selected)
         gid = int(gate_row["id"])
         locations = _json_list_text(gate_row.get("locations"))
         phones = _json_list_text(gate_row.get("contact_numbers"))
