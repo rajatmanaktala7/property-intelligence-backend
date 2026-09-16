@@ -56,6 +56,26 @@ TABLE_SPECS = {
         "pk": ("id", "evidence_key"),
         "critical": ("original_message", "transaction_type", "property_category", "locations", "area_min_sqft", "budget_max", "contact_numbers", "evidence_quality"),
     },
+    "pi_requirements": {
+        "label": "Legacy/manual requirements",
+        "pk": ("id", "requirement_id"),
+        "critical": ("original_message", "location", "city", "property_type", "rent_or_sale", "budget", "contact_numbers", "source", "created_at"),
+    },
+    "pi_operational_requirements": {
+        "label": "Operational requirements",
+        "pk": ("id", "requirement_id"),
+        "critical": ("original_message", "location", "city", "property_type", "transaction_type", "budget_max", "contact_numbers", "source_type", "created_at"),
+    },
+    "ai_whatsapp_requirement_supply_intelligence": {
+        "label": "WhatsApp requirements",
+        "pk": ("id", "requirement_id", "event_id"),
+        "critical": ("classification", "raw_message", "location", "city", "property_type", "transaction_type", "budget", "sender_phone", "contact_numbers", "created_at"),
+    },
+    "pi_whatsapp_property_master": {
+        "label": "WhatsApp property inventory",
+        "pk": ("id", "property_id", "event_id"),
+        "critical": ("location", "city", "property_type", "transaction_type", "area_sqft", "price", "contact_name", "contact_phone", "sender_phone", "message_date", "verification_status"),
+    },
     "ai_hospitality_entity": {
         "label": "Hospitality intelligence",
         "pk": ("id", "canonical_key"),
@@ -101,6 +121,8 @@ TABLE_SPECS = {
 
 FIELD_RULES = {
     "phone": ("phone", "mobile", "mobile_no", "contact_no", "contact_number", "contact_phone", "sender_phone", "sender_mobile"),
+    "contact_phone": ("contact_phone", "phone", "mobile", "contact_number", "sender_phone", "sender_mobile"),
+    "sender_phone": ("sender_phone", "sender_mobile", "phone", "mobile", "contact_phone", "sender_jid", "remote_jid"),
     "whatsapp_phone": ("whatsapp_phone", "sender_phone", "sender_mobile", "phone", "mobile"),
     "phone_numbers": ("phone_numbers", "phones", "phone", "mobile", "contact_number", "sender_phone"),
     "contact_numbers": ("contact_numbers", "phones", "phone", "mobile", "contact_number", "sender_phone"),
@@ -133,9 +155,11 @@ FIELD_RULES = {
     "budget_max": ("budget_max", "max_budget", "budget_to", "budget"),
     "price": ("price", "amount", "asking_price", "budget"),
     "amount": ("amount", "price", "asking_price", "budget"),
+    "budget": ("budget", "budget_max", "asking_price", "price"),
     "description": ("description", "original_description", "raw_text", "message", "original_message"),
     "original_message": ("original_message", "message", "raw_text", "description", "text"),
     "configuration_details": ("configuration_details", "configuration", "description", "raw_text"),
+    "raw_message": ("raw_message", "original_message", "message", "raw_text", "description"),
     "source": ("source", "source_name", "source_type", "provider"),
     "source_type": ("source_type", "source", "provider"),
     "source_name": ("source_name", "source", "provider"),
@@ -144,11 +168,12 @@ FIELD_RULES = {
     "published_at": ("published_at", "published_date", "source_date", "date", "created_at"),
     "date_captured": ("date_captured", "captured_at", "source_date", "date", "created_at"),
     "source_date": ("source_date", "published_at", "date_captured", "date", "created_at"),
+    "message_date": ("message_date", "message_timestamp", "captured_at", "date", "created_at"),
 }
 
 EVIDENCE_KEYS = (
     "raw_payload", "payload_json", "extracted_fields", "metadata", "data",
-    "raw_text", "message", "original_message", "description", "notes",
+    "raw_text", "raw_message", "message", "original_message", "description", "notes",
     "evidence", "configuration_details", "original_description",
 )
 
@@ -352,6 +377,12 @@ def sync(engine, limit_per_table=500, max_tables=40):
             email_values = _walk(obj, FIELD_RULES["email"])
             phones = _phones(phone_values)
             emails = _emails(email_values)
+            # A contact explicitly written in the source message is valid evidence.
+            # It is retained with the source row, never assigned to a guessed person.
+            if not phones:
+                phones = _phones(_all_evidence(obj))
+            if not emails:
+                emails = _emails(_all_evidence(obj))
             email_value = emails[0] if emails else ""
             if not phones and not email_value:
                 continue
@@ -470,7 +501,7 @@ def _candidate(obj, target):
     structured = _walk(obj, keys)
     evidence = _all_evidence(obj)
 
-    if target in {"phone", "whatsapp_phone", "phone_numbers", "contact_numbers", "contacts"}:
+    if target in {"phone", "contact_phone", "sender_phone", "whatsapp_phone", "phone_numbers", "contact_numbers", "contacts"}:
         values = _phones(structured)
         if not values:
             values = _phones(evidence)
@@ -517,7 +548,7 @@ def _candidate(obj, target):
             return "SQFT", "normalized explicit area unit", excerpt
         return None, "", ""
 
-    if target in {"description", "original_message", "configuration_details"}:
+    if target in {"description", "original_message", "raw_message", "configuration_details"}:
         value = _first(obj, keys)
         if len(value) >= 8:
             return value[:10000], "structured source text", value[:180]
@@ -535,7 +566,7 @@ def _candidate(obj, target):
             return value, "structured URL", value[:180]
         return None, "", ""
 
-    if target in {"published_at", "date_captured", "source_date"}:
+    if target in {"published_at", "date_captured", "source_date", "message_date"}:
         value = _first(obj, keys)
         if value:
             return value, "structured source date", value[:100]
@@ -548,7 +579,7 @@ def _candidate(obj, target):
         return None, "", ""
 
     # Money and other operational fields are never inferred from free text here.
-    if target in {"budget_min", "budget_max", "price", "amount"}:
+    if target in {"budget", "budget_min", "budget_max", "price", "amount"}:
         value = _first(obj, keys)
         if value and re.fullmatch(r"[0-9,.]+", value):
             return float(value.replace(",", "")), "structured numeric value", value
