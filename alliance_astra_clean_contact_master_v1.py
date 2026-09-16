@@ -14,7 +14,7 @@ from fastapi.responses import HTMLResponse
 from sqlalchemy import text
 
 
-VERSION = "2.0.0-ASTRA-EVIDENCE-BACKED-DATABASE-CLEAN"
+VERSION = "2.0.1-ASTRA-CURSOR-CERTIFIED-DATABASE-CLEAN"
 MARKER = "ALLIANCE_ASTRA_DATABASE_CLEAN_V2"
 SOURCE_TOKENS = (
     "whatsapp", "newspaper", "magazine", "hospitality", "retail",
@@ -347,6 +347,11 @@ def ensure_schema(engine):
             evidence_excerpt TEXT, confidence TEXT NOT NULL,
             action TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             recovery_key TEXT UNIQUE NOT NULL)"""))
+        connection.execute(text("""CREATE TABLE IF NOT EXISTS pi_astra_scan_cursor_v2(
+            table_name TEXT PRIMARY KEY, last_pk TEXT NOT NULL DEFAULT '',
+            cycles_completed INTEGER NOT NULL DEFAULT 0,
+            rows_scanned BIGINT NOT NULL DEFAULT 0,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())"""))
         connection.execute(text("CREATE INDEX IF NOT EXISTS idx_astra_recovery_record_v2 ON pi_astra_field_recovery_v2(table_name,record_pk)"))
 
 
@@ -674,12 +679,30 @@ def _recover_table(engine, run_id, table, spec, limit):
     if not targets:
         return {"table": table, "scanned": 0, "updated": 0, "skipped": 0}
     where = " OR ".join(_blank_sql(field) for field in targets)
+    with engine.begin() as connection:
+        connection.execute(text("""INSERT INTO pi_astra_scan_cursor_v2(table_name)
+            VALUES(:table) ON CONFLICT(table_name) DO NOTHING"""), {"table": table})
+        cursor = connection.execute(text("""SELECT last_pk,cycles_completed,rows_scanned
+            FROM pi_astra_scan_cursor_v2 WHERE table_name=:table"""), {"table": table}).mappings().one()
+    last_pk = str(cursor.get("last_pk") or "")
+    keyset = f" AND CAST({_qident(pk)} AS TEXT) > :last_pk" if last_pk else ""
     with engine.connect() as connection:
         rows = connection.execute(text(
-            f"SELECT to_jsonb(t) AS data FROM {_qident(table)} t WHERE {where} ORDER BY {_qident(pk)} LIMIT :limit"
-        ), {"limit": max(1, min(int(limit), 5000))}).scalars().all()
+            f"SELECT to_jsonb(t) AS data FROM {_qident(table)} t WHERE ({where}){keyset} "
+            f"ORDER BY CAST({_qident(pk)} AS TEXT) LIMIT :limit"
+        ), {"limit": max(1, min(int(limit), 5000)), "last_pk": last_pk}).scalars().all()
 
-    result = {"table": table, "scanned": len(rows), "updated": 0, "skipped": 0, "fields": {}}
+    cycle_complete = False
+    if not rows and last_pk:
+        cycle_complete = True
+        with engine.begin() as connection:
+            connection.execute(text("""UPDATE pi_astra_scan_cursor_v2
+                SET last_pk='',cycles_completed=cycles_completed+1,updated_at=NOW()
+                WHERE table_name=:table"""), {"table": table})
+
+    result = {"table": table, "scanned": len(rows), "updated": 0, "skipped": 0,
+              "fields": {}, "cycle_complete": cycle_complete,
+              "cursor_before": last_pk, "cursor_after": last_pk}
     for raw in rows:
         obj = raw if isinstance(raw, dict) else _json(raw)
         if not isinstance(obj, dict) or obj.get(pk) is None:
@@ -731,9 +754,20 @@ def _recover_table(engine, run_id, table, spec, limit):
                 result["updated"] += 1
                 result["fields"][target] = result["fields"].get(target, 0) + 1
             except Exception as exc:
-                result.setdefault("errors", []).append(f"{record_pk}:{target}:{type(exc).__name__}")
-                if len(result["errors"]) >= 20:
-                    return result
+                errors = result.setdefault("errors", [])
+                if len(errors) < 20:
+                    errors.append(f"{record_pk}:{target}:{type(exc).__name__}")
+    if rows:
+        last_obj = rows[-1] if isinstance(rows[-1], dict) else _json(rows[-1])
+        cursor_after = str((last_obj or {}).get(pk) or "")
+        if cursor_after:
+            with engine.begin() as connection:
+                connection.execute(text("""UPDATE pi_astra_scan_cursor_v2
+                    SET last_pk=:last_pk,rows_scanned=rows_scanned+:scanned,updated_at=NOW()
+                    WHERE table_name=:table"""), {
+                        "table": table, "last_pk": cursor_after, "scanned": len(rows),
+                    })
+            result["cursor_after"] = cursor_after
     return result
 
 
@@ -750,7 +784,7 @@ def run_recovery(engine, limit_per_table=1000, include_contacts=True):
         connection.execute(text("""INSERT INTO pi_astra_database_runs_v2(run_id,status,phase)
             VALUES(:run_id,'RUNNING','CONTACT_SYNC')"""), {"run_id": run_id})
     try:
-        contact_result = sync(engine, min(int(limit_per_table), 1000), 40) if include_contacts else {"status": "SKIPPED"}
+        contact_result = sync(engine, min(int(limit_per_table), 1000), 40) if include_contacts else {"status": "SKIPPED_ALREADY_SYNCED"}
         table_results = []
         with engine.begin() as connection:
             connection.execute(text("UPDATE pi_astra_database_runs_v2 SET phase='FIELD_RECOVERY' WHERE run_id=:run_id"), {"run_id": run_id})
@@ -760,6 +794,7 @@ def run_recovery(engine, limit_per_table=1000, include_contacts=True):
             "tables": len(table_results),
             "rows_scanned": sum(item.get("scanned", 0) for item in table_results),
             "fields_recovered": sum(item.get("updated", 0) for item in table_results),
+            "cycles_completed": sum(1 for item in table_results if item.get("cycle_complete")),
             "contacts": contact_result,
             "table_results": table_results,
         }
@@ -842,7 +877,7 @@ def register(core):
         return audit(engine)
 
     @app.post("/api/alliance/astra-database-clean-v2/run", include_in_schema=False)
-    def clean_run(req: Request, limit_per_table: int = 1000):
+    def clean_run(req: Request, limit_per_table: int = 1000, include_contacts: bool = False):
         role = _role(core, req)
         if role not in {"admin", "team"}:
             raise HTTPException(403, "Alliance role required")
@@ -852,12 +887,14 @@ def register(core):
             RUNTIME["status"] = "QUEUED"
         worker = threading.Thread(
             target=run_recovery,
-            args=(engine, max(50, min(int(limit_per_table), 5000)), True),
+            args=(engine, max(50, min(int(limit_per_table), 5000)), bool(include_contacts)),
             name="alliance-astra-database-clean-v2",
             daemon=True,
         )
         worker.start()
-        return {"status": "STARTED", "version": VERSION, "batch_per_table": max(50, min(int(limit_per_table), 5000)), "gpt_used": False}
+        return {"status": "STARTED", "version": VERSION,
+                "batch_per_table": max(50, min(int(limit_per_table), 5000)),
+                "include_contacts": bool(include_contacts), "gpt_used": False}
 
     @app.get("/alliance/database-quality", response_class=HTMLResponse, include_in_schema=False)
     def quality_page(req: Request):
