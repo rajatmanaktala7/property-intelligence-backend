@@ -5,12 +5,13 @@ from typing import Any, Dict, List, Tuple
 
 import alliance_phase5_canonical_matcher as phase5
 
-VERSION = "2.3.0-UNIFIED-INTENT-POLICY"
+VERSION = "2.3.1-PRESENT-TENSE-DEMAND-POLICY"
 
 _DEMAND = (
     (r"\bLOOKING\s+FOR\b", 50, "looking_for"),
     (r"\bLOOKING\s+TO\s+(?:BUY|RENT|LEASE)\b", 50, "looking_to_transact"),
     (r"\bREQUIREMENT\b", 48, "requirement"),
+    (r"\bREQUIRE\b", 48, "require"),
     (r"\bREQUIRED\b", 45, "required"),
     (r"\bNEED(?:ED)?\b", 42, "need"),
     (r"\bWANTED\b", 42, "wanted"),
