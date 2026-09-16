@@ -10,7 +10,7 @@ from fastapi import Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import text
 
-VERSION = "12.3.12-CLEAN-REQUIREMENT-DATABASE-HUB"
+VERSION = "12.3.13-WHATSAPP-SENDER-CONTACT-NORMALIZATION"
 SOURCES = ("MASTER", "NEWSPAPER", "WHATSAPP", "MAGAZINE", "MANUAL", "SOCIAL")
 
 EXCLUDE_TOKENS = (
@@ -83,6 +83,26 @@ def _first(obj, keys, default=""):
     if isinstance(v, dict):
         return json.dumps(v, ensure_ascii=False, default=str)
     return v
+
+def _contact(obj):
+    values = _walk(obj, [
+        "phone", "phones", "contact_no", "contact_number", "contact_phone",
+        "mobile", "mobile_no", "sender_phone", "sender_mobile", "whatsapp_phone",
+        "sender_jid", "remote_jid", "from"
+    ])
+    found = []
+    for value in values:
+        text_value = str(value or "").replace("@s.whatsapp.net", "")
+        for match in re.finditer(r"(?<!\\d)(?:\\+?91[\\s.-]?)?([6-9](?:[\\s.-]?\\d){9})(?!\\d)", text_value):
+            digits = re.sub(r"\\D", "", match.group(1))
+            if len(digits) == 10 and digits not in found:
+                found.append(digits)
+    if found:
+        return ", ".join(found)
+    return _first(obj, [
+        "phone", "phones", "contact_no", "contact_number", "contact_phone",
+        "mobile", "mobile_no", "sender_phone", "sender_mobile"
+    ])
 
 def _message(obj):
     vals = _walk(obj, [
@@ -172,10 +192,7 @@ def _normalize_source_row(table, obj, idx):
         "message": _message(obj),
         "company": _first(obj, ["company_name", "brand_name", "client_company", "company", "retailer_name"]),
         "contact_name": _first(obj, ["contact_name", "client_name", "sender_name", "name"]),
-        "contact": _first(obj, [
-            "phone", "phones", "contact_no", "contact_number", "contact_phone",
-            "mobile", "mobile_no", "sender_phone", "sender_mobile"
-        ]),
+        "contact": _contact(obj),
         "location": _first(obj, [
             "preferred_locations", "preferred_location", "location", "locality",
             "city", "area_name", "micro_market"
