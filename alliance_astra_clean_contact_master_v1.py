@@ -88,51 +88,66 @@ def ensure_schema(engine):
           source_type TEXT NOT NULL, source_table TEXT NOT NULL, source_record_id TEXT NOT NULL,
           source_captured_at TEXT, evidence_json JSONB NOT NULL DEFAULT '{}'::jsonb, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
           UNIQUE(source_table,source_record_id,canonical_key))"""))
-def sync(engine, limit_per_table=3000):
-    ensure_schema(engine); stats={"tables":0,"rows":0,"contacts_upserted":0,"evidence_upserted":0}
-    for table in _tables(engine):
+def sync(engine, limit_per_table=500, max_tables=32):
+    ensure_schema(engine)
+    stats = {"tables": 0, "rows": 0, "contacts_upserted": 0, "evidence_upserted": 0}
+    excluded = ("audit", "run", "log", "test", "exam", "history", "backup", "archive")
+    candidates = [t for t in _tables(engine) if not any(x in t.lower() for x in excluded)]
+    priority = {"whatsapp": 0, "newspaper": 1, "magazine": 2, "hospitality": 3, "retail": 4, "commercial": 5, "manual": 6}
+    candidates.sort(key=lambda t: min((priority[k] for k in priority if k in t.lower()), default=99))
+    for table in candidates[:max(1, int(max_tables))]:
         try:
             with engine.connect() as c:
-                rows=c.execute(text(f"SELECT to_jsonb(t) AS data FROM {_qident(table)} t LIMIT :n"),{"n":int(limit_per_table)}).scalars().all()
-        except Exception: continue
-        stats["tables"]+=1
-        for pos, raw in enumerate(rows,1):
-            obj=raw if isinstance(raw,dict) else json.loads(raw) if isinstance(raw,str) else {}
-            if not isinstance(obj,dict): continue
-            phones=_phones(_walk(obj,["phone","phones","mobile","mobile_no","contact_no","contact_number","contact_phone","whatsapp_phone","sender_phone","sender_mobile","sender_jid","remote_jid","from"]))
-            email=_email(_walk(obj,["email","contact_email","email_id"]))
-            if not phones and not email: continue
-            stats["rows"]+=1
-            name=_first(obj,["contact_name","sender_name","client_name","owner_name","broker_name","name","person_name"])
-            company=_first(obj,["company_name","brand_name","business_name","agency_brand","retailer_name","company"])
-            location=_first(obj,["location","locality","city","area_name","micro_market"])
-            designation=_first(obj,["designation","role","title"])
-            source_id=_first(obj,["id","record_id","event_id","message_id","source_id","requirement_id"]) or str(pos)
-            captured=_first(obj,["captured_at","created_at","message_timestamp","timestamp","date"])
+                rows = c.execute(text(f"SELECT to_jsonb(t) AS data FROM {_qident(table)} t LIMIT :n"), {"n": int(limit_per_table)}).scalars().all()
+        except Exception:
+            continue
+        prepared = []
+        for pos, raw in enumerate(rows, 1):
+            obj = raw if isinstance(raw, dict) else json.loads(raw) if isinstance(raw, str) else {}
+            if not isinstance(obj, dict):
+                continue
+            phones = _phones(_walk(obj, ["phone","phones","mobile","mobile_no","contact_no","contact_number","contact_phone","whatsapp_phone","sender_phone","sender_mobile","sender_jid","remote_jid","from"]))
+            email = _email(_walk(obj, ["email","contact_email","email_id"]))
+            if not phones and not email:
+                continue
+            name = _first(obj, ["contact_name","sender_name","client_name","owner_name","broker_name","name","person_name"])
+            company = _first(obj, ["company_name","brand_name","business_name","agency_brand","retailer_name","company"])
+            location = _first(obj, ["location","locality","city","area_name","micro_market"])
+            designation = _first(obj, ["designation","role","title"])
+            source_id = _first(obj, ["id","record_id","event_id","message_id","source_id","requirement_id"]) or str(pos)
+            captured = _first(obj, ["captured_at","created_at","message_timestamp","timestamp","date"])
             for phone in phones or [""]:
-                keyseed="|".join([phone,email.lower(),re.sub(r"\s+"," ",name.lower()),re.sub(r"\s+"," ",company.lower())])
-                key="CONTACT-"+hashlib.sha256(keyseed.encode("utf-8","ignore")).hexdigest()[:24].upper()
-                with engine.begin() as c:
-                    c.execute(text("""INSERT INTO pi_clean_contacts_v1(canonical_key,contact_name,company_name,phone,whatsapp_phone,email,designation,location,source_count)
-                      VALUES(:k,:n,:co,:p,:wp,:e,:d,:l,1)
-                      ON CONFLICT(canonical_key) DO UPDATE SET
-                      contact_name=COALESCE(NULLIF(EXCLUDED.contact_name,''),pi_clean_contacts_v1.contact_name),
-                      company_name=COALESCE(NULLIF(EXCLUDED.company_name,''),pi_clean_contacts_v1.company_name),
-                      phone=COALESCE(NULLIF(EXCLUDED.phone,''),pi_clean_contacts_v1.phone),
-                      whatsapp_phone=COALESCE(NULLIF(EXCLUDED.whatsapp_phone,''),pi_clean_contacts_v1.whatsapp_phone),
-                      email=COALESCE(NULLIF(EXCLUDED.email,''),pi_clean_contacts_v1.email),
-                      designation=COALESCE(NULLIF(EXCLUDED.designation,''),pi_clean_contacts_v1.designation),
-                      location=COALESCE(NULLIF(EXCLUDED.location,''),pi_clean_contacts_v1.location),
-                      last_seen_at=NOW(),updated_at=NOW()"""),{"k":key,"n":name,"co":company,"p":phone,"wp":phone if _source_kind(table)=="WHATSAPP" else "","e":email,"d":designation,"l":location})
-                    result=c.execute(text("""INSERT INTO pi_clean_contact_evidence_v1(canonical_key,source_type,source_table,source_record_id,source_captured_at,evidence_json)
-                      VALUES(:k,:st,:tb,:sid,:at,CAST(:ev AS JSONB)) ON CONFLICT(source_table,source_record_id,canonical_key) DO NOTHING"""),
-                      {"k":key,"st":_source_kind(table),"tb":table,"sid":source_id,"at":captured,"ev":json.dumps({"name":name,"company":company,"phone":phone,"email":email,"location":location},ensure_ascii=False)})
-                    stats["contacts_upserted"]+=1; stats["evidence_upserted"]+=max(0,result.rowcount or 0)
+                seed = "|".join([phone, email.lower(), re.sub(r"\\s+", " ", name.lower()), re.sub(r"\\s+", " ", company.lower())])
+                prepared.append({"key":"CONTACT-"+hashlib.sha256(seed.encode("utf-8","ignore")).hexdigest()[:24].upper(),"name":name,"company":company,"phone":phone,"whatsapp":phone if _source_kind(table)=="WHATSAPP" else "","email":email,"designation":designation,"location":location,"source_type":_source_kind(table),"source_table":table,"source_id":source_id,"captured":captured})
+        if not prepared:
+            stats["tables"] += 1
+            continue
+        with engine.begin() as c:
+            for item in prepared:
+                c.execute(text("""INSERT INTO pi_clean_contacts_v1(canonical_key,contact_name,company_name,phone,whatsapp_phone,email,designation,location,source_count)
+                    VALUES(:key,:name,:company,:phone,:whatsapp,:email,:designation,:location,1)
+                    ON CONFLICT(canonical_key) DO UPDATE SET
+                    contact_name=COALESCE(NULLIF(EXCLUDED.contact_name,''),pi_clean_contacts_v1.contact_name),
+                    company_name=COALESCE(NULLIF(EXCLUDED.company_name,''),pi_clean_contacts_v1.company_name),
+                    phone=COALESCE(NULLIF(EXCLUDED.phone,''),pi_clean_contacts_v1.phone),
+                    whatsapp_phone=COALESCE(NULLIF(EXCLUDED.whatsapp_phone,''),pi_clean_contacts_v1.whatsapp_phone),
+                    email=COALESCE(NULLIF(EXCLUDED.email,''),pi_clean_contacts_v1.email),
+                    designation=COALESCE(NULLIF(EXCLUDED.designation,''),pi_clean_contacts_v1.designation),
+                    location=COALESCE(NULLIF(EXCLUDED.location,''),pi_clean_contacts_v1.location),
+                    last_seen_at=NOW(),updated_at=NOW()"""), item)
+                result = c.execute(text("""INSERT INTO pi_clean_contact_evidence_v1(canonical_key,source_type,source_table,source_record_id,source_captured_at,evidence_json)
+                    VALUES(:key,:source_type,:source_table,:source_id,:captured,CAST(:evidence AS JSONB))
+                    ON CONFLICT(source_table,source_record_id,canonical_key) DO NOTHING"""), {**item,"evidence":json.dumps({"name":item["name"],"company":item["company"],"phone":item["phone"],"email":item["email"],"location":item["location"]},ensure_ascii=False)})
+                stats["contacts_upserted"] += 1
+                stats["evidence_upserted"] += max(0, result.rowcount or 0)
+        stats["tables"] += 1
+        stats["rows"] += len(prepared)
     with engine.begin() as c:
         c.execute(text("""UPDATE pi_clean_contacts_v1 x SET source_count=s.n FROM
-          (SELECT canonical_key,COUNT(*) n FROM pi_clean_contact_evidence_v1 GROUP BY canonical_key) s
-          WHERE x.canonical_key=s.canonical_key"""))
+            (SELECT canonical_key,COUNT(*) n FROM pi_clean_contact_evidence_v1 GROUP BY canonical_key) s
+            WHERE x.canonical_key=s.canonical_key"""))
     return stats
+
 def register(core):
     app=_app(core); engine=_engine(core)
     if engine is None: raise RuntimeError("Contact master requires database engine")
