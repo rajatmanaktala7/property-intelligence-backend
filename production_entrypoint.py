@@ -467,6 +467,27 @@ def _load_core():
                 "fail_safe":True,
             }
             print("[commercial-intelligence-ai] warning:", type(_commercial_ai_exc).__name__, str(_commercial_ai_exc))
+        # ALLIANCE_HOSPITALITY_BOT_RUNTIME_V1
+        # Patch only the worker function; preserve the existing public route.
+        try:
+            import alliance_hospitality_bot_runtime_v1 as _hospitality_runtime_v1
+            _hospitality_runtime_result = _hospitality_runtime_v1.register(wrapped.core)
+            stabilization = dict(stabilization or {})
+            stabilization["hospitality_bot_runtime_v1"] = _hospitality_runtime_result
+            print("[hospitality-bot-runtime-v1]", _hospitality_runtime_result)
+        except Exception as _hospitality_runtime_exc:
+            stabilization = dict(stabilization or {})
+            stabilization["hospitality_bot_runtime_v1"] = {
+                "status": "ERROR",
+                "error": f"{type(_hospitality_runtime_exc).__name__}: {_hospitality_runtime_exc}",
+                "fail_safe": True,
+            }
+            print(
+                "[hospitality-bot-runtime-v1] warning:",
+                type(_hospitality_runtime_exc).__name__,
+                str(_hospitality_runtime_exc),
+            )
+
         # Deal Match Intent Guard V1 - additive only; frozen V6.6 remains unchanged.
         try:
             import alliance_deal_match_intent_guard_v1 as deal_intent_guard_v1

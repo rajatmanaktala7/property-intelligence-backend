@@ -4,7 +4,7 @@ from html import escape
 from urllib.parse import urlparse
 from sqlalchemy import bindparam, text
 
-VERSION="1.1.0-BOUNDED-BULK-RENDER"
+VERSION="1.2.0-TRUTH-FIRST-ASSET-BRIEFS"
 
 CITY_ALIASES={
  "gurgaon":("gurgaon","gurugram"),"gurugram":("gurgaon","gurugram"),
@@ -246,7 +246,10 @@ def _parse(city,view):
 def render_commercial(engine,view,city,message=""):
     ensure_schema(engine)
     v,city2,aliases=_parse(city,view)
-    where=["COALESCE(visibility_status,'ACTIVE')='ACTIVE'"];p={}
+    where=[
+        "COALESCE(visibility_status,'ACTIVE')='ACTIVE'",
+        "NOT (asset_class='MALL' AND asset_name ~* '(^[[:space:]]*[0-9]+[[:space:]]+.*malls?[[:space:]]+in[[:space:]]+|\\m(biggest|best|top|largest|famous|popular)\\M.*\\mmalls?\\M)')",
+    ];p={}
     if v=="MALLS":where.append("asset_class='MALL'")
     elif v in ("GOV","GOVERNMENT"):where.append("asset_class='GOVERNMENT_PREMISES'")
     elif v=="RESEARCH":where.append("(last_researched_at IS NULL OR confidence<60)")
@@ -274,6 +277,8 @@ def render_commercial(engine,view,city,message=""):
         asset_codes=[a["asset_code"] for a in assets]
         vacancy_rows=[]
         contact_rows=[]
+        brand_rows=[]
+        recommendation_rows=[]
 
         if asset_codes:
             vacancy_query=text(
@@ -285,7 +290,24 @@ def render_commercial(engine,view,city,message=""):
             contact_query=text(
                 "SELECT * FROM aci_intel_contacts "
                 "WHERE asset_code IN :asset_codes "
+                "AND COALESCE(email,'') !~* '(@example\\.com$|@web\\.com$|@domain\\.com$)' "
                 "ORDER BY asset_code,confidence DESC,last_verified_at DESC NULLS LAST"
+            ).bindparams(bindparam("asset_codes", expanding=True))
+
+            brand_query=text(
+                "SELECT asset_code,brand_name,category,performance_score FROM ("
+                "SELECT asset_code,brand_name,category,performance_score,"
+                "ROW_NUMBER() OVER(PARTITION BY asset_code ORDER BY performance_score DESC NULLS LAST,brand_name) AS rn "
+                "FROM aci_intel_brands WHERE asset_code IN :asset_codes"
+                ") ranked WHERE rn<=6 ORDER BY asset_code,rn"
+            ).bindparams(bindparam("asset_codes", expanding=True))
+
+            recommendation_query=text(
+                "SELECT asset_code,brand_name,category,fit_score,reason FROM ("
+                "SELECT asset_code,brand_name,category,fit_score,reason,"
+                "ROW_NUMBER() OVER(PARTITION BY asset_code ORDER BY fit_score DESC,brand_name) AS rn "
+                "FROM aci_intel_recommendations WHERE asset_code IN :asset_codes"
+                ") ranked WHERE rn<=5 ORDER BY asset_code,rn"
             ).bindparams(bindparam("asset_codes", expanding=True))
 
             vacancy_rows=[
@@ -296,34 +318,94 @@ def render_commercial(engine,view,city,message=""):
                 dict(x) for x in
                 c.execute(contact_query, {"asset_codes":asset_codes}).mappings().all()
             ]
+            brand_rows=[
+                dict(x) for x in
+                c.execute(brand_query, {"asset_codes":asset_codes}).mappings().all()
+            ]
+            recommendation_rows=[
+                dict(x) for x in
+                c.execute(recommendation_query, {"asset_codes":asset_codes}).mappings().all()
+            ]
 
     vacancies_by_asset={}
     contacts_by_asset={}
+    brands_by_asset={}
+    recommendations_by_asset={}
 
     for row in vacancy_rows:
         bucket=vacancies_by_asset.setdefault(row.get("asset_code"),[])
-        if len(bucket)<5:
+        key=(
+            _clean(row.get("availability_status")),
+            _clean(row.get("area_text")),
+            _clean(row.get("rent_text")),
+        )
+        if key not in {
+            (_clean(x.get("availability_status")), _clean(x.get("area_text")), _clean(x.get("rent_text")))
+            for x in bucket
+        } and len(bucket)<3:
             bucket.append(row)
 
     for row in contact_rows:
+        phone=_clean(row.get("phone"))
+        email=_clean(row.get("email"))
+        if email.lower().endswith(("@example.com","@web.com","@domain.com")):
+            continue
         bucket=contacts_by_asset.setdefault(row.get("asset_code"),[])
-        if len(bucket)<6:
+        key=(phone,email.lower())
+        if key not in {(_clean(x.get("phone")),_clean(x.get("email")).lower()) for x in bucket} and len(bucket)<4:
             bucket.append(row)
+
+    for row in brand_rows:
+        brands_by_asset.setdefault(row.get("asset_code"),[]).append(row)
+    for row in recommendation_rows:
+        recommendations_by_asset.setdefault(row.get("asset_code"),[]).append(row)
 
     cards=[]
     for a in assets:
-        vac=vacancies_by_asset.get(a["asset_code"],[])
-        con=contacts_by_asset.get(a["asset_code"],[])
-        vh="".join(f"<div><b>{escape(_clean(x.get('availability_status')))}</b> {escape(_clean(x.get('area_text')))} {escape(_clean(x.get('rent_text')))}</div>" for x in vac) or "No verified availability."
-        ch="".join(f"<div><b>{escape(_clean(x.get('company_name') or x.get('contact_name')))}</b> {escape(_clean(x.get('phone')))} {escape(_clean(x.get('email')))}</div>" for x in con) or "No public contact verified."
-        src=f'<a class="btn" target="_blank" href="{escape(_clean(a.get("source_url")))}">Open source</a>' if a.get("source_url") else ""
-        cards.append(f'''<div class="card"><h2>{escape(_clean(a.get("asset_name")))}</h2><p>{escape(_clean(a.get("city")))} · {escape(_clean(a.get("location")))} · <b>{escape(_clean(a.get("developer_or_authority")))}</b></p><div class="grid"><div><h3>Status</h3>{escape(_clean(a.get("lifecycle_status")))}</div><div><h3>Availability</h3>{vh}</div><div><h3>Developer / Contact</h3>{ch}</div></div><div class="bar"><form method="post" action="/commercial-intelligence/research/{escape(a["asset_code"])}"><button>Research this asset</button></form>{src}</div></div>''')
+        code=a["asset_code"]
+        vac=vacancies_by_asset.get(code,[])
+        con=contacts_by_asset.get(code,[])
+        brands=brands_by_asset.get(code,[])
+        recs=recommendations_by_asset.get(code,[])
+
+        statuses={_clean(x.get("availability_status")) for x in vac if _clean(x.get("availability_status"))}
+        if "REPORTED_AVAILABLE" in statuses and "NO_VERIFIED_AVAILABILITY" in statuses:
+            vh="<b>NEEDS_VERIFICATION</b><br><small>Public evidence conflicts; confirm with leasing management.</small>"
+        elif vac:
+            x=vac[0]
+            vh=f"<div><b>{escape(_clean(x.get('availability_status')))}</b> {escape(_clean(x.get('area_text')))} {escape(_clean(x.get('rent_text')))}</div>"
+        else:
+            vh="No verified availability."
+
+        contact_lines=[]
+        for x in con:
+            label=_clean(x.get("contact_name") or x.get("company_name"))
+            if _norm(label)==_norm(a.get("asset_name")):
+                label="Public leasing/business contact"
+            contact_lines.append(
+                f"<div><b>{escape(label)}</b> {escape(_clean(x.get('phone')))} {escape(_clean(x.get('email')))}</div>"
+            )
+        ch="".join(contact_lines) or "No public contact verified."
+
+        observed=", ".join(_clean(x.get("brand_name")) for x in brands) or "No asset-specific brands verified yet."
+        pitches=", ".join(
+            f"{_clean(x.get('brand_name'))} ({_clean(x.get('category'))})"
+            for x in recs
+        ) or "Research this asset to calculate evidence-based pitch targets."
+        brief=(
+            f"<div class=\"brief\"><h3>Asset Brief</h3>"
+            f"<p><b>Brands observed:</b> {escape(observed)}</p>"
+            f"<p><b>Potential brands to pitch:</b> {escape(pitches)}</p>"
+            f"<small>Pitch suggestions are category-gap hypotheses, not confirmed requirements.</small></div>"
+        )
+        src=f'<a class="btn" target="_blank" rel="noopener" href="{escape(_clean(a.get("source_url")))}">Open source</a>' if a.get("source_url") else ""
+        cards.append(f'''<div class="card"><h2>{escape(_clean(a.get("asset_name")))}</h2><p>{escape(_clean(a.get("city")))} · {escape(_clean(a.get("location")))} · <b>{escape(_clean(a.get("developer_or_authority")))}</b></p><div class="grid"><div><h3>Status</h3>{escape(_clean(a.get("lifecycle_status")))}</div><div><h3>Availability</h3>{vh}</div><div><h3>Developer / Contact</h3>{ch}</div></div>{brief}<div class="bar"><form method="post" action="/commercial-intelligence/research/{escape(code)}"><button>Research this asset</button></form>{src}</div></div>''')
     devhtml=""
     if v in ("ALL","GOV","GOVERNMENT") and devs:
         rows="".join(f"<tr><td>{escape(_clean(x['authority']))}</td><td>{escape(_clean(x['developer_name']))}</td><td>{x['property_count']}</td><td>{escape(_clean(x.get('phones')))}</td></tr>" for x in devs)
         devhtml=f'''<div class="card"><h2>Developer / Lessee Portfolio</h2><p>Historical developer relationships are kept separate from current vacancy status.</p><table><tr><th>Authority</th><th>Developer</th><th>Properties</th><th>Public Phones</th></tr>{rows}</table></div>'''
     note=f"{len(assets)} result(s). "+(f"Strict filter: {city2} / {v}" if city2 else f"View: {v}")
-    return f'''<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Commercial Intelligence</title><style>*{{box-sizing:border-box}}body{{font-family:Arial;margin:0;background:#f4f7fb;color:#172437}}header{{background:#102235;color:white;padding:18px}}.wrap{{max-width:1500px;margin:auto;padding:18px}}.bar{{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0}}.btn,button{{padding:9px 12px;border:0;border-radius:8px;background:#1677ff;color:white;text-decoration:none;font-weight:bold;cursor:pointer}}input{{padding:9px;border:1px solid #ccd6e0;border-radius:8px;min-width:230px}}.card{{background:white;border:1px solid #e1e7ee;border-radius:14px;padding:16px;margin:12px 0}}.grid{{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px}}.grid>div{{background:#f8fafc;padding:10px;border-radius:10px}}table{{width:100%;border-collapse:collapse}}th,td{{padding:8px;border-bottom:1px solid #e7edf3;text-align:left}}.note{{background:#fff6df;padding:10px;border-radius:9px}}@media(max-width:900px){{.grid{{grid-template-columns:1fr}}}}</style></head><body><header><a class="btn" style="float:right;background:white;color:#102235" href="/team-dashboard-v376">Back to Main Dashboard</a><h1>Commercial Intelligence</h1><div>Malls + Government Commercial Opportunities + Developer Intelligence</div></header><div class="wrap"><div class="bar"><a class="btn" href="/commercial-intelligence?view=ALL">All</a><a class="btn" href="/commercial-intelligence?view=MALLS">Malls</a><a class="btn" href="/commercial-intelligence?view=GOV">Government</a><form method="get" action="/commercial-intelligence"><input type="hidden" name="view" value="{escape(v)}"><input name="city" value="{escape(city or '')}" placeholder="e.g. Gurgaon malls"><button>Filter</button></form><form method="post" action="/commercial-intelligence/government-sync"><button>Sync Government Sources</button></form></div><div class="note">{escape(note)}. Gurgaon/Gurugram mall searches are restricted to Gurgaon/Gurugram mall records only.</div>{devhtml}{''.join(cards) if cards else '<div class="card"><h2>No matching results</h2><p>Run research/sync or change the filter.</p></div>'}</div></body></html>'''
+    return f'''<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Commercial Intelligence</title><style>*{{box-sizing:border-box}}body{{font-family:Arial;margin:0;background:#f4f7fb;color:#172437}}header{{background:#102235;color:white;padding:18px}}.wrap{{max-width:1500px;margin:auto;padding:18px}}.bar{{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0}}.btn,button{{padding:9px 12px;border:0;border-radius:8px;background:#1677ff;color:white;text-decoration:none;font-weight:bold;cursor:pointer}}input{{padding:9px;border:1px solid #ccd6e0;border-radius:8px;min-width:230px}}.card{{background:white;border:1px solid #e1e7ee;border-radius:14px;padding:16px;margin:12px 0}}.grid{{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px}}.grid>div{{background:#f8fafc;padding:10px;border-radius:10px}}table{{width:100%;border-collapse:collapse}}th,td{{padding:8px;border-bottom:1px solid #e7edf3;text-align:left}}.note{{background:#fff6df;padding:10px;border-radius:9px}}.brief{{background:#eef6ff;border-left:4px solid #1677ff;padding:11px;margin-top:10px;border-radius:8px}}.brief p{{margin:6px 0}}@media(max-width:900px){{.grid{{grid-template-columns:1fr}}}}</style></head><body><header><a class="btn" style="float:right;background:white;color:#102235" href="/team-dashboard-v376">Back to Main Dashboard</a><h1>Commercial Intelligence</h1><div>Malls + Government Commercial Opportunities + Developer Intelligence</div></header><div class="wrap"><div class="bar"><a class="btn" href="/commercial-intelligence?view=ALL">All</a><a class="btn" href="/commercial-intelligence?view=MALLS">Malls</a><a class="btn" href="/commercial-intelligence?view=GOV">Government</a><form method="get" action="/commercial-intelligence"><input type="hidden" name="view" value="{escape(v)}"><input name="city" value="{escape(city or '')}" placeholder="e.g. Gurgaon malls"><button>Filter</button></form><form method="post" action="/commercial-intelligence/government-sync"><button>Sync Government Sources</button></form></div><div class="note">{escape(note)}. Gurgaon/Gurugram mall searches are restricted to Gurgaon/Gurugram mall records only.</div>{devhtml}{''.join(cards) if cards else '<div class="card"><h2>No matching results</h2><p>Run research/sync or change the filter.</p></div>'}</div></body></html>'''
 
 
 # ALLIANCE_COMMERCIAL_RENDERER_V21

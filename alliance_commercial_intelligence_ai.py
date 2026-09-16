@@ -11,7 +11,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import text
 import alliance_government_commercial_sources_v1 as govsrc
 
-VERSION = "5.0.2-CANONICAL-ROUTE-OWNERSHIP"
+VERSION = "5.1.0-EVIDENCE-PURITY-AND-CONTACT-GUARD"
 
 FULL_RUN_STALE_MINUTES = 45
 
@@ -140,7 +140,41 @@ def _phone(blob):
 
 def _email(blob):
     m = re.search(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", str(blob or ""), re.I)
-    return m.group(0) if m else None
+    if not m:
+        return None
+    value = m.group(0).lower()
+    if value.endswith(("@example.com", "@web.com", "@domain.com")):
+        return None
+    if value.startswith(("example@", "test@", "noreply@", "no-reply@")):
+        return None
+    return m.group(0)
+
+def _asset_affinity(asset_name, title, snippet):
+    """Require evidence to identify this asset, not merely any mall/list article."""
+    asset = _slug(asset_name)
+    evidence = _slug(f"{title} {snippet}")
+    if not asset or not evidence:
+        return False
+    tokens = [
+        token for token in asset.split()
+        if len(token) >= 3 and token not in {"mall", "shopping", "centre", "center", "india"}
+    ]
+    if not tokens:
+        return False
+    required = 1 if len(tokens) == 1 else 2
+    return sum(1 for token in set(tokens) if re.search(rf"\b{re.escape(token)}\b", evidence)) >= required
+
+def _contact_context(asset_name, title, snippet):
+    blob = f"{title} {snippet}"
+    low = blob.lower()
+    if not _asset_affinity(asset_name, title, snippet):
+        return False
+    if not any(term in low for term in (
+        "leasing", "lease", "mall management", "contact", "business development",
+        "developer", "official", "retail enquiries", "retail inquiries",
+    )):
+        return False
+    return True
 
 def _extract_brands(blob):
     low = " " + _clean(blob).lower() + " "
@@ -198,7 +232,7 @@ def _mall_purity(url, title, snippet, city=""):
     if re.search(r"\b(?:manager|salary|jobs?|hiring|career|course|pgdm|mba|recruitment)\b", low_title):
         score -= 80
     # Generic listicles are evidence sources, not asset entities.
-    if re.search(r"\b(?:top|best|list of|largest|famous|popular)\s+\d*\s*(?:shopping )?malls?\b", low_title):
+    if re.search(r"\b(?:top|best|biggest|largest|famous|popular|list of)\b.*\bmalls?\b", low_title) or re.search(r"^\s*\d+\s+.*\bmalls?\s+in\s+(?:india|[a-z ]+)$", low_title):
         score -= 50
     name = _extract_asset_name(title, city)
     words = [w for w in re.findall(r"[a-z0-9]+", name.lower()) if w not in {"mall","shopping","centre","center","high","street",city.lower()}]
@@ -344,31 +378,121 @@ def _build_mall_recommendations(c, asset, code, joined):
       VALUES(:a,:o,:s,:ss,:w,:ca,:co,:v,:ct,:sm,:cf,NOW()) ON CONFLICT(asset_code) DO UPDATE SET opportunity_score=EXCLUDED.opportunity_score,strongest_scope=EXCLUDED.strongest_scope,secondary_scope=EXCLUDED.secondary_scope,weak_scope=EXCLUDED.weak_scope,catchment_summary=EXCLUDED.catchment_summary,competition_summary=EXCLUDED.competition_summary,vacancy_summary=EXCLUDED.vacancy_summary,contact_summary=EXCLUDED.contact_summary,ai_summary=EXCLUDED.ai_summary,confidence=EXCLUDED.confidence,last_researched_at=NOW(),updated_at=NOW()'''),{"a":code,"o":opp,"s":strong,"ss":second,"w":weak,"ca":f"Catchment signals researched for {_clean(asset.get('location') or asset.get('city'))}; exact footfall and demographics require source verification.","co":"Competition inferred from tenant/category mix and public evidence; compare with similar malls before outreach.","v":vs,"ct":f"{nc} public leasing/business contact signal(s) found.","sm":summary,"cf":70 if len(present)>=5 else 55})
 
 def _research_mall(engine, code):
-    with engine.connect() as c: asset=c.execute(text("SELECT * FROM aci_intel_assets WHERE asset_code=:a"),{"a":code}).mappings().first()
-    if not asset: return
-    name,city=_clean(asset.get("asset_name")),_clean(asset.get("city"))
-    rows,_=_search([f'"{name}" {city} brands stores directory',f'"{name}" {city} tenants brands opening',f'"{name}" {city} leasing contact phone email',f'"{name}" {city} retail space available lease vacancy',f'"{name}" {city} reviews footfall popular stores',f'"{name}" {city} developer owner GLA opening'],True)
-    brand_ev={}; blobs=[]
+    with engine.connect() as c:
+        asset = c.execute(
+            text("SELECT * FROM aci_intel_assets WHERE asset_code=:a"),
+            {"a": code},
+        ).mappings().first()
+    if not asset:
+        return
+    name, city = _clean(asset.get("asset_name")), _clean(asset.get("city"))
+    ok, score, reason = _mall_purity(
+        asset.get("source_url"), name, "", city,
+    )
+    if not ok:
+        with engine.begin() as c:
+            _set_purity(c, code, score, reason, "QUARANTINED")
+        return
+
+    rows, _ = _search([
+        f'"{name}" {city} brands stores directory',
+        f'"{name}" {city} tenants brands opening',
+        f'"{name}" {city} leasing contact phone email',
+        f'"{name}" {city} retail space available lease vacancy',
+        f'"{name}" {city} reviews footfall popular stores',
+        f'"{name}" {city} developer owner GLA opening',
+    ], True)
+    brand_ev, blobs = {}, []
     with engine.begin() as c:
+        # Rebuild derived public-web signals for this asset so stale/duplicate
+        # contacts and contradictory availability rows cannot accumulate.
+        c.execute(text("DELETE FROM aci_intel_vacancies WHERE asset_code=:a AND confidence<=70"), {"a": code})
+        c.execute(text("DELETE FROM aci_intel_contacts WHERE asset_code=:a AND verification_status='PUBLIC_REPORTED'"), {"a": code})
+        c.execute(text("DELETE FROM aci_intel_evidence WHERE asset_code=:a AND evidence_type='MALL_RESEARCH'"), {"a": code})
+
         for row in rows[:80]:
-            title,snippet,url=_clean(row.get("title")),_clean(row.get("snippet")),_clean(row.get("url")); blob=f"{title} {snippet}"
-            if not title or _is_noise(url,title,snippet): continue
-            blobs.append(blob); _save_evidence(c,code,"MALL_RESEARCH",row)
-            for brand,cat in _extract_brands(blob): brand_ev.setdefault((brand,cat),[]).append(row)
-            av=_availability(blob)
-            if av!="UNKNOWN":
-                c.execute(text("INSERT INTO aci_intel_vacancies(asset_code,availability_status,area_text,floor_text,rent_text,source_url,confidence,last_verified_at) VALUES(:a,:s,:ar,:fl,:r,:u,:cf,NOW())"),{"a":code,"s":av,"ar":_area(blob),"fl":_floor(blob),"r":_rent(blob),"u":url,"cf":70})
-            ph,em=_phone(blob),_email(blob)
-            if (ph or em) and any(x in blob.lower() for x in ["leasing","lease","mall management","retail","business development","contact"]):
-                c.execute(text('''INSERT INTO aci_intel_contacts(asset_code,phone,email,company_name,source_url,confidence,last_verified_at)
-                  SELECT :a,:p,:e,:co,:u,65,NOW() WHERE NOT EXISTS(SELECT 1 FROM aci_intel_contacts WHERE asset_code=:a AND COALESCE(phone,'')=COALESCE(:p,'') AND COALESCE(email,'')=COALESCE(:e,''))'''),{"a":code,"p":ph,"e":em,"co":name,"u":url})
-        joined=" ".join(blobs)
-        for (brand,cat),evs in brand_ev.items():
-            score=_brand_perf(len(evs),joined)
-            c.execute(text('''INSERT INTO aci_intel_brands(asset_code,brand_name,category,presence_status,performance_score,performance_label,evidence_count,source_url,last_verified_at)
-              VALUES(:a,:b,:c,'PUBLICLY_REPORTED',:s,:l,:n,:u,NOW()) ON CONFLICT(asset_code,brand_name) DO UPDATE SET category=EXCLUDED.category,presence_status='PUBLICLY_REPORTED',performance_score=EXCLUDED.performance_score,performance_label=EXCLUDED.performance_label,evidence_count=EXCLUDED.evidence_count,source_url=EXCLUDED.source_url,last_verified_at=NOW(),updated_at=NOW()'''),{"a":code,"b":brand,"c":cat,"s":score,"l":_perf_label(score),"n":len(evs),"u":_clean(evs[0].get("url"))})
-        _build_mall_recommendations(c,asset,code,joined)
-        c.execute(text("UPDATE aci_intel_assets SET last_researched_at=NOW(),updated_at=NOW() WHERE asset_code=:a"),{"a":code})
+            title = _clean(row.get("title"))
+            snippet = _clean(row.get("snippet"))
+            url = _clean(row.get("url"))
+            blob = f"{title} {snippet}"
+            if (
+                not title
+                or _is_noise(url, title, snippet)
+                or not _asset_affinity(name, title, snippet)
+            ):
+                continue
+            blobs.append(blob)
+            _save_evidence(c, code, "MALL_RESEARCH", row)
+            for brand, category in _extract_brands(blob):
+                brand_ev.setdefault((brand, category), []).append(row)
+
+            availability = _availability(blob)
+            if availability != "UNKNOWN":
+                exists = c.execute(text("""
+                    SELECT 1 FROM aci_intel_vacancies
+                    WHERE asset_code=:a AND availability_status=:s
+                      AND COALESCE(source_url,'')=COALESCE(:u,'')
+                    LIMIT 1
+                """), {"a": code, "s": availability, "u": url}).first()
+                if not exists:
+                    c.execute(text("""
+                        INSERT INTO aci_intel_vacancies(
+                            asset_code,availability_status,area_text,floor_text,
+                            rent_text,source_url,confidence,last_verified_at
+                        ) VALUES(:a,:s,:ar,:fl,:r,:u,70,NOW())
+                    """), {
+                        "a": code, "s": availability, "ar": _area(blob),
+                        "fl": _floor(blob), "r": _rent(blob), "u": url,
+                    })
+
+            phone, email = _phone(blob), _email(blob)
+            if (phone or email) and _contact_context(name, title, snippet):
+                c.execute(text("""
+                    INSERT INTO aci_intel_contacts(
+                        asset_code,phone,email,company_name,source_url,
+                        verification_status,confidence,last_verified_at
+                    )
+                    SELECT :a,:p,:e,NULL,:u,'PUBLIC_REPORTED',70,NOW()
+                    WHERE NOT EXISTS(
+                        SELECT 1 FROM aci_intel_contacts
+                        WHERE asset_code=:a
+                          AND COALESCE(phone,'')=COALESCE(:p,'')
+                          AND COALESCE(email,'')=COALESCE(:e,'')
+                    )
+                """), {"a": code, "p": phone, "e": email, "u": url})
+
+        joined = " ".join(blobs)
+        for (brand, category), evidence in brand_ev.items():
+            brand_score = _brand_perf(len(evidence), joined)
+            c.execute(text("""
+                INSERT INTO aci_intel_brands(
+                    asset_code,brand_name,category,presence_status,
+                    performance_score,performance_label,evidence_count,
+                    source_url,last_verified_at
+                )
+                VALUES(:a,:b,:c,'PUBLICLY_REPORTED',:s,:l,:n,:u,NOW())
+                ON CONFLICT(asset_code,brand_name) DO UPDATE SET
+                    category=EXCLUDED.category,
+                    presence_status='PUBLICLY_REPORTED',
+                    performance_score=EXCLUDED.performance_score,
+                    performance_label=EXCLUDED.performance_label,
+                    evidence_count=EXCLUDED.evidence_count,
+                    source_url=EXCLUDED.source_url,
+                    last_verified_at=NOW(),
+                    updated_at=NOW()
+            """), {
+                "a": code, "b": brand, "c": category, "s": brand_score,
+                "l": _perf_label(brand_score), "n": len(evidence),
+                "u": _clean(evidence[0].get("url")),
+            })
+        _build_mall_recommendations(c, asset, code, joined)
+        c.execute(text("""
+            UPDATE aci_intel_assets
+            SET last_researched_at=NOW(),updated_at=NOW(),
+                visibility_status='ACTIVE',purity_score=GREATEST(purity_score,:score),
+                purity_reason='asset-specific public evidence'
+            WHERE asset_code=:a
+        """), {"a": code, "score": score})
 
 def _research_gov(engine, code):
     return govsrc.research_government_asset(engine, code, _search)

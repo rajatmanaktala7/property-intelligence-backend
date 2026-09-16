@@ -8,7 +8,7 @@ from sqlalchemy import text
 from fastapi import Request, Body
 from fastapi.responses import HTMLResponse
 
-MODULE_VERSION = "3.1C-LEGACY-ADOPTION-DISCOVERY-RESTORE"
+MODULE_VERSION = "3.1.1-PROVIDER-FALLBACK-RESULT-TRUTH"
 
 CATEGORIES = {
     "RESTAURANT","CAFE","LOUNGE","CLUB","BANQUET",
@@ -192,35 +192,87 @@ def upsert_hospitality(engine,payload,source):
 
     return int(hid)
 
+def _normalize_search_rows(rows, count):
+    normalized = []
+    for row in rows or []:
+        title = _norm(row.get("name") or row.get("title"))
+        url = row.get("url") or row.get("link")
+        snippet = _norm(row.get("summary") or row.get("snippet"))
+        if not title or not url:
+            continue
+        normalized.append({
+            "name": title,
+            "url": url,
+            "summary": snippet,
+            "snippet": snippet,
+            "source_provider": row.get("source_provider") or row.get("provider"),
+        })
+        if len(normalized) >= max(1, min(int(count), 8)):
+            break
+    return normalized
+
+
 def _langsearch(query,count=8):
     key=os.getenv("LANGSEARCH_API_KEY","").strip()
-    if not key:
-        return {"status":"NO_KEY","provider":"LANGSEARCH","results":[]}
+    primary_error = None
 
-    body=json.dumps({
-        "query":query,
-        "freshness":"noLimit",
-        "summary":True,
-        "count":max(1,min(int(count),8)),
-    }).encode("utf-8")
+    if key:
+        body=json.dumps({
+            "query":query,
+            "freshness":"noLimit",
+            "summary":True,
+            "count":max(1,min(int(count),8)),
+        }).encode("utf-8")
 
-    req=urllib.request.Request(
-        "https://api.langsearch.com/v1/web-search",
-        data=body,
-        method="POST",
-        headers={
-            "Authorization":f"Bearer {key}",
-            "Content-Type":"application/json",
-        },
-    )
+        req=urllib.request.Request(
+            "https://api.langsearch.com/v1/web-search",
+            data=body,
+            method="POST",
+            headers={
+                "Authorization":f"Bearer {key}",
+                "Content-Type":"application/json",
+            },
+        )
 
+        try:
+            with urllib.request.urlopen(req,timeout=10) as r:
+                data=json.loads(r.read().decode("utf-8","replace"))
+            vals=data.get("data",{}).get("webPages",{}).get("value",[])
+            normalized=_normalize_search_rows(vals,count)
+            if normalized:
+                return {"status":"OK","provider":"LANGSEARCH","results":normalized}
+            primary_error="LangSearch returned zero usable results"
+        except Exception as exc:
+            primary_error=f"{type(exc).__name__}: {exc}"
+    else:
+        primary_error="LANGSEARCH_API_KEY is not configured"
+
+    # Existing Alliance search waterfall provides a safe secondary provider.
     try:
-        with urllib.request.urlopen(req,timeout=4) as r:
-            data=json.loads(r.read().decode("utf-8","replace"))
-        vals=data.get("data",{}).get("webPages",{}).get("value",[])
-        return {"status":"OK","provider":"LANGSEARCH","results":vals}
+        import property_discovery
+        rows, logs = property_discovery.search_waterfall([query], deep=False)
+        normalized=_normalize_search_rows(rows,count)
+        if normalized:
+            return {
+                "status":"OK",
+                "provider":"SEARCH_WATERFALL",
+                "results":normalized,
+                "primary_error":primary_error,
+            }
+        return {
+            "status":"NO_RESULTS",
+            "provider":"SEARCH_WATERFALL",
+            "message":primary_error or "No usable public results",
+            "provider_logs":logs or [],
+            "results":[],
+        }
     except Exception as exc:
-        return {"status":"ERROR","provider":"LANGSEARCH","message":str(exc),"results":[]}
+        return {
+            "status":"ERROR",
+            "provider":"LANGSEARCH+SEARCH_WATERFALL",
+            "message":f"{primary_error}; fallback {type(exc).__name__}: {exc}",
+            "results":[],
+        }
 
 def run_discovery(engine,category,location="Delhi NCR",count=8):
     ensure_schema_safe(engine)
@@ -262,7 +314,7 @@ def run_discovery(engine,category,location="Delhi NCR",count=8):
                 },
                 {
                     "source_type":"WEB_DISCOVERY",
-                    "source_name":"LANGSEARCH",
+                    "source_name":result.get("provider") or "WEB_DISCOVERY",
                     "source_url":item.get("url"),
                     "evidence_text":_norm(item.get("summary") or item.get("snippet")),
                     "raw_payload":item,
@@ -296,6 +348,7 @@ def run_discovery(engine,category,location="Delhi NCR",count=8):
         "provider_status":result["status"],
         "fetched_count":len(result["results"]),
         "saved_permanently":saved,
+        "error_message":result.get("message"),
         "next_step":"VERIFY_CONTACTS" if saved else "NO_RESULTS",
     }
 
