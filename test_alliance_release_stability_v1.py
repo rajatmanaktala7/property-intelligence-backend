@@ -36,8 +36,30 @@ def test_owner_check_accepts_canonical_first():
     assert result["shadowed_owners"] == ["legacy.login"]
 
 
+def test_source_views_are_fixed_and_complete():
+    assert stability.SOURCE_VIEWS == (
+        "manual",
+        "whatsapp",
+        "newspaper",
+        "magazine",
+    )
+    expression = stability._source_case("evidence")
+    for source in ("WHATSAPP", "NEWSPAPER", "MAGAZINE", "MANUAL"):
+        assert source in expression
+
+
+def test_route_presence_checks_method():
+    app = FastAPI()
+    _add(app, "/api/v60/deal-match", "GET", "matcher", "match")
+    assert stability._route_present(app, "/api/v60/deal-match") is True
+    assert stability._route_present(app, "/api/v60/deal-match", "POST") is False
+
+
 if __name__ == "__main__":
     test_owner_check_rejects_shadowing()
     test_owner_check_accepts_canonical_first()
+    test_source_views_are_fixed_and_complete()
+    test_route_presence_checks_method()
     print("ROUTE_SHADOWING_TEST=PASS")
     print("CANONICAL_OWNER_TEST=PASS")
+    print("CANONICAL_SOURCE_VIEW_TEST=PASS")

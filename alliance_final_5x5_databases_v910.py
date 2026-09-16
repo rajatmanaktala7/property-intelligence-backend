@@ -4,7 +4,7 @@ from fastapi import Form, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import text
 
-VERSION="9.2.0-CLEAN-FIVE-SOURCE-PROPERTY-HUB"
+VERSION="9.3.0-CANONICAL-SOURCE-VIEWS-CERTIFIED"
 SOURCES=("MASTER","NEWSPAPER","WHATSAPP","MAGAZINE","MANUAL")
 CATEGORY_OPTIONS=("Residential Sale","Residential Rent","Commercial Sale","Commercial Rent","Industrial Sale","Industrial Rent","Farmhouse Sale","Farmhouse Rent")
 
@@ -14,6 +14,7 @@ def _login(core,req):
     fn=getattr(core,"need_login",None)
     return fn(req) if fn else "team"
 def _e(v): return html.escape("" if v is None else str(v))
+def _shown(v): return "Not captured" if v in (None,"",[],{}) else str(v)
 def _dict(v):
     if isinstance(v,dict): return v
     if isinstance(v,str):
@@ -171,7 +172,7 @@ def _property_table(core,e,req,source,q,location,category,transaction,status,ass
               f'<a class="btn light" href="/alliance/primary/property/{_e(cid)}">History</a>',r.get("assigned_to") or "",source_name,
               f'<a class="btn light" href="/alliance/primary/property/{_e(cid)}/edit">Edit</a>',delete]
         cls=["nowrap","loc","desc","","","","","nowrap","","","","nowrap","nowrap","","","","","",""]
-        trs.append("<tr>"+"".join(f'<td class="{cls[i]}">{x if i in (13,14,17,18) else _e(x)}</td>' for i,x in enumerate(vals))+"</tr>")
+        trs.append("<tr>"+"".join(f'<td class="{cls[i]}">{x if i in (13,14,17,18) else _e(_shown(x))}</td>' for i,x in enumerate(vals))+"</tr>")
     H=["Property ID","Location","Description / Address","Property Category","Property Type","Area","Floor","Rent/Sale","Amount","Contact Name","Contact No.","Date & Time","Status","Verify","History","Assigned To","Source","Edit","Delete"]
     return _filter_form(q,location,category,transaction,status,assigned,limit)+f'<div class="tablebox"><table><thead><tr>{"".join("<th>"+x+"</th>" for x in H)}</tr></thead><tbody>{"".join(trs) if trs else "<tr><td colspan=19>No records found</td></tr>"}</tbody></table></div>'
 def _requirement_table(e,source,q,location,category,transaction,status,assigned,limit):
@@ -193,7 +194,7 @@ def _requirement_table(e,source,q,location,category,transaction,status,assigned,
         src=_source_name(e,cid,"REQUIREMENT")
         vals=[cid,desc,company,cname,phone,loc,pcat,ptype,area,tx,budget,_fmt_dt(r.get("created_at")),st,r.get("assigned_to") or "",src,
               f'<a class="btn light" href="/alliance/primary/requirement/{_e(cid)}">Open</a>']
-        trs.append("<tr>"+"".join(f'<td class="{"desc" if i==1 else ""}">{x if i==15 else _e(x)}</td>' for i,x in enumerate(vals))+"</tr>")
+        trs.append("<tr>"+"".join(f'<td class="{"desc" if i==1 else ""}">{x if i==15 else _e(_shown(x))}</td>' for i,x in enumerate(vals))+"</tr>")
     H=["Requirement ID","Requirement / Original Message","Client / Company","Contact Name","Contact No.","Location","Property Category","Property Type","Area","Rent/Sale","Budget","Date & Time","Status","Assigned To","Source","Open"]
     return _filter_form(q,location,category,transaction,status,assigned,limit)+f'<div class="tablebox"><table><thead><tr>{"".join("<th>"+x+"</th>" for x in H)}</tr></thead><tbody>{"".join(trs) if trs else "<tr><td colspan=16>No requirements found</td></tr>"}</tbody></table></div>'
 def register(core):
