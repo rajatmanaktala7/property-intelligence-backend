@@ -10,8 +10,8 @@ from fastapi import Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import text
 
-VERSION = "12.3.13-WHATSAPP-SENDER-CONTACT-NORMALIZATION"
-SOURCES = ("MASTER", "NEWSPAPER", "WHATSAPP", "MAGAZINE", "MANUAL", "SOCIAL")
+VERSION = "12.4.0-ALL-SOURCE-REQUIREMENT-DATABASE-HUB"
+SOURCES = ("MASTER", "NEWSPAPER", "MANUAL", "MAGAZINE", "WHATSAPP", "SOCIAL")
 
 EXCLUDE_TOKENS = (
     "match", "workflow", "action", "audit", "review", "repair", "task", "journal",
@@ -304,6 +304,49 @@ def _master_rows(e, source, limit=10000):
         })
     return out
 
+def _gate_rows(e, limit=10000):
+    """Load the all-source evidence inventory used by the Master Requirements view."""
+    if not _table_exists(e, "pi_requirement_gate_v1191"):
+        return []
+    try:
+        with e.connect() as c:
+            raw_rows = c.execute(text("""
+                SELECT to_jsonb(g) AS d
+                FROM pi_requirement_gate_v1191 g
+                WHERE COALESCE(classification,'') NOT IN ('REJECTED','NOISE','REJECTED/EXPIRED')
+                ORDER BY created_at DESC NULLS LAST, id DESC
+                LIMIT :n
+            """), {"n": int(limit)}).scalars().all()
+    except Exception:
+        return []
+    out = []
+    for idx, raw in enumerate(raw_rows, 1):
+        obj = _dict(raw) if not isinstance(raw, dict) else dict(raw)
+        extracted = _dict(obj.get("extracted_fields"))
+        merged = dict(extracted)
+        merged.update({k: v for k, v in obj.items() if v not in (None, "", [], {})})
+        source_table = str(obj.get("source_table") or "pi_requirement_gate_v1191")
+        source = _classify(obj.get("source_type") or source_table)
+        if source == "OTHER":
+            source = "SOCIAL" if _classify(_source_hint(merged)) == "SOCIAL" else "OTHER"
+        classification = str(obj.get("classification") or "").upper()
+        canonical_id = _first(merged, ["canonical_id", "master_requirement_id", "master_id"], "")
+        row = _normalize_source_row(source_table, merged, idx)
+        row.update({
+            "canonical_id": str(canonical_id or ""),
+            "source_pk": str(obj.get("source_pk") or obj.get("id") or row.get("source_pk") or idx),
+            "source": source,
+            "message": str(obj.get("original_message") or row.get("message") or ""),
+            "contact": _contact(merged) or _first(merged, ["contact_numbers"], ""),
+            "created_at": obj.get("created_at") or row.get("created_at"),
+            "verification": "VERIFIED" if "VERIFIED" in classification and "NEEDS" not in classification else "SOURCE / NEEDS VERIFICATION",
+            "assigned_to": _first(merged, ["assigned_to", "owner", "team_member"], ""),
+            "is_master": bool(canonical_id),
+        })
+        out.append(row)
+    return out
+
+
 def _fingerprint(row):
     cid = str(row.get("canonical_id") or "").strip().lower()
     if cid:
@@ -318,7 +361,21 @@ def _fingerprint(row):
 def _combined(e, source):
     masters = _master_rows(e, source)
     if source == "MASTER":
-        return masters, {"master": len(masters), "source_only": 0, "tables": []}
+        gate_rows = _gate_rows(e)
+        seen = {_fingerprint(r) for r in gate_rows}
+        canonical_only = []
+        for row in masters:
+            fp = _fingerprint(row)
+            if fp not in seen:
+                seen.add(fp)
+                canonical_only.append(row)
+        rows = gate_rows + canonical_only
+        rows.sort(key=lambda r: str(r.get("created_at") or ""), reverse=True)
+        return rows, {
+            "master": sum(1 for r in rows if r.get("is_master")),
+            "source_only": sum(1 for r in rows if not r.get("is_master")),
+            "tables": ["pi_requirement_gate_v1191", "pi_master_requirements_v711"],
+        }
     source_rows, tables = _source_rows(e, source)
     master_ids = {str(r.get("canonical_id") or "") for r in masters if r.get("canonical_id")}
     seen = {_fingerprint(r) for r in masters}
@@ -384,7 +441,10 @@ def _move_front(app, path):
 
 def _nav():
     return """
-    <nav><a href="/alliance/primary">Command Centre</a><a href="/alliance/final/requirements">Requirement Databases</a></nav>
+    <nav>
+      <a href="#" onclick="history.back();return false">← Back to Previous Page</a>
+      <a href="/team-dashboard-v376">Back to Dashboard</a>
+    </nav>
     """
 
 def _shell(title, body):
@@ -409,7 +469,7 @@ th,td{{border:1px solid #d0d5dd;padding:7px;text-align:left;vertical-align:top;w
 .desc{{min-width:300px;max-width:500px}}.sourceonly{{background:#fff8e8}}.masterrow{{background:#f8fff9}}
 </style></head><body>
 <header><b>Alliance CRE Intelligence OS 11</b><small>PROPERTY → VERIFY → REQUIREMENT → MATCH → CLIENT → FOLLOW-UP → DEAL</small></header>
-{_nav()}<div class="wrap"><h2>{_e(title)}</h2>{body}<p><a class="btn" href="/team-dashboard-v376">← Back to Dashboard</a></p></div>
+{_nav()}<div class="wrap"><h2>{_e(title)}</h2>{body}</div>
 </body></html>"""
 
 def _fast_requirement_counts(e):
@@ -502,16 +562,18 @@ def _hub(e):
             'The underlying databases remain available.</div>'
         )
 
-    actions = """<div class="card"><b>Add or view requirement sources</b><br><br>
-    <a class="btn" href="/requirements-workbench">+ Add Requirement Manually</a>
-    <a class="btn" href="/alliance/final/requirements/newspaper">Newspaper Requirements</a>
-    <a class="btn" href="/alliance/final/requirements/whatsapp">WhatsApp Requirements</a>
-    <a class="btn" href="/alliance/final/requirements/social">Social Media Requirements</a>
-    <br><small>Social Media includes LinkedIn, Facebook, Instagram or Social source evidence only. No records are copied into Master automatically.</small></div>"""
-    body = f"""{actions}<div class="notice"><b>All requirement databases are available.</b>
-    Counts use lightweight database queries. Complete records load only after
-    a database is opened. Nothing is automatically copied into Master and no
-    duplicate Master records are created.</div>
+    actions = """<div class="card"><b>Add or open requirement sources</b><br><br>
+    <a class="btn" href="/requirements-workbench">+ Add Manual Requirement</a>
+    <a class="btn" href="/alliance/final/requirements/newspaper">Newspaper</a>
+    <a class="btn" href="/alliance/final/requirements/manual">Manual</a>
+    <a class="btn" href="/alliance/final/requirements/magazine">Magazine</a>
+    <a class="btn" href="/alliance/final/requirements/whatsapp">WhatsApp</a>
+    <a class="btn" href="/alliance/final/requirements/social">Social Media / Other</a>
+    </div>"""
+    body = f"""{actions}<div class="notice"><b>Master Requirements is the complete all-source evidence inventory.</b>
+    Manual, Newspaper, Magazine, WhatsApp and Social Media records remain traceable
+    to their original source. Only verified canonical requirements are eligible for
+    Smart Matcher; source evidence is never silently promoted or duplicated.</div>
     {warning}
     <div class="grid">{''.join(cards)}</div>"""
 
@@ -522,13 +584,13 @@ def _table(e, source, q, location, transaction, status, assigned, limit):
     rows, meta = _combined(e, source)
     rows = _filtered(rows, q, location, transaction, status, assigned)[:limit]
     filters = f"""<div class="card"><form class="filters">
-      <input name="q" value="{_e(q)}" placeholder="Search message, contact, brand, ID or source">
+      <input name="q" value="{_e(q)}" placeholder="Search any field, contact, source or ID">
       <input name="location" value="{_e(location)}" placeholder="Location">
       <select name="transaction"><option value="">Rent / Sale</option>
         <option value="RENT" {'selected' if transaction.upper()=='RENT' else ''}>RENT</option>
         <option value="LEASE" {'selected' if transaction.upper()=='LEASE' else ''}>LEASE</option>
         <option value="SALE" {'selected' if transaction.upper()=='SALE' else ''}>SALE</option></select>
-      <select name="status"><option value="">All Status</option>
+      <select name="status"><option value="">All Verification</option>
         <option value="VERIFIED" {'selected' if status.upper()=='VERIFIED' else ''}>VERIFIED</option>
         <option value="UNVERIFIED" {'selected' if status.upper()=='UNVERIFIED' else ''}>UNVERIFIED</option>
         <option value="SOURCE" {'selected' if status.upper()=='SOURCE' else ''}>SOURCE / NEEDS VERIFICATION</option></select>
@@ -538,52 +600,57 @@ def _table(e, source, q, location, transaction, status, assigned, limit):
     trs = []
     for row in rows:
         is_master = bool(row.get("is_master"))
-        rid = row.get("canonical_id") or f"{row.get('source_table')}:{row.get('source_pk')}"
-        if is_master and row.get("canonical_id"):
-            cid = _e(row["canonical_id"])
+        cid = str(row.get("canonical_id") or "")
+        src = str(row.get("source") or source).upper()
+        spk = str(row.get("source_pk") or "")
+        if is_master and cid:
             verification = str(row.get("verification") or "").upper()
             if verification == "VERIFIED":
                 action = (
-                    f'<a class="btn" href="/alliance/primary/requirement/{cid}">Open</a> '
-                    f'<a class="btn" href="/alliance/primary/matcher?requirement_id={cid}">Run Match</a>'
+                    f'<a class="btn" href="/alliance/primary/requirement/{_e(cid)}">Open</a> '
+                    f'<a class="btn" href="/alliance/primary/matcher?requirement_id={_e(cid)}">Run Match</a>'
                 )
             else:
-                action = (
-                    f'<a class="btn" href="/alliance/primary/requirement/{cid}">Open</a> '
-                    f'<a class="btn" href="/alliance/primary/requirement/{cid}">Verify First</a>'
-                )
+                action = f'<a class="btn" href="/alliance/primary/requirement/{_e(cid)}">Verify</a>'
+        elif src in SOURCES and src != "MASTER" and spk:
+            action = (
+                f'<a class="btn" href="/alliance/final/requirements/run-match?source={_e(src)}'
+                f'&source_pk={_e(spk)}">Verify & Run Match</a>'
+            )
         else:
-            action = '<a class="btn" href="/alliance/primary/requirements">Verify First</a>'
+            action = '<span>Review source evidence</span>'
         cls = "masterrow" if is_master else "sourceonly"
         vals = [
-            rid, row.get("message"), row.get("company"), row.get("contact_name"), row.get("contact"),
-            row.get("location"), row.get("category"), row.get("property_type"), row.get("area"),
-            row.get("transaction"), row.get("budget"), row.get("created_at"), row.get("verification"),
-            row.get("assigned_to") or "UNASSIGNED", row.get("source_table"), action
+            row.get("created_at"), row.get("message"), row.get("company"),
+            row.get("contact_name"), row.get("contact"), row.get("location"),
+            row.get("category"), row.get("property_type"), row.get("area"),
+            row.get("transaction"), row.get("budget"), action,
+            row.get("verification"), row.get("assigned_to") or "UNASSIGNED",
+            row.get("source_table"), spk, cid,
         ]
         cells = []
         for i, value in enumerate(vals):
-            if i == 15:
+            if i == 11:
                 cells.append(f"<td>{value}</td>")
             else:
                 css = " class='desc'" if i == 1 else ""
                 cells.append(f"<td{css}>{_e(value)}</td>")
         trs.append(f"<tr class='{cls}'>{''.join(cells)}</tr>")
     note = (
-        f"<b>{len(rows)}</b> rows shown. Canonical linked: <b>{meta['master']}</b> · "
-        f"Restored source-only: <b>{meta['source_only']}</b>. "
-        "Green rows are Master. Verified Master requirements show Run Match. Yellow source-only rows must be verified/promoted first."
+        f"<b>{len(rows)}</b> rows shown. Verified/canonical linked: <b>{meta['master']}</b> · "
+        f"source evidence awaiting verification: <b>{meta['source_only']}</b>. "
+        "Master is the all-source inventory; Smart Matcher continues to use verified canonical requirements only."
     )
     headers = [
-        "Requirement ID / Source ID","Original Requirement","Client / Company","Contact Name","Contact No.",
-        "Location","Category / Use","Property Type","Area","Rent/Sale","Budget","Date / Time",
-        "Verification","Assigned To","Source Database","Action"
+        "Date / Time","Original Requirement","Client / Company","Contact Name",
+        "Contact No.","Location","Category / Use","Property Type","Area",
+        "Rent / Sale","Budget","Action","Verification","Assigned To",
+        "Source","Source ID","Requirement ID"
     ]
     body = f"""<div class="notice">{note}</div>{filters}
     <div class="tablebox"><table><thead><tr>{''.join('<th>'+h+'</th>' for h in headers)}</tr></thead>
-    <tbody>{''.join(trs) if trs else '<tr><td colspan="16">No requirements found.</td></tr>'}</tbody></table></div>"""
+    <tbody>{''.join(trs) if trs else '<tr><td colspan="17">No requirements found.</td></tr>'}</tbody></table></div>"""
     return _shell(f"{source.title()} Requirements", body)
-
 
 def _gate_tx(v):
     s = str(v or "").strip().upper()
@@ -789,11 +856,6 @@ def register(core, served_app=None):
         src = source.upper()
         if src not in SOURCES:
             return HTMLResponse("Unknown requirement database", status_code=404)
-        if src == "MASTER":
-            return RedirectResponse(
-                "/alliance/master-requirement-matcher",
-                status_code=302,
-            )
         return HTMLResponse(
             _table(e, src, q, location, transaction, status, assigned, limit),
             headers={"Cache-Control":"no-store","X-Alliance-Requirement-Restore":VERSION},
