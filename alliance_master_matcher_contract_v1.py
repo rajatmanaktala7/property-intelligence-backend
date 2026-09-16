@@ -5,7 +5,7 @@ from sqlalchemy import text
 import alliance_phase5_canonical_matcher as base
 from alliance_phase5_canonical_matcher import *
 
-VERSION = "1.0.0-MASTER-DATABASE-AUTHORITY"
+VERSION = "1.0.1-JSON-SAFE-MASTER-DATABASE-AUTHORITY"
 MASTER_TABLE = "pi_master_properties_v711"
 WORKFLOW_TABLE = "pi_master_workflow_v720"
 MATCHER_SOURCE_CONTRACT = "MASTER_ONLY"
@@ -166,7 +166,12 @@ def public_item(p: Dict[str, Any], match_score: float, match_class: str, why: Li
     item["detail_url"] = p.get("detail_url") or (f"/alliance/primary/property/{rid}" if rid else None)
     item["source_count"] = int(p.get("source_count") or 1)
     item["data_completeness"] = int(p.get("data_completeness") or 0)
-    item["captured_on"] = p.get("captured_on")
+    captured_on = p.get("captured_on")
+    item["captured_on"] = (
+        captured_on.isoformat()
+        if hasattr(captured_on, "isoformat")
+        else str(captured_on) if captured_on not in (None, "") else None
+    )
     return item
 
 def _sort_key(x):
