@@ -8,7 +8,7 @@ from fastapi import Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy import text
 
-VERSION = "2.2.0-FIVE-SOURCE-INTELLIGENCE-HUB"
+VERSION = "2.3.0-CLEAN-SOURCE-NAVIGATION"
 MARKER = "CANONICAL_ALLIANCE_DASHBOARD_V1"
 STATE: Dict[str, Any] = {
     "status": "INIT",
@@ -16,7 +16,7 @@ STATE: Dict[str, Any] = {
     "authority": "CANONICAL_MASTER_DATA",
     "dashboard_marker": MARKER,
     "legacy_dashboard_replaced": True,
-    "navigation_model": "7-AREA-FIVE-SOURCE-HUB",
+    "navigation_model": "8-AREA-CLEAN-SOURCE-HUB",
     "matcher_authority": "MASTER_ONLY",
     "property_authority": "pi_master_properties_v711",
     "requirement_authority": "pi_requirement_gate_v1191",
@@ -82,21 +82,14 @@ def _render(counts):
         _area("Properties", "🏢", _n(counts["master_properties"]), "Master properties, availability, Goa inventory and new property entry.", "/alliance/final/databases", "Open Properties", "blue"),
         _area("Requirements", "📋", _n(counts["master_requirements"]), "One canonical demand workspace for manual, WhatsApp and newspaper requirements.", "/alliance/final/requirements", "Open Requirements", "purple"),
         _area("Match & Deal Desk", "🎯", _n(counts["matcher_eligible"]), "Run Smart Match, review exact / verify / alternate options and prepare the client draft.", "/alliance/primary/smart-match", "Open Smart Match", "green"),
-        _area("Intelligence", "✨", "5 sources", "WhatsApp, newspaper, commercial, hospitality and retail intelligence in one section.", "#intelligence", "View Sources", "orange"),
+        _area("Intelligence", chr(0x2728), "3 sections", "Commercial, Hospitality and Retail intelligence with bot controls.", "#intelligence", "View Intelligence", "orange"),
+        _area("WhatsApp Live", chr(0x1F4AC), "Live", "Live WhatsApp source, contacts, availability and requirement capture.", "/whatsapp-live", "Open WhatsApp Live", "green"),
         _area("Contacts", "☎", _n(counts["contact_master"]), "Evidence-backed internal contact master with source segregation.", "/alliance/primary/contact-master", "Open Contacts", "cyan"),
         _area("Team", "👥", "Today", "Follow-ups, day plans, staff review, monthly review and reports.", "#team", "View Team", "pink"),
         _area("System", "🛡", "PASS", "Guardian, data health, diagnostics and production link audit.", "#system", "View Health", "slate"),
     ])
 
-    intelligence = "".join([
-        _mini("WhatsApp Intelligence", "/whatsapp-live", "Live messages, contacts and classified intelligence"),
-        _mini("Newspaper Intelligence", "/newspaper-v83", "Upload, process and review newspaper intelligence"),
-        _mini("Commercial Intelligence", "/commercial-intelligence", "Research assets and review the commercial database"),
-        _mini("Hospitality Bot", "/hospitality-intelligence#bot-controls", "Run hospitality discovery"),
-        _mini("Hospitality Intelligence", "/hospitality-intelligence#intelligence-database", "Review saved hospitality intelligence"),
-        _mini("Retail Bot", "/retail-expansion#bot-controls", "Run retail discovery"),
-        _mini("Retail Intelligence", "/retail-expansion#intelligence-database", "Review saved retail intelligence"),
-    ])
+    intelligence = """<a class="mini" href="/commercial-intelligence"><strong>Commercial Intelligence</strong><span>Research assets and review the commercial intelligence database</span></a><div class="mini"><strong>Hospitality Intelligence</strong><span>Review saved hospitality intelligence</span><a class="subbtn" href="/hospitality-intelligence#bot-controls">Run Hospitality Bot</a><a class="subbtn lightbtn" href="/hospitality-intelligence#intelligence-database">Open Intelligence</a></div><div class="mini"><strong>Retail Intelligence</strong><span>Review retail contacts, expansion signals and requirements</span><a class="subbtn" href="/retail-expansion#bot-controls">Run Retail Bot</a><a class="subbtn lightbtn" href="/retail-expansion#intelligence-database">Open Intelligence</a></div>"""
 
     team = "".join([
         _mini("Team Tasks", "/alliance/primary/followups", "Sorted work queue: overdue, due today, upcoming, then completed"),
@@ -140,6 +133,8 @@ h1{{font-size:34px;line-height:1.15;margin:0 0 8px}}h2{{font-size:21px;margin:34
 .mini-grid{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}}
 .mini{{display:block;text-decoration:none;color:inherit;border:1px solid var(--line);border-radius:14px;padding:14px;background:#fbfcfe}}
 .mini:hover{{background:#fff;border-color:#bac4d2}}.mini strong{{display:block;margin-bottom:3px}}.mini span{{display:block;color:var(--muted);font-size:12.5px}}
+.subbtn{{display:inline-block;margin:10px 6px 0 0;padding:8px 10px;border-radius:8px;background:#3157d5;color:white!important;text-decoration:none;font-size:12px;font-weight:800}}.lightbtn{{background:#e9eefb;color:#2445b5!important}}
+.flow{{display:flex;align-items:center;justify-content:center;gap:8px;flex-wrap:wrap;background:#10223f;color:white;border-radius:16px;padding:14px;margin-top:26px;font-size:12px;font-weight:850}}.flow b{{background:rgba(255,255,255,.1);padding:7px 9px;border-radius:8px}}.flow i{{font-style:normal;color:#8fb4ff}}
 .quick{{display:grid;grid-template-columns:1fr 1fr;gap:12px}}
 .quick a{{text-decoration:none;color:#fff;border-radius:16px;padding:17px 18px;font-weight:850;background:#182235}}
 .quick a:last-child{{background:#3157d5}}
@@ -166,6 +161,7 @@ h1{{font-size:34px;line-height:1.15;margin:0 0 8px}}h2{{font-size:21px;margin:34
 
   <div class="grid">{primary}</div>
 
+  <div class="flow"><b>PROPERTY</b><i>&rarr;</i><b>VERIFY</b><i>&rarr;</i><b>REQUIREMENT</b><i>&rarr;</i><b>MATCH</b><i>&rarr;</i><b>CLIENT</b><i>&rarr;</i><b>FOLLOW-UP</b><i>&rarr;</i><b>DEAL</b></div>
   <h2 id="quick-add">Quick Add</h2>
   <div class="quick">
     <a href="/property-manual">＋ Add Inventory</a>
@@ -207,7 +203,7 @@ def register(core):
                 "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
                 "Pragma": "no-cache",
                 "X-Alliance-Dashboard-Authority": MARKER,
-                "X-Alliance-Navigation-Model": "7-AREA-FIVE-SOURCE-HUB",
+                "X-Alliance-Navigation-Model": "8-AREA-CLEAN-SOURCE-HUB",
             })
         except Exception as exc:
             STATE["status"] = "ERROR"
@@ -224,7 +220,7 @@ def register(core):
                 "version": VERSION,
                 "dashboard_marker": MARKER,
                 "legacy_dashboard_replaced": True,
-                "navigation_model": "7-AREA-FIVE-SOURCE-HUB",
+                "navigation_model": "8-AREA-CLEAN-SOURCE-HUB",
                 "matcher_authority": "MASTER_ONLY",
                 "property_authority": "pi_master_properties_v711",
                 "requirement_authority": "pi_requirement_gate_v1191",
