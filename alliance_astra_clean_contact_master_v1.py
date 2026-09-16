@@ -14,7 +14,7 @@ from fastapi.responses import HTMLResponse
 from sqlalchemy import text
 
 
-VERSION = "2.0.1-ASTRA-CURSOR-CERTIFIED-DATABASE-CLEAN"
+VERSION = "2.0.2-ASTRA-FULL-CYCLE-DATABASE-CLEAN"
 MARKER = "ALLIANCE_ASTRA_DATABASE_CLEAN_V2"
 SOURCE_TOKENS = (
     "whatsapp", "newspaper", "magazine", "hospitality", "retail",
@@ -686,15 +686,15 @@ def _recover_table(engine, run_id, table, spec, limit):
             FROM pi_astra_scan_cursor_v2 WHERE table_name=:table"""), {"table": table}).mappings().one()
     last_pk = str(cursor.get("last_pk") or "")
     keyset = f" AND CAST({_qident(pk)} AS TEXT) > :last_pk" if last_pk else ""
+    batch_limit = max(1, min(int(limit), 5000))
     with engine.connect() as connection:
         rows = connection.execute(text(
             f"SELECT to_jsonb(t) AS data FROM {_qident(table)} t WHERE ({where}){keyset} "
             f"ORDER BY CAST({_qident(pk)} AS TEXT) LIMIT :limit"
-        ), {"limit": max(1, min(int(limit), 5000)), "last_pk": last_pk}).scalars().all()
+        ), {"limit": batch_limit, "last_pk": last_pk}).scalars().all()
 
-    cycle_complete = False
-    if not rows and last_pk:
-        cycle_complete = True
+    cycle_complete = not rows
+    if not rows:
         with engine.begin() as connection:
             connection.execute(text("""UPDATE pi_astra_scan_cursor_v2
                 SET last_pk='',cycles_completed=cycles_completed+1,updated_at=NOW()
@@ -762,12 +762,22 @@ def _recover_table(engine, run_id, table, spec, limit):
         cursor_after = str((last_obj or {}).get(pk) or "")
         if cursor_after:
             with engine.begin() as connection:
-                connection.execute(text("""UPDATE pi_astra_scan_cursor_v2
-                    SET last_pk=:last_pk,rows_scanned=rows_scanned+:scanned,updated_at=NOW()
-                    WHERE table_name=:table"""), {
-                        "table": table, "last_pk": cursor_after, "scanned": len(rows),
-                    })
-            result["cursor_after"] = cursor_after
+                if len(rows) < batch_limit:
+                    connection.execute(text("""UPDATE pi_astra_scan_cursor_v2
+                        SET last_pk='',cycles_completed=cycles_completed+1,
+                            rows_scanned=rows_scanned+:scanned,updated_at=NOW()
+                        WHERE table_name=:table"""), {
+                            "table": table, "scanned": len(rows),
+                        })
+                    result["cycle_complete"] = True
+                    result["cursor_after"] = ""
+                else:
+                    connection.execute(text("""UPDATE pi_astra_scan_cursor_v2
+                        SET last_pk=:last_pk,rows_scanned=rows_scanned+:scanned,updated_at=NOW()
+                        WHERE table_name=:table"""), {
+                            "table": table, "last_pk": cursor_after, "scanned": len(rows),
+                        })
+                    result["cursor_after"] = cursor_after
     return result
 
 
