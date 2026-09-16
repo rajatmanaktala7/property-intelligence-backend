@@ -6,7 +6,7 @@ from fastapi import Form, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import text
 
-VERSION = "12.4.14-LIVE-BOT-DATABASE-PAGES"
+VERSION = "12.4.15-LIVE-BOT-RESULT-TRUTH"
 
 def _app(core):
     return getattr(core, "app", None) or core
@@ -234,7 +234,16 @@ def register(core):
         _login(core,req)
         import alliance_v31_hospitality as h
         out=h.run_discovery(core.engine,category,location,8)
-        msg=f"Discovery complete: fetched {out.get('fetched_count',0)}, saved {out.get('saved_permanently',0)}"
+        state=out.get("provider_status") or out.get("status") or "UNKNOWN"
+        provider=out.get("provider") or "UNKNOWN"
+        error=out.get("error_message") or out.get("message") or ""
+        msg=(
+            f"Discovery {state} via {provider}: "
+            f"fetched {out.get('fetched_count',0)}, "
+            f"saved {out.get('saved_permanently',0)}"
+        )
+        if error:
+            msg += f" | {error}"
         return RedirectResponse("/hospitality-intelligence?msg="+quote_plus(msg),303)
 
     @app.get("/retail-expansion",response_class=HTMLResponse)
