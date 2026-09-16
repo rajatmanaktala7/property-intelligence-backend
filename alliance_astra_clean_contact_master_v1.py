@@ -14,7 +14,7 @@ from fastapi.responses import HTMLResponse
 from sqlalchemy import text
 
 
-VERSION = "2.0.2-ASTRA-FULL-CYCLE-DATABASE-CLEAN"
+VERSION = "2.0.3-ASTRA-APPLICABILITY-AWARE-DATABASE-CLEAN"
 MARKER = "ALLIANCE_ASTRA_DATABASE_CLEAN_V2"
 SOURCE_TOKENS = (
     "whatsapp", "newspaper", "magazine", "hospitality", "retail",
@@ -670,14 +670,28 @@ def audit(engine):
 
 def _recover_table(engine, run_id, table, spec, limit):
     columns = _table_columns(engine, table)
-    if not columns or spec.get("audit_only"):
-        return {"table": table, "scanned": 0, "updated": 0, "skipped": 0}
+    if not columns:
+        return {
+            "table": table, "scanned": 0, "updated": 0, "skipped": 0,
+            "cycle_complete": True, "not_applicable": True,
+            "recovery_status": "TABLE_NOT_PRESENT",
+        }
+    if spec.get("audit_only"):
+        return {
+            "table": table, "scanned": 0, "updated": 0, "skipped": 0,
+            "cycle_complete": True, "not_applicable": True,
+            "recovery_status": "AUDIT_ONLY",
+        }
     pk = _pk_for(spec, columns)
     if not pk:
         return {"table": table, "scanned": 0, "updated": 0, "skipped": 0, "error": "No safe primary key"}
     targets = [field for field in spec["critical"] if field in columns and field in FIELD_RULES]
     if not targets:
-        return {"table": table, "scanned": 0, "updated": 0, "skipped": 0}
+        return {
+            "table": table, "scanned": 0, "updated": 0, "skipped": 0,
+            "cycle_complete": True, "not_applicable": True,
+            "recovery_status": "NO_APPLICABLE_TARGET_COLUMNS",
+        }
     where = " OR ".join(_blank_sql(field) for field in targets)
     with engine.begin() as connection:
         connection.execute(text("""INSERT INTO pi_astra_scan_cursor_v2(table_name)
