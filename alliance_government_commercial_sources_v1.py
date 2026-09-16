@@ -4,7 +4,7 @@ from html import escape
 from urllib.parse import urlparse
 from sqlalchemy import bindparam, text
 
-VERSION="1.2.0-TRUTH-FIRST-ASSET-BRIEFS"
+VERSION="1.3.0-ALL-ACTIVE-ASSETS-SORTED-RESEARCH"
 
 CITY_ALIASES={
  "gurgaon":("gurgaon","gurugram"),"gurugram":("gurgaon","gurugram"),
@@ -263,7 +263,7 @@ def render_commercial(engine,view,city,message=""):
     # Bounded bulk loading: three queries total instead of two queries per asset.
     with engine.connect() as c:
         assets=[dict(x) for x in c.execute(
-            text(f"SELECT * FROM aci_intel_assets WHERE {' AND '.join(where)} ORDER BY confidence DESC,asset_name LIMIT 300"),
+            text(f"SELECT * FROM aci_intel_assets WHERE {' AND '.join(where)} ORDER BY last_researched_at DESC NULLS LAST, confidence DESC, asset_name LIMIT 1000"),
             p,
         ).mappings().all()]
         devs=[dict(x) for x in c.execute(text(
@@ -436,15 +436,26 @@ th,td{padding-top:6px!important;padding-bottom:6px!important;vertical-align:top}
    const host=document.querySelector('.wrap')||document.body;
    const bar=document.createElement('div');
    bar.id='allianceCommercialV21Bar';
-   bar.innerHTML='<b>Commercial Intelligence</b><input id="allianceCommercialV21Search" placeholder="Search asset, city, location, developer, status or contact"><span id="allianceCommercialV21Count"></span>';
+   bar.innerHTML='<b>Commercial Intelligence</b><input id="allianceCommercialV21Search" placeholder="Search asset, city, location, developer, status or contact"><select id="allianceCommercialV21Sort"><option value="fresh">Recently researched</option><option value="name">Asset name</option><option value="city">City / location</option></select><span id="allianceCommercialV21Count"></span>';
    host.insertBefore(bar,host.firstChild);
-   const q=bar.querySelector('#allianceCommercialV21Search'), n=bar.querySelector('#allianceCommercialV21Count');
+   const q=bar.querySelector('#allianceCommercialV21Search'), n=bar.querySelector('#allianceCommercialV21Count'), sort=bar.querySelector('#allianceCommercialV21Sort');
    function filter(){
      const term=(q.value||'').trim().toLowerCase(); let visible=0;
-     cards().forEach(card=>{const ok=!term||(card.innerText||'').toLowerCase().includes(term);card.style.display=ok?'':'none';if(ok)visible++;});
+     const list=cards();
+     list.forEach(card=>{const ok=!term||(card.innerText||'').toLowerCase().includes(term);card.style.display=ok?'':'none';if(ok)visible++;});
+     const host=list.length?list[0].parentElement:null;
+     if(host){
+       const key=sort.value;
+       list.sort((a,b)=>{
+         if(key==='name')return (a.querySelector('h2')?.innerText||'').localeCompare(b.querySelector('h2')?.innerText||'');
+         if(key==='city')return (a.querySelector('p')?.innerText||'').localeCompare(b.querySelector('p')?.innerText||'');
+         return 0;
+       });
+       if(key!=='fresh')list.forEach(card=>host.appendChild(card));
+     }
      n.textContent=visible+' assets visible';
    }
-   q.addEventListener('input',filter);filter();
+   q.addEventListener('input',filter);sort.addEventListener('change',filter);filter();
  }
  async function refreshAsset(action,box){
    try{
