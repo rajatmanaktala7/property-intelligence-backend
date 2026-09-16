@@ -623,34 +623,17 @@ def register_v31_hospitality_routes(core):
         if hasattr(core,"need_login"):
             core.need_login(req)
 
-        return HTMLResponse("""<!doctype html>
-<html>
-<head>
-<meta charset="utf-8">
-<title>V3.1C Hospitality Intelligence</title>
-<style>
-body{font-family:Arial;background:#f5f7fa;margin:0}
-.wrap{max-width:1100px;margin:32px auto;padding:0 18px}
-.card{background:white;border-radius:16px;padding:24px;margin-bottom:18px;box-shadow:0 1px 8px rgba(0,0,0,.06)}
-.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
-.k{background:#f8fafc;padding:16px;border-radius:12px}
-</style>
-</head>
-<body>
-<div class="wrap">
-<div class="card">
-<h1>V3.1C Hospitality Persistent Intelligence</h1>
-<p>Legacy adoption + discovery restored. Startup remains safe.</p>
-<p><b>All fetched records remain permanently stored with source history.</b></p>
-</div>
-<div class="grid">
-<div class="k"><b>Legacy</b><br>Non-destructive adoption</div>
-<div class="k"><b>Discovery</b><br>LangSearch bot</div>
-<div class="k"><b>Persistence</b><br>Canonical database</div>
-<div class="k"><b>History</b><br>Source + run history</div>
-</div>
-</div>
-</body>
-</html>""")
+        return HTMLResponse("""<!doctype html><html><head><meta charset="utf-8"><title>Hospitality Intelligence</title>
+<style>body{font:14px Arial;margin:0;background:#f5f7fb;color:#172437}.wrap{max-width:1400px;margin:auto;padding:22px}.card{background:#fff;border:1px solid #e1e7ef;border-radius:14px;padding:16px;margin:12px 0}.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}input,select,button{padding:9px;border:1px solid #ccd7e4;border-radius:7px;margin:3px}button{background:#1769e0;color:#fff;border:0;font-weight:bold;cursor:pointer}.muted{color:#637085}table{border-collapse:collapse;width:100%;font-size:12px}th,td{padding:8px;border-bottom:1px solid #e9edf2;text-align:left}@media(max-width:700px){.grid{grid-template-columns:1fr}}</style></head><body><div class="wrap">
+<h1>Hospitality Intelligence</h1><p class="muted">Run discovery separately. Saved intelligence excludes test/demo rows by default.</p>
+<div class="grid"><div class="card" id="bot-controls"><h2>1. Run Hospitality Bot</h2><select id="cat"><option>RESTAURANT</option><option>CAFE</option><option>LOUNGE</option><option>CLUB</option><option>BANQUET</option><option>GUEST_HOUSE</option></select><input id="loc" value="Delhi NCR" placeholder="Location"><input id="cnt" type="number" value="8" min="1" max="30"><button onclick="runBot()">Run Bot</button><pre id="run"></pre></div>
+<div class="card"><h2>How it works</h2><p>Discovery uses public source evidence. Contacts remain unverified until the team confirms them. No test records are shown below.</p><button onclick="loadData()">Refresh Intelligence</button></div></div>
+<div class="card" id="intelligence-database"><h2>2. Intelligence Database</h2><p id="summary" class="muted">Loading...</p><table><thead><tr><th>Business</th><th>Category</th><th>Location</th><th>Contact</th><th>Phone</th><th>Email</th><th>Verification</th><th>Last seen</th></tr></thead><tbody id="rows"></tbody></table></div>
+</div><script>
+const esc=v=>String(v??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const demo=v=>/\b(test|demo|sample|example)\b/i.test(String(v??''));
+async function loadData(){const r=await fetch('/api/v3/hospitality/entities?limit=200');const x=await r.json();const a=(x.entities||[]).filter(v=>!demo(v.business_name));document.querySelector('#summary').textContent=a.length+' real records visible';document.querySelector('#rows').innerHTML=a.map(v=>'<tr><td>'+esc(v.business_name)+'</td><td>'+esc(v.category)+'</td><td>'+esc(v.location||v.city)+'</td><td>'+esc(v.contact_name)+'</td><td>'+esc(v.contact_phone||v.whatsapp_phone)+'</td><td>'+esc(v.email)+'</td><td>'+esc(v.verification_status)+'</td><td>'+esc(v.last_seen_at)+'</td></tr>').join('')||'<tr><td colspan="8">No real hospitality intelligence records yet. Run the bot or ingest an approved source.</td></tr>'}
+async function runBot(){const c=document.querySelector('#cat').value,l=encodeURIComponent(document.querySelector('#loc').value),n=document.querySelector('#cnt').value;document.querySelector('#run').textContent='Running…';const r=await fetch('/api/v3/hospitality/discover/'+encodeURIComponent(c)+'?location='+l+'&count='+n,{method:'POST'});document.querySelector('#run').textContent=JSON.stringify(await r.json(),null,2);loadData()}
+loadData();</script></body></html>""")
 
     return app
