@@ -1,7 +1,7 @@
 from __future__ import annotations
 import re
 from sqlalchemy import text
-VERSION="1.0.1-ASTRA-WHATSAPP-CONTACT-BRIDGE-COMPAT"
+VERSION="1.1.0-SEPARATE-CONTACTS-FAST-UI"
 
 def _phone(v):
     s=str(v or '').strip().replace('@s.whatsapp.net','').replace('@c.us','')
@@ -28,8 +28,6 @@ def _deep_phones(*values):
     return ', '.join(out)
 
 def install(fix, engine):
-    # Current rectification API calls this function _wa_lookup. Older releases called
-    # it _sender_from_whatsapp. Accept either so boot cannot fail during upgrades.
     old_lookup=getattr(fix,'_wa_lookup',None) or getattr(fix,'_sender_from_whatsapp',None)
     if not callable(old_lookup):
         def old_lookup(row): return ''
@@ -62,11 +60,11 @@ def install(fix, engine):
         sid=fix._first(row,['source_pk','wa_requirement_id','requirement_id','record_id','id'])
         stable=fix._first(row,['source_table']) or 'WHATSAPP'
         return astra_evidence(stable,sid)
-    # Publish both names. This preserves compatibility with the current UI module and
-    # with any critical-flow release gate still checking the historical helper name.
     fix._wa_lookup=wa_lookup
     fix._sender_from_whatsapp=wa_lookup
 
+    # Keep Company, Contact Name and Contact No. as independent structured fields.
+    # Only enrich a missing WhatsApp number from evidence lineage.
     def norm(obj,source_table=''):
         r=old_norm(obj,source_table)
         if str(r.get('source') or '').upper()=='WHATSAPP' and str(r.get('contact') or '') in ('','Not captured'):
@@ -76,20 +74,27 @@ def install(fix, engine):
                 try:p=wa_lookup(obj if isinstance(obj,dict) else {})
                 except Exception:p=''
             if p:r['contact']=p
-        bits=[]
-        for v in (r.get('company'),r.get('name'),r.get('contact')):
-            s=str(v or '').strip()
-            if s and s!='Not captured' and s not in bits:bits.append(s)
-        r['company']=' · '.join(bits) if bits else 'Not captured'
-        r['name']=''
-        r['contact']=''
         return r
     fix._norm_req=norm
 
     def requirements_page(engine_obj,source,q=''):
         page=old_page(engine_obj,source,q)
-        page=page.replace('Client / Company</th><th>Contact Name</th><th>Contact No.</th>','Client / Contact</th><th class="mergehide">Contact Name</th><th class="mergehide">Contact No.</th>')
-        page=page.replace('</style>','th:nth-child(4),td:nth-child(4),th:nth-child(5),td:nth-child(5){display:none}.desc{min-width:210px;max-width:330px}.loc{min-width:70px;max-width:120px}table{font-size:9px}th,td{padding:3px 4px}</style>')
+        # Current fast table has 17 columns. Put sparse fields after Run Matcher.
+        order=[0,1,2,3,4,5,6,10,11,16,7,8,9,12,13,14,15]
+        headers=['Date / Time','Requirement / Description','Client / Company','Contact Name','Contact No.','Location','Category / Purpose','Rent / Sale','Budget','Run Matcher','Property Type','Area Min','Area Max','Floor / Preference','Verification','Source','Source ID']
+        page=re.sub(r'<thead><tr>.*?</tr></thead>',"<thead><tr>"+''.join('<th>'+h+'</th>' for h in headers)+'</tr></thead>',page,count=1,flags=re.S)
+        def reorder_row(m):
+            attrs=m.group(1); inner=m.group(2)
+            cells=re.findall(r'<td(?:\s[^>]*)?>.*?</td>',inner,flags=re.S)
+            if len(cells)!=17:return m.group(0)
+            return '<tr'+attrs+'>'+''.join(cells[i] for i in order)+'</tr>'
+        page=re.sub(r'<tr([^>]*)>(.*?)</tr>',reorder_row,page,flags=re.S)
+        css="""<style id='requirement-readable-v2'>table{font-size:12px!important}th,td{padding:7px 8px!important;line-height:1.3}.reqzoom{display:flex;align-items:center;gap:6px;margin:0 0 8px 0;width:max-content;background:white;border:1px solid #98a2b3;border-radius:6px;padding:5px}.reqzoom button{font-size:13px;padding:5px 9px}.desc{min-width:300px!important;max-width:500px!important}</style>"""
+        controls="<div class='reqzoom'><b>Table Zoom</b><button type='button' onclick='reqZoom(-10)'>−</button><button type='button' onclick='reqZoom(10)'>+</button><button type='button' onclick='reqZoomReset()'>Reset</button><span id='reqZoomValue'>100%</span></div>"
+        js="""<script id='requirement-zoom-v2'>(function(){var z=parseInt(localStorage.getItem('allianceReqZoom')||'100',10);function apply(){z=Math.max(70,Math.min(170,z));document.querySelectorAll('.tablebox table').forEach(function(t){t.style.fontSize=(12*z/100)+'px'});var v=document.getElementById('reqZoomValue');if(v)v.textContent=z+'%';localStorage.setItem('allianceReqZoom',String(z));}window.reqZoom=function(d){z+=d;apply()};window.reqZoomReset=function(){z=100;apply()};apply();})();</script>"""
+        page=page.replace('</head>',css+'</head>',1)
+        page=page.replace('<div class=tablebox>',controls+'<div class=tablebox>',1)
+        page=page.replace('</body>',js+'</body>',1)
         return page
     fix._requirements_page=requirements_page
-    return {'status':'INSTALLED','version':VERSION,'contact':'ASTRA_JID_PLUS_EVIDENCE_LINEAGE','compatibility':'WA_LOOKUP_PLUS_LEGACY_SENDER_HELPER','client_contact':'MERGED','compact':True}
+    return {'status':'INSTALLED','version':VERSION,'contact':'SEPARATE_WITH_ASTRA_EVIDENCE_RECOVERY','client_contact':'SEPARATE','zoom':'70-170%','priority_order':'MATCHER_BEFORE_SPARSE_FIELDS','database_changed':False}
