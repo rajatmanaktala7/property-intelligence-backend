@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 from fastapi import APIRouter, Request, HTTPException
 
-VERSION = "1.2.0-CLEAN-UI-DATA-RECTIFICATION-GATE"
+VERSION = "1.3.0-RECTIFICATION-ON-REQUIREMENT-AUTHORITY"
 TARGET_SCORE = 100.0
 
 CANONICAL_ROUTES = (
@@ -60,10 +60,12 @@ def audit(core: Any, requirement_app: Any = None, served_app: Any = None) -> dic
         rectification = {
             "status":"ACTIVE",
             "version":fix.VERSION,
+            "served_app_rectified":True,
+            "isolated_requirement_app_rectified":bool(requirement_app),
             "newspaper":"CAPTURE_ONLY",
             "manual":"ADD_ONLY",
             "magazine":"CLEAN_SOURCE_PAGE",
-            "requirement_contacts":"NORMALIZED",
+            "requirement_contacts":"NORMALIZED_PLUS_LINKED_WHATSAPP_SENDER",
             "master_requirements":"ALL_SOURCE_TOTAL",
             "master_properties":"SOURCE_SECTIONS_ONLY",
         }
@@ -75,10 +77,24 @@ def audit(core: Any, requirement_app: Any = None, served_app: Any = None) -> dic
 def register(core: Any, requirement_app: Any = None, served_app: Any = None) -> dict:
     app = getattr(core, "app", None) or core
 
-    # Run after all legacy/source registrars. This patch changes presentation and
-    # read normalization only; it does not bulk-promote or delete database rows.
+    # Presentation/read normalization only. Source records and canonical rows are
+    # not bulk-promoted, deleted or rewritten here.
     import alliance_ui_data_rectification_v1 as fix
-    fix_state = fix.register(core, requirement_app=requirement_app, served_app=served_app or app)
+    served_state = fix.register(core, requirement_app=requirement_app, served_app=served_app or app)
+
+    # Requirement pages are intentionally dispatched to a separate ASGI app by
+    # production_entrypoint. The previous release registered the rectification
+    # middleware only on the main app, so the user kept seeing the old tables.
+    # Register the same read-only rectification layer on the actual requirement
+    # authority as well. Route ownership remains v1235; middleware only presents
+    # the restored all-source view and normalized contacts/table layout.
+    requirement_state = None
+    if requirement_app is not None and requirement_app is not (served_app or app):
+        requirement_state = fix.register(
+            core,
+            requirement_app=requirement_app,
+            served_app=requirement_app,
+        )
 
     report = assert_critical_route_ownership(core, requirement_app)
     router = APIRouter()
@@ -96,6 +112,7 @@ def register(core: Any, requirement_app: Any = None, served_app: Any = None) -> 
         "version":VERSION,
         "acceptance_score":100.0,
         "critical_routes_locked":True,
-        "rectification":fix_state,
+        "rectification":served_state,
+        "requirement_rectification":requirement_state,
         "database_changed":False,
     }
