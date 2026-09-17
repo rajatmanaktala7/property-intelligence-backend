@@ -1,7 +1,7 @@
 from __future__ import annotations
 import re
 from sqlalchemy import text
-VERSION="1.0.0-ASTRA-WHATSAPP-CONTACT-BRIDGE"
+VERSION="1.0.1-ASTRA-WHATSAPP-CONTACT-BRIDGE-COMPAT"
 
 def _phone(v):
     s=str(v or '').strip().replace('@s.whatsapp.net','').replace('@c.us','')
@@ -28,15 +28,17 @@ def _deep_phones(*values):
     return ', '.join(out)
 
 def install(fix, engine):
-    # Astra's proven difference: normalize numeric WhatsApp JIDs/91-prefixed sender
-    # identities before rejecting them as non-phone values.
+    # Current rectification API calls this function _wa_lookup. Older releases called
+    # it _sender_from_whatsapp. Accept either so boot cannot fail during upgrades.
+    old_lookup=getattr(fix,'_wa_lookup',None) or getattr(fix,'_sender_from_whatsapp',None)
+    if not callable(old_lookup):
+        def old_lookup(row): return ''
+    old_norm=getattr(fix,'_norm_req')
+    old_page=getattr(fix,'_requirements_page')
     fix._phones=_deep_phones
-    old_lookup=fix._wa_lookup
-    old_norm=fix._norm_req
-    old_page=fix._requirements_page
 
     def astra_evidence(source_table,source_id):
-        if not source_id:return ''
+        if not source_id or engine is None:return ''
         try:
             with engine.connect() as c:
                 rows=c.execute(text("""SELECT c.whatsapp_phone,c.phone,e.evidence_json
@@ -54,12 +56,16 @@ def install(fix, engine):
     def wa_lookup(row):
         p=_deep_phones(row)
         if p:return p
-        p=old_lookup(row)
+        try:p=old_lookup(row)
+        except Exception:p=''
         if p:return p
         sid=fix._first(row,['source_pk','wa_requirement_id','requirement_id','record_id','id'])
         stable=fix._first(row,['source_table']) or 'WHATSAPP'
         return astra_evidence(stable,sid)
+    # Publish both names. This preserves compatibility with the current UI module and
+    # with any critical-flow release gate still checking the historical helper name.
     fix._wa_lookup=wa_lookup
+    fix._sender_from_whatsapp=wa_lookup
 
     def norm(obj,source_table=''):
         r=old_norm(obj,source_table)
@@ -70,7 +76,6 @@ def install(fix, engine):
                 try:p=wa_lookup(obj if isinstance(obj,dict) else {})
                 except Exception:p=''
             if p:r['contact']=p
-        # One compact client/contact field requested by user.
         bits=[]
         for v in (r.get('company'),r.get('name'),r.get('contact')):
             s=str(v or '').strip()
@@ -87,4 +92,4 @@ def install(fix, engine):
         page=page.replace('</style>','th:nth-child(4),td:nth-child(4),th:nth-child(5),td:nth-child(5){display:none}.desc{min-width:210px;max-width:330px}.loc{min-width:70px;max-width:120px}table{font-size:9px}th,td{padding:3px 4px}</style>')
         return page
     fix._requirements_page=requirements_page
-    return {'status':'INSTALLED','version':VERSION,'contact':'ASTRA_JID_PLUS_EVIDENCE_LINEAGE','client_contact':'MERGED','compact':True}
+    return {'status':'INSTALLED','version':VERSION,'contact':'ASTRA_JID_PLUS_EVIDENCE_LINEAGE','compatibility':'WA_LOOKUP_PLUS_LEGACY_SENDER_HELPER','client_contact':'MERGED','compact':True}
