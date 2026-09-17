@@ -10547,6 +10547,18 @@ async def v151_update_contact(cid:int,req:Request):
         c.execute(text("UPDATE pi_marketing_contacts SET "+",".join(sets)+",updated_at=NOW() WHERE id=:id"),params)
     return {"status":"ok"}
 
+@app.post("/api/v15-1/marketing-contacts/manual")
+async def v151_add_manual_marketing_contact(req:Request):
+    """Explicit manual entry; the existing normalized-mobile upsert keeps it deduplicated."""
+    need_login(req); _v151_setup()
+    body=await req.json(); phone=_v151_digits(body.get("phone"))
+    if not phone: raise HTTPException(400,"A valid 10-digit Indian mobile number is required")
+    category=str(body.get("category") or "OTHER").upper()
+    allowed={"CAFE","RESTAURANT","BANQUET","HOTEL","GUEST_HOUSE","LOUNGE","CLUB","BAR","FARMHOUSE","RETAILER","BROKER","OWNER","OTHER"}
+    if category not in allowed: raise HTTPException(400,"Unsupported marketing category")
+    _v151_upsert_contact(phone,name=str(body.get("name") or "").strip(),company=str(body.get("company") or "").strip(),category=category,city=str(body.get("city") or "").strip(),location=str(body.get("location") or "").strip(),source="MANUAL",source_detail="Manual marketing contact",notes=str(body.get("notes") or "").strip())
+    return {"status":"ok","deduplicated_by":"normalized_mobile","source":"MANUAL"}
+
 @app.get("/marketing-contacts",response_class=HTMLResponse)
 def v151_marketing_contacts_page(req:Request):
     role=page_role_or_redirect(req)
@@ -10993,6 +11005,9 @@ def v1551_marketing_summary(req:Request):
         "ai_retail":one("SELECT COUNT(*) FROM pi_marketing_contacts WHERE source ILIKE '%AI_RETAIL%'"),
         "property_database":one("SELECT COUNT(*) FROM pi_marketing_contacts WHERE source ILIKE '%PROPERTY_DATABASE%'"),
         "magazine":one("SELECT COUNT(*) FROM pi_marketing_contacts WHERE source ILIKE '%MAGAZINE%'"),
+        "whatsapp":one("SELECT COUNT(*) FROM pi_marketing_contacts WHERE source ILIKE '%WHATSAPP%'"),
+        "newspaper":one("SELECT COUNT(*) FROM pi_marketing_contacts WHERE source ILIKE '%NEWSPAPER%'"),
+        "manual":one("SELECT COUNT(*) FROM pi_marketing_contacts WHERE source ILIKE '%MANUAL%'"),
         "verified":one("SELECT COUNT(*) FROM pi_marketing_contacts WHERE verified_status='VERIFIED'"),
         "ready":one("SELECT COUNT(*) FROM pi_marketing_contacts WHERE whatsapp_status='READY'"),
         "categories":categories
@@ -11056,7 +11071,12 @@ th{position:sticky;top:0;background:#f8fafc;z-index:2}.pill{display:inline-block
 <button class="tab" data-source="AI_RETAIL" onclick="setSource(this)">AI Retail</button>
 <button class="tab" data-source="PROPERTY_DATABASE" onclick="setSource(this)">Property Database</button>
 <button class="tab" data-source="MAGAZINE" onclick="setSource(this)">Magazine</button>
+<button class="tab" data-source="WHATSAPP" onclick="setSource(this)">WhatsApp</button>
+<button class="tab" data-source="NEWSPAPER" onclick="setSource(this)">Newspaper</button>
+<button class="tab" data-source="MANUAL" onclick="setSource(this)">Manual</button>
 </div>
+
+<div class="card"><b>Add marketing contact manually</b><div class="filters"><input id="mname" placeholder="Name / business"><input id="mphone" placeholder="10-digit mobile *"><select id="mcategory"><option>BROKER</option><option>OWNER</option><option>BANQUET</option><option>RESTAURANT</option><option>CAFE</option><option>LOUNGE</option><option>GUEST_HOUSE</option><option>HOTEL</option><option>CLUB</option><option>BAR</option><option>OTHER</option></select><input id="mcity" placeholder="City"><input id="mlocation" placeholder="Location"><button class="btn" onclick="addManual()">Save contact</button></div><span class="small">Stored as MANUAL and deduplicated by normalized mobile. It is not added to a messaging campaign automatically.</span></div>
 
 <div class="card">
 <div><b>Category Segregation</b></div>
@@ -11108,6 +11128,7 @@ async function summary(){
   catgrid.innerHTML=Object.entries(d.categories||{}).map(([k,v])=>`<span class="cchip" onclick="pickCat('${k}')">${k}<b>${v}</b></span>`).join('');
 }
 function pickCat(c){category.value=c;loadContacts();}
+async function addManual(){try{await A('/api/v15-1/marketing-contacts/manual',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:mname.value,phone:mphone.value,category:mcategory.value,city:mcity.value,location:mlocation.value})});msg.textContent='Manual contact saved and deduplicated by mobile.';mphone.value='';await summary();await loadContacts()}catch(e){msg.textContent='ERROR: '+e.message}}
 async function loadContacts(){
   let u='/api/v15-1/marketing-contacts?category='+encodeURIComponent(category.value)
       +'&source='+encodeURIComponent(source)

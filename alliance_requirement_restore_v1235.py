@@ -180,6 +180,25 @@ def _source_hint(obj):
     ]
     return " ".join(str(_first(obj, [k], "")) for k in keys)
 
+def _safe_budget(value, message=""):
+    """Never present a phone/JID as money just because a source column was mis-mapped."""
+    raw = str(value or "").strip()
+    digits = re.sub(r"\D", "", raw)
+    phone_like = bool(re.fullmatch(r"(?:91)?[6-9]\d{9}", digits))
+    # A mobile-shaped field is never a budget.  Message context is deliberately
+    # ignored here: a rental request often contains the word "rent" beside its
+    # sender number, which was the original false-positive path.
+    has_money_context = bool(re.search(r"(?:₹|rs\.?|inr|lakh|lac|crore|cr)", raw, re.I))
+    return "" if phone_like and not has_money_context else raw
+
+def _transaction_from_evidence(value, message=""):
+    blob = (str(value or "") + " " + str(message or "")).upper()
+    if re.search(r"\b(OUTRIGHT|PURCHASE|BUY|SALE)\b", blob):
+        return "SALE"
+    if re.search(r"\b(RENT|LEASE|LETTING)\b", blob):
+        return "RENT"
+    return ""
+
 def _normalize_source_row(table, obj, idx):
     source = _classify(table)
     if source == "OTHER":
@@ -189,12 +208,15 @@ def _normalize_source_row(table, obj, idx):
     amin = _first(obj, ["area_min", "area_min_sqft", "minimum_area", "minimum_area_sqft", "min_area", "min_area_sqft"])
     amax = _first(obj, ["area_max", "area_max_sqft", "maximum_area", "maximum_area_sqft", "max_area", "max_area_sqft"])
     area = f"{amin}-{amax}" if amin or amax else _first(obj, ["area_sqft", "requirement_sqft", "required_area", "area"])
+    message = _message(obj)
+    raw_tx = _first(obj, ["transaction_type", "transaction", "rent_sale", "rent_or_sale", "deal_type"])
+    raw_budget = _first(obj, ["budget", "sale_budget", "rent_budget", "max_budget", "budget_raw"])
     return {
         "canonical_id": str(canonical_id or ""),
         "source_pk": str(source_pk or idx),
         "source_table": table,
         "source": source,
-        "message": _message(obj),
+        "message": message,
         "company": _first(obj, ["company_name", "brand_name", "client_company", "company", "retailer_name"]),
         "contact_name": _first(obj, ["contact_name", "client_name", "sender_name", "name"]),
         "contact": _contact(obj),
@@ -202,14 +224,14 @@ def _normalize_source_row(table, obj, idx):
             "preferred_locations", "preferred_location", "location", "locality",
             "city", "area_name", "micro_market"
         ]),
-        "transaction": _first(obj, ["transaction_type", "transaction", "rent_sale", "rent_or_sale", "deal_type"]),
+        "transaction": _transaction_from_evidence(raw_tx, message),
         "category": _first(obj, [
             "property_category", "required_property_category", "category",
             "intended_use", "use", "use_case", "business_category"
         ]),
         "property_type": _first(obj, ["property_type", "required_property_type", "asset_type"]),
         "area": area,
-        "budget": _first(obj, ["budget", "sale_budget", "rent_budget", "max_budget", "budget_raw"]),
+        "budget": _safe_budget(raw_budget, message),
         "created_at": _first(obj, ["created_at", "timestamp", "message_timestamp", "date", "captured_at"]),
         "verification": "SOURCE / NEEDS MASTER VERIFICATION",
         "assigned_to": "",

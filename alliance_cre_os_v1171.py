@@ -1,5 +1,5 @@
 from __future__ import annotations
-import html, json, uuid, datetime
+import html, json, uuid, datetime, re
 from urllib.parse import quote
 from fastapi import Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -15,7 +15,21 @@ def e(v): return html.escape('' if v is None else str(v))
 def shell(body,k=''):
     tabs=''.join(f'<a class="{"on" if k==x else ""}" href="/alliance/source/{x}">{cfg[1]}</a>' for x,cfg in SOURCES.items())
     css='''*{box-sizing:border-box}body{margin:0;background:#f5f7fa;color:#172033;font:12px Arial}header{background:#102a43;color:#fff;padding:14px 18px}.top{background:#fff3cd;border-bottom:1px solid #d6b656;padding:8px 12px}nav,.tabs{background:#fff;border-bottom:1px solid #98a2b3;padding:7px;white-space:nowrap;overflow:auto}a{text-decoration:none}nav a,.tabs a,.btn,button,.back{display:inline-block;background:#102a43;color:#fff;padding:7px 9px;margin:2px;border:0}.back{background:#1f6f43;font-weight:bold}.tabs a.on{background:#486581}.danger{background:#9b1c1c}.wrap{padding:10px}.kpis{display:flex;gap:6px;flex-wrap:wrap}.kpi{display:inline-flex;flex-direction:column;background:#fff;border:1px solid #667085;padding:10px 16px}.kpi b{font-size:24px}.search{display:flex;gap:5px;margin:8px 0}.search input{min-width:320px}.pager{margin:8px 0;background:#fff;border:1px solid #98a2b3;padding:7px}.tablebox{overflow:auto;max-height:70vh;border:1px solid #667085}table{border-collapse:collapse;width:max-content;min-width:100%;background:#fff}th,td{border:1px solid #98a2b3;padding:5px 6px;vertical-align:top;overflow-wrap:anywhere}th{background:#e9eef5;position:sticky;top:0;z-index:2}td.desc{min-width:360px;max-width:520px;white-space:pre-wrap}input,select,textarea{border:1px solid #98a2b3;padding:7px;width:100%}textarea{min-height:110px}.grid{display:grid;grid-template-columns:repeat(3,minmax(180px,1fr));gap:8px;background:#fff;border:1px solid #98a2b3;padding:12px}.wide{grid-column:1/-1}.thumb{max-width:240px;max-height:180px;margin:6px;border:1px solid #98a2b3}.hint{color:#667085;font-size:11px}@media(max-width:800px){.grid{grid-template-columns:1fr}.search{display:block}.search input{min-width:0}}'''
-    return f'''<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>{css}</style></head><body><header><b>Alliance CRE Intelligence OS 11.7.1</b><br>Full Property Database</header><div class="top"><a class="back" href="/alliance/primary">← Back to Dashboard</a></div><nav><a href="/alliance/property-add/manual">+ Add Manual Property</a><a href="/alliance/source/manual">Property Databases</a><a href="/commercial-intelligence">Commercial Intelligence</a></nav><div class="tabs">{tabs}</div><div class="wrap">{body}</div></body></html>'''
+    return f'''<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>{css}</style></head><body><header><b>Alliance CRE Intelligence OS 11.7.1</b><br>Full Property Database</header><div class="top"><a class="back" href="/alliance/primary">← Back to Dashboard</a></div><nav><a href="/alliance/final/database/master">Master Properties</a><a href="/alliance/property-add/manual">+ Add Manual Property</a><a href="/newspaper-upload">Upload Newspaper</a><a href="/magazine-capture">Upload Magazine</a></nav><div class="tabs">{tabs}</div><div class="wrap">{body}</div></body></html>'''
+
+def _property_description(source, value):
+    """Display clean property facts only; source evidence remains untouched in storage."""
+    raw = str(value or "").strip()
+    if source != "newspaper":
+        return raw
+    raw = re.sub(r"\s*Imported from Newspaper Capture Source\s+[^;|]+(?:;\s*core property\s+[^;|]+)?", "", raw, flags=re.I)
+    parts = re.findall(r"(?:Property|Type|Remarks):\s*([^|;]+)", raw, flags=re.I)
+    clean = " | ".join(re.sub(r"\s+", " ", p).strip() for p in parts if p.strip())
+    return clean or raw
+
+def _looks_like_requirement(value):
+    s = str(value or "").lower()
+    return bool(re.search(r"\b(looking for|requirement|wanted|need\s+(?:a|an|\d)|client\s+looking)\b", s))
 
 def source_data(engine,k,q,page,per_page):
     t,_,pk=SOURCES[k]; off=(page-1)*per_page
@@ -32,8 +46,14 @@ def listing(engine,k,q,page,per_page):
     pages=max(1,(filtered+per_page-1)//per_page); page=min(max(1,page),pages)
     heads=['Property ID','Location','Description','Category','Type','Area','Unit','Floor','Rent/Sale Amount','Owner/Broker','Contact No.','Entry Date','Verification','Posted By','Assigned To','Source','Photos','Videos','Edit','Archive']
     trs=[]
+    held_for_review=0
     for d in rs:
         n=base.norm(k,d); rid=str(d.get(SOURCES[k][2],'')); ph,vi=base.media_count(engine,k,d); cells=[]
+        if k == 'newspaper' and _looks_like_requirement(n[2] if len(n)>2 else ''):
+            held_for_review += 1
+            continue
+        if len(n)>2:
+            n[2]=_property_description(k,n[2])
         for i,x in enumerate(n): cells.append(f'<td class="{"desc" if i==2 else ""}">{e(x)}</td>')
         u=f'/alliance/property-media/{k}/{quote(rid,safe="")}'
         cells += [f'<td><a class="btn" href="{u}">Photos ({ph})</a></td>',f'<td><a class="btn" href="{u}">Videos ({vi})</a></td>',f'<td><a class="btn" href="/alliance/property-edit/{k}/{quote(rid,safe="")}">Edit</a></td>',f'<td><form method="post" action="/alliance/property-archive/{k}/{quote(rid,safe="")}" onsubmit="return confirm(\'Archive record?\')"><button class="danger">Archive</button></form></td>']
@@ -42,7 +62,8 @@ def listing(engine,k,q,page,per_page):
     prev=f'<a class="btn" href="{b}&page={page-1}">← Previous</a>' if page>1 else ''
     nxt=f'<a class="btn" href="{b}&page={page+1}">Next →</a>' if page<pages else ''
     opts=''.join(f'<option value="{x}" {"selected" if x==per_page else ""}>{x}</option>' for x in (50,100,200,500))
-    body=f'''<div class="kpis"><div class="kpi"><b>{total:,}</b><span>FULL DATABASE TOTAL</span></div><div class="kpi"><b>{filtered:,}</b><span>{'Search results' if q else 'Active records'}</span></div><div class="kpi"><b>{lo:,}–{hi:,}</b><span>Showing now</span></div></div><form class="search"><input name="q" value="{e(q)}" placeholder="Search complete {SOURCES[k][1]} database"><select name="per_page" style="width:110px">{opts}</select><input type="hidden" name="page" value="1"><button>Search</button></form><div class="pager">Page <b>{page:,}</b> of <b>{pages:,}</b> · Showing {lo:,}–{hi:,} of {filtered:,} {prev}{nxt}</div><div class="tablebox"><table><thead><tr>{''.join('<th>'+h+'</th>' for h in heads)}</tr></thead><tbody>{''.join(trs) if trs else '<tr><td colspan="20">No records</td></tr>'}</tbody></table></div><div class="pager">{prev} Page {page:,} of {pages:,} {nxt}</div>'''
+    review_note = f'<p class="hint">{held_for_review} Newspaper row(s) on this page were held out of the property view because their text reads as a requirement. Raw source evidence is retained and is not deleted.</p>' if held_for_review else ''
+    body=f'''<div class="kpis"><div class="kpi"><b>{total:,}</b><span>FULL SOURCE RECORDS</span></div><div class="kpi"><b>{filtered:,}</b><span>{'Search results' if q else 'Active source records'}</span></div><div class="kpi"><b>{lo:,}–{hi:,}</b><span>Source range</span></div></div><form class="search"><input name="q" value="{e(q)}" placeholder="Search complete {SOURCES[k][1]} database"><select name="per_page" style="width:110px">{opts}</select><input type="hidden" name="page" value="1"><button>Search</button></form><div class="pager">Page <b>{page:,}</b> of <b>{pages:,}</b> · Source range {lo:,}–{hi:,} of {filtered:,} {prev}{nxt}</div>{review_note}<div class="tablebox"><table><thead><tr>{''.join('<th>'+h+'</th>' for h in heads)}</tr></thead><tbody>{''.join(trs) if trs else '<tr><td colspan="20">No clean property rows on this source page.</td></tr>'}</tbody></table></div><div class="pager">{prev} Page {page:,} of {pages:,} {nxt}</div>'''
     return shell(body,k)
 
 def add_form():

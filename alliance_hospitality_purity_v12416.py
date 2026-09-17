@@ -15,6 +15,7 @@ NOISE_EXACT={
 NOISE_PATTERNS=(
     r"^restaurants? in\b",r"^cafes? in\b",r"^banquet halls? in\b",r"^hotels? in\b",
     r"^clubs? in\b",r"^bars? in\b",r"^guest houses? in\b",r"\bcommercial projects?\b",
+    r"^contact info$",r"^[a-z0-9.-]+\.(?:in|com|org|net)$",r"\b(news|aajtak|timesofindia|hindustantimes)\.(?:in|com)\b",
 )
 BAD_EMAILS={"you@email.com","example@example.com","test@test.com"}
 AGGREGATOR_HOSTS=("justdial.","tripadvisor.","zomato.","swiggy.","magicpin.","sloshout.","wedmegood.")
