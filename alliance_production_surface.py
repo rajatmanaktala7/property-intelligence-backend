@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from fastapi import Request, Query, HTTPException
+from fastapi.responses import HTMLResponse
 from sqlalchemy import text
 
-VERSION = "PRODUCTION-SURFACE-1.1-NO-WHATSAPP-UI"
+VERSION = "PRODUCTION-SURFACE-2.0-CANONICAL-CLEAN"
 STATE = {"registered": False, "error": None, "routes": []}
+
 
 def _remove_owned(app, owned_paths):
     kept = []
@@ -16,6 +18,7 @@ def _remove_owned(app, owned_paths):
         kept.append(route)
     app.router.routes[:] = kept
 
+
 def register(wrapped):
     app = wrapped.app
     core = wrapped.core
@@ -23,6 +26,12 @@ def register(wrapped):
     import alliance_v383_database_foundation as v383
     import alliance_v46_unified_intelligence as v46
     import alliance_v45_live_whatsapp_takeover as v451
+    import alliance_master_matcher_contract_v1 as master_matcher
+    import alliance_dashboard_cleanliness_v1 as cleanliness
+
+    # Install the existing non-blocking cleanliness guard. It does not scan or
+    # rewrite historical data at startup; it only hardens future explicit rebuilds.
+    cleanliness_state = cleanliness.register(wrapped)
 
     def v383_status(req: Request):
         core.need_login(req)
@@ -113,11 +122,42 @@ def register(wrapped):
             "rows": out,
         }
 
-    # IMPORTANT:
-    # Production surface owns API/health/intelligence routes only.
-    # WhatsApp presentation routes are intentionally NOT registered here.
-    # Sole UI owner is alliance_live_feed_purity V5.1, loaded afterwards by
-    # production_entrypoint.py.
+    def canonical_match(req: Request, q: str, limit: int = Query(50, ge=1, le=200)):
+        core.need_login(req)
+        q = (q or "").strip()
+        if not q:
+            raise HTTPException(422, "Requirement is required")
+        try:
+            result = master_matcher.run_match(core.engine, q, limit=limit)
+            result["canonical_contract"] = "MASTER_PROPERTIES_ONLY"
+            result["master_table"] = master_matcher.MASTER_TABLE
+            return result
+        except Exception as exc:
+            raise HTTPException(500, f"CANONICAL_MATCH_FAILED: {type(exc).__name__}: {exc}")
+
+    def clean_home(req: Request):
+        core.need_login(req)
+        html = """<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>
+<title>Alliance CRE Command Centre</title><style>
+body{font-family:Arial,sans-serif;margin:0;background:#f5f2ec;color:#24211d}.wrap{max-width:1100px;margin:34px auto;padding:0 18px}
+h1{margin-bottom:4px}.sub{color:#6d655c;margin-top:0}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px;margin-top:24px}
+a.card{display:block;background:#fff;border:1px solid #ded8cf;border-radius:12px;padding:18px;text-decoration:none;color:#24211d;box-shadow:0 2px 8px #0000000a}
+a.card:hover{border-color:#8d8173}.card b{display:block;font-size:18px;margin-bottom:7px}.card span{font-size:14px;color:#6d655c}
+.match{background:#fff;border:1px solid #ded8cf;border-radius:12px;padding:18px;margin-top:18px}input{width:70%;max-width:720px;padding:11px;border:1px solid #bbb;border-radius:8px}button{padding:11px 16px;border:0;border-radius:8px;background:#24211d;color:#fff;cursor:pointer}pre{white-space:pre-wrap;background:#f7f7f7;padding:12px;border-radius:8px;max-height:420px;overflow:auto}.foot{margin-top:22px;color:#756d64;font-size:13px}
+</style></head><body><div class='wrap'><h1>Alliance CRE Command Centre</h1><p class='sub'>One Master Property Database. One Master Requirement Database. One canonical matcher.</p>
+<div class='grid'>
+<a class='card' href='/alliance/primary/properties'><b>Master Properties</b><span>All valid property inventory from Manual, WhatsApp, Newspaper and Magazine.</span></a>
+<a class='card' href='/alliance/primary/requirements'><b>Master Requirements</b><span>All active requirements with Run Matcher workflow.</span></a>
+<a class='card' href='/property-manual'><b>Add Property</b><span>Add a manual property into the operational pipeline.</span></a>
+<a class='card' href='/whatsapp-live'><b>WhatsApp Live</b><span>Live property and requirement capture with source identity.</span></a>
+<a class='card' href='/alliance/primary/matcher'><b>Matcher</b><span>Review canonical matching results and verification status.</span></a>
+<a class='card' href='/alliance/primary/followups'><b>Follow-ups</b><span>Approved actions and team follow-up queue.</span></a>
+</div>
+<div class='match'><h2>Smart Match</h2><p>Write the requirement. Results are sourced only from Master Properties.</p><input id='q' placeholder='Example: restaurant space 2000 sqft in Saket for rent'><button onclick='runMatch()'>Run Matcher</button><pre id='out'>Ready.</pre></div>
+<p class='foot'>Source databases remain available in their own sections for ingestion and audit. Team navigation is intentionally limited to operational actions.</p></div>
+<script>async function runMatch(){const q=document.getElementById('q').value.trim(),o=document.getElementById('out');if(!q){o.textContent='Enter a requirement.';return;}o.textContent='Matching...';try{const r=await fetch('/api/alliance/canonical-match?q='+encodeURIComponent(q));const d=await r.json();o.textContent=JSON.stringify(d,null,2);}catch(e){o.textContent='Matcher error: '+e;}}</script></body></html>"""
+        return HTMLResponse(html)
+
     routes = [
         ("/api/v383/status", v383_status, ["GET"]),
         ("/api/v383/sync", v383_sync, ["POST"]),
@@ -125,6 +165,8 @@ def register(wrapped):
         ("/api/v46/semantic-search", v46_semantic_search, ["GET"]),
         ("/api/v451/live/status", v451_status, ["GET"]),
         ("/api/v451/live/properties", v451_properties, ["GET"]),
+        ("/api/alliance/canonical-match", canonical_match, ["GET"]),
+        ("/alliance/primary", clean_home, ["GET"]),
     ]
 
     owned = {p for p, _, _ in routes}
@@ -133,13 +175,13 @@ def register(wrapped):
     for path, endpoint, methods in routes:
         app.add_api_route(path, endpoint, methods=methods)
 
-    present = {
-        p: any(getattr(r, "path", None) == p for r in app.router.routes)
-        for p in owned
-    }
+    present = {p: any(getattr(r, "path", None) == p for r in app.router.routes) for p in owned}
     STATE["registered"] = all(present.values())
     STATE["routes"] = sorted([p for p, ok in present.items() if ok])
     STATE["error"] = None
+    STATE["matcher_contract"] = "MASTER_PROPERTIES_ONLY"
+    STATE["matcher_master_table"] = master_matcher.MASTER_TABLE
+    STATE["dashboard_cleanliness"] = cleanliness_state
     STATE["whatsapp_ui_owner"] = "alliance_live_feed_purity V5.1"
     STATE["whatsapp_ui_registered_here"] = False
     return dict(STATE)
