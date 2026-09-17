@@ -60,7 +60,7 @@ def register(core):
             max_length=5000,
         )
     ):
-        import alliance_whatsapp_first_match_v1 as wa
+        import alliance_master_matcher_contract_v1 as matcher
         import alliance_phase5_canonical_matcher as phase5
 
         total = 0
@@ -82,7 +82,10 @@ def register(core):
                     except Exception:
                         current_generation_rows = None
 
-        result = wa.run_match(core.engine, q, min_score=70.0, limit=20)
+        # Diagnostic samples must exercise the same master-only contract as
+        # every live v60 Run Matcher action.  WhatsApp remains lineage/evidence
+        # data and is never queried as a parallel candidate source here.
+        result = matcher.run_match(core.engine, q, min_score=70.0, limit=20)
         req = result.get("requirement") or {}
         summary = result.get("summary") or {}
 
@@ -101,16 +104,17 @@ def register(core):
                 "api_owners": _owners(app, "/api/v60/deal-match"),
                 "status_owners": _owners(app, "/api/v60/status"),
                 "route_version": getattr(v60, "VERSION", "unknown"),
-                "engine_version": getattr(wa, "VERSION", "unknown"),
+                "engine_version": getattr(matcher, "VERSION", "unknown"),
+                "source_contract": getattr(matcher, "MATCHER_SOURCE_CONTRACT", "unknown"),
             },
             "whatsapp_inventory": {
                 "table": "pi_whatsapp_property_master",
                 "total_rows": total,
                 "generation_count": generations,
                 "current_generation_rows": current_generation_rows,
-                "search_scope": "ALL_STORED_GENERATIONS_REQUIREMENT_FILTERED",
-                "rows_loaded_for_requirement": summary.get("pi_whatsapp_property_master"),
-                "deduped_candidates": summary.get("whatsapp_deduped_candidates"),
+                "search_scope": "SOURCE_EVIDENCE_ONLY_NOT_A_MATCH_CANDIDATE_SOURCE",
+                "rows_loaded_for_requirement": 0,
+                "deduped_candidates": 0,
             },
             "sample_requirement": {
                 "parsed": req,

@@ -40,8 +40,12 @@ def snapshot(core):
         "pi_master_properties_v711", "pi_master_requirements_v711", "pi_master_source_links_v711",
         "pi_master_workflow_v720", "pi_master_matches_v720", "pi_operational_properties", "pi_operational_requirements"
     ]}
+    matcher = None
     try:
-        import alliance_whatsapp_first_match_v1 as matcher
+        # v60 imports this contract as its matcher engine.  Do not inspect the
+        # retained WhatsApp evidence helper here: it is not a live matcher
+        # authority and made a healthy master-only runtime appear unsafe.
+        import alliance_master_matcher_contract_v1 as matcher
         matcher_version = getattr(matcher, "VERSION", "unknown")
     except Exception as exc:
         matcher_version = f"ERROR:{type(exc).__name__}"
@@ -75,7 +79,11 @@ def snapshot(core):
         if not ok: blockers.append(f"TABLE_PRESENTATION_REGRESSION:{k}")
     for k,ok in tables.items():
         if not ok: blockers.append(f"MISSING_TABLE:{k}")
-    if "CANONICAL-MASTER-AUTHORITY" not in matcher_version:
+    if (
+        getattr(matcher, "MATCHER_SOURCE_CONTRACT", None) != "MASTER_ONLY"
+        or getattr(matcher, "MASTER_TABLE", None) != "pi_master_properties_v711"
+        or "CANONICAL-MASTER-AUTHORITY" not in matcher_version
+    ):
         blockers.append("MATCHER_AUTHORITY_NOT_CANONICAL_MASTER")
     return {
         "status": "PASS" if not blockers else "FAIL",

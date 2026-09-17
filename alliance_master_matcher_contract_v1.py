@@ -5,7 +5,9 @@ from sqlalchemy import text
 import alliance_phase5_canonical_matcher as base
 from alliance_phase5_canonical_matcher import *
 
-VERSION = "1.0.1-JSON-SAFE-MASTER-DATABASE-AUTHORITY"
+# This exact marker is consumed by the live System Doctor.  It is not a
+# cosmetic label: this module is the only candidate loader used by v60.
+VERSION = "1.0.2-CANONICAL-MASTER-AUTHORITY"
 MASTER_TABLE = "pi_master_properties_v711"
 WORKFLOW_TABLE = "pi_master_workflow_v720"
 MATCHER_SOURCE_CONTRACT = "MASTER_ONLY"
