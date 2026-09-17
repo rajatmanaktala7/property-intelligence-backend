@@ -1,7 +1,7 @@
 from __future__ import annotations
 from typing import Any
 from fastapi import APIRouter,Request,HTTPException
-VERSION="1.5.0-ASTRA-SENDER-LINEAGE-RESTORED"
+VERSION="1.6.0-CANONICAL-REQUIREMENT-READABILITY"
 TARGET_SCORE=100.0
 CANONICAL_ROUTES=(("/login","GET","app","login_page"),("/login","POST","app","login_post"),("/alliance/primary","GET","alliance_regional_newspaper_authority_v1","regional_dashboard"),("/commercial-intelligence","GET","alliance_final_dashboard_v1241","commercial_fallback"),("/alliance/primary/matcher","GET","alliance_master_requirement_authority_v1","smart_matcher_redirect"))
 REQUIREMENT_ROUTES=(("/alliance/final/requirements","GET","alliance_requirement_restore_v1235","requirement_hub"),("/alliance/final/requirements/{source}","GET","alliance_requirement_restore_v1235","requirement_db"))
@@ -28,15 +28,17 @@ def audit(core:Any,requirement_app:Any=None,served_app:Any=None)->dict:
  report=assert_critical_route_ownership(core,requirement_app)
  try:
   import alliance_ui_data_rectification_v1 as fix
-  rect={"status":"ACTIVE","version":fix.VERSION,"astra_sender_lineage":True,"client_contact_merged":True,"compact_tables":True,"manual_edit":True,"master_requirements":"ALL_SOURCE_TOTAL"}
+  rect={"status":"ACTIVE","version":fix.VERSION,"astra_sender_lineage":True,"contacts_separate":True,"canonical_requirement_zoom":True,"sparse_fields_after_matcher":True,"manual_edit":True,"master_requirements":"ALL_SOURCE_TOTAL"}
  except Exception as exc:rect={"status":"ERROR","error":f"{type(exc).__name__}: {exc}"}
  return {"status":report["status"],"version":VERSION,"acceptance_score":report["acceptance_score"],"critical_route_ownership":report["checks"],"rectification":rect,"database_changed":"MANUAL_EDITS_ONLY"}
 def register(core:Any,requirement_app:Any=None,served_app:Any=None)->dict:
  app=getattr(core,"app",None) or core
+ # Patch the ACTUAL canonical route owner first. Earlier visual patches targeted a
+ # middleware renderer while the isolated requirement app remained owned by v1235.
+ import alliance_requirement_readability_patch_v1 as readability
+ readability_state=readability.install()
  import alliance_ui_data_rectification_v1 as fix
  _install_source_truth_patch(fix)
- # Restore the proven Astra normalization before any requirement middleware is registered.
- # This accepts 91-prefixed WhatsApp JIDs and uses Astra's evidence lineage as fallback.
  import alliance_astra_requirement_contact_bridge_v1 as astra_bridge
  astra_state=astra_bridge.install(fix,getattr(core,"engine",None))
  served_state=fix.register(core,requirement_app=requirement_app,served_app=served_app or app)
@@ -51,4 +53,4 @@ def register(core:Any,requirement_app:Any=None,served_app:Any=None)->dict:
   if role not in {"admin","team"}:raise HTTPException(401,"Login required")
   return audit(core,requirement_app,served_app)
  app.include_router(router)
- return {"status":"PASS","version":VERSION,"acceptance_score":100.0,"critical_routes_locked":True,"astra":astra_state,"rectification":served_state,"requirement_rectification":requirement_state,"hotfix":hotfix_state,"database_changed":"MANUAL_EDITS_ONLY"}
+ return {"status":"PASS","version":VERSION,"acceptance_score":100.0,"critical_routes_locked":True,"canonical_requirement_readability":readability_state,"astra":astra_state,"rectification":served_state,"requirement_rectification":requirement_state,"hotfix":hotfix_state,"database_changed":"MANUAL_EDITS_ONLY"}
