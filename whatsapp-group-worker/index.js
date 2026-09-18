@@ -29,7 +29,22 @@ function maskPhone(p){const s=String(p||"");return s.length<=4?"****":"*".repeat
 function remember(id){const n=Date.now();recentIds.set(id,n);for(const[k,t]of recentIds)if(n-t>21600000)recentIds.delete(k)}
 function alreadySeen(id){return recentIds.has(id)}
 function getText(m){if(!m)return"";return m.conversation||m.extendedTextMessage?.text||m.imageMessage?.caption||m.videoMessage?.caption||m.documentMessage?.caption||m.buttonsResponseMessage?.selectedDisplayText||m.listResponseMessage?.title||""}
-function normalizePhone(jid){if(!jid)return"";return String(jid).split("@")[0].split(":")[0].replace(/\D/g,"")}
+function normalizePhone(jid){if(!jid)return"";const s=String(jid);if(!s.includes("@s.whatsapp.net")&&!s.includes("@c.us"))return"";const n=s.split("@")[0].split(":")[0].replace(/\D/g,"");return /^(?:91)?[6-9]\d{9}$/.test(n)?(n.length===12?n.slice(2):n):""}
+function isLid(jid){return /@lid$/i.test(String(jid||""))}
+function senderIdentity(msg){
+ const candidates=[
+  msg?.key?.participant,
+  msg?.key?.participantAlt,
+  msg?.participant,
+  msg?.participantAlt,
+  msg?.message?.extendedTextMessage?.contextInfo?.participant,
+  msg?.message?.extendedTextMessage?.contextInfo?.participantAlt
+ ].filter(Boolean).map(String);
+ const phoneJid=candidates.find(x=>normalizePhone(x))||"";
+ const lidJid=candidates.find(isLid)||"";
+ return{phoneJid,lidJid,rawParticipant:String(msg?.key?.participant||msg?.participant||""),
+        participantAlt:String(msg?.key?.participantAlt||msg?.participantAlt||"")};
+}
 function esc(v){return String(v??"").replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;")}
 function fmt(v){if(!v)return"—";try{return new Date(v).toLocaleString("en-IN",{timeZone:"Asia/Kolkata",dateStyle:"medium",timeStyle:"medium"})}catch{return String(v)}}
 
@@ -84,10 +99,17 @@ async function start(){
     let meta=null;try{meta=await sock.groupMetadata(jid)}catch{}
     const groupName=(meta?.subject||jid).trim();stateView.lastMessageAt=new Date().toISOString();stateView.lastGroupName=groupName;
     if(GROUP_ALLOWLIST.length&&!GROUP_ALLOWLIST.includes(groupName))continue;
-    const pj=msg.key.participant||msg.participant||msg.message?.extendedTextMessage?.contextInfo?.participant||"";
-    const senderPhone=normalizePhone(pj),senderName=msg.pushName||senderPhone||"Unknown";
+    const ident=senderIdentity(msg);
+    const senderPhone=normalizePhone(ident.phoneJid);
+    const senderName=msg.pushName||senderPhone||(ident.lidJid?"WhatsApp contact":"Unknown");
     const epoch=Number(msg.messageTimestamp||0),timestamp=epoch?new Date(epoch*1000).toISOString():new Date().toISOString();
-    await postWithRetry({account_phone:ACCOUNT_PHONE,group_name:groupName,external_message_id:id,sender_name:senderName,sender_phone:senderPhone,timestamp,text})
+    await postWithRetry({
+     account_phone:ACCOUNT_PHONE,group_name:groupName,external_message_id:id,
+     sender_name:senderName,sender_phone:senderPhone,
+     sender_jid:ident.phoneJid,sender_lid:ident.lidJid,
+     participant:ident.rawParticipant,participant_alt:ident.participantAlt,
+     timestamp,text
+    })
    }catch(e){stateView.lastError=String(e);logger.error({err:String(e)},"Could not process incoming group message")}
   });
   starting=false;
