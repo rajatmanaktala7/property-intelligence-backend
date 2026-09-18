@@ -5,7 +5,7 @@ from fastapi import HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from sqlalchemy import inspect, text
 
-VERSION="1.8.0-ASTRA-INTERPRETATION-AND-REGISTRY-SAFETY"
+VERSION="1.8.1-MATCHER-DISPLAY-ZERO-SAFETY"
 MASTER_REQUIREMENT_TABLE="pi_requirement_gate_v1191"
 MASTER_PROPERTY_TABLE="pi_master_properties_v711"
 MASTER_LINKS_TABLE="pi_master_source_links_v711"
@@ -370,10 +370,10 @@ def _render_match(core,req):
     ai=result.get("astra_interpretation") or {}
     astra_html="<div class='card'><b>Astra interpretation:</b> "+_e(ai.get("confidence") or "—")+" · Transaction: "+_e(ai.get("transaction") or "—")+" · Location: "+_e(", ".join(ai.get("locations") or []) or "—")+" · Asset: "+_e(ai.get("asset") or "—")+"</div>"
     head=astra_html+"<div class='card'><b>Matcher authority:</b> MASTER_ONLY · <b>Master property database:</b> "+_e(MASTER_PROPERTY_TABLE)+ \
-         " · <b>Master rows considered:</b> "+_e(summary.get("master_rows_considered"))+ \
-         " · <b>Exact verified:</b> "+_e(summary.get("exact_verified"))+ \
-         " · <b>Exact to verify:</b> "+_e(summary.get("exact_needs_verification"))+ \
-         " · <b>Alternatives:</b> "+_e(summary.get("approved_alternatives"))+"</div>"
+         " · <b>Master rows considered:</b> "+_e(summary.get("master_rows_considered") if summary.get("master_rows_considered") is not None else 0)+ \
+         " · <b>Exact verified:</b> "+_e(summary.get("exact_verified") if summary.get("exact_verified") is not None else 0)+ \
+         " · <b>Exact to verify:</b> "+_e(summary.get("exact_needs_verification") if summary.get("exact_needs_verification") is not None else 0)+ \
+         " · <b>Alternatives:</b> "+_e(summary.get("approved_alternatives") if summary.get("approved_alternatives") is not None else 0)+"</div>"
     if not cards:
         head+="<div class='card'><b>No qualifying Master Property match found.</b><br>The matcher ran successfully against Master Properties only. This is an inventory/criteria gap, not a blank-page failure.</div>"
     return head+"".join(cards)
