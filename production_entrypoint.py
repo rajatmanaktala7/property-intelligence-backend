@@ -1455,6 +1455,22 @@ def _load_core():
             stabilization["master_requirement_authority_v1"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","fail_safe":True}
         # ALLIANCE_MASTER_REQUIREMENT_AUTHORITY_V1_END
 
+        # ALLIANCE_FAST_MANUAL_FORMS
+        # The current manual property/requirement forms and their operational
+        # source tables must be registered before final database authorities.
+        try:
+            import fast_manual_forms as fast_manual_forms_v19
+            fast_manual_result = fast_manual_forms_v19.register(wrapped)
+            stabilization = dict(stabilization or {})
+            stabilization["fast_manual_forms_v19"] = fast_manual_result
+            print("[fast-manual-forms-v19]", fast_manual_result)
+        except Exception as exc:
+            stabilization = dict(stabilization or {})
+            stabilization["fast_manual_forms_v19"] = {
+                "status":"ERROR","error":f"{type(exc).__name__}: {exc}","fail_safe":True
+            }
+            print("[fast-manual-forms-v19] warning:", type(exc).__name__, str(exc))
+
         # ALLIANCE_MANUAL_DATABASE_RESTORE_V1150
         # Final exact-route authority for the settled Manual Property database.
         try:
