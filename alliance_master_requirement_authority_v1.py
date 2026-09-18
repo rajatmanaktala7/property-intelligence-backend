@@ -5,7 +5,7 @@ from fastapi import HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from sqlalchemy import inspect, text
 
-VERSION="1.6.0-FOCUSED-MATCH-RESULTS"
+VERSION="1.7.0-MASTER-CONTRACT-AND-SENDER-SAFETY"
 MASTER_REQUIREMENT_TABLE="pi_requirement_gate_v1191"
 MASTER_PROPERTY_TABLE="pi_master_properties_v711"
 MASTER_LINKS_TABLE="pi_master_source_links_v711"
@@ -178,6 +178,21 @@ def _wa_requirement_sender_map(rows):
                     d["sender_name"]=ident["name"]
                     d["sender_id"]=ident["sender_id"]
                     d["sender_identity_status"]=ident["status"]
+    # Safety: an account/device phone can be stamped onto many unrelated opaque
+    # WhatsApp sender IDs by historical ingestion. A genuine sender phone must not
+    # simultaneously identify multiple distinct opaque senders in this batch.
+    phone_ids={}
+    for d in result.values():
+        p=_phone(d.get("sender_phone")); oid=_norm(d.get("sender_id"))
+        if p and oid:
+            phone_ids.setdefault(p,set()).add(oid)
+    contaminated={p for p,ids in phone_ids.items() if len(ids)>=3}
+    if contaminated:
+        for d in result.values():
+            p=_phone(d.get("sender_phone"))
+            if p in contaminated:
+                d["sender_phone"]=""
+                d["sender_identity_status"]="REJECTED_SHARED_ACCOUNT_OR_DEVICE_PHONE"
     return result
 
 def _resolve_sender_ids_from_registry(rows):
@@ -307,10 +322,19 @@ def _master_whatsapp_sender_map(core,ids):
     return out
 
 def _match(core,req):
-    import alliance_phase5_canonical_matcher as phase5
+    # Use the existing MASTER-ONLY matcher contract. Do not match directly against
+    # pi_properties or pi_whatsapp_property_master.
+    import alliance_master_matcher_contract_v1 as master_matcher
     raw=_norm(req.get("original_message"))
     if not raw: raise RuntimeError("Requirement has no original message")
-    result=phase5.run_match(core.engine,raw,min_score=70.0,limit=100)
+    # The gate already holds normalized facts. Add only missing structured facts so
+    # terse WhatsApp wording (for example "deal") does not lose RENT/SALE intent.
+    tx=_norm(req.get("transaction_type")).upper()
+    tx_hint=" FOR RENT" if tx in ("LEASE","RENT") else (" FOR SALE" if tx in ("SALE","PURCHASE") else "")
+    locs=" ".join(str(x) for x in (req.get("locations_list") or []) if _norm(x))
+    type_hint=_norm(req.get("property_category"))
+    enriched=" ".join(x for x in (raw,tx_hint,locs,type_hint) if _norm(x))
+    result=master_matcher.run_match(core.engine,enriched,min_score=70.0,limit=100)
     items=[]
     for key,label in (("exact_verified","EXACT VERIFIED"),("exact_needs_verification","EXACT NEEDS VERIFICATION"),("alternatives","ALTERNATIVE")):
         for item in result.get(key) or []:
@@ -338,7 +362,15 @@ def _render_match(core,req):
             f"Source: {_e(source)} · Property ID: {_e(pid)}<br>"
             f"<div class='contacts'>{contact_html}</div>"
             f"Why matched: {_e(why)}<br><a class='btn' href='{_e(detail)}'>View Full Property</a></div>")
-    return "<div class='card'><b>Matcher authority:</b> MASTER_ONLY · <b>Master property database:</b> "+_e(MASTER_PROPERTY_TABLE)+"</div>"+"".join(cards)
+    summary=result.get("summary") or {}
+    head="<div class='card'><b>Matcher authority:</b> MASTER_ONLY · <b>Master property database:</b> "+_e(MASTER_PROPERTY_TABLE)+ \
+         " · <b>Master rows considered:</b> "+_e(summary.get("master_rows_considered"))+ \
+         " · <b>Exact verified:</b> "+_e(summary.get("exact_verified"))+ \
+         " · <b>Exact to verify:</b> "+_e(summary.get("exact_needs_verification"))+ \
+         " · <b>Alternatives:</b> "+_e(summary.get("approved_alternatives"))+"</div>"
+    if not cards:
+        head+="<div class='card'><b>No qualifying Master Property match found.</b><br>The matcher ran successfully against Master Properties only. This is an inventory/criteria gap, not a blank-page failure.</div>"
+    return head+"".join(cards)
 
 def _page(core,request:Request):
     rows=_apply_requirement_sender(_requirements(core))
