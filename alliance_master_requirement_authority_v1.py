@@ -5,7 +5,7 @@ from fastapi import HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from sqlalchemy import inspect, text
 
-VERSION="1.5.0-PRESERVE-MATCHER-SELECTION"
+VERSION="1.6.0-FOCUSED-MATCH-RESULTS"
 MASTER_REQUIREMENT_TABLE="pi_requirement_gate_v1191"
 MASTER_PROPERTY_TABLE="pi_master_properties_v711"
 MASTER_LINKS_TABLE="pi_master_source_links_v711"
@@ -364,11 +364,21 @@ def _page(core,request:Request):
     if rid:
         req=_find_req(rows,rid)
         if req:
+            # A Run Matcher action is a focused action, not a navigation request.
+            # Render only the selected requirement and its Master Property matches.
+            sender_phone=req.get('whatsapp_sender_phone') or '—'
+            sender_name=req.get('whatsapp_sender_name') or ''
             results="<div id='results'><h2>Master Database Matches</h2><div class='card'>"+ \
                 f"<b>Requirement #{_e(rid)}</b><br>{_e(req.get('original_message'))}<br>" + \
                 f"Requirement contact: {_e(', '.join(str(x) for x in req.get('contacts_list') or []) or '—')}<br>" + \
-                f"<b>WhatsApp Sender:</b> {_e(req.get('whatsapp_sender_phone') or '—')} {_e(req.get('whatsapp_sender_name') or '')}</div>" + \
+                f"<b>WhatsApp Sender:</b> {_e(sender_phone)} {_e(sender_name)}</div>" + \
                 _render_match(core,req)+"</div>"
+            return f"""<!doctype html><html><head><meta charset='utf-8'><title>Alliance Master Requirement Matcher</title>
+<style>body{{font-family:Arial;margin:22px;background:#f6f8fb;color:#172437}}.btn{{display:inline-block;padding:8px 10px;margin:3px;border-radius:7px;background:#1769aa;color:white;text-decoration:none}}.card{{background:white;border:1px solid #dfe5eb;border-radius:10px;padding:12px;margin:10px 0}}.contacts{{margin:8px 0;padding:8px;background:#f7fafc}}</style></head><body>
+<p><a href='javascript:history.back()'>← Previous Page</a> · <a href='/alliance/primary'>Dashboard</a></p>
+<h1>Alliance Master Requirement Matcher</h1>
+<div class='card'>Requirement authority: <b>{MASTER_REQUIREMENT_TABLE}</b> · Property authority: <b>{MASTER_PROPERTY_TABLE}</b> · Matcher source: <b>MASTER ONLY</b>.</div>
+{results}</body></html>"""
     return f"""<!doctype html><html><head><meta charset='utf-8'><title>Alliance Master Requirement Matcher</title>
 <style>body{{font-family:Arial;margin:22px;background:#f6f8fb;color:#172437}}table{{width:100%;border-collapse:collapse;background:white;font-size:12px}}th,td{{border-bottom:1px solid #e1e7ee;padding:7px;vertical-align:top;text-align:left}}th{{background:#eef3f8}}.tab,.btn{{display:inline-block;padding:8px 10px;margin:3px;border-radius:7px;background:#1769aa;color:white;text-decoration:none}}.card{{background:white;border:1px solid #dfe5eb;border-radius:10px;padding:12px;margin:10px 0}}.contacts{{margin:8px 0;padding:8px;background:#f7fafc}}</style></head><body>
 <p><a href='/alliance/primary'>← Dashboard</a></p><h1>Alliance Master Requirement Matcher</h1>
