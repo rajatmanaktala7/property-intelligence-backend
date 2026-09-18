@@ -5,7 +5,7 @@ from fastapi import HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from sqlalchemy import inspect, text
 
-VERSION="1.9.1-INLINE-TEAM-CONTACT-NO-DETAIL-PAGE"
+VERSION="2.0.0-CLEAN-TABLE-INLINE-VERIFY-EDIT-REMARKS"
 MASTER_REQUIREMENT_TABLE="pi_requirement_gate_v1191"
 MASTER_PROPERTY_TABLE="pi_master_properties_v711"
 MASTER_LINKS_TABLE="pi_master_source_links_v711"
@@ -346,54 +346,82 @@ def _match(core,req):
     ids=[str(d.get("record_id") or d.get("property_id") or d.get("canonical_id") or d.get("id") or "") for d in items]
     return result,items,_master_contact_map(core,ids),_master_whatsapp_sender_map(core,ids)
 
+def _match_detail_map(core, ids):
+    ids=[str(x) for x in ids if str(x or "").strip()]
+    if not ids or not _table_exists(core.engine,MASTER_PROPERTY_TABLE): return {}
+    params={f"p{i}":v for i,v in enumerate(ids)}
+    holders=",".join(":"+k for k in params)
+    q=text(f"""SELECT canonical_id,locality,city,transaction_type,area_sqft,price_raw,
+                     clean_record,phones,created_at,updated_at
+              FROM {MASTER_PROPERTY_TABLE}
+              WHERE CAST(canonical_id AS TEXT) IN ({holders})""")
+    out={}
+    with core.engine.connect() as conn:
+        for r in conn.execute(q,params).mappings():
+            d=dict(r); cr=d.get("clean_record")
+            if isinstance(cr,str):
+                try: cr=json.loads(cr)
+                except Exception: cr={}
+            if not isinstance(cr,dict): cr={}
+            def pick(*keys):
+                for k in keys:
+                    v=cr.get(k)
+                    if v not in (None,"",[],{}): return v
+                return ""
+            desc=pick("team_description","description_edit","description","original_description","original_message","raw_line","source_text")
+            area=pick("area_display","area","available_area") or d.get("area_sqft") or ""
+            ptype=pick("property_type","asset_type","subtype")
+            amount=pick("rent","monthly_rent","rent_amount","rent_in_figures","sale_price","sale_amount","price","asking_price","amount","price_raw") or d.get("price_raw") or ""
+            out[str(d.get("canonical_id"))]={"description":_norm(desc),"area":_norm(area),"property_type":_norm(ptype),"price":_norm(amount),"clean_record":cr}
+    return out
+
 def _render_match(core,req):
     result,items,enrich,wa_sender=_match(core,req)
-    cards=[]
+    ids=[str(d.get("record_id") or d.get("property_id") or d.get("canonical_id") or d.get("id") or "") for d in items[:100]]
+    details=_match_detail_map(core,ids)
+    rows=[]
     for d in items[:100]:
         pid=str(d.get("record_id") or d.get("property_id") or d.get("canonical_id") or d.get("id") or "")
+        md=details.get(pid) or {}
         contacts=list((enrich.get(pid) or {}).get("contacts") or [])
         for x in wa_sender.get(pid) or []:
-            if x["value"] and x["value"] not in [z["value"] for z in contacts]: contacts.append(x)
-        contact_html="<br>".join(f"<b>{_e(x['label'])}:</b> {_e(x['value'])}" for x in contacts) or "Contact not available — verify source record"
-        source=_norm(d.get("source_name") or d.get("source_bucket") or d.get("source") or ", ".join((enrich.get(pid) or {}).get("sources") or []))
-        why=d.get("why"); why=", ".join(str(x) for x in why) if isinstance(why,list) else why
-        detail=d.get("detail_url") or (f"/alliance/primary/property/{quote(pid)}" if pid else "#")
-        ptype=_norm(d.get('subtype') or d.get('family') or 'Not captured')
-        loc=_norm(d.get('location') or 'Not captured')
-        tx=_norm(d.get('transaction') or 'Not captured')
-        area=_norm(d.get('area_display') or d.get('area_sqft') or d.get('area') or 'Not captured')
-        price=_norm(d.get('price_display') or d.get('price') or 'Not captured')
-        desc=_norm(d.get('property') or 'Not captured')
-        verification=_norm(d.get('availability_verification') or d.get('verification') or 'UNVERIFIED')
+            if x.get("value") and x["value"] not in [z.get("value") for z in contacts]: contacts.append(x)
+        contact_text=", ".join(x.get("value") for x in contacts if x.get("value")) or "Not captured"
+        source=_norm(d.get("source_name") or d.get("source_bucket") or d.get("source") or ", ".join((enrich.get(pid) or {}).get("sources") or [])) or "Master"
+        ptype=_norm(d.get("subtype") or md.get("property_type") or d.get("family") or "Not captured")
+        loc=_norm(d.get("location") or "Not captured")
+        tx=_norm(d.get("transaction") or "Not captured")
+        area=_norm(d.get("area_display") or d.get("area_sqft") or d.get("area") or md.get("area") or "Not captured")
+        price=_norm(d.get("price_display") or d.get("price") or md.get("price") or "Not captured")
+        desc=_norm(md.get("description") or d.get("property") or "Not captured")
+        verification=_norm(d.get("availability_verification") or d.get("verification") or "UNVERIFIED")
+        why=d.get("why"); why=", ".join(str(x) for x in why) if isinstance(why,list) else _norm(why)
         draft=("Hi, we have shortlisted an option matching your requirement.\\n\\n"
                +"Location: "+loc+"\\nProperty Type: "+ptype+"\\nTransaction: "+tx
                +"\\nArea: "+area+"\\nPrice: "+price
                +"\\n\\nPlease let me know if you would like full details or a site visit.")
-        cards.append("<div class='card'>"
-            f"<div class='matchhead'><b>{_e(d.get('match_class') or d.get('_bucket'))}</b> · Match score {_e(d.get('match_score'))}</div>"
-            "<table class='verifytable'>"
-            f"<tr><th>Property ID</th><td>{_e(pid)}</td><th>Verification</th><td><b>{_e(verification)}</b></td></tr>"
-            f"<tr><th>Location</th><td>{_e(loc)}</td><th>Property Type</th><td>{_e(ptype)}</td></tr>"
-            f"<tr><th>Rent / Sale</th><td>{_e(tx)}</td><th>Price</th><td>{_e(price)}</td></tr>"
-            f"<tr><th>Area</th><td>{_e(area)}</td><th>Source</th><td>{_e(source or 'Not captured')}</td></tr>"
-            f"<tr><th>Description</th><td colspan='3'>{_e(desc)}</td></tr>"
-            f"<tr><th>Team Verification Contact</th><td colspan='3'>{contact_html}<br><small>Internal only. This contact is never included in the client message.</small></td></tr>"
-            f"<tr><th>Why matched</th><td colspan='3'>{_e(why)}</td></tr>"
-            "</table>"
-            "<div class='actions'>"
-            f"<button class='btn prepare' type='button' data-draft='{_e(draft)}' onclick='prepareMessage(this)'>Prepare Message</button>"
-            "</div><div class='draftbox' style='display:none'></div></div>")
+        verify_form=(f"<details class='inline'><summary class='btn good'>Verify / Remarks</summary>"
+          f"<form method='post' action='/alliance/primary/property/{quote(pid)}/verify'>"
+          "<select name='status' required><option>AVAILABLE</option><option>NOT_AVAILABLE</option><option>CALL_BACK</option><option>SOLD</option><option>RENTED</option><option>HOLD</option><option>WRONG_NUMBER</option></select>"
+          "<select name='verified_with' required><option>OWNER</option><option>BROKER</option><option>OTHER</option></select>"
+          "<input name='verified_by' required placeholder='Verified by'><input name='remarks' placeholder='Remarks'><input type='datetime-local' name='next_verification_at'>"
+          "<button class='btn good' type='submit'>Save Verification</button></form></details>")
+        edit=f"<a class='btn light' href='/alliance/primary/property/{quote(pid)}/edit'>Edit</a>"
+        msg=f"<button class='btn prepare' type='button' data-draft='{_e(draft)}' onclick='prepareMessage(this)'>Prepare Message</button>"
+        rows.append("<tr>"
+          f"<td>{_e(d.get('match_class') or d.get('_bucket'))}<br><small>Score {_e(d.get('match_score'))}</small></td>"
+          f"<td>{_e(loc)}</td><td>{_e(ptype)}</td><td>{_e(area)}</td><td>{_e(tx)}</td><td>{_e(price)}</td>"
+          f"<td class='desc'>{_e(desc)}</td><td><b>{_e(contact_text)}</b><br><small>Internal only</small></td>"
+          f"<td>{_e(verification)}</td><td>{_e(source)}</td><td class='why'>{_e(why)}</td>"
+          f"<td>{verify_form}{edit}{msg}<div class='draftbox' style='display:none'></div></td></tr>")
     summary=result.get("summary") or {}
     ai=result.get("astra_interpretation") or {}
-    astra_html="<div class='card'><b>Astra interpretation:</b> "+_e(ai.get("confidence") or "—")+" · Transaction: "+_e(ai.get("transaction") or "—")+" · Location: "+_e(", ".join(ai.get("locations") or []) or "—")+" · Asset: "+_e(ai.get("asset") or "—")+"</div>"
-    head=astra_html+"<div class='card'><b>Matcher authority:</b> MASTER_ONLY · <b>Master property database:</b> "+_e(MASTER_PROPERTY_TABLE)+ \
-         " · <b>Master rows considered:</b> "+_e(summary.get("master_rows_considered") if summary.get("master_rows_considered") is not None else 0)+ \
-         " · <b>Exact verified:</b> "+_e(summary.get("exact_verified") if summary.get("exact_verified") is not None else 0)+ \
-         " · <b>Exact to verify:</b> "+_e(summary.get("exact_needs_verification") if summary.get("exact_needs_verification") is not None else 0)+ \
-         " · <b>Alternatives:</b> "+_e(summary.get("approved_alternatives") if summary.get("approved_alternatives") is not None else 0)+"</div>"
-    if not cards:
-        head+="<div class='card'><b>No qualifying Master Property match found.</b><br>The matcher ran successfully against Master Properties only. This is an inventory/criteria gap, not a blank-page failure.</div>"
-    return head+"".join(cards)
+    astra="<div class='summary'><b>Astra:</b> "+_e(ai.get("confidence") or "—")+" · "+_e(ai.get("transaction") or "—")+" · "+_e(", ".join(ai.get("locations") or []) or "—")+" · "+_e(ai.get("asset") or "—")+"</div>"
+    counts="<div class='summary'><b>Master matches:</b> Verified "+_e(summary.get("exact_verified") or 0)+" · To verify "+_e(summary.get("exact_needs_verification") or 0)+" · Alternatives "+_e(summary.get("approved_alternatives") or 0)+"</div>"
+    if not rows:
+        return astra+counts+"<div class='summary'><b>No qualifying Master Property match found.</b></div>"
+    headers=["Match","Location","Property Type","Area","Rent/Sale","Price","Property Details","Team Contact","Status","Source","Why matched","Team Action"]
+    return astra+counts+"<div class='matchtable'><table><thead><tr>"+''.join("<th>"+h+"</th>" for h in headers)+"</tr></thead><tbody>"+''.join(rows)+"</tbody></table></div>"
 
 def _page(core,request:Request):
     rows=_apply_requirement_sender(_requirements(core))
@@ -429,7 +457,7 @@ def _page(core,request:Request):
                 f"<b>WhatsApp Sender:</b> {_e(sender_phone)} {_e(sender_name)}</div>" + \
                 _render_match(core,req)+"</div>"
             return f"""<!doctype html><html><head><meta charset='utf-8'><title>Alliance Master Requirement Matcher</title>
-<style>body{{font-family:Arial;margin:22px;background:#f6f8fb;color:#172437}}.btn{{display:inline-block;padding:8px 10px;margin:3px;border:0;border-radius:7px;background:#1769aa;color:white;text-decoration:none;cursor:pointer}}.card{{background:white;border:1px solid #dfe5eb;border-radius:10px;padding:12px;margin:10px 0}}.contacts{{margin:8px 0;padding:8px;background:#f7fafc}}.verifytable{{width:100%;border-collapse:collapse;margin:10px 0}}.verifytable th,.verifytable td{{border:1px solid #e1e7ee;padding:8px;text-align:left;vertical-align:top}}.verifytable th{{width:14%;background:#f4f7fa}}.actions{{margin-top:8px}}.draftbox{{white-space:pre-wrap;background:#f7fafc;border:1px solid #dfe5eb;border-radius:8px;padding:12px;margin-top:10px}}</style><script>function prepareMessage(b){{var box=b.closest('.card').querySelector('.draftbox');var draft=b.getAttribute('data-draft')||'';box.style.display='block';box.innerHTML='<b>Client Message Draft — verify facts before sending</b><br><br>'+draft.replace(/\\n/g,'<br>')+'<br><br><button class="btn" type="button" onclick="navigator.clipboard.writeText(this.parentElement.innerText.replace(\'Client Message Draft — verify facts before sending\',\'\').replace(\'Copy Message\',\'\').trim())">Copy Message</button>';}}</script></head><body>
+<style>body{{font-family:Arial;margin:16px;background:#f6f8fb;color:#172437}}.btn{{display:inline-block;padding:7px 9px;margin:2px;border:0;border-radius:5px;background:#1769aa;color:white;text-decoration:none;cursor:pointer;font-size:11px}}.good{{background:#067647!important}}.light{{background:#475467!important}}.card,.summary{{background:white;border:1px solid #dfe5eb;border-radius:8px;padding:10px;margin:8px 0}}.matchtable{{overflow:auto;max-height:72vh;border:1px solid #dfe5eb;background:white}}.matchtable table{{border-collapse:collapse;width:max-content;min-width:100%;font-size:11px}}.matchtable th,.matchtable td{{border:1px solid #dfe5eb;padding:6px;vertical-align:top;text-align:left;max-width:240px}}.matchtable th{{position:sticky;top:0;background:#eef3f8;z-index:3;white-space:nowrap}}.desc{{min-width:260px;max-width:380px!important}}.why{{max-width:220px!important}}details.inline form{{min-width:230px;background:#fff;padding:6px;border:1px solid #ccd5df}}details.inline input,details.inline select{{width:100%;margin:2px 0;padding:5px}}.draftbox{{white-space:pre-wrap;background:#f7fafc;border:1px solid #dfe5eb;border-radius:6px;padding:8px;margin-top:6px;min-width:250px}}</style><script>function prepareMessage(b){{var box=b.closest('.card').querySelector('.draftbox');var draft=b.getAttribute('data-draft')||'';box.style.display='block';box.innerHTML='<b>Client Message Draft — verify facts before sending</b><br><br>'+draft.replace(/\\n/g,'<br>')+'<br><br><button class="btn" type="button" onclick="navigator.clipboard.writeText(this.parentElement.innerText.replace(\'Client Message Draft — verify facts before sending\',\'\').replace(\'Copy Message\',\'\').trim())">Copy Message</button>';}}</script></head><body>
 <p><a href='javascript:history.back()'>← Previous Page</a> · <a href='/alliance/primary'>Dashboard</a></p>
 <h1>Alliance Master Requirement Matcher</h1>
 <div class='card'>Requirement authority: <b>{MASTER_REQUIREMENT_TABLE}</b> · Property authority: <b>{MASTER_PROPERTY_TABLE}</b> · Matcher source: <b>MASTER ONLY</b>.</div>
