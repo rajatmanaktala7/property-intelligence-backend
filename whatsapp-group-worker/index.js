@@ -31,7 +31,7 @@ function alreadySeen(id){return recentIds.has(id)}
 function getText(m){if(!m)return"";return m.conversation||m.extendedTextMessage?.text||m.imageMessage?.caption||m.videoMessage?.caption||m.documentMessage?.caption||m.buttonsResponseMessage?.selectedDisplayText||m.listResponseMessage?.title||""}
 function normalizePhone(jid){if(!jid)return"";const s=String(jid);if(!s.includes("@s.whatsapp.net")&&!s.includes("@c.us"))return"";const n=s.split("@")[0].split(":")[0].replace(/\D/g,"");return /^(?:91)?[6-9]\d{9}$/.test(n)?(n.length===12?n.slice(2):n):""}
 function isLid(jid){return /@lid$/i.test(String(jid||""))}
-function senderIdentity(msg){
+async function senderIdentity(msg,sock){
  const candidates=[
   msg?.key?.participant,
   msg?.key?.participantAlt,
@@ -40,8 +40,14 @@ function senderIdentity(msg){
   msg?.message?.extendedTextMessage?.contextInfo?.participant,
   msg?.message?.extendedTextMessage?.contextInfo?.participantAlt
  ].filter(Boolean).map(String);
- const phoneJid=candidates.find(x=>normalizePhone(x))||"";
+ let phoneJid=candidates.find(x=>normalizePhone(x))||"";
  const lidJid=candidates.find(isLid)||"";
+ if(!phoneJid&&lidJid){
+  try{
+   const mapped=await sock?.signalRepository?.lidMapping?.getPNForLID?.(lidJid);
+   if(mapped&&normalizePhone(mapped))phoneJid=String(mapped);
+  }catch(e){logger.warn({lid:lidJid,err:String(e)},"LID to PN lookup failed")}
+ }
  return{phoneJid,lidJid,rawParticipant:String(msg?.key?.participant||msg?.participant||""),
         participantAlt:String(msg?.key?.participantAlt||msg?.participantAlt||"")};
 }
@@ -99,7 +105,7 @@ async function start(){
     let meta=null;try{meta=await sock.groupMetadata(jid)}catch{}
     const groupName=(meta?.subject||jid).trim();stateView.lastMessageAt=new Date().toISOString();stateView.lastGroupName=groupName;
     if(GROUP_ALLOWLIST.length&&!GROUP_ALLOWLIST.includes(groupName))continue;
-    const ident=senderIdentity(msg);
+    const ident=await senderIdentity(msg,sock);
     const senderPhone=normalizePhone(ident.phoneJid);
     const senderName=msg.pushName||senderPhone||(ident.lidJid?"WhatsApp contact":"Unknown");
     const epoch=Number(msg.messageTimestamp||0),timestamp=epoch?new Date(epoch*1000).toISOString():new Date().toISOString();
