@@ -11,7 +11,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 
 
-VERSION = "3.7-OUTERMOST-REQUIREMENT-DISPATCH"
+VERSION = "3.8-REQUIREMENT-READY-DISPATCH"
 
 BOOT = {
     "state": "STARTING",
@@ -2039,7 +2039,6 @@ class HealthFirstDispatcher:
         if (
             is_requirement_request
             and REQUIREMENT_APP is not None
-            and BOOT["core_loaded"]
         ):
             await REQUIREMENT_APP(scope, receive, send)
             return
