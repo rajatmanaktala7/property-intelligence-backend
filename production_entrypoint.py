@@ -11,7 +11,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 
 
-VERSION = "3.9-EARLY-REQUIREMENT-AUTHORITY"
+VERSION = "4.0-EARLIEST-REQUIREMENT-AUTHORITY"
 
 BOOT = {
     "state": "STARTING",
@@ -439,8 +439,29 @@ def _load_core():
 
     try:
         import newspaper_wrapper as wrapped
-        import alliance_production_surface as production_surface
 
+        # ALLIANCE_EARLY_REQUIREMENT_AUTHORITY_V2
+        # Requirement authority must become public before the broader production
+        # surface registration begins. production_surface.register() can be a
+        # long-running bootstrap and previously left REQUIREMENT_APP unset.
+        try:
+            import alliance_requirement_restore_v1235 as earliest_reqrestore_v1235
+            earliest_requirement_app = FastAPI(
+                title="Alliance Requirement Authority",
+                docs_url=None,
+                redoc_url=None,
+                openapi_url=None,
+            )
+            earliest_reqrestore_result = earliest_reqrestore_v1235.register(
+                wrapped.core,
+                served_app=earliest_requirement_app,
+            )
+            REQUIREMENT_APP = earliest_requirement_app
+            print("[earliest-requirement-authority-v2]", earliest_reqrestore_result)
+        except Exception as exc:
+            print("[earliest-requirement-authority-v2] warning:", type(exc).__name__, str(exc))
+
+        import alliance_production_surface as production_surface
         stabilization = production_surface.register(wrapped)
 
         # ALLIANCE_EARLY_REQUIREMENT_AUTHORITY_V1
