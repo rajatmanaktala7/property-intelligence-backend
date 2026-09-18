@@ -11,7 +11,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 
 
-VERSION = "3.6-DUAL-RUNTIME-REQUIREMENT-AUTHORITY"
+VERSION = "3.7-OUTERMOST-REQUIREMENT-DISPATCH"
 
 BOOT = {
     "state": "STARTING",
@@ -2019,10 +2019,25 @@ class HealthFirstDispatcher:
             await self._serve_freshness(scope, receive, send)
             return
 
-        # ALLIANCE_ISOLATED_REQUIREMENT_DISPATCH_V1
-        # Preserve the original ASGI scope and pi_session cookie.
+        # ALLIANCE_ISOLATED_REQUIREMENT_DISPATCH_V2
+        # Preserve the original ASGI scope and pi_session cookie. Match the
+        # settled requirement namespace even when an upstream proxy supplies a
+        # root_path or a non-canonical raw path. This is the outermost public
+        # ASGI boundary, so legacy core routes cannot intercept these requests.
+        root_path = str(scope.get("root_path", "") or "")
+        raw_path = scope.get("raw_path", b"")
+        if isinstance(raw_path, (bytes, bytearray)):
+            raw_path = raw_path.decode("utf-8", "ignore")
+        else:
+            raw_path = str(raw_path or "")
+        requirement_namespace = "/alliance/final/requirements"
+        is_requirement_request = (
+            path.startswith(requirement_namespace)
+            or (root_path + path).startswith(requirement_namespace)
+            or raw_path.startswith(requirement_namespace)
+        )
         if (
-            path.startswith("/alliance/final/requirements")
+            is_requirement_request
             and REQUIREMENT_APP is not None
             and BOOT["core_loaded"]
         ):
