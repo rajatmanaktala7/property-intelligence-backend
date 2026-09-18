@@ -11,7 +11,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 
 
-VERSION = "3.5-ISOLATED-REQUIREMENT-ROUTER"
+VERSION = "3.6-DUAL-RUNTIME-REQUIREMENT-AUTHORITY"
 
 BOOT = {
     "state": "STARTING",
@@ -1500,12 +1500,28 @@ def _load_core():
                 wrapped.core,
                 served_app=isolated_requirement_app,
             )
+
+            # ALLIANCE_REQUIREMENT_DUAL_RUNTIME_AUTHORITY_V1
+            # The public domain has historically reached both the outer dispatcher
+            # and the wrapped core route table. Keep the isolated authority, but
+            # install the exact same settled requirement handler on the core app
+            # after every legacy registrar as well. register() removes the legacy
+            # GET owners for the settled requirement paths before adding itself.
+            # No database/schema/data/link changes are made here.
+            core_reqrestore_result = final_reqrestore_v1235.register(
+                wrapped.core,
+                served_app=wrapped.app,
+            )
+
             REQUIREMENT_APP = isolated_requirement_app
             stabilization = dict(stabilization or {})
             stabilization["final_requirement_route_authority_v1"] = {
                 "status": "READY",
                 "owner": "alliance_requirement_restore_v1235",
                 "registered_after_legacy_routes": True,
+                "dual_runtime_authority": True,
+                "isolated_registration": final_reqrestore_result,
+                "core_registration": core_reqrestore_result,
                 "registration": final_reqrestore_result,
             }
             print(
