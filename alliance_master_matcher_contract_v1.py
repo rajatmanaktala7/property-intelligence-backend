@@ -7,7 +7,7 @@ from alliance_phase5_canonical_matcher import *
 
 # This exact marker is consumed by the live System Doctor.  It is not a
 # cosmetic label: this module is the only candidate loader used by v60.
-VERSION = "1.0.3-ASTRA-INVENTORY-LOCATION-RESOLUTION"
+VERSION = "1.0.4-STRICT-ASTRA-ASSET-INTENT"
 MASTER_TABLE = "pi_master_properties_v711"
 WORKFLOW_TABLE = "pi_master_workflow_v720"
 MATCHER_SOURCE_CONTRACT = "MASTER_ONLY"
@@ -194,6 +194,32 @@ def run_match(engine, requirement_text: str, min_score: float = 70.0, limit: int
     # inventory even when they are not yet in the static alias dictionary.
     # This keeps Master Properties authoritative and avoids guessing localities.
     req = base.enrich_requirement_with_inventory_locations(req, requirement_text, candidates)
+    # Astra appends an explicit PROPERTY TYPE hint when the raw requirement names
+    # a concrete asset. Re-assert that explicit asset after generic intended-use
+    # words (for example AIRBNB/HOSPITALITY) have been parsed, so "villa for
+    # Airbnb" cannot silently become a HOTEL requirement.
+    marker = "ASTRA INTERPRETATION:"
+    upper_text = str(requirement_text or "").upper()
+    astra_tail = upper_text.split(marker, 1)[1] if marker in upper_text else ""
+    import re as _re
+    m = _re.search(r"PROPERTY TYPE\s+(VILLA|APARTMENT|RETAIL|OFFICE|RESTAURANT|HOTEL|WAREHOUSE|LAND)\b", astra_tail)
+    if m:
+        astra_asset = m.group(1)
+        asset_map = {
+            "VILLA": ("RESIDENTIAL", "VILLA"),
+            "APARTMENT": ("RESIDENTIAL", "APARTMENT"),
+            "RETAIL": ("COMMERCIAL", "RETAIL"),
+            "OFFICE": ("COMMERCIAL", "OFFICE"),
+            "RESTAURANT": ("COMMERCIAL", "RESTAURANT"),
+            "HOTEL": ("COMMERCIAL", "HOTEL"),
+            "WAREHOUSE": ("COMMERCIAL", "WAREHOUSE"),
+            "LAND": ("LAND", "LAND"),
+        }
+        fam, sub = asset_map[astra_asset]
+        req["family"] = fam
+        req["subtype"] = sub
+        req["acceptable_subtypes"] = [sub]
+        req["asset_resolution"] = "ASTRA_EXPLICIT_ASSET"
     exact_verified, exact_verify, rejected = [], [], []
     for p in candidates:
         ok, code, gate = base.eligible(req, p, "EXACT")
