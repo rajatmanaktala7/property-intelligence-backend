@@ -5,7 +5,7 @@ from fastapi import Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import text
 
-VERSION="1.5.0-WHATSAPP-REQUIREMENT-RESTORED-CONTACTS"
+VERSION="1.6.0-WHATSAPP-REQUIREMENT-EVIDENCE-CONTACTS"
 PHONE_RE=re.compile(r"(?<!\d)(?:\+?91[\s.\-]?)?([6-9](?:[\s.\-]?\d){9})(?!\d)")
 SOURCES=("MASTER","NEWSPAPER","MANUAL","MAGAZINE","WHATSAPP")
 
@@ -88,10 +88,16 @@ def _requirement_rows(engine,source,limit=500):
             params={f'id{i}':v for i,v in enumerate(ids)}
             marks=','.join(':'+k for k in params)
             with wb.wa_engine.connect() as wc:
-                restored=wc.execute(text(f"""SELECT wa_requirement_id,contact_phone FROM wa_requirements
-                    WHERE wa_requirement_id IN ({marks})
-                      AND contact_phone IS NOT NULL AND BTRIM(contact_phone)<>''"""),params).mappings().all()
-            phone_map={str(x['wa_requirement_id']):_phones(x.get('contact_phone')) for x in restored}
+                restored=wc.execute(text(f"""SELECT r.wa_requirement_id,r.contact_phone,
+                    e.sender_phone,e.payload_json
+                    FROM wa_requirements r
+                    LEFT JOIN wa_bridge_events e ON e.entity_id=r.wa_requirement_id
+                    WHERE r.wa_requirement_id IN ({marks})"""),params).mappings().all()
+            phone_map={}
+            for x in restored:
+                p=_phones(x.get('contact_phone'))
+                if not p:p=_phones(x.get('sender_phone'),x.get('payload_json'))
+                if p:phone_map[str(x['wa_requirement_id'])]=p
             for r in missing:
                 p=phone_map.get(str(r.get('source_id') or ''))
                 if p:r['contact']=p
