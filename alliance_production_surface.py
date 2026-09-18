@@ -29,6 +29,11 @@ def register(wrapped):
     import alliance_master_matcher_contract_v1 as master_matcher
     import alliance_dashboard_cleanliness_v1 as cleanliness
 
+    # Canonical Property Databases presentation must be installed on the actual
+    # production boot path. This is display-only: no database mutation.
+    import alliance_property_database_unified_patch_v1 as property_database_patch
+    property_database_patch_state = property_database_patch.install()
+
     # Install the existing non-blocking cleanliness guard. It does not scan or
     # rewrite historical data at startup; it only hardens future explicit rebuilds.
     cleanliness_state = cleanliness.register(wrapped)
@@ -182,6 +187,7 @@ a.card:hover{border-color:#8d8173}.card b{display:block;font-size:18px;margin-bo
     STATE["matcher_contract"] = "MASTER_PROPERTIES_ONLY"
     STATE["matcher_master_table"] = master_matcher.MASTER_TABLE
     STATE["dashboard_cleanliness"] = cleanliness_state
+    STATE["unified_property_databases"] = property_database_patch_state
     STATE["whatsapp_ui_owner"] = "alliance_live_feed_purity V5.1"
     STATE["whatsapp_ui_registered_here"] = False
     return dict(STATE)
