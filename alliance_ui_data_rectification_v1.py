@@ -5,7 +5,7 @@ from fastapi import Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import text
 
-VERSION="1.7.0-WHATSAPP-SENDER-IDENTITY-RESOLUTION"
+VERSION="1.8.0-WHATSAPP-OPAQUE-ID-REGISTRY-RESOLUTION"
 PHONE_RE=re.compile(r"(?<!\d)(?:\+?91[\s.\-]?)?([6-9](?:[\s.\-]?\d){9})(?!\d)")
 SOURCES=("MASTER","NEWSPAPER","MANUAL","MAGAZINE","WHATSAPP")
 
@@ -101,8 +101,40 @@ def _requirement_rows(engine,source,limit=500):
                     if p:phone_map[str(x['wa_requirement_id'])]=p
                     else:unresolved.append(x)
 
-                # Resolve opaque WhatsApp identities from historical events for the
-                # same sender name. Accept only one unique real phone for a sender.
+                # First resolve WhatsApp opaque/LID identities through the dedicated
+                # evidence registry populated by live identity capture. This is the
+                # authoritative LID -> real phone mapping and never uses account_phone.
+                opaque_ids=[]
+                for x in unresolved:
+                    raw=str(x.get('sender_phone') or '').strip()
+                    digits=''.join(ch for ch in raw.split('@',1)[0] if ch.isdigit())
+                    if len(digits)>=13:opaque_ids.append(digits)
+                opaque_ids=list(dict.fromkeys(opaque_ids))[:500]
+                registry_map={}
+                if opaque_ids:
+                    op={f'o{i}':v for i,v in enumerate(opaque_ids)}
+                    om=','.join(':'+k for k in op)
+                    try:
+                        regs=wc.execute(text(f"""SELECT opaque_id,resolved_phone
+                            FROM pi_whatsapp_sender_identity_registry_v1
+                            WHERE opaque_id IN ({om})
+                              AND resolution_status='RESOLVED_UNIQUE_EXACT_EVIDENCE'
+                              AND confidence>=100 AND conflicting_phones=0
+                              AND resolved_phone IS NOT NULL"""),op).mappings().all()
+                        registry_map={str(z.get('opaque_id') or ''):_phones(z.get('resolved_phone')) for z in regs}
+                    except Exception:
+                        registry_map={}
+                still=[]
+                for x in unresolved:
+                    raw=str(x.get('sender_phone') or '').strip()
+                    oid=''.join(ch for ch in raw.split('@',1)[0] if ch.isdigit())
+                    p=registry_map.get(oid)
+                    if p:phone_map[str(x['wa_requirement_id'])]=p
+                    else:still.append(x)
+                unresolved=still
+
+                # Secondary evidence: historical events for the same sender name.
+                # Accept only one unique real phone for that sender.
                 names=list(dict.fromkeys(str(x.get('sender_name') or '').strip() for x in unresolved if str(x.get('sender_name') or '').strip()))[:500]
                 sender_map={}
                 if names:
