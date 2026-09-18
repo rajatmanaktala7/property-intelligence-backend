@@ -10,7 +10,7 @@ from fastapi import Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import text
 
-VERSION = "13.2.0-ASTRA-SCHEMA-SAFE-MANUAL-AUTHORITY"
+VERSION = "13.3.0-ASTRA-LIVE-MANUAL-TRUTH-PROBE"
 SOURCES = ("MASTER", "NEWSPAPER", "MANUAL", "MAGAZINE", "WHATSAPP", "SOCIAL")
 
 EXCLUDE_TOKENS = (
@@ -1075,6 +1075,36 @@ def register(core, served_app=None):
         src = source.upper()
         if src not in SOURCES:
             return HTMLResponse("Unknown requirement database", status_code=404)
+        # ASTRA_LIVE_MANUAL_TRUTH_PROBE_V1
+        # Read-only diagnostic on the exact authenticated live handler. This proves
+        # which runtime, engine and table result the user's browser is actually using.
+        if src == "MANUAL" and req.query_params.get("__astra_truth") == "1":
+            from fastapi.responses import JSONResponse
+            result = {
+                "diagnostic": "ASTRA_LIVE_MANUAL_TRUTH_PROBE_V1",
+                "version": VERSION,
+                "source": "pi_operational_requirements",
+                "database_changed": False,
+            }
+            try:
+                with e.connect() as conn:
+                    result["total_rows"] = int(conn.execute(text("SELECT COUNT(*) FROM pi_operational_requirements")).scalar() or 0)
+                    result["manual_rows"] = int(conn.execute(text("""
+                        SELECT COUNT(*) FROM pi_operational_requirements
+                        WHERE UPPER(COALESCE(entry_source,'MANUAL'))='MANUAL'
+                    """)).scalar() or 0)
+                    result["latest"] = [dict(r) for r in conn.execute(text("""
+                        SELECT id, entry_source, requirement_code, client_name, company_name,
+                               contact_number, city, transaction_type, created_at
+                        FROM pi_operational_requirements
+                        ORDER BY id DESC LIMIT 3
+                    """)).mappings().all()]
+                result["mapped_rows"] = len(_manual_operational_rows(e, 1000))
+                result["status"] = "OK"
+            except Exception as exc:
+                result["status"] = "ERROR"
+                result["error"] = f"{type(exc).__name__}: {exc}"
+            return JSONResponse(result, headers={"Cache-Control":"no-store","X-Alliance-Requirement-Restore":VERSION}, default=str)
         # Keep the first page intentionally small. Requirement pages are operational
         # workspaces, not full-table exports. Search narrows before rendering.
         page_rows = _table(e, src, q, location, transaction, status, assigned, limit)
