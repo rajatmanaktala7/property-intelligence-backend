@@ -4,7 +4,7 @@ from fastapi import Request, Query
 from fastapi.responses import HTMLResponse
 from sqlalchemy import text
 
-VERSION="11.5.0-MANUAL-SOURCE-RESTORE"
+VERSION="11.6.0-CLEAN-COMPACT-MANUAL-GRID"
 PATH="/alliance/final/database/manual"
 
 def e(v):
@@ -49,13 +49,13 @@ def register(wrapped):
             vals=[
                 pick(d,"id","property_id","canonical_id"),
                 pick(d,"location","locality","area_name","city"),
-                pick(d,"description","address","property_description","original_description"),
-                pick(d,"property_category","category"),
-                pick(d,"property_type","type"),
+                pick(d,"description","address","property_description","original_description","remarks","property_name"),
+                pick(d,"property_category","category","suitable_for"),
+                pick(d,"property_type","type","property_types"),
                 pick(d,"area","area_sqft","size","built_up_area"),
                 pick(d,"floor"),
-                pick(d,"amount","rent","sale_amount","price"),
-                pick(d,"owner_name","broker_name","contact_name","name"),
+                pick(d,"amount","rent","rent_amount","sale_amount","price","rent_text"),
+                pick(d,"owner_name","broker_name","contact_name","owner_broker_name","name"),
                 pick(d,"contact_number","contact_no","phone","mobile"),
                 pick(d,"created_at","entry_date","created_on"),
                 pick(d,"verification_status","status","availability_status"),
@@ -71,12 +71,12 @@ def register(wrapped):
 <title>Manual Property Database · Alliance CRE</title>
 <style>*{{box-sizing:border-box}}body{{margin:0;background:#f4f7fb;color:#172033;font-family:Arial;font-size:12px}}
 header{{background:#102a43;color:#fff;padding:14px 18px}}nav{{background:#fff;border-bottom:1px solid #98a2b3;padding:7px;position:sticky;top:0}}
-nav a,.btn,button{{background:#102a43;color:#fff;text-decoration:none;border:0;padding:7px 9px;margin-right:5px}}
+nav a,.btn,button{{background:#102a43;color:#fff;text-decoration:none;border:0;padding:6px 8px;margin-right:4px;border-radius:5px}}
 .wrap{{padding:10px}}.stats{{display:flex;gap:8px;margin:8px 0}}.card{{background:#fff;border:1px solid #98a2b3;padding:10px;min-width:160px}}
 .num{{font-size:26px;font-weight:800}}form{{display:flex;gap:5px;margin:8px 0}}input{{padding:7px;border:1px solid #98a2b3;min-width:320px}}
-.tablebox{{overflow:auto;max-height:76vh;border:1px solid #667085}}table{{border-collapse:collapse;width:max-content;min-width:100%;background:#fff}}
-th,td{{border:1px solid #98a2b3;padding:5px 6px;vertical-align:top;overflow-wrap:anywhere}}th{{background:#e9eef5;position:sticky;top:0;z-index:2}}
-td:nth-child(3){{min-width:320px;max-width:480px}}tbody tr:nth-child(even) td{{background:#f8fafc}}</style></head>
+.tablebox{{overflow:auto;max-height:76vh;border:1px solid #667085}}table{{border-collapse:collapse;width:100%;min-width:1250px;background:#fff;table-layout:fixed}}
+th,td{{border:1px solid #98a2b3;padding:5px 6px;vertical-align:top;overflow-wrap:anywhere;line-height:1.25}}th{{background:#e9eef5;position:sticky;top:0;z-index:2;white-space:normal}}
+th:nth-child(1),td:nth-child(1){{width:90px}}th:nth-child(2),td:nth-child(2){{width:120px}}th:nth-child(3),td:nth-child(3){{width:250px}}th:nth-child(4),td:nth-child(4),th:nth-child(5),td:nth-child(5){{width:125px}}th:nth-child(6),td:nth-child(6){{width:100px}}th:nth-child(9),td:nth-child(9){{width:120px}}th:nth-child(10),td:nth-child(10){{width:110px}}tbody tr:nth-child(even) td{{background:#f8fafc}}</style></head>
 <body><header><b>Alliance CRE Intelligence OS 11.5</b><br>Manual Source Database · restored directly from pi_operational_properties</header>
 <nav><a href="/alliance/primary">Command Centre</a><a href="/property-manual">Add Property</a><a href="/alliance/final/databases">Property Databases</a><a href="/commercial-intelligence">Commercial Intelligence</a></nav>
 <div class="wrap"><div class="stats"><div class="card"><div class="num">{total:,}</div>Exact Manual Source Records</div></div>
