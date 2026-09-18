@@ -5,7 +5,7 @@ from fastapi import Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import text
 
-VERSION="1.4.0-CANONICAL-PROPERTY-ROUTE-AUTHORITY"
+VERSION="1.5.0-WHATSAPP-REQUIREMENT-RESTORED-CONTACTS"
 PHONE_RE=re.compile(r"(?<!\d)(?:\+?91[\s.\-]?)?([6-9](?:[\s.\-]?\d){9})(?!\d)")
 SOURCES=("MASTER","NEWSPAPER","MANUAL","MAGAZINE","WHATSAPP")
 
@@ -77,6 +77,24 @@ def _requirement_rows(engine,source,limit=500):
         try:
             with engine.connect() as c:data=c.execute(text("SELECT to_jsonb(r) FROM pi_master_requirements_v711 r ORDER BY created_at DESC NULLS LAST LIMIT :n"),{'n':limit}).scalars().all()
             for x in data:add(x,'pi_master_requirements_v711')
+        except Exception:pass
+    # Use the same restored WhatsApp requirement contact authority used by
+    # WhatsApp recovery/availability. Bulk lookup avoids one DB query per row.
+    missing=[r for r in rows if r.get('source')=='WHATSAPP' and r.get('contact') in ('','Not captured') and str(r.get('source_id') or '').startswith('WAR-')]
+    if missing:
+        try:
+            import whatsapp_live_bridge as wb
+            ids=list(dict.fromkeys(str(r['source_id']) for r in missing))[:1000]
+            params={f'id{i}':v for i,v in enumerate(ids)}
+            marks=','.join(':'+k for k in params)
+            with wb.wa_engine.connect() as wc:
+                restored=wc.execute(text(f"""SELECT wa_requirement_id,contact_phone FROM wa_requirements
+                    WHERE wa_requirement_id IN ({marks})
+                      AND contact_phone IS NOT NULL AND BTRIM(contact_phone)<>''"""),params).mappings().all()
+            phone_map={str(x['wa_requirement_id']):_phones(x.get('contact_phone')) for x in restored}
+            for r in missing:
+                p=phone_map.get(str(r.get('source_id') or ''))
+                if p:r['contact']=p
         except Exception:pass
     rows.sort(key=lambda r:str(r.get('date') or ''),reverse=True);return rows[:limit]
 def _action(r,source):
