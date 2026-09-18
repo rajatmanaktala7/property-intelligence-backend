@@ -10,7 +10,7 @@ from fastapi import Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import text
 
-VERSION = "12.9.0-MANUAL-SOURCE-TRUTH"
+VERSION = "13.0.0-ASTRA-DIRECT-MANUAL-AUTHORITY"
 SOURCES = ("MASTER", "NEWSPAPER", "MANUAL", "MAGAZINE", "WHATSAPP", "SOCIAL")
 
 EXCLUDE_TOKENS = (
@@ -387,57 +387,73 @@ def _fingerprint(row):
     return "FP:" + hashlib.sha1(seed.encode("utf-8", "ignore")).hexdigest()
 
 def _manual_operational_rows(e, limit=1000):
-    """Read the verified production authority for historical manual requirements."""
-    if not _table_exists(e, "pi_operational_requirements"):
-        return []
-    try:
-        with e.connect() as conn:
-            raw = conn.execute(text("""
-                SELECT to_jsonb(t) AS d
-                FROM pi_operational_requirements t
-                WHERE UPPER(COALESCE(entry_source,'MANUAL'))='MANUAL'
-                ORDER BY id DESC
-                LIMIT :n
-            """), {"n": int(limit)}).scalars().all()
-    except Exception:
-        return []
-    out=[]
-    for i, x in enumerate(raw, 1):
-        d=x if isinstance(x,dict) else _dict(x)
-        types=d.get("requirement_types") or []
-        if isinstance(types,str):
-            try: types=json.loads(types)
-            except Exception: types=[types]
-        ptype=", ".join(str(v) for v in types if str(v).strip()) if isinstance(types,list) else str(types or "")
-        amin=str(d.get("minimum_area_text") or d.get("minimum_area_sqft") or "").strip()
-        amax=str(d.get("maximum_area_text") or d.get("maximum_area_sqft") or "").strip()
-        area=(amin+" - "+amax).strip(" -")
-        tx=str(d.get("transaction_type") or "").strip().upper()
-        budget=(d.get("maximum_rent_text") if tx in {"LEASE","RENT"} else d.get("sale_input_text") or d.get("sale_budget"))
-        if budget in (None,""): budget=d.get("maximum_rent_text") or d.get("maximum_rent") or d.get("sale_budget") or ""
-        message=str(d.get("additional_points") or "").strip()
+    """
+    Astra-style direct authority: deterministic source, explicit fields, no table
+    discovery, no JSON conversion, no historical inference.
+    """
+    sql = text("""
+        SELECT
+            id, requirement_code, created_at, entry_date,
+            client_name, company_name, contact_number,
+            preferred_locations, city, requirement_types,
+            transaction_type, additional_points,
+            minimum_area_sqft, minimum_area_text,
+            maximum_area_sqft, maximum_area_text,
+            maximum_rent, maximum_rent_text,
+            sale_budget, sale_input_text,
+            verification_status, entered_by, created_by
+        FROM pi_operational_requirements
+        WHERE UPPER(COALESCE(entry_source, 'MANUAL')) = 'MANUAL'
+        ORDER BY id DESC
+        LIMIT :n
+    """)
+    with e.connect() as conn:
+        raw = conn.execute(sql, {"n": int(limit)}).mappings().all()
+
+    out = []
+    for i, row in enumerate(raw, 1):
+        d = dict(row)
+        types = d.get("requirement_types") or []
+        if isinstance(types, str):
+            try:
+                types = json.loads(types)
+            except Exception:
+                types = [types]
+        ptype = ", ".join(str(v) for v in types if str(v).strip()) if isinstance(types, list) else str(types or "")
+        amin = str(d.get("minimum_area_text") or d.get("minimum_area_sqft") or "").strip()
+        amax = str(d.get("maximum_area_text") or d.get("maximum_area_sqft") or "").strip()
+        area = (amin + " - " + amax).strip(" -")
+        tx = str(d.get("transaction_type") or "").strip().upper()
+        if tx in {"LEASE", "RENT"}:
+            budget = d.get("maximum_rent_text") or d.get("maximum_rent") or ""
+        else:
+            budget = d.get("sale_input_text") or d.get("sale_budget") or d.get("maximum_rent_text") or ""
+        message = str(d.get("additional_points") or "").strip()
         if not message:
-            bits=[ptype, str(d.get("preferred_locations") or "").strip(), tx, area, str(budget or "").strip()]
-            message=" | ".join(v for v in bits if v)
+            message = " | ".join(v for v in [
+                ptype,
+                str(d.get("preferred_locations") or d.get("city") or "").strip(),
+                tx, area, str(budget or "").strip()
+            ] if v)
         out.append({
-            "canonical_id":"",
-            "source_pk":str(d.get("id") or d.get("requirement_code") or i),
-            "source_table":"pi_operational_requirements",
-            "source":"MANUAL",
-            "message":message,
-            "company":d.get("company_name") or "",
-            "contact_name":d.get("client_name") or "",
-            "contact":d.get("contact_number") or "",
-            "location":d.get("preferred_locations") or d.get("city") or "",
-            "transaction":tx,
-            "category":ptype,
-            "property_type":ptype,
-            "area":area,
-            "budget":budget,
-            "created_at":d.get("created_at") or d.get("entry_date"),
-            "verification":d.get("verification_status") or "UNVERIFIED",
-            "assigned_to":d.get("entered_by") or d.get("created_by") or "",
-            "is_master":False,
+            "canonical_id": "",
+            "source_pk": str(d.get("id") or d.get("requirement_code") or i),
+            "source_table": "pi_operational_requirements",
+            "source": "MANUAL",
+            "message": message,
+            "company": d.get("company_name") or "",
+            "contact_name": d.get("client_name") or "",
+            "contact": d.get("contact_number") or "",
+            "location": d.get("preferred_locations") or d.get("city") or "",
+            "transaction": tx,
+            "category": ptype,
+            "property_type": ptype,
+            "area": area,
+            "budget": budget,
+            "created_at": d.get("created_at") or d.get("entry_date"),
+            "verification": d.get("verification_status") or "UNVERIFIED",
+            "assigned_to": d.get("entered_by") or d.get("created_by") or "",
+            "is_master": False,
         })
     return out
 
@@ -1021,6 +1037,30 @@ def register(core, served_app=None):
         }
         _ensure_gate_row(e, selected)
         return RedirectResponse("/alliance/final/requirements/manual", status_code=303)
+
+    @app.get("/api/alliance/manual-requirements-source-truth", include_in_schema=False)
+    def manual_requirements_source_truth(req: Request):
+        _login(core, req)
+        with e.connect() as conn:
+            count = conn.execute(text("""
+                SELECT COUNT(*) FROM pi_operational_requirements
+                WHERE UPPER(COALESCE(entry_source,'MANUAL'))='MANUAL'
+            """)).scalar()
+            sample = conn.execute(text("""
+                SELECT id, requirement_code, client_name, contact_number,
+                       preferred_locations, transaction_type, verification_status
+                FROM pi_operational_requirements
+                WHERE UPPER(COALESCE(entry_source,'MANUAL'))='MANUAL'
+                ORDER BY id DESC LIMIT 3
+            """)).mappings().all()
+        return JSONResponse({
+            "status":"READY",
+            "version":VERSION,
+            "authority":"pi_operational_requirements",
+            "manual_count":int(count or 0),
+            "sample":[dict(x) for x in sample],
+            "database_writes":False,
+        })
 
     @app.get("/alliance/final/requirements/{source}", response_class=HTMLResponse, include_in_schema=False)
     def requirement_db(
