@@ -5,7 +5,7 @@ from fastapi import Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import text
 
-VERSION="1.6.0-WHATSAPP-REQUIREMENT-EVIDENCE-CONTACTS"
+VERSION="1.6.1-WHATSAPP-REQUIREMENT-NO-ACCOUNT-PHONE"
 PHONE_RE=re.compile(r"(?<!\d)(?:\+?91[\s.\-]?)?([6-9](?:[\s.\-]?\d){9})(?!\d)")
 SOURCES=("MASTER","NEWSPAPER","MANUAL","MAGAZINE","WHATSAPP")
 
@@ -96,7 +96,7 @@ def _requirement_rows(engine,source,limit=500):
             phone_map={}
             for x in restored:
                 p=_phones(x.get('contact_phone'))
-                if not p:p=_phones(x.get('sender_phone'),x.get('payload_json'))
+                if not p:p=_phones(x.get('sender_phone'))
                 if p:phone_map[str(x['wa_requirement_id'])]=p
             for r in missing:
                 p=phone_map.get(str(r.get('source_id') or ''))
