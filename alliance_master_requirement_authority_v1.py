@@ -401,10 +401,11 @@ def _render_match(core,req):
                +"\\nArea: "+area+"\\nPrice: "+price
                +"\\n\\nPlease let me know if you would like full details or a site visit.")
         verify_form=(f"<details class='inline'><summary class='btn good'>Verify / Remarks</summary>"
-          f"<form method='post' action='/alliance/primary/property/{quote(pid)}/verify'>"
+          f"<form method='post' action='/alliance/master-requirement-matcher/property/{quote(pid)}/verify'>"
+          f"<input type='hidden' name='requirement_id' value='{_e(req.get('id'))}'>"
           "<select name='status' required><option>AVAILABLE</option><option>NOT_AVAILABLE</option><option>CALL_BACK</option><option>SOLD</option><option>RENTED</option><option>HOLD</option><option>WRONG_NUMBER</option></select>"
           "<select name='verified_with' required><option>OWNER</option><option>BROKER</option><option>OTHER</option></select>"
-          "<input name='verified_by' required placeholder='Verified by'><input name='remarks' placeholder='Remarks'><input type='datetime-local' name='next_verification_at'>"
+          "<input name='remarks' placeholder='Remarks'><input type='datetime-local' name='next_verification_at'>"
           "<button class='btn good' type='submit'>Save Verification</button></form></details>")
         edit=f"<a class='btn light' href='/alliance/primary/property/{quote(pid)}/edit'>Edit</a>"
         msg=f"<button class='btn prepare' type='button' data-draft='{_e(draft)}' onclick='prepareMessage(this)'>Prepare Message</button>"
@@ -545,6 +546,39 @@ def register(core):
     @app.get(WORKSPACE_ROUTE,response_class=HTMLResponse)
     async def master_requirement_page(request:Request):
         _auth(core,request); return HTMLResponse(_page(core,request))
+    @app.post("/alliance/master-requirement-matcher/property/{cid}/verify")
+    async def matcher_property_verify(
+        cid:str, request:Request,
+        requirement_id:str=Form(""),
+        status:str=Form("AVAILABLE"),
+        verified_with:str=Form("OTHER"),
+        remarks:str=Form(""),
+        next_verification_at:str=Form(""),
+    ):
+        _auth(core,request)
+        status=_norm(status).upper()
+        allowed={"AVAILABLE","NOT_AVAILABLE","CALL_BACK","SOLD","RENTED","HOLD","WRONG_NUMBER"}
+        if status not in allowed: raise HTTPException(400,"Invalid verification status")
+        actor_fn=getattr(core,"actor_name",None)
+        actor=actor_fn(request) if callable(actor_fn) else "team"
+        available="AVAILABLE" if status=="AVAILABLE" else ("UNAVAILABLE" if status in {"NOT_AVAILABLE","SOLD","RENTED","WRONG_NUMBER"} else "UNKNOWN")
+        verification="VERIFIED" if status=="AVAILABLE" else "UNVERIFIED"
+        with core.engine.begin() as conn:
+            conn.execute(text("""INSERT INTO pi_master_workflow_v720(canonical_id,entity_type,verification_status,verified_at,verified_by,availability_status,internal_notes,updated_at)
+                VALUES(:id,'PROPERTY',:vs,NOW(),:by,:av,:notes,NOW())
+                ON CONFLICT(canonical_id) DO UPDATE SET verification_status=:vs,verified_at=NOW(),verified_by=:by,
+                availability_status=:av,internal_notes=:notes,updated_at=NOW()"""),
+                {"id":cid,"vs":verification,"by":actor,"av":available,"notes":_norm(remarks) or None})
+            try:
+                conn.execute(text("""INSERT INTO pi_master_action_log_v730(canonical_id,entity_type,action,actor,details)
+                    VALUES(:id,'PROPERTY','MATCHER_VERIFICATION',:by,CAST(:d AS JSONB))"""),
+                    {"id":cid,"by":actor,"d":json.dumps({"status":status,"verified_with":verified_with,"remarks":remarks,"next_verification_at":next_verification_at},ensure_ascii=False)})
+            except Exception:
+                pass
+        rid=_norm(requirement_id)
+        target=WORKSPACE_ROUTE+(("?requirement_id="+quote(rid)+"#results") if rid else "")
+        return RedirectResponse(target,status_code=303)
+
     @app.get("/api/alliance/master-requirements-v1/status")
     async def master_requirement_status(request:Request):
         _auth(core,request); return JSONResponse(_status(core))
