@@ -2,7 +2,7 @@ from __future__ import annotations
 import hashlib, json, re
 from sqlalchemy import text
 
-VERSION="1.0.1-LIVE-REQUEST-JSON-IDENTITY-CAPTURE"
+VERSION="1.1.0-EXCLUDE-ACCOUNT-GROUP-IDENTITY"
 EVENT_TABLE="pi_whatsapp_live_identity_events_v1"
 REGISTRY_TABLE="pi_whatsapp_sender_identity_registry_v1"
 
@@ -72,6 +72,10 @@ def _extract_pairs(snapshot):
     lids=[]; phones=[]
     for path,v in snapshot.items():
         lk=path.lower()
+        # Never use the connected account, group/chat identity, or message metadata
+        # as evidence for a sender's phone number.
+        if any(x in lk for x in ("account_phone","group_jid","group_id","group_name","chat_jid","chat_name","remote_jid","message_id","external_message_id")):
+            continue
         l=_lid(v); p=_phone(v)
         if l and ("lid" in lk or "@lid" in _norm(v).lower() or len(re.sub(r"\D+","",_norm(v)))>=13):
             lids.append((l,path))
