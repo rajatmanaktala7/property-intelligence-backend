@@ -1,7 +1,7 @@
 from __future__ import annotations
 import re
 from sqlalchemy import text
-VERSION="1.1.0-SEPARATE-CONTACTS-FAST-UI"
+VERSION="1.2.0-WHATSAPP-REQUIREMENT-CONTACT-BRIDGE"
 
 def _phone(v):
     s=str(v or '').strip().replace('@s.whatsapp.net','').replace('@c.us','')
@@ -51,6 +51,22 @@ def install(fix, engine):
         except Exception:pass
         return ''
 
+    def restored_requirement_phone(source_id):
+        # Availability/WhatsApp recovery writes the verified sender number into
+        # wa_requirements.contact_phone. Requirement pages must read that same
+        # restored authority instead of showing "Not captured".
+        sid=str(source_id or '').strip()
+        if not sid:return ''
+        try:
+            import whatsapp_live_bridge as wb
+            wa_engine=getattr(wb,'wa_engine',None)
+            if wa_engine is None:return ''
+            with wa_engine.connect() as c:
+                r=c.execute(text("""SELECT contact_phone FROM wa_requirements
+                  WHERE wa_requirement_id=:sid LIMIT 1"""),{'sid':sid}).mappings().first()
+            return _deep_phones(r.get('contact_phone')) if r else ''
+        except Exception:return ''
+
     def wa_lookup(row):
         p=_deep_phones(row)
         if p:return p
@@ -58,6 +74,8 @@ def install(fix, engine):
         except Exception:p=''
         if p:return p
         sid=fix._first(row,['source_pk','wa_requirement_id','requirement_id','record_id','id'])
+        p=restored_requirement_phone(sid)
+        if p:return p
         stable=fix._first(row,['source_table']) or 'WHATSAPP'
         return astra_evidence(stable,sid)
     fix._wa_lookup=wa_lookup
@@ -69,7 +87,8 @@ def install(fix, engine):
         r=old_norm(obj,source_table)
         if str(r.get('source') or '').upper()=='WHATSAPP' and str(r.get('contact') or '') in ('','Not captured'):
             sid=r.get('source_id')
-            p=astra_evidence(source_table,sid)
+            p=restored_requirement_phone(sid)
+            if not p:p=astra_evidence(source_table,sid)
             if not p:
                 try:p=wa_lookup(obj if isinstance(obj,dict) else {})
                 except Exception:p=''
