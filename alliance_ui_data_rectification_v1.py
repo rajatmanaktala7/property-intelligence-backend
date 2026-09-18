@@ -5,7 +5,7 @@ from fastapi import Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import text
 
-VERSION="1.3.2-FAST-REQUIREMENT-VIEWS"
+VERSION="1.4.0-CANONICAL-PROPERTY-ROUTE-AUTHORITY"
 PHONE_RE=re.compile(r"(?<!\d)(?:\+?91[\s.\-]?)?([6-9](?:[\s.\-]?\d){9})(?!\d)")
 SOURCES=("MASTER","NEWSPAPER","MANUAL","MAGAZINE","WHATSAPP")
 
@@ -105,7 +105,22 @@ def register(core,requirement_app=None,served_app=None):
         if path=='/alliance/source/newspaper':return RedirectResponse('/newspaper-v83',307)
         if path=='/alliance/source/manual':return HTMLResponse(_manual_page(),headers={'Cache-Control':'no-store'})
         if path=='/alliance/final/databases':return HTMLResponse(_property_hub(),headers={'Cache-Control':'no-store'})
-        if path=='/alliance/final/database/master' and engine is not None:return HTMLResponse(_master_properties(engine),headers={'Cache-Control':'no-store'})
+        # Property database authority: render every source through the canonical V9.3
+        # database renderer. The unified patch supplies the approved 19-column layout,
+        # zoom controls and reads normalized p.phones for WhatsApp contacts. Do not
+        # replace Master with the old one-link placeholder page.
+        if path.startswith('/alliance/final/database/') and engine is not None:
+            src=path.rsplit('/',1)[-1].upper()
+            if src in SOURCES:
+                import alliance_final_5x5_databases_v910 as property_db
+                import alliance_property_database_unified_patch_v1 as property_patch
+                property_patch.install()
+                qp=request.query_params
+                try: limit=max(1,min(1500,int(qp.get('limit','500') or 500)))
+                except Exception: limit=500
+                body=property_db._property_table(core,engine,request,src,qp.get('q',''),qp.get('location',''),qp.get('category',''),qp.get('transaction',''),qp.get('status',''),qp.get('assigned',''),limit)
+                page=property_db._shell(f"{src.title()} Property Database",body)
+                return HTMLResponse(page,headers={'Cache-Control':'no-store'})
         if path=='/alliance/final/requirements':return HTMLResponse(_requirement_hub(),headers={'Cache-Control':'no-store'})
         if path.startswith('/alliance/final/requirements/') and engine is not None:
             src=path.rsplit('/',1)[-1].upper()
