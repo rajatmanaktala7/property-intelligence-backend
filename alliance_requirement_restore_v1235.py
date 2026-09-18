@@ -10,7 +10,7 @@ from fastapi import Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import text
 
-VERSION = "12.8.0-DIRECT-OPERATIONAL-MANUAL-FAST"
+VERSION = "12.9.0-MANUAL-SOURCE-TRUTH"
 SOURCES = ("MASTER", "NEWSPAPER", "MANUAL", "MAGAZINE", "WHATSAPP", "SOCIAL")
 
 EXCLUDE_TOKENS = (
@@ -387,37 +387,57 @@ def _fingerprint(row):
     return "FP:" + hashlib.sha1(seed.encode("utf-8", "ignore")).hexdigest()
 
 def _manual_operational_rows(e, limit=1000):
-    """Current manual requirement form writes here. Read it directly; no discovery scan."""
-    if not _table_exists(e,"pi_operational_requirements"): return []
+    """Read the verified production authority for historical manual requirements."""
+    if not _table_exists(e, "pi_operational_requirements"):
+        return []
     try:
         with e.connect() as conn:
-            raw=conn.execute(text("""SELECT to_jsonb(t) AS d FROM pi_operational_requirements t
-                WHERE COALESCE(entry_source,'MANUAL')='MANUAL'
-                ORDER BY created_at DESC NULLS LAST,id DESC LIMIT :n"""),{"n":int(limit)}).scalars().all()
+            raw = conn.execute(text("""
+                SELECT to_jsonb(t) AS d
+                FROM pi_operational_requirements t
+                WHERE UPPER(COALESCE(entry_source,'MANUAL'))='MANUAL'
+                ORDER BY id DESC
+                LIMIT :n
+            """), {"n": int(limit)}).scalars().all()
     except Exception:
         return []
     out=[]
-    for i,x in enumerate(raw,1):
+    for i, x in enumerate(raw, 1):
         d=x if isinstance(x,dict) else _dict(x)
         types=d.get("requirement_types") or []
         if isinstance(types,str):
             try: types=json.loads(types)
             except Exception: types=[types]
-        loc=d.get("preferred_locations") or d.get("city") or ""
-        msg=d.get("additional_points") or ""
+        ptype=", ".join(str(v) for v in types if str(v).strip()) if isinstance(types,list) else str(types or "")
+        amin=str(d.get("minimum_area_text") or d.get("minimum_area_sqft") or "").strip()
+        amax=str(d.get("maximum_area_text") or d.get("maximum_area_sqft") or "").strip()
+        area=(amin+" - "+amax).strip(" -")
+        tx=str(d.get("transaction_type") or "").strip().upper()
+        budget=(d.get("maximum_rent_text") if tx in {"LEASE","RENT"} else d.get("sale_input_text") or d.get("sale_budget"))
+        if budget in (None,""): budget=d.get("maximum_rent_text") or d.get("maximum_rent") or d.get("sale_budget") or ""
+        message=str(d.get("additional_points") or "").strip()
+        if not message:
+            bits=[ptype, str(d.get("preferred_locations") or "").strip(), tx, area, str(budget or "").strip()]
+            message=" | ".join(v for v in bits if v)
         out.append({
-            "canonical_id":str(d.get("requirement_code") or d.get("id") or ""),
-            "source_pk":str(d.get("requirement_code") or d.get("id") or i),
-            "source_table":"pi_operational_requirements","source":"MANUAL",
-            "message":msg,"company":d.get("company_name") or "",
-            "contact_name":d.get("client_name") or "","contact":d.get("contact_number") or "",
-            "location":loc,"transaction":d.get("transaction_type") or "",
-            "category":", ".join(map(str,types)) if isinstance(types,list) else str(types or ""),
-            "property_type":", ".join(map(str,types)) if isinstance(types,list) else str(types or ""),
-            "area":str(d.get("minimum_area_text") or d.get("minimum_area_sqft") or "")+" - "+str(d.get("maximum_area_text") or d.get("maximum_area_sqft") or ""),
-            "budget":d.get("maximum_rent_text") or d.get("maximum_rent") or "",
-            "created_at":d.get("created_at"),"verification":d.get("verification_status") or "UNVERIFIED",
-            "assigned_to":"","is_master":False,
+            "canonical_id":"",
+            "source_pk":str(d.get("id") or d.get("requirement_code") or i),
+            "source_table":"pi_operational_requirements",
+            "source":"MANUAL",
+            "message":message,
+            "company":d.get("company_name") or "",
+            "contact_name":d.get("client_name") or "",
+            "contact":d.get("contact_number") or "",
+            "location":d.get("preferred_locations") or d.get("city") or "",
+            "transaction":tx,
+            "category":ptype,
+            "property_type":ptype,
+            "area":area,
+            "budget":budget,
+            "created_at":d.get("created_at") or d.get("entry_date"),
+            "verification":d.get("verification_status") or "UNVERIFIED",
+            "assigned_to":d.get("entered_by") or d.get("created_by") or "",
+            "is_master":False,
         })
     return out
 
