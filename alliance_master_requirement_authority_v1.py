@@ -5,7 +5,7 @@ from fastapi import HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from sqlalchemy import inspect, text
 
-VERSION="1.4.0-WHATSAPP-UPSTREAM-IDENTITY-BRIDGE"
+VERSION="1.5.0-PRESERVE-MATCHER-SELECTION"
 MASTER_REQUIREMENT_TABLE="pi_requirement_gate_v1191"
 MASTER_PROPERTY_TABLE="pi_master_properties_v711"
 MASTER_LINKS_TABLE="pi_master_source_links_v711"
@@ -443,7 +443,12 @@ def register(core):
             app.router.routes.remove(route)
     @app.get(SMART_MATCHER_ROUTE)
     async def smart_matcher_redirect(request:Request):
-        _auth(core,request); return RedirectResponse(WORKSPACE_ROUTE,status_code=302)
+        _auth(core,request)
+        # Preserve the selected requirement across the canonical matcher takeover.
+        # Previously the redirect discarded requirement_id and opened the ALL list.
+        qs=str(request.url.query or "").strip()
+        target=WORKSPACE_ROUTE + (("?" + qs) if qs else "")
+        return RedirectResponse(target,status_code=302)
     @app.get(WORKSPACE_ROUTE,response_class=HTMLResponse)
     async def master_requirement_page(request:Request):
         _auth(core,request); return HTMLResponse(_page(core,request))
