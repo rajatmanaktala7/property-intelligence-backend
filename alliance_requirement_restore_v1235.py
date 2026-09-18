@@ -10,7 +10,7 @@ from fastapi import Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import text
 
-VERSION = "13.3.0-ASTRA-LIVE-MANUAL-TRUTH-PROBE"
+VERSION = "13.4.0-ASTRA-ISOLATED-MANUAL-COUNT"
 SOURCES = ("MASTER", "NEWSPAPER", "MANUAL", "MAGAZINE", "WHATSAPP", "SOCIAL")
 
 EXCLUDE_TOKENS = (
@@ -586,22 +586,28 @@ document.addEventListener('DOMContentLoaded',function(){{if(localStorage.getItem
 </body></html>"""
 
 def _fast_requirement_counts(e):
-    """Fast counters from settled canonical authorities only. Never scan every historical table."""
+    """Fast counters from settled authorities. Each source is isolated so one bad
+    legacy query can never zero a healthy Manual counter."""
     counts = {source: 0 for source in SOURCES}
     errors = {}
+
+    # Manual has its own settled operational authority. Count it independently
+    # before touching Gate/Master queries.
     try:
         with e.connect() as c:
-            if _table_exists(e, "pi_requirement_gate_v1191"):
+            counts["MANUAL"] = int(c.execute(text("""
+                SELECT COUNT(*) FROM pi_operational_requirements
+                WHERE UPPER(COALESCE(entry_source,'MANUAL'))='MANUAL'
+            """)).scalar() or 0)
+    except Exception as exc:
+        errors["MANUAL"] = f"{type(exc).__name__}: {str(exc)[:160]}"
+
+    try:
+        if _table_exists(e, "pi_requirement_gate_v1191"):
+            with e.connect() as c:
                 counts["MASTER"] = int(c.execute(text("""
                     SELECT COUNT(*) FROM pi_requirement_gate_v1191
                     WHERE COALESCE(classification,'') NOT IN ('REJECTED','NOISE','REJECTED/EXPIRED')
-                """)).scalar() or 0)
-                # MANUAL is owned by the operational manual-entry authority, not
-                # by the Requirement Gate. The hub counter and detail page must
-                # therefore read the same source of truth.
-                counts["MANUAL"] = int(c.execute(text("""
-                    SELECT COUNT(*) FROM pi_operational_requirements
-                    WHERE UPPER(COALESCE(entry_source,'MANUAL'))='MANUAL'
                 """)).scalar() or 0)
                 for source in ("NEWSPAPER","MAGAZINE","WHATSAPP","SOCIAL"):
                     pats = {
@@ -614,11 +620,15 @@ def _fast_requirement_counts(e):
                     for i,p in enumerate(pats):
                         clauses.append(f"(UPPER(COALESCE(source_type,'')) LIKE :p{i} OR UPPER(COALESCE(source_table,'')) LIKE :p{i})")
                         params[f"p{i}"]=p
-                    counts[source]=int(c.execute(text("SELECT COUNT(*) FROM pi_requirement_gate_v1191 WHERE COALESCE(classification,'') NOT IN ('REJECTED','NOISE','REJECTED/EXPIRED') AND ("+" OR ".join(clauses)+")"),params).scalar() or 0)
-            elif _table_exists(e, "pi_master_requirements_v711"):
+                    try:
+                        counts[source]=int(c.execute(text("SELECT COUNT(*) FROM pi_requirement_gate_v1191 WHERE COALESCE(classification,'') NOT IN ('REJECTED','NOISE','REJECTED/EXPIRED') AND ("+" OR ".join(clauses)+")"),params).scalar() or 0)
+                    except Exception as exc:
+                        errors[source] = f"{type(exc).__name__}: {str(exc)[:160]}"
+        elif _table_exists(e, "pi_master_requirements_v711"):
+            with e.connect() as c:
                 counts["MASTER"] = int(c.execute(text("SELECT COUNT(*) FROM pi_master_requirements_v711")).scalar() or 0)
     except Exception as exc:
-        errors["canonical_counts"] = type(exc).__name__
+        errors["MASTER"] = f"{type(exc).__name__}: {str(exc)[:160]}"
     return counts, errors
 
 def _hub(e):
