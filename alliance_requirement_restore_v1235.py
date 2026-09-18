@@ -10,7 +10,7 @@ from fastapi import Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import text
 
-VERSION = "13.4.0-ASTRA-ISOLATED-MANUAL-COUNT"
+VERSION = "13.5.0-ASTRA-LIVE-HANDLER-PROOF"
 SOURCES = ("MASTER", "NEWSPAPER", "MANUAL", "MAGAZINE", "WHATSAPP", "SOCIAL")
 
 EXCLUDE_TOKENS = (
@@ -1090,6 +1090,7 @@ def register(core, served_app=None):
         # which runtime, engine and table result the user's browser is actually using.
         if src == "MANUAL" and req.query_params.get("__astra_truth") == "1":
             from fastapi.responses import JSONResponse
+            from fastapi.encoders import jsonable_encoder
             result = {
                 "diagnostic": "ASTRA_LIVE_MANUAL_TRUTH_PROBE_V1",
                 "version": VERSION,
@@ -1114,7 +1115,7 @@ def register(core, served_app=None):
             except Exception as exc:
                 result["status"] = "ERROR"
                 result["error"] = f"{type(exc).__name__}: {exc}"
-            return JSONResponse(result, headers={"Cache-Control":"no-store","X-Alliance-Requirement-Restore":VERSION}, default=str)
+            return JSONResponse(jsonable_encoder(result), headers={"Cache-Control":"no-store","X-Alliance-Requirement-Restore":VERSION})
         # Keep the first page intentionally small. Requirement pages are operational
         # workspaces, not full-table exports. Search narrows before rendering.
         page_rows = _table(e, src, q, location, transaction, status, assigned, limit)
