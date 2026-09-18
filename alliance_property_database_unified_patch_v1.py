@@ -1,6 +1,6 @@
 from __future__ import annotations
 import json,re
-VERSION='1.0.0-UNIFIED-PROPERTY-DATABASES'
+VERSION='1.1.0-COMPACT-UNIFIED-PROPERTY-DATABASES'
 PHONE_RE=re.compile(r'(?<!\d)(?:\+?91[\s.()-]?)?([6-9](?:[\s.()-]?\d){9})(?!\d)')
 
 def _phones(*values):
@@ -37,7 +37,7 @@ def install():
     def shell(title,body):
         page=old_shell(title,body)
         if 'Property Database' not in str(title) and 'Property Databases' not in str(title): return page
-        css="""<style id='property-unified-v1'>table{font-size:12px!important;font-weight:650}th,td{padding:7px 8px!important;line-height:1.28}.propzoom{display:flex;align-items:center;gap:6px;margin:0 0 9px;background:#fff;padding:6px;border:1px solid #d0d5dd;width:max-content;position:sticky;left:0;z-index:6}.propzoom button{padding:5px 9px;font-weight:900}.desc{min-width:330px!important;max-width:540px!important}</style>"""
+        css="""<style id='property-unified-v1'>table{font-size:11px!important;font-weight:600;table-layout:auto}th,td{padding:4px 5px!important;line-height:1.18;max-width:190px;overflow-wrap:anywhere}th{white-space:nowrap}.propzoom{display:flex;align-items:center;gap:5px;margin:0 0 7px;background:#fff;padding:5px;border:1px solid #d0d5dd;width:max-content;position:sticky;left:0;z-index:6}.propzoom button{padding:4px 7px;font-weight:900}.desc{min-width:220px!important;max-width:320px!important}.loc{min-width:90px!important;max-width:130px!important}.nowrap{white-space:nowrap!important;max-width:150px!important}.tablebox{max-height:80vh!important}td:nth-child(7),td:nth-child(8){max-width:125px!important}td:nth-child(11),td:nth-child(12),td:nth-child(13){max-width:120px!important}td:nth-child(14),td:nth-child(15),td:nth-child(16){max-width:140px!important}</style>"""
         js="""<script id='property-zoom-v1'>(function(){let z=Number(localStorage.getItem('alliancePropertyZoom')||100);function a(){document.querySelectorAll('.tablebox table').forEach(t=>t.style.fontSize=(12*z/100)+'px');document.querySelectorAll('.tablebox th,.tablebox td').forEach(x=>x.style.padding=(7*z/100)+'px '+(8*z/100)+'px')}window.propZoom=function(d){z=Math.max(70,Math.min(170,z+d*10));localStorage.setItem('alliancePropertyZoom',z);a()};window.propZoomReset=function(){z=100;localStorage.setItem('alliancePropertyZoom',z);a()};a()})();</script>"""
         controls="<div class='propzoom'><b>Table Zoom</b><button type='button' onclick='propZoom(-1)'>−</button><button type='button' onclick='propZoom(1)'>+</button><button type='button' onclick='propZoomReset()'>Reset</button></div>"
         page=page.replace('</head>',css+'</head>')
