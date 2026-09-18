@@ -7,7 +7,7 @@ from alliance_phase5_canonical_matcher import *
 
 # This exact marker is consumed by the live System Doctor.  It is not a
 # cosmetic label: this module is the only candidate loader used by v60.
-VERSION = "1.0.2-CANONICAL-MASTER-AUTHORITY"
+VERSION = "1.0.3-ASTRA-INVENTORY-LOCATION-RESOLUTION"
 MASTER_TABLE = "pi_master_properties_v711"
 WORKFLOW_TABLE = "pi_master_workflow_v720"
 MATCHER_SOURCE_CONTRACT = "MASTER_ONLY"
@@ -190,6 +190,10 @@ def run_match(engine, requirement_text: str, min_score: float = 70.0, limit: int
     req = base.parse_requirement(requirement_text)
     raw, source_counts = load_candidates(engine)
     candidates = base.dedupe_candidates(raw)
+    # Resolve localities that are present in the requirement and in current Master
+    # inventory even when they are not yet in the static alias dictionary.
+    # This keeps Master Properties authoritative and avoids guessing localities.
+    req = base.enrich_requirement_with_inventory_locations(req, requirement_text, candidates)
     exact_verified, exact_verify, rejected = [], [], []
     for p in candidates:
         ok, code, gate = base.eligible(req, p, "EXACT")
