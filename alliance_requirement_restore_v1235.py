@@ -10,7 +10,7 @@ from fastapi import Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import text
 
-VERSION = "12.7.0-DIRECT-GATE-PAGING-MANUAL-RESTORE"
+VERSION = "12.8.0-DIRECT-OPERATIONAL-MANUAL-FAST"
 SOURCES = ("MASTER", "NEWSPAPER", "MANUAL", "MAGAZINE", "WHATSAPP", "SOCIAL")
 
 EXCLUDE_TOKENS = (
@@ -386,7 +386,47 @@ def _fingerprint(row):
     seed = "|".join((phone, msg, loc, company))
     return "FP:" + hashlib.sha1(seed.encode("utf-8", "ignore")).hexdigest()
 
+def _manual_operational_rows(e, limit=1000):
+    """Current manual requirement form writes here. Read it directly; no discovery scan."""
+    if not _table_exists(e,"pi_operational_requirements"): return []
+    try:
+        with e.connect() as conn:
+            raw=conn.execute(text("""SELECT to_jsonb(t) AS d FROM pi_operational_requirements t
+                WHERE COALESCE(entry_source,'MANUAL')='MANUAL'
+                ORDER BY created_at DESC NULLS LAST,id DESC LIMIT :n"""),{"n":int(limit)}).scalars().all()
+    except Exception:
+        return []
+    out=[]
+    for i,x in enumerate(raw,1):
+        d=x if isinstance(x,dict) else _dict(x)
+        types=d.get("requirement_types") or []
+        if isinstance(types,str):
+            try: types=json.loads(types)
+            except Exception: types=[types]
+        loc=d.get("preferred_locations") or d.get("city") or ""
+        msg=d.get("additional_points") or ""
+        out.append({
+            "canonical_id":str(d.get("requirement_code") or d.get("id") or ""),
+            "source_pk":str(d.get("requirement_code") or d.get("id") or i),
+            "source_table":"pi_operational_requirements","source":"MANUAL",
+            "message":msg,"company":d.get("company_name") or "",
+            "contact_name":d.get("client_name") or "","contact":d.get("contact_number") or "",
+            "location":loc,"transaction":d.get("transaction_type") or "",
+            "category":", ".join(map(str,types)) if isinstance(types,list) else str(types or ""),
+            "property_type":", ".join(map(str,types)) if isinstance(types,list) else str(types or ""),
+            "area":str(d.get("minimum_area_text") or d.get("minimum_area_sqft") or "")+" - "+str(d.get("maximum_area_text") or d.get("maximum_area_sqft") or ""),
+            "budget":d.get("maximum_rent_text") or d.get("maximum_rent") or "",
+            "created_at":d.get("created_at"),"verification":d.get("verification_status") or "UNVERIFIED",
+            "assigned_to":"","is_master":False,
+        })
+    return out
+
 def _combined(e, source):
+    # Manual form authority is pi_operational_requirements. Do this before any
+    # Gate/historical work so the Manual page is both complete and fast.
+    if source == "MANUAL":
+        manual=_manual_operational_rows(e,1000)
+        return manual, {"master":0,"source_only":len(manual),"tables":["pi_operational_requirements"]}
     masters = _master_rows(e, source)
     if source == "MASTER":
         gate_rows = _gate_rows(e)
