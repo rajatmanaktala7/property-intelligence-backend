@@ -5,7 +5,7 @@ from fastapi import HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from sqlalchemy import inspect, text
 
-VERSION="1.9.0-TEAM-VERIFY-AND-MESSAGE-WORKSPACE"
+VERSION="1.9.1-INLINE-TEAM-CONTACT-NO-DETAIL-PAGE"
 MASTER_REQUIREMENT_TABLE="pi_requirement_gate_v1191"
 MASTER_PROPERTY_TABLE="pi_master_properties_v711"
 MASTER_LINKS_TABLE="pi_master_source_links_v711"
@@ -255,7 +255,7 @@ def _master_contact_map(core,ids):
     if not idcol:return {}
     contact_cols=[c for c in cols if c.lower() in {
         "contact_phone","contact_numbers","phone","mobile","owner_phone","broker_phone",
-        "sender_phone","whatsapp_sender","contact_no","phone_number"}]
+        "sender_phone","whatsapp_sender","contact_no","phone_number","phones","phone_numbers"}]
     source_cols=[c for c in cols if c.lower() in {"source","source_name","source_type","source_group"}]
     select=[f'"{idcol}" AS pid']+[f'"{c}" AS "{c}"' for c in contact_cols+source_cols]
     params={f"p{i}":v for i,v in enumerate(ids)}
@@ -377,11 +377,10 @@ def _render_match(core,req):
             f"<tr><th>Rent / Sale</th><td>{_e(tx)}</td><th>Price</th><td>{_e(price)}</td></tr>"
             f"<tr><th>Area</th><td>{_e(area)}</td><th>Source</th><td>{_e(source or 'Not captured')}</td></tr>"
             f"<tr><th>Description</th><td colspan='3'>{_e(desc)}</td></tr>"
-            f"<tr><th>Internal Contact</th><td colspan='3'>{contact_html}</td></tr>"
+            f"<tr><th>Team Verification Contact</th><td colspan='3'>{contact_html}<br><small>Internal only. This contact is never included in the client message.</small></td></tr>"
             f"<tr><th>Why matched</th><td colspan='3'>{_e(why)}</td></tr>"
             "</table>"
             "<div class='actions'>"
-            f"<a class='btn' href='{_e(detail)}'>View / Verify Property</a>"
             f"<button class='btn prepare' type='button' data-draft='{_e(draft)}' onclick='prepareMessage(this)'>Prepare Message</button>"
             "</div><div class='draftbox' style='display:none'></div></div>")
     summary=result.get("summary") or {}
