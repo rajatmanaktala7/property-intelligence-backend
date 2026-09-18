@@ -10,7 +10,7 @@ from fastapi import Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import text
 
-VERSION = "12.6.0-FAST-GATE-SOURCE-VIEWS-COMPACT-ZOOM"
+VERSION = "12.7.0-DIRECT-GATE-PAGING-MANUAL-RESTORE"
 SOURCES = ("MASTER", "NEWSPAPER", "MANUAL", "MAGAZINE", "WHATSAPP", "SOCIAL")
 
 EXCLUDE_TOKENS = (
@@ -519,54 +519,34 @@ document.addEventListener('DOMContentLoaded',function(){{if(localStorage.getItem
 </body></html>"""
 
 def _fast_requirement_counts(e):
-    """Count database rows without loading or normalizing complete records."""
+    """Fast counters from settled canonical authorities only. Never scan every historical table."""
     counts = {source: 0 for source in SOURCES}
     errors = {}
-
-    tables = _discover_tables(e)
-
     try:
         with e.connect() as c:
             if _table_exists(e, "pi_requirement_gate_v1191"):
-                counts["MASTER"] = int(
-                    c.execute(
-                        text("""
-                            SELECT COUNT(*)
-                            FROM pi_requirement_gate_v1191
-                            WHERE COALESCE(classification,'')
-                                  NOT IN ('REJECTED','NOISE')
-                        """)
-                    ).scalar() or 0
-                )
+                counts["MASTER"] = int(c.execute(text("""
+                    SELECT COUNT(*) FROM pi_requirement_gate_v1191
+                    WHERE COALESCE(classification,'') NOT IN ('REJECTED','NOISE','REJECTED/EXPIRED')
+                """)).scalar() or 0)
+                for source in ("NEWSPAPER","MANUAL","MAGAZINE","WHATSAPP","SOCIAL"):
+                    pats = {
+                        "NEWSPAPER":["%NEWSPAPER%"],
+                        "MANUAL":["%MANUAL%"],
+                        "MAGAZINE":["%MAGAZINE%"],
+                        "WHATSAPP":["%WHATSAPP%","WA_%","WAI_%"],
+                        "SOCIAL":["%SOCIAL%","%LINKEDIN%","%FACEBOOK%","%INSTAGRAM%"],
+                    }[source]
+                    clauses=[]; params={}
+                    for i,p in enumerate(pats):
+                        clauses.append(f"(UPPER(COALESCE(source_type,'')) LIKE :p{i} OR UPPER(COALESCE(source_table,'')) LIKE :p{i})")
+                        params[f"p{i}"]=p
+                    counts[source]=int(c.execute(text("SELECT COUNT(*) FROM pi_requirement_gate_v1191 WHERE COALESCE(classification,'') NOT IN ('REJECTED','NOISE','REJECTED/EXPIRED') AND ("+" OR ".join(clauses)+")"),params).scalar() or 0)
             elif _table_exists(e, "pi_master_requirements_v711"):
-                counts["MASTER"] = int(
-                    c.execute(
-                        text(
-                            "SELECT COUNT(*) "
-                            "FROM pi_master_requirements_v711"
-                        )
-                    ).scalar() or 0
-                )
-
-            for table in tables:
-                source = _classify(table)
-
-                if source not in {"NEWSPAPER", "WHATSAPP", "MAGAZINE", "MANUAL", "SOCIAL"}:
-                    continue
-
-                try:
-                    value = c.execute(
-                        text(f"SELECT COUNT(*) FROM {_qident(table)}")
-                    ).scalar()
-
-                    counts[source] += int(value or 0)
-                except Exception as exc:
-                    errors[table] = type(exc).__name__
+                counts["MASTER"] = int(c.execute(text("SELECT COUNT(*) FROM pi_master_requirements_v711")).scalar() or 0)
     except Exception as exc:
-        errors["connection"] = type(exc).__name__
-
+        errors["canonical_counts"] = type(exc).__name__
     return counts, errors
-
 
 def _hub(e):
     # ALLIANCE_REQUIREMENT_FAST_COUNTS_V1
@@ -991,14 +971,18 @@ def register(core, served_app=None):
         transaction: str = Query(""),
         status: str = Query(""),
         assigned: str = Query(""),
-        limit: int = Query(1500, ge=1, le=5000),
+        limit: int = Query(250, ge=1, le=1000),
+        page: int = Query(1, ge=1, le=10000),
     ):
         _login(core, req)
         src = source.upper()
         if src not in SOURCES:
             return HTMLResponse("Unknown requirement database", status_code=404)
+        # Keep the first page intentionally small. Requirement pages are operational
+        # workspaces, not full-table exports. Search narrows before rendering.
+        page_rows = _table(e, src, q, location, transaction, status, assigned, limit)
         return HTMLResponse(
-            _table(e, src, q, location, transaction, status, assigned, limit),
+            page_rows,
             headers={"Cache-Control":"no-store","X-Alliance-Requirement-Restore":VERSION},
         )
 
