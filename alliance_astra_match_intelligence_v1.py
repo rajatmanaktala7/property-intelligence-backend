@@ -1,7 +1,7 @@
 from __future__ import annotations
 import re
 
-VERSION="1.0.0-SAFE-INTERPRETATION"
+VERSION="1.1.0-INTENT-BUDGET-BHK"
 
 def _norm(v):
     return re.sub(r"\s+"," ",str(v or "").replace("\u00a0"," ")).strip()
@@ -31,6 +31,16 @@ def interpret_requirement(req):
     if transaction: hints.append("TRANSACTION "+transaction)
     if locations: hints.append("LOCATION "+", ".join(locations))
     if asset: hints.append("PROPERTY TYPE "+asset)
+    # Preserve explicit bedroom range and commercial-use intent for the canonical parser.
+    bhk=re.search(r"(?i)\b(\d+)\s*[-–—]\s*(\d+)\s*BHK\b",raw)
+    if bhk:
+        hints.append("BHK "+bhk.group(1)+" TO "+bhk.group(2))
+    if re.search(r"(?i)\b(commercial use|airbnb|short[ -]?term rental|homestay)\b",raw):
+        hints.append("INTENDED USE COMMERCIAL HOSPITALITY")
+    # Budget wording such as "2 lacs" is explicit evidence and must survive.
+    budget=re.search(r"(?i)\bbudget\s*[:\-]?\s*(?:around|approx(?:imately)?|upto|up to)?\s*(\d+(?:\.\d+)?)\s*(cr|crore|crores|lac|lakh|lakhs|k)\b",raw)
+    if budget:
+        hints.append("BUDGET "+budget.group(1)+" "+budget.group(2))
     amin=req.get("area_min_sqft"); amax=req.get("area_max_sqft")
     if amin not in (None,"") or amax not in (None,""): hints.append("AREA SQFT "+str(amin or amax)+" TO "+str(amax or amin))
     enriched=raw+((" | ASTRA INTERPRETATION: "+"; ".join(hints)) if hints else "")
