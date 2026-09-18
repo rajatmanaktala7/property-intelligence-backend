@@ -10,7 +10,7 @@ from fastapi import Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import text
 
-VERSION = "13.1.0-ASTRA-MANUAL-COUNT-AND-ROWS-AUTHORITY"
+VERSION = "13.2.0-ASTRA-SCHEMA-SAFE-MANUAL-AUTHORITY"
 SOURCES = ("MASTER", "NEWSPAPER", "MANUAL", "MAGAZINE", "WHATSAPP", "SOCIAL")
 
 EXCLUDE_TOKENS = (
@@ -388,20 +388,12 @@ def _fingerprint(row):
 
 def _manual_operational_rows(e, limit=1000):
     """
-    Astra-style direct authority: deterministic source, explicit fields, no table
-    discovery, no JSON conversion, no historical inference.
+    Astra-style source truth with schema-safe projection.
+    Read the settled operational table directly. SELECT * deliberately avoids
+    assuming optional columns that differ across historical deployments.
     """
     sql = text("""
-        SELECT
-            id, requirement_code, created_at, entry_date,
-            client_name, company_name, contact_number,
-            preferred_locations, city, requirement_types,
-            transaction_type, additional_points,
-            minimum_area_sqft, minimum_area_text,
-            maximum_area_sqft, maximum_area_text,
-            maximum_rent, maximum_rent_text,
-            sale_budget, sale_input_text,
-            verification_status, entered_by, created_by
+        SELECT *
         FROM pi_operational_requirements
         WHERE UPPER(COALESCE(entry_source, 'MANUAL')) = 'MANUAL'
         ORDER BY id DESC
@@ -427,13 +419,12 @@ def _manual_operational_rows(e, limit=1000):
         if tx in {"LEASE", "RENT"}:
             budget = d.get("maximum_rent_text") or d.get("maximum_rent") or ""
         else:
-            budget = d.get("sale_input_text") or d.get("sale_budget") or d.get("maximum_rent_text") or ""
-        message = str(d.get("additional_points") or "").strip()
+            budget = d.get("sale_input_text") or d.get("sale_budget") or d.get("maximum_rent_text") or d.get("maximum_rent") or ""
+        message = str(d.get("additional_points") or d.get("original_message") or d.get("description") or "").strip()
+        location = d.get("preferred_locations") or d.get("location") or d.get("city") or ""
         if not message:
             message = " | ".join(v for v in [
-                ptype,
-                str(d.get("preferred_locations") or d.get("city") or "").strip(),
-                tx, area, str(budget or "").strip()
+                ptype, str(location).strip(), tx, area, str(budget or "").strip()
             ] if v)
         out.append({
             "canonical_id": "",
@@ -441,18 +432,18 @@ def _manual_operational_rows(e, limit=1000):
             "source_table": "pi_operational_requirements",
             "source": "MANUAL",
             "message": message,
-            "company": d.get("company_name") or "",
-            "contact_name": d.get("client_name") or "",
-            "contact": d.get("contact_number") or "",
-            "location": d.get("preferred_locations") or d.get("city") or "",
+            "company": d.get("company_name") or d.get("company") or "",
+            "contact_name": d.get("client_name") or d.get("contact_name") or "",
+            "contact": d.get("contact_number") or d.get("contact_numbers") or d.get("phone") or "",
+            "location": location,
             "transaction": tx,
             "category": ptype,
             "property_type": ptype,
             "area": area,
             "budget": budget,
-            "created_at": d.get("created_at") or d.get("entry_date"),
-            "verification": d.get("verification_status") or "UNVERIFIED",
-            "assigned_to": d.get("entered_by") or d.get("created_by") or "",
+            "created_at": d.get("created_at") or d.get("entry_date") or d.get("updated_at"),
+            "verification": d.get("verification_status") or d.get("status") or "UNVERIFIED",
+            "assigned_to": d.get("entered_by") or d.get("created_by") or d.get("assigned_to") or "",
             "is_master": False,
         })
     return out
