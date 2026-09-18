@@ -10,7 +10,7 @@ from fastapi import Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import text
 
-VERSION = "13.0.0-ASTRA-DIRECT-MANUAL-AUTHORITY"
+VERSION = "13.1.0-ASTRA-MANUAL-COUNT-AND-ROWS-AUTHORITY"
 SOURCES = ("MASTER", "NEWSPAPER", "MANUAL", "MAGAZINE", "WHATSAPP", "SOCIAL")
 
 EXCLUDE_TOKENS = (
@@ -605,10 +605,16 @@ def _fast_requirement_counts(e):
                     SELECT COUNT(*) FROM pi_requirement_gate_v1191
                     WHERE COALESCE(classification,'') NOT IN ('REJECTED','NOISE','REJECTED/EXPIRED')
                 """)).scalar() or 0)
-                for source in ("NEWSPAPER","MANUAL","MAGAZINE","WHATSAPP","SOCIAL"):
+                # MANUAL is owned by the operational manual-entry authority, not
+                # by the Requirement Gate. The hub counter and detail page must
+                # therefore read the same source of truth.
+                counts["MANUAL"] = int(c.execute(text("""
+                    SELECT COUNT(*) FROM pi_operational_requirements
+                    WHERE UPPER(COALESCE(entry_source,'MANUAL'))='MANUAL'
+                """)).scalar() or 0)
+                for source in ("NEWSPAPER","MAGAZINE","WHATSAPP","SOCIAL"):
                     pats = {
                         "NEWSPAPER":["%NEWSPAPER%"],
-                        "MANUAL":["%MANUAL%"],
                         "MAGAZINE":["%MAGAZINE%"],
                         "WHATSAPP":["%WHATSAPP%","WA_%","WAI_%"],
                         "SOCIAL":["%SOCIAL%","%LINKEDIN%","%FACEBOOK%","%INSTAGRAM%"],
