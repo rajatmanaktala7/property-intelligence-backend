@@ -80,6 +80,37 @@ def _property_rows(e,source,q,location,category,transaction,status,assigned,limi
     with e.connect() as c:
         rows=[dict(x) for x in c.execute(text(sql),{"q":f"%{q.strip()}%","loc":f"%{location.strip()}%","tx":transaction.upper().strip(),
         "st":status.upper().strip(),"asgn":f"%{assigned.strip()}%","n":limit,"pat":pat or ""}).mappings().all()]
+    # Manual availability/property evidence historically lives in
+    # pi_operational_properties. If source-link coverage is absent, keep the
+    # settled Manual page useful by reading that existing table read-only.
+    if source=="MANUAL" and not rows:
+        try:
+            with e.connect() as c:
+                exists=c.execute(text("SELECT to_regclass('public.pi_operational_properties')")).scalar()
+                if exists:
+                    raw=c.execute(text("""SELECT to_jsonb(t) AS d FROM pi_operational_properties t
+                        WHERE (:q='%%' OR to_jsonb(t)::text ILIKE :q)
+                        ORDER BY COALESCE(updated_at,created_at) DESC NULLS LAST LIMIT :n"""),
+                        {"q":f"%{q.strip()}%","n":limit}).scalars().all()
+                    for x in raw:
+                        d=x if isinstance(x,dict) else json.loads(x)
+                        cid=str(_first(d,"canonical_id","property_id","id") or "")
+                        rows.append({
+                            "canonical_id":cid,
+                            "locality":_first(d,"location","locality","city") or "",
+                            "city":_first(d,"city") or "",
+                            "transaction_type":_first(d,"transaction_type","rent_sale") or "",
+                            "area_sqft":_first(d,"area_sqft") or "",
+                            "price_raw":_first(d,"rent_amount","sale_amount","amount","price") or "",
+                            "created_at":_first(d,"created_at","entry_date"),
+                            "updated_at":_first(d,"updated_at","created_at","entry_date"),
+                            "verification_status":_first(d,"verification_status","status") or "UNVERIFIED",
+                            "availability_status":_first(d,"availability_status","status") or "UNKNOWN",
+                            "assigned_to":_first(d,"assigned_to","team_member") or "",
+                            "clean_record":d,
+                        })
+        except Exception:
+            pass
     if category.strip():
         want=category.strip().lower()
         rows=[r for r in rows if want in str(_property_category(_dict(r.get("clean_record")),r.get("transaction_type"))).lower()]
