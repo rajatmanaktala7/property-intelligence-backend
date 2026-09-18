@@ -11,7 +11,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 
 
-VERSION = "3.8-REQUIREMENT-READY-DISPATCH"
+VERSION = "3.9-EARLY-REQUIREMENT-AUTHORITY"
 
 BOOT = {
     "state": "STARTING",
@@ -442,6 +442,40 @@ def _load_core():
         import alliance_production_surface as production_surface
 
         stabilization = production_surface.register(wrapped)
+
+        # ALLIANCE_EARLY_REQUIREMENT_AUTHORITY_V1
+        # The Requirement workspace is operationally independent of the long
+        # post-core registration chain. Create its isolated authority immediately
+        # after wrapped.core exists so Railway health readiness cannot expose a
+        # legacy Requirement page while the rest of Alliance is still booting.
+        try:
+            import alliance_requirement_restore_v1235 as early_reqrestore_v1235
+            early_requirement_app = FastAPI(
+                title="Alliance Requirement Authority",
+                docs_url=None,
+                redoc_url=None,
+                openapi_url=None,
+            )
+            early_reqrestore_result = early_reqrestore_v1235.register(
+                wrapped.core,
+                served_app=early_requirement_app,
+            )
+            REQUIREMENT_APP = early_requirement_app
+            stabilization = dict(stabilization or {})
+            stabilization["early_requirement_authority_v1"] = {
+                "status": "READY",
+                "owner": "alliance_requirement_restore_v1235",
+                "registration": early_reqrestore_result,
+            }
+            print("[early-requirement-authority-v1]", stabilization["early_requirement_authority_v1"])
+        except Exception as exc:
+            stabilization = dict(stabilization or {})
+            stabilization["early_requirement_authority_v1"] = {
+                "status": "ERROR",
+                "error": f"{type(exc).__name__}: {exc}",
+                "fail_safe": True,
+            }
+            print("[early-requirement-authority-v1] warning:", type(exc).__name__, str(exc))
 
         # ALLIANCE_EXPLAINABLE_MATCHER_V1 - register only after wrapped.core exists
         try:
