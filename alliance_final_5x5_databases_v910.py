@@ -4,7 +4,7 @@ from fastapi import Form, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import text
 
-VERSION="9.3.1-WORKING-COMPACT-ZOOM"
+VERSION="9.4.0-MANUAL-EVIDENCE-RESTORE"
 SOURCES=("MASTER","NEWSPAPER","WHATSAPP","MAGAZINE","MANUAL")
 CATEGORY_OPTIONS=("Residential Sale","Residential Rent","Commercial Sale","Commercial Rent","Industrial Sale","Industrial Rent","Farmhouse Sale","Farmhouse Rent")
 
@@ -111,6 +111,39 @@ def _property_rows(e,source,q,location,category,transaction,status,assigned,limi
                         })
         except Exception:
             pass
+    # Second compatibility source for historical manual availability/property
+    # rows. Some older manual entries were stored in pi_properties rather than
+    # pi_operational_properties and never received a Master source link.
+    if source=="MANUAL" and not rows:
+        try:
+            with e.connect() as c:
+                exists=c.execute(text("SELECT to_regclass('public.pi_properties')")).scalar()
+                if exists:
+                    raw=c.execute(text("""SELECT to_jsonb(t) AS d FROM pi_properties t
+                        WHERE (:q='%%' OR to_jsonb(t)::text ILIKE :q)
+                          AND (UPPER(COALESCE(to_jsonb(t)->>'source','')) LIKE '%%MANUAL%%'
+                               OR UPPER(COALESCE(to_jsonb(t)->>'source_type','')) LIKE '%%MANUAL%%'
+                               OR UPPER(COALESCE(to_jsonb(t)->>'source_name','')) LIKE '%%MANUAL%%'
+                               OR UPPER(COALESCE(to_jsonb(t)->>'channel','')) LIKE '%%MANUAL%%')
+                        LIMIT :n"""),{"q":f"%{q.strip()}%","n":limit}).scalars().all()
+                    for x in raw:
+                        d=x if isinstance(x,dict) else json.loads(x)
+                        rows.append({
+                            "canonical_id":str(_first(d,"canonical_id","property_id","id") or ""),
+                            "locality":_first(d,"location","locality","city") or "",
+                            "city":_first(d,"city") or "",
+                            "transaction_type":_first(d,"transaction_type","rent_sale","rent_or_sale") or "",
+                            "area_sqft":_first(d,"area_sqft","available_area") or "",
+                            "price_raw":_first(d,"rent_amount","sale_amount","amount","price") or "",
+                            "created_at":_first(d,"created_at","entry_date"),
+                            "updated_at":_first(d,"updated_at","created_at","entry_date"),
+                            "verification_status":_first(d,"verification_status","status") or "UNVERIFIED",
+                            "availability_status":_first(d,"availability_status","status") or "UNKNOWN",
+                            "assigned_to":_first(d,"assigned_to","team_member") or "",
+                            "clean_record":d,
+                        })
+        except Exception:
+            pass
     if category.strip():
         want=category.strip().lower()
         rows=[r for r in rows if want in str(_property_category(_dict(r.get("clean_record")),r.get("transaction_type"))).lower()]
@@ -136,6 +169,53 @@ def _requirement_rows(e,source,q,location,category,transaction,status,assigned,l
     with e.connect() as c:
         rows=[dict(x) for x in c.execute(text(sql),{"q":f"%{q.strip()}%","loc":f"%{location.strip()}%","tx":transaction.upper().strip(),
         "st":status.upper().strip(),"asgn":f"%{assigned.strip()}%","n":limit,"pat":pat or ""}).mappings().all()]
+    # Manual requirements created by the settled manual form are authoritative
+    # evidence in the Requirement Gate even when an older Master source link is
+    # absent. Surface those existing rows read-only in the Manual database.
+    if source=="MANUAL" and not rows:
+        try:
+            with e.connect() as c:
+                exists=c.execute(text("SELECT to_regclass('public.pi_requirement_gate_v1191')")).scalar()
+                if exists:
+                    raw=c.execute(text("""SELECT to_jsonb(g) AS d FROM pi_requirement_gate_v1191 g
+                        WHERE COALESCE(classification,'') NOT IN ('REJECTED','NOISE','REJECTED/EXPIRED')
+                          AND (UPPER(COALESCE(source_type,'')) LIKE '%%MANUAL%%'
+                               OR UPPER(COALESCE(source_table,'')) LIKE '%%MANUAL%%')
+                          AND (:q='%%' OR to_jsonb(g)::text ILIKE :q)
+                        ORDER BY created_at DESC NULLS LAST,id DESC LIMIT :n"""),
+                        {"q":f"%{q.strip()}%","n":limit}).scalars().all()
+                    for x in raw:
+                        d=x if isinstance(x,dict) else json.loads(x)
+                        locs=d.get("locations") or []
+                        if isinstance(locs,str):
+                            try: locs=json.loads(locs)
+                            except Exception: locs=[locs]
+                        phones=d.get("contact_numbers") or []
+                        if isinstance(phones,str):
+                            try: phones=json.loads(phones)
+                            except Exception: phones=[phones]
+                        rows.append({
+                            "canonical_id":str(d.get("id") or ""),
+                            "locality":", ".join(map(str,locs)) if isinstance(locs,list) else str(locs or ""),
+                            "city":"",
+                            "transaction_type":d.get("transaction_type") or "",
+                            "area_sqft":d.get("area_min_sqft") or d.get("area_max_sqft") or "",
+                            "budget_raw":d.get("budget_max") or d.get("budget_min") or "",
+                            "created_at":d.get("created_at"),
+                            "verification_status":"VERIFIED" if "VERIFIED" in str(d.get("classification") or "").upper() and "NEEDS" not in str(d.get("classification") or "").upper() else "UNVERIFIED",
+                            "assigned_to":"",
+                            "clean_record":{
+                                "requirement_text":d.get("original_message") or "",
+                                "contact_phone":", ".join(map(str,phones)) if isinstance(phones,list) else str(phones or ""),
+                                "location":", ".join(map(str,locs)) if isinstance(locs,list) else str(locs or ""),
+                                "property_category":d.get("property_category") or d.get("intended_use") or "",
+                                "property_type":d.get("property_category") or "",
+                                "budget":d.get("budget_max") or d.get("budget_min") or "",
+                                "source":"MANUAL",
+                            },
+                        })
+        except Exception:
+            pass
     if category.strip():
         want=category.strip().lower()
         rows=[r for r in rows if want in str(_first(_dict(r.get("clean_record")),"property_category","category","required_property_category") or "").lower()]
