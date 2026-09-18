@@ -5,7 +5,7 @@ from fastapi import HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from sqlalchemy import inspect, text
 
-VERSION="1.8.1-MATCHER-DISPLAY-ZERO-SAFETY"
+VERSION="1.9.0-TEAM-VERIFY-AND-MESSAGE-WORKSPACE"
 MASTER_REQUIREMENT_TABLE="pi_requirement_gate_v1191"
 MASTER_PROPERTY_TABLE="pi_master_properties_v711"
 MASTER_LINKS_TABLE="pi_master_source_links_v711"
@@ -358,14 +358,32 @@ def _render_match(core,req):
         source=_norm(d.get("source_name") or d.get("source_bucket") or d.get("source") or ", ".join((enrich.get(pid) or {}).get("sources") or []))
         why=d.get("why"); why=", ".join(str(x) for x in why) if isinstance(why,list) else why
         detail=d.get("detail_url") or (f"/alliance/primary/property/{quote(pid)}" if pid else "#")
+        ptype=_norm(d.get('subtype') or d.get('family') or 'Not captured')
+        loc=_norm(d.get('location') or 'Not captured')
+        tx=_norm(d.get('transaction') or 'Not captured')
+        area=_norm(d.get('area_display') or d.get('area_sqft') or d.get('area') or 'Not captured')
+        price=_norm(d.get('price_display') or d.get('price') or 'Not captured')
+        desc=_norm(d.get('property') or 'Not captured')
+        verification=_norm(d.get('availability_verification') or d.get('verification') or 'UNVERIFIED')
+        draft=("Hi, we have shortlisted an option matching your requirement.\\n\\n"
+               +"Location: "+loc+"\\nProperty Type: "+ptype+"\\nTransaction: "+tx
+               +"\\nArea: "+area+"\\nPrice: "+price
+               +"\\n\\nPlease let me know if you would like full details or a site visit.")
         cards.append("<div class='card'>"
-            f"<b>{_e(d.get('match_class') or d.get('_bucket'))}</b> · Score {_e(d.get('match_score'))}<br>"
-            f"<b>{_e(d.get('subtype') or d.get('family') or d.get('property') or '')}</b> · {_e(d.get('location'))} · {_e(d.get('transaction'))}<br>"
-            f"Area: {_e(d.get('area_display') or d.get('area_sqft') or d.get('area'))} · Price: {_e(d.get('price_display') or d.get('price'))}<br>"
-            f"Verification: {_e(d.get('availability_verification') or d.get('verification'))}<br>"
-            f"Source: {_e(source)} · Property ID: {_e(pid)}<br>"
-            f"<div class='contacts'>{contact_html}</div>"
-            f"Why matched: {_e(why)}<br><a class='btn' href='{_e(detail)}'>View Full Property</a></div>")
+            f"<div class='matchhead'><b>{_e(d.get('match_class') or d.get('_bucket'))}</b> · Match score {_e(d.get('match_score'))}</div>"
+            "<table class='verifytable'>"
+            f"<tr><th>Property ID</th><td>{_e(pid)}</td><th>Verification</th><td><b>{_e(verification)}</b></td></tr>"
+            f"<tr><th>Location</th><td>{_e(loc)}</td><th>Property Type</th><td>{_e(ptype)}</td></tr>"
+            f"<tr><th>Rent / Sale</th><td>{_e(tx)}</td><th>Price</th><td>{_e(price)}</td></tr>"
+            f"<tr><th>Area</th><td>{_e(area)}</td><th>Source</th><td>{_e(source or 'Not captured')}</td></tr>"
+            f"<tr><th>Description</th><td colspan='3'>{_e(desc)}</td></tr>"
+            f"<tr><th>Internal Contact</th><td colspan='3'>{contact_html}</td></tr>"
+            f"<tr><th>Why matched</th><td colspan='3'>{_e(why)}</td></tr>"
+            "</table>"
+            "<div class='actions'>"
+            f"<a class='btn' href='{_e(detail)}'>View / Verify Property</a>"
+            f"<button class='btn prepare' type='button' data-draft='{_e(draft)}' onclick='prepareMessage(this)'>Prepare Message</button>"
+            "</div><div class='draftbox' style='display:none'></div></div>")
     summary=result.get("summary") or {}
     ai=result.get("astra_interpretation") or {}
     astra_html="<div class='card'><b>Astra interpretation:</b> "+_e(ai.get("confidence") or "—")+" · Transaction: "+_e(ai.get("transaction") or "—")+" · Location: "+_e(", ".join(ai.get("locations") or []) or "—")+" · Asset: "+_e(ai.get("asset") or "—")+"</div>"
@@ -412,7 +430,7 @@ def _page(core,request:Request):
                 f"<b>WhatsApp Sender:</b> {_e(sender_phone)} {_e(sender_name)}</div>" + \
                 _render_match(core,req)+"</div>"
             return f"""<!doctype html><html><head><meta charset='utf-8'><title>Alliance Master Requirement Matcher</title>
-<style>body{{font-family:Arial;margin:22px;background:#f6f8fb;color:#172437}}.btn{{display:inline-block;padding:8px 10px;margin:3px;border-radius:7px;background:#1769aa;color:white;text-decoration:none}}.card{{background:white;border:1px solid #dfe5eb;border-radius:10px;padding:12px;margin:10px 0}}.contacts{{margin:8px 0;padding:8px;background:#f7fafc}}</style></head><body>
+<style>body{{font-family:Arial;margin:22px;background:#f6f8fb;color:#172437}}.btn{{display:inline-block;padding:8px 10px;margin:3px;border:0;border-radius:7px;background:#1769aa;color:white;text-decoration:none;cursor:pointer}}.card{{background:white;border:1px solid #dfe5eb;border-radius:10px;padding:12px;margin:10px 0}}.contacts{{margin:8px 0;padding:8px;background:#f7fafc}}.verifytable{{width:100%;border-collapse:collapse;margin:10px 0}}.verifytable th,.verifytable td{{border:1px solid #e1e7ee;padding:8px;text-align:left;vertical-align:top}}.verifytable th{{width:14%;background:#f4f7fa}}.actions{{margin-top:8px}}.draftbox{{white-space:pre-wrap;background:#f7fafc;border:1px solid #dfe5eb;border-radius:8px;padding:12px;margin-top:10px}}</style><script>function prepareMessage(b){{var box=b.closest('.card').querySelector('.draftbox');var draft=b.getAttribute('data-draft')||'';box.style.display='block';box.innerHTML='<b>Client Message Draft — verify facts before sending</b><br><br>'+draft.replace(/\\n/g,'<br>')+'<br><br><button class="btn" type="button" onclick="navigator.clipboard.writeText(this.parentElement.innerText.replace(\'Client Message Draft — verify facts before sending\',\'\').replace(\'Copy Message\',\'\').trim())">Copy Message</button>';}}</script></head><body>
 <p><a href='javascript:history.back()'>← Previous Page</a> · <a href='/alliance/primary'>Dashboard</a></p>
 <h1>Alliance Master Requirement Matcher</h1>
 <div class='card'>Requirement authority: <b>{MASTER_REQUIREMENT_TABLE}</b> · Property authority: <b>{MASTER_PROPERTY_TABLE}</b> · Matcher source: <b>MASTER ONLY</b>.</div>
