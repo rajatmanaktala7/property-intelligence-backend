@@ -10,7 +10,7 @@ from fastapi import Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import text
 
-VERSION = "12.5.0-CANONICAL-SOURCE-MATCH-ACTIONS"
+VERSION = "12.6.0-FAST-GATE-SOURCE-VIEWS-COMPACT-ZOOM"
 SOURCES = ("MASTER", "NEWSPAPER", "MANUAL", "MAGAZINE", "WHATSAPP", "SOCIAL")
 
 EXCLUDE_TOKENS = (
@@ -404,7 +404,17 @@ def _combined(e, source):
             "source_only": sum(1 for r in rows if not r.get("is_master")),
             "tables": ["pi_requirement_gate_v1191", "pi_master_requirements_v711"],
         }
-    source_rows, tables = _source_rows(e, source)
+    # The Requirement Gate is the settled all-source evidence authority. Read it
+    # directly first instead of scanning every historical requirement table on
+    # every page load. This also restores MANUAL rows created through the current
+    # manual-entry flow, whose source evidence lives in the Gate.
+    gate_all = _gate_rows(e, limit=20000)
+    gate_source = [r for r in gate_all if str(r.get("source") or "").upper() == source]
+    source_rows = gate_source
+    tables = ["pi_requirement_gate_v1191"]
+    # Compatibility fallback only when the Gate has no rows for this source.
+    if not source_rows:
+        source_rows, tables = _source_rows(e, source, per_table=1500)
     master_ids = {str(r.get("canonical_id") or "") for r in masters if r.get("canonical_id")}
     seen = {_fingerprint(r) for r in masters}
     restored = []
@@ -494,8 +504,16 @@ nav a,.btn,button{{background:#10223f;color:white;text-decoration:none;border:0;
 input,select{{width:100%;padding:8px;border:1px solid #98a2b3;border-radius:6px}}
 .tablebox{{overflow:auto;max-height:72vh;background:white;border:1px solid #dfe5ec}}table{{border-collapse:collapse;width:max-content;min-width:100%;font-size:11px}}
 th,td{{border:1px solid #d0d5dd;padding:7px;text-align:left;vertical-align:top;white-space:normal}}th{{position:sticky;top:0;background:#e9eef5;z-index:4}}
-.desc{{min-width:300px;max-width:500px}}.sourceonly{{background:#fff8e8}}.masterrow{{background:#f8fff9}}
-</style></head><body>
+.desc{{min-width:240px;max-width:390px}}.sourceonly{{background:#fff8e8}}.masterrow{{background:#f8fff9}}
+.reqtools{{display:flex;align-items:center;gap:5px;margin-bottom:7px;background:white;border:1px solid #d0d5dd;padding:5px;width:max-content;position:sticky;left:0;z-index:6}}
+.reqtools button{{padding:4px 7px}}body.compact table{{font-size:10px}}body.compact th,body.compact td{{padding:4px 5px}}body.compact .desc{{min-width:200px;max-width:320px}}
+</style><script>
+function reqApplyZoom(){{var z=Number(localStorage.getItem('allianceReqZoom')||100);document.querySelectorAll('.tablebox table').forEach(function(t){{t.style.setProperty('font-size',(11*z/100)+'px','important')}});document.querySelectorAll('.tablebox th,.tablebox td').forEach(function(x){{x.style.setProperty('padding',(7*z/100)+'px','important')}})}}
+function reqZoom(d){{var z=Number(localStorage.getItem('allianceReqZoom')||100);z=Math.max(70,Math.min(160,z+d*10));localStorage.setItem('allianceReqZoom',z);reqApplyZoom()}}
+function reqZoomReset(){{localStorage.setItem('allianceReqZoom',100);reqApplyZoom()}}
+function reqCompact(){{document.body.classList.toggle('compact');localStorage.setItem('allianceReqCompact',document.body.classList.contains('compact')?'1':'0')}}
+document.addEventListener('DOMContentLoaded',function(){{if(localStorage.getItem('allianceReqCompact')==='1')document.body.classList.add('compact');reqApplyZoom()}})
+</script></head><body>
 <header><b>Alliance CRE Intelligence OS 11</b><small>PROPERTY → VERIFY → REQUIREMENT → MATCH → CLIENT → FOLLOW-UP → DEAL</small></header>
 {_nav()}<div class="wrap"><h2>{_e(title)}</h2>{body}</div>
 </body></html>"""
@@ -687,6 +705,7 @@ def _table(e, source, q, location, transaction, status, assigned, limit):
         "Source","Source ID","Requirement ID"
     ]
     body = f"""<div class="notice">{note}</div>{filters}
+    <div class="reqtools"><b>Table</b><button type="button" onclick="reqCompact()">Compact</button><button type="button" onclick="reqZoom(-1)">−</button><button type="button" onclick="reqZoom(1)">+</button><button type="button" onclick="reqZoomReset()">Reset</button></div>
     <div class="tablebox"><table><thead><tr>{''.join('<th>'+h+'</th>' for h in headers)}</tr></thead>
     <tbody>{''.join(trs) if trs else '<tr><td colspan="17">No requirements found.</td></tr>'}</tbody></table></div>"""
     return _shell(f"{source.title()} Requirements", body)
