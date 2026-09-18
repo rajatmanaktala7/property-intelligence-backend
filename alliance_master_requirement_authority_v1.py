@@ -5,7 +5,7 @@ from fastapi import HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from sqlalchemy import inspect, text
 
-VERSION="1.7.0-MASTER-CONTRACT-AND-SENDER-SAFETY"
+VERSION="1.8.0-ASTRA-INTERPRETATION-AND-REGISTRY-SAFETY"
 MASTER_REQUIREMENT_TABLE="pi_requirement_gate_v1191"
 MASTER_PROPERTY_TABLE="pi_master_properties_v711"
 MASTER_LINKS_TABLE="pi_master_source_links_v711"
@@ -202,17 +202,24 @@ def _resolve_sender_ids_from_registry(rows):
         if eng is None:
             return rows
         mapping=resolve_many(eng,[r.get("whatsapp_sender_id") for r in rows])
+        reverse={}
+        for oid,pv in mapping.items():
+            p=_phone(pv); oid=_norm(oid)
+            if p and oid: reverse.setdefault(p,set()).add(oid)
+        contaminated={p for p,ids in reverse.items() if len(ids)>=2}
         for r in rows:
             if _phone(r.get("whatsapp_sender_phone")):
                 continue
             oid=_norm(r.get("whatsapp_sender_id"))
             p=_phone(mapping.get(oid))
-            if p:
+            if p and p not in contaminated:
                 r["whatsapp_sender_phone"]=p
                 r["whatsapp_sender_status"]="REGISTRY_RESOLVED_UNIQUE_EXACT_EVIDENCE"
                 if not r.get("contacts_list"):
                     r["contacts_list"]=[p]
                     r["contact_fallback"]="WHATSAPP_SENDER_REGISTRY"
+            elif p in contaminated:
+                r["whatsapp_sender_status"]="REJECTED_SHARED_REGISTRY_PHONE"
         return rows
     except Exception:
         return rows
@@ -327,14 +334,11 @@ def _match(core,req):
     import alliance_master_matcher_contract_v1 as master_matcher
     raw=_norm(req.get("original_message"))
     if not raw: raise RuntimeError("Requirement has no original message")
-    # The gate already holds normalized facts. Add only missing structured facts so
-    # terse WhatsApp wording (for example "deal") does not lose RENT/SALE intent.
-    tx=_norm(req.get("transaction_type")).upper()
-    tx_hint=" FOR RENT" if tx in ("LEASE","RENT") else (" FOR SALE" if tx in ("SALE","PURCHASE") else "")
-    locs=" ".join(str(x) for x in (req.get("locations_list") or []) if _norm(x))
-    type_hint=_norm(req.get("property_category"))
-    enriched=" ".join(x for x in (raw,tx_hint,locs,type_hint) if _norm(x))
+    from alliance_astra_match_intelligence_v1 import interpret_requirement
+    astra=interpret_requirement(req)
+    enriched=astra.get("enriched_text") or raw
     result=master_matcher.run_match(core.engine,enriched,min_score=70.0,limit=100)
+    result["astra_interpretation"]=astra
     items=[]
     for key,label in (("exact_verified","EXACT VERIFIED"),("exact_needs_verification","EXACT NEEDS VERIFICATION"),("alternatives","ALTERNATIVE")):
         for item in result.get(key) or []:
@@ -363,7 +367,9 @@ def _render_match(core,req):
             f"<div class='contacts'>{contact_html}</div>"
             f"Why matched: {_e(why)}<br><a class='btn' href='{_e(detail)}'>View Full Property</a></div>")
     summary=result.get("summary") or {}
-    head="<div class='card'><b>Matcher authority:</b> MASTER_ONLY · <b>Master property database:</b> "+_e(MASTER_PROPERTY_TABLE)+ \
+    ai=result.get("astra_interpretation") or {}
+    astra_html="<div class='card'><b>Astra interpretation:</b> "+_e(ai.get("confidence") or "—")+" · Transaction: "+_e(ai.get("transaction") or "—")+" · Location: "+_e(", ".join(ai.get("locations") or []) or "—")+" · Asset: "+_e(ai.get("asset") or "—")+"</div>"
+    head=astra_html+"<div class='card'><b>Matcher authority:</b> MASTER_ONLY · <b>Master property database:</b> "+_e(MASTER_PROPERTY_TABLE)+ \
          " · <b>Master rows considered:</b> "+_e(summary.get("master_rows_considered"))+ \
          " · <b>Exact verified:</b> "+_e(summary.get("exact_verified"))+ \
          " · <b>Exact to verify:</b> "+_e(summary.get("exact_needs_verification"))+ \
