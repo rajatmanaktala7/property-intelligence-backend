@@ -5,7 +5,7 @@ from fastapi import Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import text
 
-VERSION="1.8.0-WHATSAPP-OPAQUE-ID-REGISTRY-RESOLUTION"
+VERSION="1.9.0-SINGLE-CANONICAL-MATCHER-ROUTE"
 PHONE_RE=re.compile(r"(?<!\d)(?:\+?91[\s.\-]?)?([6-9](?:[\s.\-]?\d){9})(?!\d)")
 SOURCES=("MASTER","NEWSPAPER","MANUAL","MAGAZINE","WHATSAPP")
 
@@ -158,11 +158,16 @@ def _requirement_rows(engine,source,limit=500):
         except Exception:pass
     rows.sort(key=lambda r:str(r.get('date') or ''),reverse=True);return rows[:limit]
 def _action(r,source):
-    cid=str(r.get('canonical_id') or '').strip();sid=str(r.get('source_id') or '').strip();src=str(r.get('source') or source).upper();gid=str(r.get('gate_id') or '').strip();bits=[]
-    if cid:bits.append(f"<a class='btn' href='/alliance/primary/matcher?requirement_id={_e(cid)}'>Run Matcher</a>")
-    elif gid:bits.append(f"<a class='btn' href='/alliance/final/requirements/run-match?gate_id={_e(gid)}'>Run Matcher</a>")
-    elif sid:bits.append(f"<a class='btn' href='/alliance/final/requirements/run-match?source={_e(src)}&source_pk={_e(sid)}'>Run Matcher</a>")
-    return ' '.join(bits) or 'Review'
+    # One matcher authority only. alliance_master_requirement_authority_v1 owns
+    # /alliance/primary/matcher and redirects to the canonical Master Requirement
+    # Matcher while preserving requirement_id. Gate rows use their gate id, which
+    # is the matcher requirement identity in pi_requirement_gate_v1191.
+    cid=str(r.get('canonical_id') or '').strip()
+    gid=str(r.get('gate_id') or '').strip()
+    rid=gid or cid
+    if rid:
+        return f"<a class='btn' href='/alliance/primary/matcher?requirement_id={_e(rid)}'>Run Matcher</a>"
+    return 'Review'
 def _requirements_page(engine,source,q=""):
     rows=_requirement_rows(engine,source,500);q=str(q or '').strip().lower()
     if q:rows=[r for r in rows if q in ' '.join(str(v or '') for v in r.values()).lower()]
