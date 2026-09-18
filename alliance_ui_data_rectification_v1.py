@@ -5,7 +5,7 @@ from fastapi import Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import text
 
-VERSION="1.6.1-WHATSAPP-REQUIREMENT-NO-ACCOUNT-PHONE"
+VERSION="1.7.0-WHATSAPP-SENDER-IDENTITY-RESOLUTION"
 PHONE_RE=re.compile(r"(?<!\d)(?:\+?91[\s.\-]?)?([6-9](?:[\s.\-]?\d){9})(?!\d)")
 SOURCES=("MASTER","NEWSPAPER","MANUAL","MAGAZINE","WHATSAPP")
 
@@ -89,15 +89,37 @@ def _requirement_rows(engine,source,limit=500):
             marks=','.join(':'+k for k in params)
             with wb.wa_engine.connect() as wc:
                 restored=wc.execute(text(f"""SELECT r.wa_requirement_id,r.contact_phone,
-                    e.sender_phone,e.payload_json
+                    e.sender_name,e.sender_phone
                     FROM wa_requirements r
                     LEFT JOIN wa_bridge_events e ON e.entity_id=r.wa_requirement_id
                     WHERE r.wa_requirement_id IN ({marks})"""),params).mappings().all()
-            phone_map={}
-            for x in restored:
-                p=_phones(x.get('contact_phone'))
-                if not p:p=_phones(x.get('sender_phone'))
-                if p:phone_map[str(x['wa_requirement_id'])]=p
+                phone_map={}
+                unresolved=[]
+                for x in restored:
+                    p=_phones(x.get('contact_phone'))
+                    if not p:p=_phones(x.get('sender_phone'))
+                    if p:phone_map[str(x['wa_requirement_id'])]=p
+                    else:unresolved.append(x)
+
+                # Resolve opaque WhatsApp identities from historical events for the
+                # same sender name. Accept only one unique real phone for a sender.
+                names=list(dict.fromkeys(str(x.get('sender_name') or '').strip() for x in unresolved if str(x.get('sender_name') or '').strip()))[:500]
+                sender_map={}
+                if names:
+                    np={f'n{i}':v for i,v in enumerate(names)}
+                    nm=','.join(':'+k for k in np)
+                    hist=wc.execute(text(f"""SELECT sender_name,sender_phone
+                        FROM wa_bridge_events
+                        WHERE sender_name IN ({nm})
+                          AND sender_phone IS NOT NULL AND BTRIM(sender_phone)<>''"""),np).mappings().all()
+                    candidates={}
+                    for h in hist:
+                        p=_phones(h.get('sender_phone'))
+                        if p:candidates.setdefault(str(h.get('sender_name') or '').strip(),set()).add(p)
+                    sender_map={n:next(iter(ps)) for n,ps in candidates.items() if len(ps)==1}
+                for x in unresolved:
+                    p=sender_map.get(str(x.get('sender_name') or '').strip())
+                    if p:phone_map[str(x['wa_requirement_id'])]=p
             for r in missing:
                 p=phone_map.get(str(r.get('source_id') or ''))
                 if p:r['contact']=p
