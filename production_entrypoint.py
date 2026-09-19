@@ -11,7 +11,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 
 
-VERSION = "4.0-EARLIEST-REQUIREMENT-AUTHORITY"
+VERSION = "4.1-ISOLATED-DATABASE-MATCHER-AUTHORITY"
 
 BOOT = {
     "state": "STARTING",
@@ -25,6 +25,8 @@ BOOT = {
 
 CORE_APP = None
 REQUIREMENT_APP = None
+DATABASE_APP = None
+MATCHER_APP = None
 
 LATE_REGISTRATION = {
     "v383": {"status": "NOT_RUN", "error": None},
@@ -433,7 +435,7 @@ def _late_register_intelligence(wrapped):
     }
 
 def _load_core():
-    global CORE_APP, REQUIREMENT_APP
+    global CORE_APP, REQUIREMENT_APP, DATABASE_APP, MATCHER_APP
 
     BOOT["state"] = "LOADING_CORE"
 
@@ -460,6 +462,27 @@ def _load_core():
             print("[earliest-requirement-authority-v2]", earliest_reqrestore_result)
         except Exception as exc:
             print("[earliest-requirement-authority-v2] warning:", type(exc).__name__, str(exc))
+
+        # ALLIANCE_EARLY_DATABASE_AND_MATCHER_AUTHORITIES_V1
+        # Serve settled database/search and matcher workspaces from isolated
+        # authorities so legacy route ordering cannot intercept them.
+        try:
+            import alliance_final_5x5_databases_v910 as database_authority_v910
+            isolated_database_app = FastAPI(title="Alliance Database Authority", docs_url=None, redoc_url=None, openapi_url=None)
+            database_authority_v910.register(wrapped.core, served_app=isolated_database_app)
+            DATABASE_APP = isolated_database_app
+            print("[early-database-authority-v1] READY")
+        except Exception as exc:
+            print("[early-database-authority-v1] warning:", type(exc).__name__, str(exc))
+
+        try:
+            import alliance_master_requirement_authority_v1 as matcher_authority_v1
+            isolated_matcher_app = FastAPI(title="Alliance Matcher Authority", docs_url=None, redoc_url=None, openapi_url=None)
+            matcher_authority_v1.register(wrapped.core, served_app=isolated_matcher_app)
+            MATCHER_APP = isolated_matcher_app
+            print("[early-matcher-authority-v1] READY")
+        except Exception as exc:
+            print("[early-matcher-authority-v1] warning:", type(exc).__name__, str(exc))
 
         import alliance_production_surface as production_surface
         stabilization = production_surface.register(wrapped)
@@ -2096,6 +2119,25 @@ class HealthFirstDispatcher:
             and REQUIREMENT_APP is not None
         ):
             await REQUIREMENT_APP(scope, receive, send)
+            return
+
+        database_namespace = "/alliance/final/database"
+        if (
+            (path == "/alliance/final/databases" or path.startswith(database_namespace + "/"))
+            and DATABASE_APP is not None
+        ):
+            await DATABASE_APP(scope, receive, send)
+            return
+
+        matcher_paths = (
+            "/alliance/primary/matcher",
+            "/alliance/master-requirement-matcher",
+        )
+        if (
+            (path in matcher_paths or path.startswith("/alliance/master-requirement-matcher/"))
+            and MATCHER_APP is not None
+        ):
+            await MATCHER_APP(scope, receive, send)
             return
 
         await self._serve_core(scope, receive, send)
