@@ -534,8 +534,8 @@ def _start_identity_registry_refresh():
         _IDENTITY_REGISTRY_STATE.update({"status":"ERROR","error":type(e).__name__+": "+str(e)[:240]})
     return _IDENTITY_REGISTRY_STATE
 
-def register(core):
-    app=_app(core)
+def register(core, served_app=None):
+    app=served_app or _app(core)
     for route in list(getattr(app.router,"routes",[])):
         if getattr(route,"path",None)==SMART_MATCHER_ROUTE and "GET" in (getattr(route,"methods",set()) or set()):
             app.router.routes.remove(route)
