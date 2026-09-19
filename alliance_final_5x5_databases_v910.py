@@ -316,8 +316,8 @@ def _requirement_table(e,source,q,location,category,transaction,status,assigned,
         trs.append("<tr>"+"".join(f'<td class="{"desc" if i==1 else ""}">{x if i==15 else _e(_shown(x))}</td>' for i,x in enumerate(vals))+"</tr>")
     H=["Requirement ID","Requirement / Original Message","Client / Company","Contact Name","Contact No.","Location","Property Category","Property Type","Area","Rent/Sale","Budget","Date & Time","Status","Assigned To","Source","Open"]
     return _filter_form(q,location,category,transaction,status,assigned,limit)+f'<div class="dbtools"><b>Table</b><button type="button" onclick="dbCompact()">Compact</button><button type="button" onclick="dbZoom(-1)">−</button><button type="button" onclick="dbZoom(1)">+</button><button type="button" onclick="dbZoomReset()">Reset</button></div><div class="tablebox"><table><thead><tr>{"".join("<th>"+x+"</th>" for x in H)}</tr></thead><tbody>{"".join(trs) if trs else "<tr><td colspan=16>No requirements found</td></tr>"}</tbody></table></div>'
-def register(core):
-    app=_app(core);e=_engine(core)
+def register(core, served_app=None):
+    app=served_app or _app(core);e=_engine(core)
     if app is None or e is None:raise RuntimeError("9.1 requires app + engine")
     @app.get("/alliance/primary/databases")
     def canonical_property_databases(req:Request):
