@@ -1,7 +1,7 @@
 from __future__ import annotations
 import re
 
-VERSION="1.1.0-INTENT-BUDGET-BHK"
+VERSION="1.2.0-STRUCTURED-MATCH-HANDOFF"
 
 def _norm(v):
     return re.sub(r"\s+"," ",str(v or "").replace("\u00a0"," ")).strip()
@@ -45,4 +45,4 @@ def interpret_requirement(req):
     if amin not in (None,"") or amax not in (None,""): hints.append("AREA SQFT "+str(amin or amax)+" TO "+str(amax or amin))
     enriched=raw+((" | ASTRA INTERPRETATION: "+"; ".join(hints)) if hints else "")
     confidence="HIGH" if transaction and locations else ("MEDIUM" if transaction or locations else "LOW")
-    return {"version":VERSION,"enriched_text":enriched,"transaction":transaction,"locations":locations,"asset":asset,"confidence":confidence,"policy":"EVIDENCE_ONLY_NO_DB_WRITE"}
+    return {"version":VERSION,"enriched_text":enriched,"transaction":transaction,"locations":locations,"asset":asset,"area_min_sqft":amin,"area_max_sqft":amax,"confidence":confidence,"policy":"EVIDENCE_ONLY_NO_DB_WRITE"}
