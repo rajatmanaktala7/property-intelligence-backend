@@ -4,7 +4,7 @@ from fastapi import Form, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import text
 
-VERSION="9.4.0-MANUAL-EVIDENCE-RESTORE"
+VERSION="9.5.0-ASTRA-SOURCE-TRUTH-SEARCH"
 SOURCES=("MASTER","NEWSPAPER","WHATSAPP","MAGAZINE","MANUAL")
 CATEGORY_OPTIONS=("Residential Sale","Residential Rent","Commercial Sale","Commercial Rent","Industrial Sale","Industrial Rent","Farmhouse Sale","Farmhouse Rent")
 
@@ -44,11 +44,17 @@ def _source_name(e,cid,etype):
     except Exception:return ""
 def _contacts(cr):
     name=_first(cr,"contact_name","owner_name","broker_name","client_name","sender_name","name") or ""
-    phone=_first(cr,"contact_number","contact_phone","owner_contact","owner_phone","broker_contact","broker_phone","phone","mobile") or ""
-    if not phone:
-        p=cr.get("phones")
-        if isinstance(p,list): phone=", ".join(str(x) for x in p if x)
-    return name,phone
+    vals=[]
+    for k in ("contact_number","contact_phone","owner_contact","owner_phone","broker_contact","broker_phone","phone","mobile"):
+        v=cr.get(k)
+        if v not in (None,"",[],{}): vals.append(str(v))
+    p=cr.get("phones")
+    if isinstance(p,list): vals.extend(str(x) for x in p if x)
+    blob=" | ".join(vals)
+    phones=[]
+    for x in re.findall(r"(?<!\d)(?:\+?91[-\s]?)?([6-9]\d{9})(?!\d)",blob):
+        if x not in phones: phones.append(x)
+    return name,", ".join(phones)
 def _property_category(cr,tx):
     explicit=_first(cr,"property_category","category")
     if explicit and str(explicit).strip() in CATEGORY_OPTIONS:return str(explicit).strip()
@@ -144,6 +150,21 @@ def _property_rows(e,source,q,location,category,transaction,status,assigned,limi
                         })
         except Exception:
             pass
+    # ASTRA source-truth search: apply the same evidence search to every
+    # returned row, including compatibility/source rows, instead of relying only
+    # on Master projection columns.
+    def evidence_blob(r):
+        cr=_dict(r.get("clean_record"))
+        return " ".join(str(x or "") for x in (
+            r.get("canonical_id"),r.get("locality"),r.get("city"),r.get("transaction_type"),
+            r.get("price_raw"),json.dumps(cr,ensure_ascii=False,default=str)
+        )).lower()
+    if q.strip():
+        needle=q.strip().lower()
+        rows=[r for r in rows if needle in evidence_blob(r)]
+    if location.strip():
+        needle=location.strip().lower()
+        rows=[r for r in rows if needle in evidence_blob(r)]
     if category.strip():
         want=category.strip().lower()
         rows=[r for r in rows if want in str(_property_category(_dict(r.get("clean_record")),r.get("transaction_type"))).lower()]
