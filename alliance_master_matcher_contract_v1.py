@@ -7,7 +7,7 @@ from alliance_phase5_canonical_matcher import *
 
 # This exact marker is consumed by the live System Doctor.  It is not a
 # cosmetic label: this module is the only candidate loader used by v60.
-VERSION = "1.0.5-ASTRA-COMMERCIAL-VENUE-INTENT"
+VERSION = "1.0.6-DATABASE-HYGIENE-QUARANTINE-GUARD"
 MASTER_TABLE = "pi_master_properties_v711"
 WORKFLOW_TABLE = "pi_master_workflow_v720"
 MATCHER_SOURCE_CONTRACT = "MASTER_ONLY"
@@ -61,7 +61,7 @@ def load_master_properties(engine, limit: int = 50000) -> List[Dict[str, Any]]:
         raise RuntimeError("MASTER_ID_COLUMN_MISSING")
     q = "SELECT " + ",".join(f'"{x}"' for x in wanted) + f" FROM {MASTER_TABLE}"
     if "promotion_status" in cols:
-        q += " WHERE COALESCE(promotion_status,'') NOT IN ('REJECTED','DELETED','DUPLICATE','QUARANTINED')"
+        q += " WHERE COALESCE(promotion_status,'') NOT IN ('REJECTED','DELETED','DUPLICATE','QUARANTINED','MANUAL_ARCHIVED')"
     if "updated_at" in cols:
         q += " ORDER BY updated_at DESC NULLS LAST"
     elif "created_at" in cols:
