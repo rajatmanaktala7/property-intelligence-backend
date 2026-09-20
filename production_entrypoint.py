@@ -440,10 +440,13 @@ def _load_core():
     BOOT["state"] = "LOADING_CORE"
 
     try:
+        # Publish the lightweight base app BEFORE importing newspaper_wrapper.
+        # newspaper_wrapper performs substantial legacy registration at import
+        # time; login/core routes must remain available while that work runs.
+        import app as early_core
+        CORE_APP = early_core.app
+
         import newspaper_wrapper as wrapped
-        # Publish the already-created core app immediately. Essential routes such
-        # as login/dashboard remain available while the long optional registrar
-        # chain continues in this background loader thread.
         CORE_APP = wrapped.app
 
         # ALLIANCE_EARLY_REQUIREMENT_AUTHORITY_V2
