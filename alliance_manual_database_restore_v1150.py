@@ -4,7 +4,7 @@ from fastapi import Request, Query
 from fastapi.responses import HTMLResponse
 from sqlalchemy import text
 
-VERSION="11.6.0-CLEAN-COMPACT-MANUAL-GRID"
+VERSION="11.6.1-CLEAN-NONOVERLAP-MANUAL-GRID"
 PATH="/alliance/final/database/manual"
 
 def e(v):
@@ -74,9 +74,9 @@ header{{background:#102a43;color:#fff;padding:14px 18px}}nav{{background:#fff;bo
 nav a,.btn,button{{background:#102a43;color:#fff;text-decoration:none;border:0;padding:6px 8px;margin-right:4px;border-radius:5px}}
 .wrap{{padding:10px}}.stats{{display:flex;gap:8px;margin:8px 0}}.card{{background:#fff;border:1px solid #98a2b3;padding:10px;min-width:160px}}
 .num{{font-size:26px;font-weight:800}}form{{display:flex;gap:5px;margin:8px 0}}input{{padding:7px;border:1px solid #98a2b3;min-width:320px}}
-.tablebox{{overflow:auto;max-height:76vh;border:1px solid #667085}}table{{border-collapse:collapse;width:100%;min-width:1250px;background:#fff;table-layout:fixed}}
-th,td{{border:1px solid #98a2b3;padding:5px 6px;vertical-align:top;overflow-wrap:anywhere;line-height:1.25}}th{{background:#e9eef5;position:sticky;top:0;z-index:2;white-space:normal}}
-th:nth-child(1),td:nth-child(1){{width:90px}}th:nth-child(2),td:nth-child(2){{width:120px}}th:nth-child(3),td:nth-child(3){{width:250px}}th:nth-child(4),td:nth-child(4),th:nth-child(5),td:nth-child(5){{width:125px}}th:nth-child(6),td:nth-child(6){{width:100px}}th:nth-child(9),td:nth-child(9){{width:120px}}th:nth-child(10),td:nth-child(10){{width:110px}}tbody tr:nth-child(even) td{{background:#f8fafc}}</style></head>
+.tablebox{{overflow:auto;max-height:76vh;border:1px solid #667085}}table{{border-collapse:collapse;width:max-content;min-width:100%;background:#fff;table-layout:auto}}
+th,td{{border:1px solid #98a2b3;padding:6px 8px;vertical-align:top;line-height:1.3;white-space:normal;overflow-wrap:break-word;word-break:normal}}th{{background:#e9eef5;position:sticky;top:0;z-index:2;white-space:normal}}
+th:nth-child(1),td:nth-child(1){{min-width:110px;max-width:150px}}th:nth-child(2),td:nth-child(2){{min-width:150px;max-width:220px}}th:nth-child(3),td:nth-child(3){{min-width:300px;max-width:520px}}th:nth-child(4),td:nth-child(4),th:nth-child(5),td:nth-child(5){{min-width:140px;max-width:190px}}th:nth-child(6),td:nth-child(6){{min-width:110px}}th:nth-child(8),td:nth-child(8){{min-width:110px}}th:nth-child(9),td:nth-child(9){{min-width:140px}}th:nth-child(10),td:nth-child(10){{min-width:125px}}th:nth-child(11),td:nth-child(11){{min-width:185px}}th:nth-child(12),td:nth-child(12){{min-width:110px}}th:nth-child(13),td:nth-child(13){{min-width:120px}}th:nth-child(14),td:nth-child(14){{min-width:100px}}tbody tr:nth-child(even) td{{background:#f8fafc}}</style></head>
 <body><header><b>Alliance CRE Intelligence OS 11.5</b><br>Manual Source Database · restored directly from pi_operational_properties</header>
 <nav><a href="/alliance/primary">Command Centre</a><a href="/property-manual">Add Property</a><a href="/alliance/final/databases">Property Databases</a><a href="/commercial-intelligence">Commercial Intelligence</a></nav>
 <div class="wrap"><div class="stats"><div class="card"><div class="num">{total:,}</div>Exact Manual Source Records</div></div>
