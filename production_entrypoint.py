@@ -446,15 +446,14 @@ def _load_core():
         import app as early_core
         CORE_APP = early_core.app
 
-        # Install the settled canonical dashboard authority immediately so
-        # successful login never falls back to a legacy/base dashboard while
-        # optional modules continue loading in the background.
+        # Publish the settled Alliance CRE Team Command Centre immediately.
+        # This is the sole /alliance/primary owner; database authorities remain separate.
         try:
-            import alliance_dashboard_authority_v1 as early_dashboard_authority_v1
-            early_dashboard_authority_v1.register(early_core)
-            print("[early-canonical-dashboard-v1] READY")
+            import alliance_team_dashboard_v1220 as early_team_dashboard_v1220
+            early_team_dashboard_v1220.register(early_core)
+            print("[early-team-command-centre-v1220] READY")
         except Exception as exc:
-            print("[early-canonical-dashboard-v1] warning:", type(exc).__name__, str(exc))
+            print("[early-team-command-centre-v1220] warning:", type(exc).__name__, str(exc))
 
         import newspaper_wrapper as wrapped
         CORE_APP = wrapped.app
@@ -1905,21 +1904,12 @@ def _load_core():
             print("[master-consolidation-v1] warning:",type(_x).__name__,str(_x))
 
         # ALLIANCE_DASHBOARD_AUTHORITY_V1
-        try:
-            import alliance_dashboard_authority_v1 as _dashboard_authority_v1
-            DASHBOARD_AUTHORITY_V1 = _dashboard_authority_v1.register(wrapped)
-            stabilization = dict(stabilization or {})
-            stabilization["dashboard_authority_v1"] = DASHBOARD_AUTHORITY_V1
-        except Exception as _dashboard_authority_exc:
-            DASHBOARD_AUTHORITY_V1 = {
-                "status":"ERROR",
-                "version":"1.0.0-CANONICAL-ALLIANCE-DASHBOARD",
-                "error":f"{type(_dashboard_authority_exc).__name__}: {_dashboard_authority_exc}",
-                "fail_safe":True,
-            }
-            stabilization = dict(stabilization or {})
-            stabilization["dashboard_authority_v1"] = DASHBOARD_AUTHORITY_V1
-            print("[dashboard-authority-v1] warning:", type(_dashboard_authority_exc).__name__, str(_dashboard_authority_exc))
+        # Disabled: /alliance/primary is frozen to alliance_team_dashboard_v1220.
+        stabilization = dict(stabilization or {})
+        stabilization["dashboard_authority_v1"] = {
+            "status":"DISABLED",
+            "reason":"TEAM_COMMAND_CENTRE_V1220_IS_SOLE_PRIMARY_OWNER"
+        }
 
         # ALLIANCE_TEAM_READY_CERTIFICATION_V1
         try:
@@ -2120,21 +2110,17 @@ def _load_core():
                 f"{type(exc).__name__}: {exc}"
             ) from exc
         # ALLIANCE_CLEAN_CORE_V2_FINAL_SHELL
-        # Final UI authority only. Existing databases, source routes, matcher,
-        # WhatsApp ingestion, contacts and AI services remain untouched.
-        try:
-            import alliance_clean_core_v2 as clean_core_v2
-            stabilization = dict(stabilization or {})
-            stabilization["clean_core_v2"] = clean_core_v2.register(wrapped.core)
-            print("[clean-core-v2]", stabilization["clean_core_v2"])
-        except Exception as exc:
-            raise RuntimeError(
-                "Alliance Clean Core V2 shell failed: "
-                f"{type(exc).__name__}: {exc}"
-            ) from exc
+        # Disabled: it removes/replaces /alliance/primary and caused dashboard regressions.
+        stabilization = dict(stabilization or {})
+        stabilization["clean_core_v2"] = {
+            "status":"DISABLED",
+            "reason":"TEAM_COMMAND_CENTRE_V1220_IS_SOLE_PRIMARY_OWNER"
+        }
 
         BOOT["core_loaded"] = True
         BOOT["state"] = "READY" if stabilization.get("registered") else "DEGRADED"
+        stabilization["primary_dashboard_owner"]="alliance_team_dashboard_v1220"
+        stabilization["primary_dashboard_version"]="12.3.8-COMMAND-BAR-DAY-PLAN-BOTTOM"
         BOOT["stabilization"] = stabilization
         BOOT["completed_at"] = _utcnow()
         print("[health-first] Alliance core application loaded successfully")
