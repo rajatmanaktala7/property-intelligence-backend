@@ -4,7 +4,7 @@ from fastapi import Form, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import text
 
-VERSION="9.6.0-MANUAL-CLEAN-MASTER-MATCHER-BRIDGE"
+VERSION="9.6.1-ALL-PROPERTY-LOCATION-SEMANTIC-GUARD"
 SOURCES=("MASTER","NEWSPAPER","WHATSAPP","MAGAZINE","MANUAL")
 CATEGORY_OPTIONS=("Residential Sale","Residential Rent","Commercial Sale","Commercial Rent","Industrial Sale","Industrial Rent","Farmhouse Sale","Farmhouse Rent")
 
@@ -362,7 +362,7 @@ def _property_table(core,e,req,source,q,location,category,transaction,status,ass
     trs=[]
     for r in rows:
         cr=_dict(r.get("clean_record")); cid=str(r["canonical_id"])
-        locality=_clean_location_value(r.get("locality") or _first(cr,"location","locality") or "", cr)
+        # Apply the semantic location guard to every property source view.\n        # Historical bad projections such as person/company names must never be\n        # presented as a locality merely because they reached a location column.\n        locality=_clean_location_value(r.get("locality") or _first(cr,"location","locality") or "", cr)
         address=_first(cr,"address","exact_address","property_address") or ""
         desc=_manual_description(cr,r) if source=="MANUAL" else (_first(cr,"team_description","description_edit","description","property_description","original_description","original_message","raw_line","source_text","details","remarks","additional_points","property_name") or "")
         if address and address.lower() not in str(desc).lower(): desc=(address+" · "+desc).strip(" ·")
