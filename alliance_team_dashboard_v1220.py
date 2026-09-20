@@ -369,9 +369,22 @@ def register(core):
     if not any(getattr(r,"path",None)=="/api/alliance/team-command-centre/public-status" for r in app.router.routes):
         @app.get("/api/alliance/team-command-centre/public-status")
         def team_command_centre_public_status():
+            matches=[]
+            for r in app.router.routes:
+                methods=set(getattr(r,"methods",set()) or set())
+                if getattr(r,"path",None)==ROUTE and "GET" in methods:
+                    ep=getattr(r,"endpoint",None)
+                    matches.append({
+                        "module":getattr(ep,"__module__",""),
+                        "name":getattr(ep,"__name__",""),
+                    })
+            active=matches[0] if matches else {}
+            expected=(active.get("module")=="alliance_team_dashboard_v1220" and active.get("name")=="command_centre")
             return {
-                "status":"PASS",
+                "status":"PASS" if expected else "FAIL",
                 "owner":"alliance_team_dashboard_v1220",
+                "actual_active_owner":active,
+                "matching_route_count":len(matches),
                 "version":VERSION,
                 "route":ROUTE,
                 "title":"Alliance CRE · Team Command Centre",
