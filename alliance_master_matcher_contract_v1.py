@@ -7,7 +7,7 @@ from alliance_phase5_canonical_matcher import *
 
 # This exact marker is consumed by the live System Doctor.  It is not a
 # cosmetic label: this module is the only candidate loader used by v60.
-VERSION = "1.0.4-STRICT-ASTRA-ASSET-INTENT"
+VERSION = "1.0.5-ASTRA-COMMERCIAL-VENUE-INTENT"
 MASTER_TABLE = "pi_master_properties_v711"
 WORKFLOW_TABLE = "pi_master_workflow_v720"
 MATCHER_SOURCE_CONTRACT = "MASTER_ONLY"
@@ -202,7 +202,7 @@ def run_match(engine, requirement_text: str, min_score: float = 70.0, limit: int
     upper_text = str(requirement_text or "").upper()
     astra_tail = upper_text.split(marker, 1)[1] if marker in upper_text else ""
     import re as _re
-    m = _re.search(r"PROPERTY TYPE\s+(VILLA|APARTMENT|RETAIL|OFFICE|RESTAURANT|HOTEL|WAREHOUSE|LAND)\b", astra_tail)
+    m = _re.search(r"PROPERTY TYPE\s+(VILLA|APARTMENT|RETAIL|OFFICE|RESTAURANT|BANQUET|HOTEL|WAREHOUSE|LAND)\b", astra_tail)
     if m:
         astra_asset = m.group(1)
         asset_map = {
@@ -211,6 +211,7 @@ def run_match(engine, requirement_text: str, min_score: float = 70.0, limit: int
             "RETAIL": ("COMMERCIAL", "RETAIL"),
             "OFFICE": ("COMMERCIAL", "OFFICE"),
             "RESTAURANT": ("COMMERCIAL", "RESTAURANT"),
+            "BANQUET": ("COMMERCIAL", "BANQUET"),
             "HOTEL": ("COMMERCIAL", "HOTEL"),
             "WAREHOUSE": ("COMMERCIAL", "WAREHOUSE"),
             "LAND": ("LAND", "LAND"),
