@@ -80,8 +80,18 @@ def load_master_properties(engine, limit: int = 50000) -> List[Dict[str, Any]]:
             continue
         clean = _json(d.get("clean_record"))
         wa = clean.get("whatsapp_live_clean") if isinstance(clean.get("whatsapp_live_clean"), dict) else {}
-        raw = str(clean.get("original_message") or clean.get("description") or clean.get("property_name") or "").strip()
-        ptype = str(clean.get("property_type") or "").strip()
+        # Master clean_record schemas vary by source/version. Matching must use
+        # the best available property text/type instead of silently reducing
+        # candidates to location + transaction only.
+        def _pick(*keys):
+            for key in keys:
+                v = clean.get(key)
+                if v not in (None, "", [], {}):
+                    return v
+            return ""
+        raw = str(_pick("original_message","team_description","description_edit","description",
+                        "original_description","raw_line","source_text","property_name","details","remarks")).strip()
+        ptype = str(_pick("property_type","asset_type","subtype","category","property_category","intended_use")).strip()
         loc_raw = str(d.get("locality") or d.get("city") or "").strip()
         loc = base.canonical_location(loc_raw) or base.candidate_location(loc_raw) or base.norm(loc_raw) or None
         tx = base.norm(d.get("transaction_type"))
