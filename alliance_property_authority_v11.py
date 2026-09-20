@@ -5,7 +5,7 @@ from fastapi import Form, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from sqlalchemy import text, bindparam
 
-VERSION="12.0.5-MAGAZINE-ROW-LOCALITY-CATEGORY-GUARD"
+VERSION="12.1.0-SOURCE-SEPARATION-PAGINATION"
 SOURCES=("MASTER","NEWSPAPER","WHATSAPP","MAGAZINE","MANUAL")
 CATEGORY_OPTIONS=("Residential Sale","Residential Rent","Commercial Sale","Commercial Rent","Industrial Sale","Industrial Rent","Farmhouse Sale","Farmhouse Rent")
 
@@ -314,14 +314,14 @@ def _property_category(cr,tx):
         cand=f"{a} {t}".strip()
         if cand in CATEGORY_OPTIONS:return cand
     return explicit or ""
-def _property_rows(e,source,q,location,category,transaction,status,assigned,limit):
+def _property_rows(e,source,q,location,category,transaction,status,assigned,limit,offset=0):
     def source_rows(table,where,order):
         with e.connect() as cx:
             exists=cx.execute(text("SELECT to_regclass(:t)"),{"t":"public."+table}).scalar()
             if not exists:return []
             raw=cx.execute(text(f"""SELECT to_jsonb(t) FROM {table} t {where}
                 AND (:q='%%' OR to_jsonb(t)::text ILIKE :q)
-                {order} LIMIT :n"""),{"q":f"%{q.strip()}%","n":limit}).scalars().all()
+                {order} LIMIT :n OFFSET :off"""),{"q":f"%{q.strip()}%","n":limit,"off":offset}).scalars().all()
         parsed=[x if isinstance(x,dict) else json.loads(x) for x in raw]
         page_tx={}
         if source=="MAGAZINE":
@@ -381,10 +381,10 @@ def _property_rows(e,source,q,location,category,transaction,status,assigned,limi
         AND (:tx='' OR UPPER(COALESCE(p.transaction_type,''))=:tx)
         AND (:st='' OR UPPER(COALESCE(w.availability_status,w.verification_status,'UNVERIFIED'))=:st)
         AND (:asgn='%%' OR COALESCE(w.assigned_to,a.assigned_to,'') ILIKE :asgn)
-        ORDER BY p.updated_at DESC NULLS LAST,p.created_at DESC NULLS LAST LIMIT :n"""
+        ORDER BY p.updated_at DESC NULLS LAST,p.created_at DESC NULLS LAST LIMIT :n OFFSET :off"""
         with e.connect() as cx:
             rows=[dict(x) for x in cx.execute(text(sql),{"q":f"%{q.strip()}%","loc":f"%{location.strip()}%","tx":transaction.upper().strip(),
-            "st":status.upper().strip(),"asgn":f"%{assigned.strip()}%","n":limit,"pat":pat or ""}).mappings().all()]
+            "st":status.upper().strip(),"asgn":f"%{assigned.strip()}%","n":limit,"off":offset,"pat":pat or ""}).mappings().all()]
     def blob(r):
         cr=_flat_record(r.get("clean_record"))
         return " ".join(str(x or "") for x in (r.get("canonical_id"),r.get("locality"),r.get("city"),r.get("transaction_type"),r.get("price_raw"),json.dumps(cr,ensure_ascii=False,default=str))).lower()
@@ -516,7 +516,7 @@ def _filter_form(q,location,category,transaction,status,assigned,limit):
     <select name="transaction"><option value="">Rent / Sale</option><option value="RENT" {'selected' if transaction.upper()=='RENT' else ''}>Rent</option><option value="SALE" {'selected' if transaction.upper()=='SALE' else ''}>Sale</option><option value="LEASE" {'selected' if transaction.upper()=='LEASE' else ''}>Lease</option></select>
     <select name="status"><option value="">All Status</option><option {'selected' if status.upper()=='AVAILABLE' else ''}>AVAILABLE</option><option {'selected' if status.upper()=='UNVERIFIED' else ''}>UNVERIFIED</option><option {'selected' if status.upper()=='VERIFIED' else ''}>VERIFIED</option></select>
     <input name="assigned" value="{_e(assigned)}" placeholder="Assigned To">
-    <input type="number" name="limit" min="1" max="1500" value="{limit}">
+    <input type="number" name="page_size" min="25" max="500" value="{limit}">
     <button>Search</button></form></div>"""
 def _manual_media_summary(e,cr):
     pc=_first(cr,"property_code","source_record_id")
@@ -715,8 +715,66 @@ def _magazine_amounts(cr,tx,amount):
     return rent,sale
 
 
-def _property_table(core,e,req,source,q,location,category,transaction,status,assigned,limit):
-    rows=_property_rows(e,source,q,location,category,transaction,status,assigned,limit)
+def _property_source_count(e,source,q=""):
+    try:
+        with e.connect() as cx:
+            if source=="MAGAZINE":
+                return int(cx.execute(text("""SELECT COUNT(*) FROM pi_magazine_complete_v860
+                    WHERE archived_at IS NULL AND COALESCE(record_status,'ACTIVE')='ACTIVE'
+                      AND (:q='%%' OR to_jsonb(pi_magazine_complete_v860)::text ILIKE :q)"""),
+                    {"q":f"%{q.strip()}%"}).scalar() or 0)
+            if source=="MANUAL":
+                return int(cx.execute(text("""SELECT COUNT(*) FROM pi_operational_properties
+                    WHERE COALESCE(entry_source,'MANUAL')='MANUAL'
+                      AND (:q='%%' OR to_jsonb(pi_operational_properties)::text ILIKE :q)"""),
+                    {"q":f"%{q.strip()}%"}).scalar() or 0)
+            if source=="WHATSAPP":
+                return int(cx.execute(text("""SELECT COUNT(DISTINCT p.canonical_id)
+                    FROM pi_master_properties_v711 p
+                    WHERE UPPER(COALESCE(p.promotion_status,'')) NOT IN ('REJECTED','DELETED','DUPLICATE','QUARANTINED','MANUAL_ARCHIVED')
+                      AND EXISTS(
+                        SELECT 1 FROM pi_master_source_links_v711 l
+                        WHERE l.canonical_id=p.canonical_id AND l.master_entity_type='PROPERTY'
+                          AND (UPPER(COALESCE(l.source_type,'')) LIKE '%WHATSAPP%'
+                               OR UPPER(COALESCE(l.source_table,'')) LIKE '%WHATSAPP%')
+                      )
+                      AND (:q='%%' OR p.canonical_id ILIKE :q OR COALESCE(p.locality,'') ILIKE :q OR COALESCE(p.city,'') ILIKE :q OR COALESCE(p.clean_record::text,'') ILIKE :q)"""),
+                    {"q":f"%{q.strip()}%"}).scalar() or 0)
+            pat=_src_pat(source)
+            if pat:
+                return int(cx.execute(text("""SELECT COUNT(DISTINCT p.canonical_id)
+                    FROM pi_master_properties_v711 p
+                    WHERE UPPER(COALESCE(p.promotion_status,'')) NOT IN ('REJECTED','DELETED','DUPLICATE','QUARANTINED','MANUAL_ARCHIVED')
+                      AND EXISTS(
+                        SELECT 1 FROM pi_master_source_links_v711 l
+                        WHERE l.canonical_id=p.canonical_id AND l.master_entity_type='PROPERTY'
+                          AND (UPPER(COALESCE(l.source_type,'')) LIKE :pat
+                               OR UPPER(COALESCE(l.source_table,'')) LIKE :pat)
+                      )
+                      AND (:q='%%' OR p.canonical_id ILIKE :q OR COALESCE(p.locality,'') ILIKE :q OR COALESCE(p.city,'') ILIKE :q OR COALESCE(p.clean_record::text,'') ILIKE :q)"""),
+                    {"q":f"%{q.strip()}%","pat":pat}).scalar() or 0)
+            return int(cx.execute(text("""SELECT COUNT(*) FROM pi_master_properties_v711
+                WHERE UPPER(COALESCE(promotion_status,'')) NOT IN ('REJECTED','DELETED','DUPLICATE','QUARANTINED','MANUAL_ARCHIVED')
+                  AND (:q='%%' OR canonical_id ILIKE :q OR COALESCE(locality,'') ILIKE :q OR COALESCE(city,'') ILIKE :q OR COALESCE(clean_record::text,'') ILIKE :q)"""),
+                {"q":f"%{q.strip()}%"}).scalar() or 0)
+    except Exception:
+        return 0
+
+def _pager(source,page,page_size,total,q,location,category,transaction,status,assigned):
+    pages=max(1,(total+page_size-1)//page_size)
+    page=max(1,min(page,pages))
+    from urllib.parse import urlencode
+    base=f"/alliance/final/database/{source.lower()}"
+    common={"q":q,"location":location,"category":category,"transaction":transaction,"status":status,"assigned":assigned,"page_size":page_size}
+    def href(p):
+        d=dict(common);d["page"]=p
+        return base+"?"+urlencode(d)
+    prev=f'<a class="btn light" href="{_e(href(page-1))}">← Previous</a>' if page>1 else ""
+    nxt=f'<a class="btn light" href="{_e(href(page+1))}">Next →</a>' if page<pages else ""
+    return f'<div class="card"><b>Total:</b> {total:,} · <b>Page:</b> {page:,} of {pages:,} · <b>Rows/page:</b> {page_size} &nbsp; {prev} {nxt}</div>'
+
+def _property_table(core,e,req,source,q,location,category,transaction,status,assigned,limit,offset=0):
+    rows=_property_rows(e,source,q,location,category,transaction,status,assigned,limit,offset)
     wa_contacts=_whatsapp_contact_batch(e,rows) if source=="WHATSAPP" else {}
     prepared=[]
     for r in rows:
@@ -1082,6 +1140,37 @@ def register(core, served_app=None):
         if not r:return Response(status_code=404)
         return Response(content=bytes(r["content"]),media_type=str(r.get("mime_type") or "application/octet-stream"),
                         headers={"Content-Disposition":f'inline; filename="{str(r.get("filename") or "file").replace(chr(34),"")}"'})
+
+    def _source_page(req,src,q,location,category,transaction,status,assigned,page,page_size):
+        _login(core,req)
+        page=max(1,int(page)); page_size=max(25,min(int(page_size),500))
+        total=_property_source_count(e,src,q)
+        pages=max(1,(total+page_size-1)//page_size)
+        page=min(page,pages)
+        offset=(page-1)*page_size
+        body=_pager(src,page,page_size,total,q,location,category,transaction,status,assigned)
+        body+=_property_table(core,e,req,src,q,location,category,transaction,status,assigned,page_size,offset)
+        return HTMLResponse(_shell(f"{src.title()} Property Database",body))
+
+    @app.get("/alliance/final/database/whatsapp",response_class=HTMLResponse)
+    def whatsapp_database(req:Request,q:str=Query(""),location:str=Query(""),category:str=Query(""),transaction:str=Query(""),status:str=Query(""),assigned:str=Query(""),page:int=Query(1,ge=1),page_size:int=Query(100,ge=25,le=500)):
+        return _source_page(req,"WHATSAPP",q,location,category,transaction,status,assigned,page,page_size)
+
+    @app.get("/alliance/final/database/magazine",response_class=HTMLResponse)
+    def magazine_database(req:Request,q:str=Query(""),location:str=Query(""),category:str=Query(""),transaction:str=Query(""),status:str=Query(""),assigned:str=Query(""),page:int=Query(1,ge=1),page_size:int=Query(100,ge=25,le=500)):
+        return _source_page(req,"MAGAZINE",q,location,category,transaction,status,assigned,page,page_size)
+
+    @app.get("/alliance/final/database/manual",response_class=HTMLResponse)
+    def manual_database(req:Request,q:str=Query(""),location:str=Query(""),category:str=Query(""),transaction:str=Query(""),status:str=Query(""),assigned:str=Query(""),page:int=Query(1,ge=1),page_size:int=Query(100,ge=25,le=500)):
+        return _source_page(req,"MANUAL",q,location,category,transaction,status,assigned,page,page_size)
+
+    @app.get("/alliance/final/database/newspaper",response_class=HTMLResponse)
+    def newspaper_database(req:Request,q:str=Query(""),location:str=Query(""),category:str=Query(""),transaction:str=Query(""),status:str=Query(""),assigned:str=Query(""),page:int=Query(1,ge=1),page_size:int=Query(100,ge=25,le=500)):
+        return _source_page(req,"NEWSPAPER",q,location,category,transaction,status,assigned,page,page_size)
+
+    @app.get("/alliance/final/database/master",response_class=HTMLResponse)
+    def master_database(req:Request,q:str=Query(""),location:str=Query(""),category:str=Query(""),transaction:str=Query(""),status:str=Query(""),assigned:str=Query(""),page:int=Query(1,ge=1),page_size:int=Query(100,ge=25,le=500)):
+        return _source_page(req,"MASTER",q,location,category,transaction,status,assigned,page,page_size)
 
     @app.get("/alliance/final/database/{source}")
     def db(req:Request,source:str,q:str=Query(""),location:str=Query(""),category:str=Query(""),transaction:str=Query(""),status:str=Query(""),assigned:str=Query(""),limit:int=Query(500,ge=1,le=1500)):
