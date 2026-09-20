@@ -5,7 +5,7 @@ from fastapi import Form, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from sqlalchemy import text
 
-VERSION="12.0.0-WHATSAPP-CONTACT-MAGAZINE-COMPACT-RESTORE"
+VERSION="12.0.1-WHATSAPP-LINEAGE-CONTACT-RESTORE"
 SOURCES=("MASTER","NEWSPAPER","WHATSAPP","MAGAZINE","MANUAL")
 CATEGORY_OPTIONS=("Residential Sale","Residential Rent","Commercial Sale","Commercial Rent","Industrial Sale","Industrial Rent","Farmhouse Sale","Farmhouse Rent")
 
@@ -64,6 +64,32 @@ def _source_name(e,cid,etype):
         a=(r.get("source_type") or "").strip(); b=(r.get("source_table") or "").strip()
         return a if not b or b==a else f"{a} · {b}"
     except Exception:return ""
+def _source_link(e,cid,etype="PROPERTY"):
+    try:
+        with e.connect() as cx:
+            r=cx.execute(text("""SELECT source_type,source_table,source_pk
+                FROM pi_master_source_links_v711
+                WHERE canonical_id=:id AND master_entity_type=:et
+                ORDER BY created_at DESC,id DESC LIMIT 1"""),{"id":cid,"et":etype}).mappings().first()
+        return dict(r) if r else {}
+    except Exception:
+        return {}
+
+def _phones_from_any(v):
+    vals=[]
+    def walk(x):
+        if isinstance(x,dict):
+            for y in x.values():walk(y)
+        elif isinstance(x,(list,tuple,set)):
+            for y in x:walk(y)
+        else:
+            s=str(x or "").replace("@s.whatsapp.net","").replace("@c.us","")
+            for m in re.findall(r"(?<!\d)(?:\+?91[\s.\-]?)?([6-9](?:[\s.\-]?\d){9})(?!\d)",s):
+                p=re.sub(r"\D","",m)
+                if len(p)==10 and p not in vals:vals.append(p)
+    walk(v)
+    return ", ".join(vals)
+
 def _contacts(cr):
     name=_first(cr,"contact_name","owner_broker_name","owner_name","broker_name","client_name","sender_name","name") or ""
     vals=[]
@@ -77,63 +103,83 @@ def _contacts(cr):
     for x in re.findall(r"(?<!\d)(?:\+?91[-\s]?)?([6-9]\d{9})(?!\d)",blob):
         if x not in phones:phones.append(x)
     return str(name),", ".join(phones)
-def _whatsapp_sender_contact(cr):
-    """Evidence-only fallback from the WhatsApp live store. Never guess."""
+def _whatsapp_sender_contact(e,cid,cr):
+    """Recover WhatsApp sender/contact strictly from canonical source lineage and stored evidence."""
+    # Direct clean-record evidence first.
+    p=_phones_from_any({
+        "sender_phone":cr.get("sender_phone"),"contact_phone":cr.get("contact_phone"),
+        "sender_jid":cr.get("sender_jid"),"participant":cr.get("participant"),
+        "contact_numbers":cr.get("contact_numbers"),"phones":cr.get("phones")
+    })
+    if p:return p
+
+    link=_source_link(e,cid,"PROPERTY")
+    stable=str(link.get("source_pk") or _first(cr,"source_pk","wa_property_id","property_id","record_id","id") or "")
+    table=str(link.get("source_table") or "")
+    source_row=None
+
+    # Canonical DB source row.
+    if stable and re.fullmatch(r"[A-Za-z0-9_]+",table or ""):
+        try:
+            with e.connect() as cx:
+                source_row=cx.execute(text(f"""SELECT to_jsonb(x) FROM {table} x
+                    WHERE to_jsonb(x)::text ILIKE :needle LIMIT 1"""),
+                    {"needle":"%"+stable.replace("%","")+"%"}).scalar()
+        except Exception:
+            source_row=None
+    if isinstance(source_row,dict):
+        p=_phones_from_any({
+            "sender_phone":source_row.get("sender_phone"),"contact_phone":source_row.get("contact_phone"),
+            "sender_jid":source_row.get("sender_jid"),"participant":source_row.get("participant"),
+            "sender":source_row.get("sender"),"contact_numbers":source_row.get("contact_numbers"),
+            "phones":source_row.get("phones")
+        })
+        if p:return p
+
+    # WhatsApp live DB provenance.
     try:
         import whatsapp_live_bridge as live
         we=getattr(live,"wa_engine",None)
         if we is None:return ""
-        mid=str(_first(cr,"message_id","wa_message_id","external_message_id") or "")
-        rid=str(_first(cr,"wa_property_id","source_pk","property_id","record_id","id") or "")
-        raw=str(_first(cr,"original_message","raw_text","message","description","source_text") or "").strip()
-        def phones(v):
-            vals=[]
-            def walk(x):
-                if isinstance(x,dict):
-                    for y in x.values():walk(y)
-                elif isinstance(x,(list,tuple,set)):
-                    for y in x:walk(y)
-                else:
-                    s=str(x or "").replace("@s.whatsapp.net","").replace("@c.us","")
-                    for m in re.findall(r"(?<!\d)(?:\+?91[\s.\-]?)?([6-9](?:[\s.\-]?\d){9})(?!\d)",s):
-                        p=re.sub(r"\D","",m)
-                        if len(p)==10 and p not in vals:vals.append(p)
-            walk(v)
-            return ", ".join(vals)
+        merged=dict(cr)
+        if isinstance(source_row,dict): merged.update({k:v for k,v in source_row.items() if v not in (None,"",[],{})})
+        mid=str(_first(merged,"message_id","wa_message_id","external_message_id") or "")
+        rid=stable or str(_first(merged,"wa_property_id","source_pk","property_id","record_id","id") or "")
+        raw=str(_first(merged,"original_message","raw_text","message","description","source_text") or "").strip()
         with we.connect() as cx:
-            # 1. Exact property/source record.
+            # Exact source/property row across known historical tables.
             if rid:
-                for table,idcols in (
-                    ("wa_properties",("wa_property_id","id")),
-                    ("wa_property_master",("wa_property_id","id")),
-                    ("pi_whatsapp_property_master",("wa_property_id","id")),
-                ):
-                    for col in idcols:
-                        try:
-                            d=cx.execute(text(f"SELECT to_jsonb(x) FROM {table} x WHERE CAST({col} AS TEXT)=:r LIMIT 1"),{"r":rid}).scalar()
-                        except Exception:d=None
-                        if isinstance(d,dict):
-                            p=phones({"sender_phone":d.get("sender_phone"),"contact_phone":d.get("contact_phone"),"sender_jid":d.get("sender_jid"),"participant":d.get("participant")})
-                            if p:return p
-                            mid=mid or str(d.get("message_id") or "")
-            # 2. Exact message provenance.
+                for t in ("wa_properties","wa_property_master","pi_whatsapp_property_master"):
+                    try:
+                        d=cx.execute(text(f"""SELECT to_jsonb(x) FROM {t} x
+                            WHERE to_jsonb(x)::text ILIKE :needle LIMIT 1"""),
+                            {"needle":"%"+rid.replace("%","")+"%"}).scalar()
+                    except Exception:d=None
+                    if isinstance(d,dict):
+                        p=_phones_from_any({
+                            "sender_phone":d.get("sender_phone"),"contact_phone":d.get("contact_phone"),
+                            "sender_jid":d.get("sender_jid"),"participant":d.get("participant"),
+                            "sender":d.get("sender")
+                        })
+                        if p:return p
+                        mid=mid or str(d.get("message_id") or "")
+            # Exact message.
             if mid:
                 try:d=cx.execute(text("SELECT to_jsonb(x) FROM wa_messages x WHERE CAST(message_id AS TEXT)=:m LIMIT 1"),{"m":mid}).scalar()
                 except Exception:d=None
                 if isinstance(d,dict):
-                    p=phones({"sender_phone":d.get("sender_phone"),"sender_jid":d.get("sender_jid"),"participant":d.get("participant")})
+                    p=_phones_from_any({"sender_phone":d.get("sender_phone"),"sender_jid":d.get("sender_jid"),"participant":d.get("participant")})
                     if p:return p
-            # 3. Historical bridge exact raw-text fallback.
+            # Exact raw text historical bridge fallback.
             if raw:
-                for table in ("wa_bridge_events","wa_messages"):
+                for t in ("wa_bridge_events","wa_messages"):
                     try:
-                        d=cx.execute(text(f"""SELECT to_jsonb(x) FROM {table} x
-                            WHERE (raw_text=:raw OR message=:raw OR original_message=:raw)
-                              AND NULLIF(BTRIM(COALESCE(sender_phone,'')),'') IS NOT NULL
-                            ORDER BY created_at DESC LIMIT 1"""),{"raw":raw}).scalar()
+                        d=cx.execute(text(f"""SELECT to_jsonb(x) FROM {t} x
+                            WHERE to_jsonb(x)::text ILIKE :raw
+                            ORDER BY created_at DESC LIMIT 1"""),{"raw":"%"+raw[:220].replace("%","")+"%"}).scalar()
                     except Exception:d=None
                     if isinstance(d,dict):
-                        p=phones({"sender_phone":d.get("sender_phone"),"sender_jid":d.get("sender_jid"),"participant":d.get("participant")})
+                        p=_phones_from_any({"sender_phone":d.get("sender_phone"),"sender_jid":d.get("sender_jid"),"participant":d.get("participant")})
                         if p:return p
     except Exception:
         pass
@@ -526,7 +572,7 @@ def _canonical_property_projection(r,source,e):
 
     cname,cphone=_contacts(cr)
     if source=="WHATSAPP" and not cphone:
-        cphone=_whatsapp_sender_contact(cr)
+        cphone=_whatsapp_sender_contact(e,cid,cr)
     stat=r.get("availability_status")
     if not stat or stat=="UNKNOWN":stat=r.get("verification_status") or _first(cr,"verification_status","status") or "UNVERIFIED"
 
