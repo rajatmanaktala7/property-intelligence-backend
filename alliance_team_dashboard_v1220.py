@@ -8,7 +8,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import text
 
 VERSION = "12.3.8-COMMAND-BAR-DAY-PLAN-BOTTOM"
-ROUTE = "/alliance/primary"
+ROUTE = "/alliance/legacy/team-command-centre"
 
 STAFF = ["Yogesh Mehra", "Priya", "Zoya Saifi"]
 
@@ -387,7 +387,7 @@ def register(core):
                 "matching_route_count":len(matches),
                 "version":VERSION,
                 "route":ROUTE,
-                "title":"Alliance CRE · Team Command Centre",
+                "title":"Alliance CRE · Team Command Centre (Legacy/Team View)",
                 "data_exposed":False,
             }
 
