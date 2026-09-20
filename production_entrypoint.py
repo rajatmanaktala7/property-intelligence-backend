@@ -1894,6 +1894,32 @@ def _load_core():
             stabilization["alliance_ai_doctor_v21"] = {"status":"ERROR","error":f"{type(_doctor_v21_exc).__name__}: {_doctor_v21_exc}","fail_safe":True}
             print("[alliance-ai-doctor-v21] ERROR", type(_doctor_v21_exc).__name__, str(_doctor_v21_exc))
 
+        # ALLIANCE_CONTACT_PROVENANCE_V705_STARTUP_RESTORE
+        # Restore the required parent lifecycle before Promotion Integrity 7.1.1.
+        # Existing authority only. No database/schema/link redesign.
+        try:
+            import alliance_contact_provenance_v705 as contact_provenance_v705
+            stabilization = dict(stabilization or {})
+            stabilization["contact_provenance_v705"] = (
+                contact_provenance_v705.start(wrapped.core)
+            )
+            print(
+                "[contact-provenance-v705]",
+                stabilization["contact_provenance_v705"],
+            )
+        except Exception as exc:
+            stabilization = dict(stabilization or {})
+            stabilization["contact_provenance_v705"] = {
+                "status": "ERROR",
+                "error": f"{type(exc).__name__}: {exc}",
+                "fail_safe": True,
+            }
+            print(
+                "[contact-provenance-v705] warning:",
+                type(exc).__name__,
+                str(exc),
+            )
+
         # ALLIANCE_PROMOTION_INTEGRITY_V711_STARTUP_RESTORE
         # Restore existing validated source -> Master promotion lifecycle.
         # No database/schema/data/link changes are made here.
