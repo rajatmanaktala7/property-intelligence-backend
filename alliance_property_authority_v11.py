@@ -5,7 +5,7 @@ from fastapi import Form, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from sqlalchemy import text
 
-VERSION="11.6.1-MANUAL-ASSET-RESTORE-VISUAL-LOCK"
+VERSION="11.7.0-UNIFIED-GRID-SERIAL-RESTORE"
 SOURCES=("MASTER","NEWSPAPER","WHATSAPP","MAGAZINE","MANUAL")
 CATEGORY_OPTIONS=("Residential Sale","Residential Rent","Commercial Sale","Commercial Rent","Industrial Sale","Industrial Rent","Farmhouse Sale","Farmhouse Rent")
 
@@ -314,11 +314,11 @@ nav a,.btn,button,.summarybtn{{background:#0d2238;color:white;text-decoration:no
 .good{{background:#067647!important;border-color:#067647!important}}.light{{background:#475467!important}}.danger{{background:#b42318!important}}
 .wrap{{max-width:2100px;margin:auto;padding:14px}}.card{{background:white;border:1px solid #98a2b3;padding:10px;margin-bottom:10px}}
 .searchgrid{{display:grid;grid-template-columns:2fr repeat(6,minmax(130px,1fr));gap:6px}}input,select{{width:100%;padding:7px;border:1px solid #98a2b3;border-radius:0}}
-.tablebox{{overflow:auto;max-height:76vh;border:1px solid #667085;background:white}}table{{border-collapse:collapse;width:3140px;min-width:3140px;font-size:11px;table-layout:fixed}}
+.tablebox{{overflow:auto;max-height:76vh;border:1px solid #667085;background:white}}table{{border-collapse:collapse;width:3520px;min-width:3520px;font-size:11px;table-layout:fixed}}
 th,td{{border:1px solid #98a2b3;padding:6px 7px;text-align:left;vertical-align:top;white-space:normal;overflow-wrap:anywhere;word-break:normal;overflow:hidden}}
 th{{background:#e9eef5;position:sticky;top:0;z-index:4;white-space:nowrap;min-width:110px}}
 tbody tr:nth-child(even) td{{background:#f8fafc}}tbody tr:hover td{{background:#eef4ff}}
-.desc{{width:520px!important;min-width:520px!important;max-width:520px!important;white-space:normal!important;overflow-wrap:anywhere!important}}
+.desc{{width:360px!important;min-width:360px!important;max-width:360px!important;white-space:normal!important;overflow-wrap:anywhere!important}}.remarks{{width:420px!important;min-width:420px!important;max-width:420px!important;white-space:normal!important;overflow-wrap:anywhere!important}}
 .loc{{width:180px!important;min-width:180px!important;max-width:180px!important;white-space:normal!important}}
 .nowrap{{white-space:nowrap!important;overflow:hidden!important;text-overflow:ellipsis}}
 td:nth-child(10),td:nth-child(11){{min-width:140px;max-width:190px}}
@@ -379,25 +379,31 @@ def _canonical_property_projection(r,source,e):
         return None
 
     address=_first(cr,"address","exact_address","property_address") or ""
-    desc=_first(cr,"description","property_description","original_description","source_text","raw_line","original_message","details","team_description","description_edit")
-    if not desc:
-        parts=[]
-        for label,keys in (
-            ("Property",("property_name","property_type","property_types")),
-            ("Address",("address","exact_address","property_address")),
-            ("Area",("area_text","area_display","area","available_area","area_sqft")),
-            ("Floor",("floor","floors")),
-            ("Suitable",("suitable_for","suitable_category","property_category","category")),
-            ("Parking",("parking","parking_details")),
-            ("Possession",("possession","possession_status")),
-            ("Remarks",("remarks","additional_points")),
-        ):
-            v=_first(cr,*keys)
-            if v not in (None,"",[],{}):parts.append(label+": "+_display_text(v))
-        desc=" | ".join(parts)
+    root=_dict(r.get("clean_record"))
+    manual_origin=(source=="MANUAL" or isinstance(root.get("manual_operational"),dict) or str(_first(cr,"source_type","entry_source") or "").upper().startswith("MANUAL"))
+    if manual_origin:
+        # Manual form has no separate description field. Use the manually entered
+        # property identity/details here, and keep Remarks completely separate.
+        desc=_first(cr,"team_description","description_edit","property_description","property_name") or ""
+        if not desc:
+            parts=[]
+            for label,keys in (
+                ("Property",("property_name","property_type","property_types")),
+                ("Area",("area_text","area_display","area","available_area","area_sqft")),
+                ("Floor",("floor","floors")),
+                ("Suitable",("suitable_for","suitable_category","property_category","category")),
+                ("Parking",("parking","parking_details")),
+                ("Possession",("possession","possession_status")),
+            ):
+                v=_first(cr,*keys)
+                if v not in (None,"",[],{}):parts.append(label+": "+_display_text(v))
+            desc=" | ".join(parts)
+    else:
+        desc=_first(cr,"description","property_description","original_description","source_text","raw_line","original_message","details","team_description","description_edit") or ""
     desc=_display_text(desc)
     if address and address.lower() not in desc.lower():
         desc=(address+" · "+desc).strip(" ·")
+    remarks=_display_text(_first(cr,"remarks","additional_points","notes") or "")
 
     tx=r.get("transaction_type") or _first(cr,"transaction_type","rent_sale","rent_or_sale") or ""
     pcat=_magazine_category(cr,tx) if source=="MAGAZINE" else _property_category(cr,tx)
@@ -430,6 +436,7 @@ def _canonical_property_projection(r,source,e):
         "id":cid,
         "location":locality,
         "description":desc,
+        "remarks":remarks,
         "category":pcat,
         "type":ptype,
         "area":area,
@@ -444,6 +451,7 @@ def _canonical_property_projection(r,source,e):
         "source":source_name,
         "google_pin":_display_text(google_pin),
         "media":media,
+        "source_record_id":_display_text(_first(cr,"property_code","property_id","source_record_id") or ""),
         "source_only":"-SOURCE-" in cid,
     }
 
@@ -455,7 +463,17 @@ def _property_table(core,e,req,source,q,location,category,transaction,status,ass
         if not p:continue
         cid=p["id"]
         if p["source_only"]:
-            verify="Source record";history="—";edit="—";delete="—"
+            verify="Source record";history="—"
+            sid=p.get("source_record_id") or ""
+            if source=="MANUAL" and sid:
+                div=str(_first(_flat_record(r.get("clean_record")),"division") or "DELHI_NCR")
+                edit=f'<a class="btn light" href="/fast-property-entry?division={_e(div)}&edit={_e(sid)}">Edit</a>'
+                delete=f"""<form method="post" action="/alliance/final/database/manual/{_e(sid)}/delete-source" onsubmit="return confirm('Archive this Manual property? It will also be withdrawn from Master.');"><button class="danger">Delete</button></form>"""
+            elif source=="MAGAZINE" and sid:
+                edit=f'<a class="btn light" href="/magazine-complete">Edit</a>'
+                delete=f"""<form method="post" action="/alliance/final/database/magazine/{_e(sid)}/delete-source" onsubmit="return confirm('Archive this Magazine property? Original evidence will remain.');"><button class="danger">Delete</button></form>"""
+            else:
+                edit="—";delete="—"
         else:
             verify=f"""<details class="pop"><summary class="summarybtn good">Verify</summary><div><form method="post" action="/alliance/primary/property/{_e(cid)}/verify">
             <select name="status" required><option>AVAILABLE</option><option>NOT_AVAILABLE</option><option>CALL_BACK</option><option>SOLD</option><option>RENTED</option><option>HOLD</option><option>WRONG_NUMBER</option></select>
@@ -468,14 +486,16 @@ def _property_table(core,e,req,source,q,location,category,transaction,status,ass
         m=p["media"]; pc=m.get("property_code") or ""
         media_label=f'{m.get("images",0)} pics · {m.get("videos",0)} videos · {m.get("brochures",0)} docs'
         media_html=(f'<a class="btn light" href="/alliance/final/database/media/{quote(str(pc),safe="")}">{_e(media_label)}</a>' if pc and m.get("total",0)>0 else _e(media_label if pc else "—"))
-        vals=[p["id"],p["location"],p["description"],p["category"],p["type"],p["area"],p["floor"],p["transaction"],p["amount"],p["contact_name"],p["contact_no"],pin_html,media_html,p["date"],p["status"],verify,history,p["assigned_to"],p["source"],edit,delete]
-        cls=["nowrap","loc","desc","","","","","nowrap","","","","","","nowrap","nowrap","","","","","",""]
-        raw={11,12,15,16,19,20}
+
+        # Canonical serial order for every Property database.
+        vals=[p["id"],p["location"],p["description"],p["remarks"],pin_html,media_html,p["category"],p["type"],p["area"],p["floor"],p["transaction"],p["amount"],p["contact_name"],p["contact_no"],p["date"],p["status"],verify,history,p["assigned_to"],p["source"],edit,delete]
+        cls=["nowrap","loc","desc","remarks","","","","","","","nowrap","","","","nowrap","nowrap","","","","","",""]
+        raw={4,5,16,17,20,21}
         trs.append("<tr>"+"".join(f'<td class="{cls[i]}">{x if i in raw else _e(_shown(x))}</td>' for i,x in enumerate(vals))+"</tr>")
-    H=["Property ID","Location","Description / Address","Property Category","Property Type","Area","Floor","Rent/Sale","Amount","Contact Name","Contact No.","Google Pin","Media","Date & Time","Status","Verify","History","Assigned To","Source","Edit","Delete"]
-    widths=[180,180,520,150,170,120,110,100,120,140,140,110,190,170,110,100,100,120,130,90,90]
+    H=["Property ID","Location","Description / Address","Remarks","Google Pin","Media","Property Category","Property Type","Area","Floor","Rent/Sale","Amount","Contact Name","Contact No.","Date & Time","Status","Verify","History","Assigned To","Source","Edit","Delete"]
+    widths=[180,180,360,420,110,190,150,170,120,110,100,120,140,140,170,110,100,100,120,130,90,90]
     colgroup="<colgroup>"+"".join(f'<col style="width:{w}px;min-width:{w}px;max-width:{w}px">' for w in widths)+"</colgroup>"
-    return _filter_form(q,location,category,transaction,status,assigned,limit)+f'<div class="dbtools"><b>Table</b><button type="button" onclick="dbCompact()">Compact</button><button type="button" onclick="dbZoom(-1)">−</button><button type="button" onclick="dbZoom(1)">+</button><button type="button" onclick="dbZoomReset()">Reset</button></div><div class="tablebox"><table>{colgroup}<thead><tr>{"".join("<th>"+x+"</th>" for x in H)}</tr></thead><tbody>{"".join(trs) if trs else "<tr><td colspan=21>No records found</td></tr>"}</tbody></table></div>'
+    return _filter_form(q,location,category,transaction,status,assigned,limit)+f'<div class="dbtools"><b>Table</b><button type="button" onclick="dbCompact()">Compact</button><button type="button" onclick="dbZoom(-1)">−</button><button type="button" onclick="dbZoom(1)">+</button><button type="button" onclick="dbZoomReset()">Reset</button></div><div class="tablebox"><table>{colgroup}<thead><tr>{"".join("<th>"+x+"</th>" for x in H)}</tr></thead><tbody>{"".join(trs) if trs else "<tr><td colspan=22>No records found</td></tr>"}</tbody></table></div>'
 
 def _requirement_table(e,source,q,location,category,transaction,status,assigned,limit):
     rows=_requirement_rows(e,source,q,location,category,transaction,status,assigned,limit)
@@ -607,7 +627,7 @@ def register(core, served_app=None):
                 checks["master_filter_contract_present"]=True
 
             # Renderer contract: same projection keys for every property source.
-            expected={"id","location","description","category","type","area","floor","transaction","amount","contact_name","contact_no","date","status","assigned_to","source","google_pin","media","source_only"}
+            expected={"id","location","description","remarks","category","type","area","floor","transaction","amount","contact_name","contact_no","date","status","assigned_to","source","google_pin","media","source_record_id","source_only"}
             checks["single_projection_schema"]=set(_canonical_property_projection({
                 "canonical_id":"AUDIT","locality":"Saket","transaction_type":"LEASE","created_at":None,
                 "verification_status":"UNVERIFIED","availability_status":"UNKNOWN","assigned_to":"",
@@ -615,7 +635,7 @@ def register(core, served_app=None):
             },"MANUAL",e).keys())==expected
 
             checks["requirements_not_registered_here"]=True
-            checks["canonical_header_21_columns"]=True
+            checks["canonical_header_22_columns"]=True
         except Exception as ex:
             checks["audit_runtime"]=False
             details["audit_error_type"]=type(ex).__name__
@@ -648,6 +668,28 @@ def register(core, served_app=None):
         <a class="btn good" href="/magazine-capture">+ Upload Magazine</a>
         <a class="btn good" href="/whatsapp-live">Open WhatsApp Live</a></div>"""
         return HTMLResponse(_shell("5 Property Databases",actions+f'<div class="grid">{cards}</div>'))
+
+    @app.post("/alliance/final/database/manual/{pc}/delete-source")
+    def delete_manual_source(pc:str,req:Request):
+        _login(core,req)
+        import alliance_operational_master_bridge_v12426 as bridge
+        with e.begin() as cx:
+            x=cx.execute(text("""UPDATE pi_operational_properties
+                SET entry_source='ARCHIVED',updated_at=NOW()
+                WHERE property_code=:pc AND COALESCE(entry_source,'MANUAL')='MANUAL'"""),{"pc":pc})
+            if not x.rowcount:return RedirectResponse("/alliance/final/database/manual",303)
+        try:bridge.withdraw_property(e,pc,"canonical-grid")
+        except Exception:pass
+        return RedirectResponse("/alliance/final/database/manual",303)
+
+    @app.post("/alliance/final/database/magazine/{pid}/delete-source")
+    def delete_magazine_source(pid:str,req:Request):
+        _login(core,req)
+        with e.begin() as cx:
+            cx.execute(text("""UPDATE pi_magazine_complete_v860
+                SET archived_at=NOW(),record_status='ARCHIVED',updated_at=NOW()
+                WHERE property_id=:pid AND archived_at IS NULL"""),{"pid":pid})
+        return RedirectResponse("/alliance/final/database/magazine",303)
 
     @app.get("/alliance/final/database/media/{pc}",response_class=HTMLResponse)
     def manual_media_gallery(pc:str,req:Request):
