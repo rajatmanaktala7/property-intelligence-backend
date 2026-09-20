@@ -5,7 +5,7 @@ from fastapi import Form, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from sqlalchemy import text, bindparam
 
-VERSION="12.0.3-FAST-WHATSAPP-CONTACT-AMOUNT-RECOVERY"
+VERSION="12.0.4-MAGAZINE-LOCALITY-CATEGORY-COMPACT-GRID"
 SOURCES=("MASTER","NEWSPAPER","WHATSAPP","MAGAZINE","MANUAL")
 CATEGORY_OPTIONS=("Residential Sale","Residential Rent","Commercial Sale","Commercial Rent","Industrial Sale","Industrial Rent","Farmhouse Sale","Farmhouse Rent")
 
@@ -230,7 +230,9 @@ def _derive_transaction(cr,current=""):
 
 def _magazine_category(cr,tx):
     """Controlled Magazine category: asset class × Rent/Sale.
-    Row evidence wins; valid magazine section/category is fallback only."""
+    Priority: row evidence -> locality intelligence -> section fallback.
+    This prevents residential localities such as Vasant Vihar inheriting an
+    Industrial heading from a neighboring/page section."""
     txv=_derive_transaction(cr,tx)
     suffix="Rent" if txv=="LEASE" else "Sale" if txv=="SALE" else ""
     row_blob=" ".join(str(cr.get(k) or "") for k in (
@@ -239,6 +241,7 @@ def _magazine_category(cr,tx):
     section_blob=" ".join(str(cr.get(k) or "") for k in (
         "property_category","category","original_section","section_heading","category_source"
     )).upper()
+    loc=str(_first(cr,"location","locality","area_name","micro_market","city") or "").upper()
 
     def asset_from(blob):
         if re.search(r"\b(FARM\s*HOUSE|FARMHOUSE|SAINIK\s+FARM|GADIPUR\s+FARM|DERA\s+MANDI)\b",blob):return "Farmhouse"
@@ -247,9 +250,22 @@ def _magazine_category(cr,tx):
         if re.search(r"\b(INDUSTRIAL|FACTORY|WAREHOUSE|GODOWN|SHED)\b",blob):return "Industrial"
         return ""
 
-    asset=asset_from(row_blob) or asset_from(section_blob)
-    if asset and suffix:
-        return f"{asset} {suffix}"
+    asset=asset_from(row_blob)
+
+    if not asset:
+        if re.search(r"\b(VASANT\s+VIHAR|VASANT\s+KUNJ|DEFENCE\s+COLONY|GREATER\s+KAILASH|GK\s*[12]?|PANCHSHEEL|HAUZ\s+KHAS|SAFDARJUNG|GREEN\s+PARK|MAHARANI\s+BAGH|JOR\s+BAGH|NEW\s+FRIENDS\s+COLONY|NFC|EAST\s+OF\s+KAILASH|CR\s+PARK|CHITRANJAN\s+PARK|GULMOHAR\s+PARK|UDAY\s+PARK|MAYFAIR\s+GARDEN|PUNJABI\s+BAGH|PASCHIM\s+VIHAR|RAJOURI\s+GARDEN|JANAKPURI|PATEL\s+NAGAR)\b",loc):
+            asset="Residential"
+        elif re.search(r"\b(OKHLA(?:\s+PHASE\s*[123])?|NARAINA(?:\s+INDUSTRIAL\s+AREA)?|WAZIRPUR(?:\s+INDUSTRIAL\s+AREA)?|MUNDKA|BAWANA|NARELA|MAYAPURI(?:\s+INDUSTRIAL\s+AREA)?|KIRTI\s+NAGAR\s+INDUSTRIAL)\b",loc):
+            asset="Industrial"
+        elif re.search(r"\b(CONNAUGHT\s+PLACE|CP\b|NEHRU\s+PLACE|SAKET\s+DISTRICT\s+CENTRE|JANAKPURI\s+DISTRICT\s+CENTRE|BHIKAJI\s+CAMA|NETAJI\s+SUBHASH\s+PLACE|NSP\b|KAROL\s+BAGH|LAJPAT\s+NAGAR|SOUTH\s+EXTENSION|GREATER\s+KAILASH\s+MARKET)\b",loc):
+            asset="Commercial"
+
+    if not asset:
+        # Section fallback is allowed only when it is internally coherent; never
+        # use it to override known locality intelligence.
+        asset=asset_from(section_blob)
+
+    if asset and suffix:return f"{asset} {suffix}"
     return asset or ""
 
 
@@ -458,7 +474,7 @@ nav a,.btn,button,.summarybtn{{background:#0d2238;color:white;text-decoration:no
 .good{{background:#067647!important;border-color:#067647!important}}.light{{background:#475467!important}}.danger{{background:#b42318!important}}
 .wrap{{max-width:2100px;margin:auto;padding:14px}}.card{{background:white;border:1px solid #98a2b3;padding:10px;margin-bottom:10px}}
 .searchgrid{{display:grid;grid-template-columns:2fr repeat(6,minmax(130px,1fr));gap:6px}}input,select{{width:100%;padding:7px;border:1px solid #98a2b3;border-radius:0}}
-.tablebox{{overflow:auto;max-height:76vh;border:1px solid #667085;background:white}}table{{border-collapse:collapse;width:3680px;min-width:3680px;font-size:11px;table-layout:fixed}}.magazinebox{{max-height:82vh}}.magazinebox table{{font-size:10.5px!important}}.magazinebox th,.magazinebox td{{padding:5px 6px!important}}
+.tablebox{{overflow:auto;max-height:76vh;border:1px solid #667085;background:white;scrollbar-gutter:stable both-edges}}table{{border-collapse:collapse;width:3680px;min-width:3680px;font-size:11px;table-layout:fixed}}.magazinebox{{max-height:82vh;overflow-x:scroll!important;overflow-y:auto!important;scrollbar-gutter:stable both-edges}}.magazinebox table{{font-size:10.5px!important}}.magazinebox th,.magazinebox td{{padding:5px 6px!important}}
 th,td{{border:1px solid #98a2b3;padding:7px;text-align:left;vertical-align:top;white-space:normal;overflow-wrap:anywhere;word-break:normal;overflow:hidden;font-weight:600}}
 th{{background:#e9eef5;position:sticky;top:0;z-index:4;white-space:nowrap;min-width:110px;font-weight:800}}
 tbody tr:nth-child(even) td{{background:#f8fafc}}tbody tr:hover td{{background:#eef4ff}}
@@ -737,16 +753,15 @@ def _property_table(core,e,req,source,q,location,category,transaction,status,ass
             rent_amount,sale_amount=_magazine_amounts(cr,p["transaction"],p["amount"])
             vals=[
                 p["date"],p["description"],p["location"],p["category"],p["transaction"],
-                rent_amount,sale_amount,p["area"],p["floor"],p["contact_name"],p["contact_no"],
-                verify,p["status"],edit,delete,p["remarks"]
+                rent_amount,sale_amount,p["contact_no"],verify,p["status"],edit,delete,p["remarks"]
             ]
-            cls=["nowrap","desc","loc","","nowrap","","","","","","","","nowrap","","","remarks"]
-            raw={11,13,14}
+            cls=["nowrap","desc","loc","","nowrap","","","","","nowrap","","","remarks"]
+            raw={8,10,11}
             trs.append("<tr>"+"".join(f'<td class="{cls[i]}">{x if i in raw else _e(_shown(x))}</td>' for i,x in enumerate(vals))+"</tr>")
-        H=["Date / Time","Description / Address","Location","Category","Rent / Sale","Rent Amount","Sale Amount","Area","Floor","Contact Name","Contact No.","Verify","Verification","Edit","Delete","Remarks"]
-        widths=[155,420,150,135,90,120,120,105,90,120,125,90,100,80,80,280]
+        H=["Date / Time","Description / Address","Location","Category","Rent / Sale","Rent Amount","Sale Amount","Contact No.","Verify","Verification","Edit","Delete","Remarks"]
+        widths=[155,460,150,145,95,125,125,135,90,100,80,80,300]
         colgroup="<colgroup>"+"".join(f'<col style="width:{w}px;min-width:{w}px;max-width:{w}px">' for w in widths)+"</colgroup>"
-        return _filter_form(q,location,category,transaction,status,assigned,limit)+f'<div class="dbtools"><b>Magazine Compact Table</b><button type="button" onclick="dbCompact()">Compact</button><button type="button" onclick="dbZoom(-1)">−</button><button type="button" onclick="dbZoom(1)">+</button><button type="button" onclick="dbZoomReset()">Reset</button></div><div class="tablebox magazinebox"><table style="width:2260px;min-width:2260px">{colgroup}<thead><tr>{"".join("<th>"+x+"</th>" for x in H)}</tr></thead><tbody>{"".join(trs) if trs else "<tr><td colspan=16>No records found</td></tr>"}</tbody></table></div>'
+        return _filter_form(q,location,category,transaction,status,assigned,limit)+f'<div class="dbtools"><b>Magazine Compact Table</b><button type="button" onclick="dbCompact()">Compact</button><button type="button" onclick="dbZoom(-1)">−</button><button type="button" onclick="dbZoom(1)">+</button><button type="button" onclick="dbZoomReset()">Reset</button></div><div class="tablebox magazinebox"><table style="width:2040px;min-width:2040px">{colgroup}<thead><tr>{"".join("<th>"+x+"</th>" for x in H)}</tr></thead><tbody>{"".join(trs) if trs else "<tr><td colspan=13>No records found</td></tr>"}</tbody></table></div>'
 
     trs=[]
     for r,p,verify,history,edit,delete,pin_html,media_html in prepared:
