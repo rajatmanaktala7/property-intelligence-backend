@@ -1064,7 +1064,9 @@ def _property_table(core,e,req,source,q,location,category,transaction,status,ass
             ]
             cls=["nowrap","desc","loc","","nowrap","","","","","nowrap","","","remarks"]
             raw={8,10,11}
-            trs.append("<tr>"+"".join(f'<td class="{cls[i]}">{x if i in raw else _e(_shown(x))}</td>' for i,x in enumerate(vals))+"</tr>")
+            def mag_show(x):
+                return "—" if x in (None,"",[],{},"Not captured") else str(x)
+            trs.append("<tr>"+"".join(f'<td class="{cls[i]}">{x if i in raw else _e(mag_show(x))}</td>' for i,x in enumerate(vals))+"</tr>")
         H=["Date / Time","Description / Address","Location","Category","Rent / Sale","Rent Amount","Sale Amount","Contact No.","Verify","Verification","Edit","Delete","Remarks"]
         widths=[155,460,150,145,95,125,125,135,90,100,80,80,300]
         colgroup="<colgroup>"+"".join(f'<col style="width:{w}px;min-width:{w}px;max-width:{w}px">' for w in widths)+"</colgroup>"
