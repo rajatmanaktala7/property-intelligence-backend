@@ -4,7 +4,7 @@ from fastapi import Form, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import text
 
-VERSION="10.1.0-CANONICAL-RECORD-FLATTENING-SOURCE-SAFE-ACTIONS"
+VERSION="10.2.0-CANONICAL-MASTER-ONLY-SOURCE-VIEWS"
 PROPERTY_SOURCES=("MASTER","WHATSAPP","MANUAL","NEWSPAPER","MAGAZINE")
 REQUIREMENT_SOURCES=("MASTER","WHATSAPP","MANUAL")
 SOURCES=PROPERTY_SOURCES
@@ -150,87 +150,10 @@ def _property_rows(e,source,q,location,category,transaction,status,assigned,limi
     with e.connect() as c:
         rows=[dict(x) for x in c.execute(text(sql),{"q":f"%{q.strip()}%","loc":f"%{location.strip()}%","tx":transaction.upper().strip(),
         "st":status.upper().strip(),"asgn":f"%{assigned.strip()}%","n":limit,"pat":pat or ""}).mappings().all()]
-    # Manual availability/property evidence historically lives in
-    # pi_operational_properties. If source-link coverage is absent, keep the
-    # settled Manual page useful by reading that existing table read-only.
-    if source=="MANUAL":
-        try:
-            with e.connect() as c:
-                exists=c.execute(text("SELECT to_regclass('public.pi_operational_properties')")).scalar()
-                if exists:
-                    raw=c.execute(text("""SELECT to_jsonb(t) AS d FROM pi_operational_properties t
-                        WHERE (:q='%%' OR to_jsonb(t)::text ILIKE :q)
-                        ORDER BY COALESCE(updated_at,created_at) DESC NULLS LAST LIMIT :n"""),
-                        {"q":f"%{q.strip()}%","n":limit}).scalars().all()
-                    for x in raw:
-                        d=x if isinstance(x,dict) else json.loads(x)
-                        cid=str(_first(d,"canonical_id") or ("MANUAL-SOURCE-"+str(_first(d,"property_code","property_id","id") or "")))
-                        rows.append({
-                            "canonical_id":cid,
-                            "locality":_first(d,"location","locality","city") or "",
-                            "city":_first(d,"city") or "",
-                            "transaction_type":_first(d,"transaction_type","rent_sale") or "",
-                            "area_sqft":_first(d,"area_sqft","area","available_area") or "",
-                            "price_raw":_first(d,"rent_amount","sale_amount","amount","price") or "",
-                            "created_at":_first(d,"created_at","entry_date"),
-                            "updated_at":_first(d,"updated_at","created_at","entry_date"),
-                            "verification_status":_first(d,"verification_status","status") or "UNVERIFIED",
-                            "availability_status":_first(d,"availability_status","status") or "UNKNOWN",
-                            "assigned_to":_first(d,"assigned_to","team_member") or "",
-                            "clean_record":dict(d, source_table="pi_operational_properties", source_pk=str(_first(d,"property_code","id") or "")),
-                        })
-        except Exception:
-            pass
-    # Second compatibility source for historical manual availability/property
-    # rows. Some older manual entries were stored in pi_properties rather than
-    # pi_operational_properties and never received a Master source link.
-    if source=="MANUAL":
-        try:
-            with e.connect() as c:
-                exists=c.execute(text("SELECT to_regclass('public.pi_properties')")).scalar()
-                if exists:
-                    raw=c.execute(text("""SELECT to_jsonb(t) AS d FROM pi_properties t
-                        WHERE (:q='%%' OR to_jsonb(t)::text ILIKE :q)
-                          AND (UPPER(COALESCE(to_jsonb(t)->>'source','')) LIKE '%%MANUAL%%'
-                               OR UPPER(COALESCE(to_jsonb(t)->>'source_type','')) LIKE '%%MANUAL%%'
-                               OR UPPER(COALESCE(to_jsonb(t)->>'source_name','')) LIKE '%%MANUAL%%'
-                               OR UPPER(COALESCE(to_jsonb(t)->>'channel','')) LIKE '%%MANUAL%%')
-                        LIMIT :n"""),{"q":f"%{q.strip()}%","n":limit}).scalars().all()
-                    for x in raw:
-                        d=x if isinstance(x,dict) else json.loads(x)
-                        rows.append({
-                            "canonical_id":str(_first(d,"canonical_id") or ("MANUAL-SOURCE-"+str(_first(d,"property_code","property_id","id") or ""))),
-                            "locality":_first(d,"location","locality","city") or "",
-                            "city":_first(d,"city") or "",
-                            "transaction_type":_first(d,"transaction_type","rent_sale","rent_or_sale") or "",
-                            "area_sqft":_first(d,"area_sqft","available_area") or "",
-                            "price_raw":_first(d,"rent_amount","sale_amount","amount","price") or "",
-                            "created_at":_first(d,"created_at","entry_date"),
-                            "updated_at":_first(d,"updated_at","created_at","entry_date"),
-                            "verification_status":_first(d,"verification_status","status") or "UNVERIFIED",
-                            "availability_status":_first(d,"availability_status","status") or "UNKNOWN",
-                            "assigned_to":_first(d,"assigned_to","team_member") or "",
-                            "clean_record":dict(d, source_table="pi_properties", source_pk=str(_first(d,"property_code","property_id","id") or "")),
-                        })
-        except Exception:
-            pass
-    # Manual DB is a complete source view, not a fallback view.
-    # Merge canonical Manual-linked rows with historical manual tables and dedupe.
-    if source=="MANUAL":
-        deduped=[]
-        seen=set()
-        for r in rows:
-            cr=_flat_record(r.get("clean_record"))
-            cid=str(r.get("canonical_id") or "").strip()
-            fp=cid or "|".join(str(x or "").strip().lower() for x in (
-                r.get("locality"),r.get("city"),r.get("transaction_type"),
-                r.get("area_sqft"),r.get("price_raw"),
-                _first(cr,"contact_number","contact_phone","owner_contact","broker_contact","phone","mobile"),
-                _first(cr,"description","property_description","original_message","raw_line","details","remarks")
-            ))
-            if fp in seen: continue
-            seen.add(fp); deduped.append(r)
-        rows=deduped
+    # Canonical source pages must render canonical Master rows only.
+    # Historical Manual rows are repaired/promoted by the canonical hygiene
+    # bridge; reading raw legacy tables here created duplicate/stale results
+    # and made Manual appear identical to other source views.
     # ASTRA source-truth search: apply the same evidence search to every
     # returned row, including compatibility/source rows, instead of relying only
     # on Master projection columns.
