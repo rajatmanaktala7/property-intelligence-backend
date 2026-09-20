@@ -171,7 +171,7 @@ a.card:hover{border-color:#8d8173}.card b{display:block;font-size:18px;margin-bo
         ("/api/v451/live/status", v451_status, ["GET"]),
         ("/api/v451/live/properties", v451_properties, ["GET"]),
         ("/api/alliance/canonical-match", canonical_match, ["GET"]),
-        ("/alliance/primary", clean_home, ["GET"]),
+        ("/alliance/legacy/production-surface-home", clean_home, ["GET"]),
     ]
 
     owned = {p for p, _, _ in routes}
