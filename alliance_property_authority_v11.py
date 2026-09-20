@@ -1,11 +1,11 @@
 from __future__ import annotations
-import html, json, re
+import html, json, re, time
 from urllib.parse import quote
 from fastapi import Form, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from sqlalchemy import text, bindparam
 
-VERSION="12.7.0-MAGAZINE-SHORTHAND-RENT-RECOVERY"
+VERSION="12.8.0-MAGAZINE-CONTEXT-RECOVERY"
 SOURCES=("MASTER","NEWSPAPER","WHATSAPP","MAGAZINE","MANUAL")
 CATEGORY_OPTIONS=("Residential Sale","Residential Rent","Commercial Sale","Commercial Rent","Industrial Sale","Industrial Rent","Farmhouse Sale","Farmhouse Rent")
 
@@ -246,6 +246,41 @@ def _derive_transaction(cr,current=""):
     if rent_ev:return "LEASE"
     return ""
 
+_MAGAZINE_CONTEXT_CACHE={"expires":0.0,"section":{},"page":{}}
+
+def _magazine_context_map(e):
+    now=time.time()
+    if _MAGAZINE_CONTEXT_CACHE.get("expires",0)>now:
+        return _MAGAZINE_CONTEXT_CACHE
+    from collections import Counter,defaultdict
+    sec_votes=defaultdict(Counter); page_votes=defaultdict(Counter)
+    try:
+        with e.connect() as cx:
+            raws=cx.execute(text("""SELECT to_jsonb(t) FROM pi_magazine_complete_v860 t
+                WHERE archived_at IS NULL AND COALESCE(record_status,'ACTIVE')='ACTIVE'""")).scalars().all()
+        for raw in raws:
+            d=raw if isinstance(raw,dict) else json.loads(raw)
+            tx=_derive_transaction(d,_first(d,"transaction_type","rent_sale","rent_or_sale") or "")
+            if not tx: continue
+            pg=str(d.get("page_number") or "").strip()
+            sec=str(_first(d,"original_section","section_heading","category_source","property_category","category") or "").strip().upper()
+            if pg: page_votes[pg][tx]+=1
+            if pg and sec: sec_votes[(pg,sec)][tx]+=1
+
+        sec_map={}; page_map={}
+        for key,cnt in sec_votes.items():
+            tx,n=cnt.most_common(1)[0]; total=sum(cnt.values())
+            if total and n>=2 and n/total>=0.80:
+                sec_map[key]=tx
+        for key,cnt in page_votes.items():
+            tx,n=cnt.most_common(1)[0]; total=sum(cnt.values())
+            if total>=3 and n==total:
+                page_map[key]=tx
+        _MAGAZINE_CONTEXT_CACHE.update({"expires":now+300,"section":sec_map,"page":page_map})
+    except Exception:
+        _MAGAZINE_CONTEXT_CACHE.update({"expires":now+60,"section":{},"page":{}})
+    return _MAGAZINE_CONTEXT_CACHE
+
 def _magazine_category(cr,tx):
     """Controlled Magazine category: asset class × Rent/Sale.
     Priority: row evidence -> locality intelligence -> section fallback.
@@ -440,25 +475,21 @@ def _property_rows(e,source,q,location,category,transaction,status,assigned,limi
                 {order} LIMIT :n OFFSET :off"""),{"q":f"%{q.strip()}%","n":limit,"off":offset}).scalars().all()
         parsed=[x if isinstance(x,dict) else json.loads(x) for x in raw]
         page_tx={}
+        section_tx={}
         if source=="MAGAZINE":
-            from collections import Counter,defaultdict
-            votes=defaultdict(Counter)
-            for d in parsed:
-                pg=str(d.get("page_number") or "")
-                tx0=_derive_transaction(d,_first(d,"transaction_type","rent_sale","rent_or_sale") or "")
-                if pg and tx0:votes[pg][tx0]+=1
-            for pg,cnt in votes.items():
-                if cnt:
-                    txv,n=cnt.most_common(1)[0]
-                    total=sum(cnt.values())
-                    if n>=2 or (total==1 and len(cnt)==1):
-                        page_tx[pg]=txv
+            ctx=_magazine_context_map(e)
+            page_tx=dict(ctx.get("page") or {})
+            section_tx=dict(ctx.get("section") or {})
         out=[]
         for d in parsed:
             sid=str(_first(d,"property_code","property_id","source_record_id","id") or "")
             txv=_derive_transaction(d,_first(d,"transaction_type","rent_sale","rent_or_sale") or "")
             if source=="MAGAZINE" and not txv:
-                txv=page_tx.get(str(d.get("page_number") or ""), "")
+                pg=str(d.get("page_number") or "").strip()
+                sec=str(_first(d,"original_section","section_heading","category_source","property_category","category") or "").strip().upper()
+                txv=section_tx.get((pg,sec),"") if pg and sec else ""
+                if not txv:
+                    txv=page_tx.get(pg,"")
             out.append({
                 "canonical_id":source+"-SOURCE-"+sid,
                 "locality":_first(d,"location","locality","city") or "",
