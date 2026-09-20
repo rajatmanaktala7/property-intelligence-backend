@@ -5,7 +5,7 @@ from fastapi import Form, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from sqlalchemy import text, bindparam
 
-VERSION="12.2.1-FAST-TRUE-SOURCE-AUTHORITIES"
+VERSION="12.2.2-FAST-SOURCE-RENDER"
 SOURCES=("MASTER","NEWSPAPER","WHATSAPP","MAGAZINE","MANUAL")
 CATEGORY_OPTIONS=("Residential Sale","Residential Rent","Commercial Sale","Commercial Rent","Industrial Sale","Industrial Rent","Farmhouse Sale","Farmhouse Rent")
 
@@ -691,7 +691,7 @@ def _canonical_property_projection(r,source,e,contact_batch=None):
                  if "-SOURCE-" in cid
                  else (_source_name(e,cid,"PROPERTY") or str(_first(cr,"entry_source","source","source_type") or source).title()))
     google_pin=_first(cr,"google_location","google_maps","google_pin","map_link") or ""
-    media=_manual_media_summary(e,cr)
+    media=_manual_media_summary(e,cr) if manual_origin else {"property_code":"","images":0,"videos":0,"brochures":0,"total":0}
 
     return {
         "id":cid,
@@ -1274,7 +1274,7 @@ def register(core, served_app=None):
                 "authority":"LATEST_COMPLETED pi_whatsapp_property_master GENERATION",
                 "rows":wa_total,
                 "latest_clean_generation_rows":latest_gen_rows,
-                "master_linked_subset_not_used_for_source_page":true,
+                "master_linked_subset_not_used_for_source_page":True,
                 "pages_at_100":max(1,(wa_total+page_size-1)//page_size),
                 "route":"/alliance/final/database/whatsapp",
                 "route_owner":owner("/alliance/final/database/whatsapp"),
