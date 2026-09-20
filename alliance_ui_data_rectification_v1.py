@@ -59,6 +59,44 @@ def _norm_req(obj,source_table=""):
     single=_first(m,["area_sqft","requirement_sqft","required_area","area"]);amin=_first(m,["area_min_sqft","minimum_area_sqft","minimum_area","min_area_sqft","min_area"]) or single;amax=_first(m,["area_max_sqft","maximum_area_sqft","maximum_area","max_area_sqft","max_area"]) or single
     return {"date":_first(m,["created_at","message_timestamp","timestamp","date","captured_at"]),"description":_first(m,["original_message","requirement_message","raw_text","message","requirement_text","requirement","description","additional_points","remarks","notes","content"]),"company":_first(m,["company_name","brand_name","client_company","company","retailer_name","company_brand_person"]),"name":_first(m,["contact_name","client_name","sender_name","name"]),"contact":_phones(m) or "Not captured","location":loc or "Not captured","category":_first(m,["intended_use","suitable_category","category","property_category","business_category"]),"ptype":_first(m,["property_type","required_property_type","asset_type"]),"area_min":amin,"area_max":amax,"transaction":_first(m,["transaction_type","transaction","rent_sale","rent_or_sale","deal_type"]),"budget":_first(m,["budget_max","budget","sale_budget","rent_budget","budget_raw","budget_max_inr"]),"floor":_first(m,["floor","preferred_floor","floor_preference","entry_status","additional_preferences"]),"verification":_first(m,["verification_status","classification","status"]) or "UNVERIFIED","source":src if src!='OTHER' else source_table,"source_id":_first(m,["source_pk","wa_requirement_id","requirement_id","record_id","id"]),"canonical_id":_first(m,["canonical_id","master_requirement_id","master_id"]),"gate_id":_first(m,["gate_id","id"]) if source_table=="pi_requirement_gate_v1191" else ""}
 def _requirement_rows(engine,source,limit=500):
+    # NEW REQUIREMENT UI ARCHITECTURE:
+    # Manual is a source database, so its display authority is the settled
+    # pi_operational_requirements table. Gate remains canonical matcher authority.
+    # Do not collapse unpromoted Manual source rows into Gate just to display them.
+    if source=='MANUAL':
+        try:
+            import alliance_requirement_restore_v1235 as req_restore
+            manual=req_restore._manual_operational_rows(engine,limit)
+            rows=[]
+            for x in manual:
+                r={
+                    "date":x.get("created_at") or "",
+                    "description":x.get("message") or x.get("description") or "",
+                    "company":x.get("company") or x.get("company_name") or x.get("client_name") or "",
+                    "name":x.get("contact_name") or x.get("client_name") or "",
+                    "contact":x.get("contact") or x.get("contact_number") or "Not captured",
+                    "location":x.get("location") or x.get("preferred_locations") or x.get("city") or "Not captured",
+                    "category":x.get("category") or x.get("intended_use") or "",
+                    "ptype":x.get("property_type") or "",
+                    "area_min":x.get("area_min_sqft") or x.get("minimum_area") or x.get("minimum_area_sqft") or "",
+                    "area_max":x.get("area_max_sqft") or x.get("maximum_area") or x.get("maximum_area_sqft") or "",
+                    "transaction":x.get("transaction") or x.get("transaction_type") or "",
+                    "budget":x.get("budget") or x.get("budget_max") or x.get("maximum_rent") or "",
+                    "floor":x.get("floor") or x.get("floor_requirement") or "",
+                    "verification":x.get("verification") or x.get("verification_status") or "RAW",
+                    "source":"MANUAL",
+                    "source_id":x.get("source_pk") or x.get("source_id") or x.get("id") or "",
+                    "canonical_id":x.get("canonical_id") or "",
+                    "gate_id":"",
+                }
+                rows.append(r)
+            rows.sort(key=lambda r:str(r.get("date") or ""),reverse=True)
+            return rows[:limit]
+        except Exception:
+            # Fall through to Gate only if the settled Manual source authority
+            # itself is unavailable. This preserves existing non-Manual behavior.
+            pass
+
     # FAST PATH ONLY: canonical gate + canonical master. Do not inspect every requirement
     # table on every HTTP request; that was causing multi-thousand-row scans and hangs.
     rows=[];seen=set()
@@ -167,6 +205,12 @@ def _action(r,source):
     rid=gid or cid
     if rid:
         return f"<a class='btn' href='/alliance/primary/matcher?requirement_id={_e(rid)}'>Run Matcher</a>"
+    # Unpromoted source rows must enter through the source adapter. That adapter
+    # creates/reuses Gate evidence, verifies, bridges and then opens Master Matcher.
+    sid=str(r.get('source_id') or '').strip()
+    src=str(r.get('source') or source).upper()
+    if src in SOURCES and src!='MASTER' and sid:
+        return f"<a class='btn' href='/alliance/final/requirements/run-match?source={_e(src)}&source_pk={_e(sid)}'>Run Matcher</a>"
     return 'Review'
 def _requirements_page(engine,source,q=""):
     rows=_requirement_rows(engine,source,500);q=str(q or '').strip().lower()
