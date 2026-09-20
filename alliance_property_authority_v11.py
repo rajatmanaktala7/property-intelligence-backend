@@ -1439,6 +1439,33 @@ def register(core, served_app=None):
                 live_rows_count=sum(tx_dist.values())
         except Exception:
             pass
+        magazine_metrics={
+            "active_rows":mag_total,
+            "transaction_resolved":0,
+            "transaction_unresolved":0,
+            "rent_amount_recovered":0,
+            "sale_amount_recovered":0,
+            "explicit_amount_missing_transaction":0,
+        }
+        try:
+            with e.connect() as cx:
+                mags=cx.execute(text("""SELECT to_jsonb(t) FROM pi_magazine_complete_v860 t
+                    WHERE archived_at IS NULL AND COALESCE(record_status,'ACTIVE')='ACTIVE'""")).scalars().all()
+            for raw in mags:
+                d=raw if isinstance(raw,dict) else json.loads(raw)
+                tx=_derive_transaction(d,_first(d,"transaction_type","rent_sale","rent_or_sale") or "")
+                if tx: magazine_metrics["transaction_resolved"]+=1
+                else: magazine_metrics["transaction_unresolved"]+=1
+                amt=_display_text(_first(d,"rent_text","amount","amount_raw","rent_amount","sale_amount","price_raw","price") or "")
+                rent_amt,sale_amt=_magazine_amounts(d,tx,amt)
+                if rent_amt: magazine_metrics["rent_amount_recovered"]+=1
+                if sale_amt: magazine_metrics["sale_amount_recovered"]+=1
+                blob=" ".join(str(d.get(k) or "") for k in ("description","original_description","raw_line","source_text","details"))
+                if re.search(r"(?i)@\s*\d+(?:\.\d+)?\s*(?:TH|K|L|LAC|LAKH|CR|CRORE)",blob) and not tx:
+                    magazine_metrics["explicit_amount_missing_transaction"]+=1
+        except Exception as exc:
+            magazine_metrics={"status":"ERROR","error":type(exc).__name__+": "+str(exc)[:180]}
+
         page_size=100
         return {
             "status":"PASS",
@@ -1457,6 +1484,7 @@ def register(core, served_app=None):
             "magazine":{
                 "authority":"pi_magazine_complete_v860",
                 "rows":mag_total,
+                "recovery_metrics":magazine_metrics,
                 "pages_at_100":max(1,(mag_total+page_size-1)//page_size),
                 "route":"/alliance/final/database/magazine",
                 "route_owner":owner("/alliance/final/database/magazine"),
