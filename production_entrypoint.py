@@ -1533,6 +1533,36 @@ def _load_core():
             stabilization["master_requirement_authority_v1"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","fail_safe":True}
         # ALLIANCE_MASTER_REQUIREMENT_AUTHORITY_V1_END
 
+        # ALLIANCE_MASTER_MATCHER_FINAL_ROUTE_AUTHORITY_V1
+        # Reassert the settled current Master matcher after legacy registrations.
+        # No URL, database, schema or contact changes.
+        try:
+            import alliance_master_requirement_authority_v1 as final_master_matcher_v1
+            matcher_app = getattr(wrapped, "app", None) or getattr(wrapped.core, "app", None) or wrapped.core
+            matcher_paths = {
+                "/alliance/primary/matcher",
+                "/alliance/master-requirement-matcher",
+            }
+            matcher_app.router.routes[:] = [
+                r for r in matcher_app.router.routes
+                if not (
+                    getattr(r, "path", None) in matcher_paths
+                    and "GET" in set(getattr(r, "methods", set()) or set())
+                )
+            ]
+            final_matcher_result = final_master_matcher_v1.register(wrapped.core)
+            stabilization = dict(stabilization or {})
+            stabilization["master_matcher_final_route_authority_v1"] = final_matcher_result
+            print("[master-matcher-final-route-authority-v1]", final_matcher_result)
+        except Exception as exc:
+            stabilization = dict(stabilization or {})
+            stabilization["master_matcher_final_route_authority_v1"] = {
+                "status": "ERROR",
+                "error": f"{type(exc).__name__}: {exc}",
+                "fail_safe": True,
+            }
+            print("[master-matcher-final-route-authority-v1] warning:", type(exc).__name__, str(exc))
+
         # ALLIANCE_FAST_MANUAL_FORMS
         # The current manual property/requirement forms and their operational
         # source tables must be registered before final database authorities.
