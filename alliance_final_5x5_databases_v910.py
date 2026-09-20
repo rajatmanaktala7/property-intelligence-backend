@@ -4,7 +4,7 @@ from fastapi import Form, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import text
 
-VERSION="10.6.0-RESTORED-UI-SOURCE-TRUTH"
+VERSION="10.6.1-OLD-TABLE-V3-CONTENT"
 PROPERTY_SOURCES=("MASTER","WHATSAPP","MANUAL","NEWSPAPER","MAGAZINE")
 REQUIREMENT_SOURCES=("MASTER","WHATSAPP","MANUAL")
 SOURCES=PROPERTY_SOURCES
@@ -150,6 +150,53 @@ def _manual_description(cr,r):
         for label,v in (("Location",r.get("locality") or r.get("city")),("Area",r.get("area_sqft")),("Transaction",r.get("transaction_type")),("Amount",r.get("price_raw"))):
             if v not in (None,"",[],{}): parts.append(f"{label}: {v}")
     return " | ".join(parts)
+
+def _display_text(v):
+    if isinstance(v,list): return ", ".join(str(x) for x in v if x not in (None,""))
+    if isinstance(v,dict): return json.dumps(v,ensure_ascii=False,default=str)
+    return "" if v is None else str(v).strip()
+
+def _v3_description(cr,r):
+    """Use the clearer Property Core V3 description contract inside the restored table UI."""
+    v=_first(cr,"description","property_description","original_description","source_text","raw_line","original_message","details")
+    if v:
+        return _display_text(v)
+    parts=[]
+    for label,keys in (
+        ("Property",("property_name","property_type","property_types")),
+        ("Address",("address","exact_address","property_address")),
+        ("Area",("area_text","area_display","area","available_area","area_sqft")),
+        ("Floor",("floor","floors")),
+        ("Suitable",("suitable_for","property_category","category")),
+        ("Parking",("parking","parking_details")),
+        ("Possession",("possession","possession_status")),
+        ("Remarks",("remarks","additional_points")),
+    ):
+        x=_first(cr,*keys)
+        if x not in (None,"",[],{}):
+            parts.append(label+": "+_display_text(x))
+    if parts:
+        return " | ".join(parts)
+    return _manual_description(cr,r)
+
+def _v3_area(cr,r):
+    v=_first(cr,"area_text","area_display","available_area")
+    if v:return _display_text(v)
+    val=_first(cr,"area_value","area_sqft","area","size") or r.get("area_value") or r.get("area_sqft")
+    unit=_first(cr,"area_unit") or r.get("area_unit") or ("SQFT" if r.get("area_sqft") else "")
+    return (f"{_display_text(val)} {_display_text(unit)}".strip() if val not in (None,"") else "")
+
+def _v3_amount(cr,r,tx):
+    # Prefer the source's human-readable amount text. Never replace it with an
+    # ambiguous historical numeric normalization when the original text exists.
+    v=_first(cr,"rent_text","amount","amount_raw","price_raw")
+    if v not in (None,"",[],{}):return _display_text(v)
+    if str(tx).upper() in ("RENT","LEASE"):
+        v=_first(cr,"rent","monthly_rent","rent_amount","rent_in_figures")
+    else:
+        v=_first(cr,"sale_price","sale_amount","price","asking_price")
+    if v in (None,"",[],{}):v=r.get("price_raw")
+    return _display_text(v)
 
 def _property_category(cr,tx):
     explicit=_first(cr,"property_category","category")
@@ -362,11 +409,11 @@ th,td{{border:1px solid #98a2b3;padding:6px 7px;text-align:left;vertical-align:t
 th{{background:#e9eef5;position:sticky;top:0;z-index:4;white-space:nowrap;min-width:110px}}
 .manual-unified table{{min-width:1900px;table-layout:auto}}.manual-unified td.desc{{min-width:360px;max-width:520px}}.manual-unified td.loc{{min-width:150px}}.manual-unified th,.manual-unified td{{overflow-wrap:break-word;word-break:normal}}
 tbody tr:nth-child(even) td{{background:#f8fafc}}tbody tr:hover td{{background:#eef4ff}}
-.desc{{min-width:320px!important;max-width:460px!important;white-space:normal!important}}
+.desc{{width:420px!important;min-width:420px!important;max-width:420px!important;white-space:normal!important;overflow-wrap:anywhere!important}}
 .loc{{min-width:160px!important;max-width:260px!important;white-space:normal!important}}
 .nowrap{{white-space:nowrap!important;min-width:120px}}
 td:nth-child(10),td:nth-child(11){{min-width:140px;max-width:190px}}
-td:nth-child(12){{min-width:150px;max-width:190px}}
+th:nth-child(12),td:nth-child(12){{width:170px!important;min-width:170px!important;max-width:170px!important;white-space:nowrap!important;overflow:hidden!important}}
 td:nth-child(14),td:nth-child(15),td:nth-child(18),td:nth-child(19){{min-width:90px;max-width:130px}}
 .grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:8px}}.dbcard{{border:1px solid #98a2b3;background:white;padding:12px}}.dbcard h3{{margin:0 0 5px}}
 details.pop{{position:relative}}details.pop>div{{position:absolute;z-index:20;background:white;border:1px solid #667085;padding:9px;min-width:430px}}details.pop summary{{list-style:none}}
@@ -405,24 +452,15 @@ def _property_table(core,e,req,source,q,location,category,transaction,status,ass
         if locality=="Needs verification":
             continue
         address=_first(cr,"address","exact_address","property_address") or ""
-        desc=_first(cr,"team_description","description_edit","description","property_description","original_description","original_message","raw_line","source_text","details","remarks","additional_points","property_name") or ""
-        # One display contract for every source. Structured evidence is turned
-        # into a useful description instead of showing "Not captured".
-        if not desc:
-            desc=_manual_description(cr,r)
+        desc=_v3_description(cr,r)
         if address and address.lower() not in str(desc).lower(): desc=(address+" · "+desc).strip(" ·")
         tx=r.get("transaction_type") or _first(cr,"transaction_type","rent_or_sale") or ""
         pcat=_property_category(cr,tx)
         ptype=_first(cr,"property_type","asset_type","subtype") or ""
-        area=_first(cr,"area_display","area","available_area")
-        if not area:
-            av=_first(cr,"area_value") or r.get("area_value") or r.get("area_sqft") or ""
-            au=_first(cr,"area_unit") or r.get("area_unit") or ("SQFT" if r.get("area_sqft") else "")
-            area=f"{av} {au}".strip()
+        area=_v3_area(cr,r)
         floor=_first(cr,"floor","floors","floor_codes") or ""
         if isinstance(floor,list):floor=", ".join(map(str,floor))
-        amount=_first(cr,"rent","monthly_rent","rent_amount","rent_in_figures") if str(tx).upper() in ("RENT","LEASE") else _first(cr,"sale_price","sale_amount","price","asking_price")
-        amount=amount or _first(cr,"amount","price_raw") or r.get("price_raw") or ""
+        amount=_v3_amount(cr,r,tx)
         cname,cphone=_contacts(cr)
         stat=r.get("availability_status")
         if not stat or stat=="UNKNOWN":stat=r.get("verification_status") or "UNVERIFIED"
