@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 import threading
@@ -236,7 +236,7 @@ code{{background:#f5eee5;padding:4px 6px;border-radius:5px}}
 <p>The health service is online while the main application loads independently.</p>
 <p><b>Boot state:</b> <code>{BOOT["state"]}</code></p>
 <p><b>Detail:</b> <code>{err}</code></p>
-<p><a href="/healthz">Health</a> ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â· <a href="/boot-status">Boot Status</a></p>
+<p><a href="/healthz">Health</a> ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â· <a href="/boot-status">Boot Status</a></p>
 </main>
 </body>
 </html>""",
@@ -1648,7 +1648,33 @@ def _load_core():
                 type(exc).__name__,
                 str(exc),
             )
-        # ALLIANCE_WHATSAPP_HISTORICAL_CONTACT_RECOVERY_V1
+
+        # ALLIANCE_ISOLATED_APP_GLOBAL_PUBLISH_V1
+        # Publish the already-created isolated authorities to the outer
+        # HealthFirstDispatcher. No routes, URLs, databases or data change.
+        globals()["REQUIREMENT_APP"] = locals().get(
+            "REQUIREMENT_APP",
+            globals().get("REQUIREMENT_APP")
+        )
+        globals()["DATABASE_APP"] = locals().get(
+            "DATABASE_APP",
+            globals().get("DATABASE_APP")
+        )
+        globals()["MATCHER_APP"] = locals().get(
+            "MATCHER_APP",
+            globals().get("MATCHER_APP")
+        )
+
+        print(
+            "[isolated-app-global-publish-v1]",
+            {
+                "requirement": globals().get("REQUIREMENT_APP") is not None,
+                "database": globals().get("DATABASE_APP") is not None,
+                "matcher": globals().get("MATCHER_APP") is not None,
+            }
+        )
+
+# ALLIANCE_WHATSAPP_HISTORICAL_CONTACT_RECOVERY_V1
         try:
             import alliance_whatsapp_historical_contact_recovery_v1 as wa_contact_recovery_v1
             stabilization = dict(stabilization or {})
