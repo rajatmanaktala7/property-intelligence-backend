@@ -1462,14 +1462,16 @@ def run_sync(full_master_replay: bool = False, max_master_batches: Optional[int]
         }
 
     try:
+        # Operational priority: live WhatsApp must never wait behind historical
+        # master maintenance. Process fresh properties/requirements first.
+        _sync_live_properties(main, wa, counters)
+        _sync_requirements(main, wa, counters)
         _sync_master_backlog(
             main,
             counters,
             full_replay=full_master_replay,
             max_batches=max_master_batches,
         )
-        _sync_live_properties(main, wa, counters)
-        _sync_requirements(main, wa, counters)
         audit = audit_snapshot()
     finally:
         _release_job_lock()
