@@ -2019,6 +2019,20 @@ def _load_core():
                 "Alliance critical-flow release gate failed: "
                 f"{type(exc).__name__}: {exc}"
             ) from exc
+        # ALLIANCE_CLEAN_CORE_V2_FINAL_SHELL
+        # Final UI authority only. Existing databases, source routes, matcher,
+        # WhatsApp ingestion, contacts and AI services remain untouched.
+        try:
+            import alliance_clean_core_v2 as clean_core_v2
+            stabilization = dict(stabilization or {})
+            stabilization["clean_core_v2"] = clean_core_v2.register(wrapped.core)
+            print("[clean-core-v2]", stabilization["clean_core_v2"])
+        except Exception as exc:
+            raise RuntimeError(
+                "Alliance Clean Core V2 shell failed: "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
+
         BOOT["core_loaded"] = True
         BOOT["state"] = "READY" if stabilization.get("registered") else "DEGRADED"
         BOOT["stabilization"] = stabilization
