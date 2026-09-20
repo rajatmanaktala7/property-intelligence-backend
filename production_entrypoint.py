@@ -446,14 +446,22 @@ def _load_core():
         import app as early_core
         CORE_APP = early_core.app
 
-        # Publish the settled Alliance CRE Team Command Centre immediately.
-        # This is the sole /alliance/primary owner; database authorities remain separate.
+        # Publish supporting Team routes first, but keep its old dashboard
+        # on /alliance/legacy/team-command-centre.
         try:
             import alliance_team_dashboard_v1220 as early_team_dashboard_v1220
             early_team_dashboard_v1220.register(early_core)
-            print("[early-team-command-centre-v1220] READY")
+            print("[early-team-support-v1220] READY")
         except Exception as exc:
-            print("[early-team-command-centre-v1220] warning:", type(exc).__name__, str(exc))
+            print("[early-team-support-v1220] warning:", type(exc).__name__, str(exc))
+
+        # Primary dashboard authority: latest clean canonical dashboard.
+        try:
+            import alliance_dashboard_authority_v1 as early_dashboard_authority_v1
+            early_dashboard_authority_v1.register(early_core)
+            print("[early-canonical-dashboard-v1] READY")
+        except Exception as exc:
+            print("[early-canonical-dashboard-v1] warning:", type(exc).__name__, str(exc))
 
         import newspaper_wrapper as wrapped
         CORE_APP = wrapped.app
@@ -519,8 +527,8 @@ def _load_core():
             BOOT["state"] = "READY"
             BOOT["stabilization"] = {
                 "critical_workspace":"READY",
-                "primary_dashboard_owner":"alliance_team_dashboard_v1220",
-                "primary_dashboard_version":"12.3.8-COMMAND-BAR-DAY-PLAN-BOTTOM",
+                "primary_dashboard_owner":"alliance_dashboard_authority_v1",
+                "primary_dashboard_version":"2.3.0-CLEAN-SOURCE-NAVIGATION",
                 "requirement_owner":"alliance_requirement_restore_v1235",
                 "database_owner":"alliance_property_authority_v11",
                 "matcher_owner":"alliance_master_requirement_authority_v1",
@@ -1937,11 +1945,12 @@ def _load_core():
             print("[master-consolidation-v1] warning:",type(_x).__name__,str(_x))
 
         # ALLIANCE_DASHBOARD_AUTHORITY_V1
-        # Disabled: /alliance/primary is frozen to alliance_team_dashboard_v1220.
+        # Already installed before serving starts; do not add middleware late.
         stabilization = dict(stabilization or {})
         stabilization["dashboard_authority_v1"] = {
-            "status":"DISABLED",
-            "reason":"TEAM_COMMAND_CENTRE_V1220_IS_SOLE_PRIMARY_OWNER"
+            "status":"READY_EARLY",
+            "owner":"alliance_dashboard_authority_v1",
+            "version":"2.3.0-CLEAN-SOURCE-NAVIGATION"
         }
 
         # ALLIANCE_TEAM_READY_CERTIFICATION_V1
@@ -2153,8 +2162,8 @@ def _load_core():
         BOOT["core_loaded"] = True
         BOOT["state"] = "READY" if BOOT.get("critical_ready") else ("READY" if stabilization.get("registered") else "DEGRADED")
         stabilization["critical_workspace"]="READY" if BOOT.get("critical_ready") else "UNKNOWN"
-        stabilization["primary_dashboard_owner"]="alliance_team_dashboard_v1220"
-        stabilization["primary_dashboard_version"]="12.3.8-COMMAND-BAR-DAY-PLAN-BOTTOM"
+        stabilization["primary_dashboard_owner"]="alliance_dashboard_authority_v1"
+        stabilization["primary_dashboard_version"]="2.3.0-CLEAN-SOURCE-NAVIGATION"
         stabilization["requirement_owner"]="alliance_requirement_restore_v1235"
         stabilization["database_owner"]="alliance_property_authority_v11"
         stabilization["matcher_owner"]="alliance_master_requirement_authority_v1"
