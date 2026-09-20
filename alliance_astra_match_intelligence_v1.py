@@ -1,7 +1,7 @@
 from __future__ import annotations
 import re
 
-VERSION="1.3.0-COMMERCIAL-VENUE-ASSET-HANDOFF"
+VERSION="1.4.0-EVIDENCE-FIRST-REQUIREMENT-REPAIR"
 
 def _norm(v):
     return re.sub(r"\s+"," ",str(v or "").replace("\u00a0"," ")).strip()
@@ -15,7 +15,13 @@ def interpret_requirement(req):
     tx=_norm(req.get("transaction_type")).upper()
     locations=_list(req.get("locations_list"))
     asset=_norm(req.get("property_category"))
-    if tx in ("LEASE","RENT"): transaction="RENT"
+    # Raw source evidence wins over stale/incorrect structured gate fields.
+    # This is read-only: it repairs interpretation for matching without rewriting history.
+    if re.search(r"(?i)\b(required|requirement|wanted|looking for|need)\b[\s\S]{0,120}\b(purchase|buy|outright)\b|\b(for purchase|to purchase|outright purchase)\b",raw):
+        transaction="SALE"
+    elif re.search(r"(?i)\b(required|requirement|wanted|looking for|need)\b[\s\S]{0,120}\b(on rent|for rent|lease|rental)\b|\b(for lease|on lease|long[ -]?term rental)\b",raw):
+        transaction="RENT"
+    elif tx in ("LEASE","RENT"): transaction="RENT"
     elif tx in ("SALE","PURCHASE","BUY"): transaction="SALE"
     elif re.search(r"(?i)\b(on rent|for rent|lease|rental)\b",raw): transaction="RENT"
     elif re.search(r"(?i)\b(purchase|buy|outright|for sale)\b",raw): transaction="SALE"
@@ -24,9 +30,11 @@ def interpret_requirement(req):
         known=["SANDESH VIHAR","PITAMPURA","PRASHANT VIHAR","ROHINI","PASCHIM VIHAR","PUNJABI BAGH","RAJOURI GARDEN","SAKET","GREEN PARK","HAUZ KHAS","SOUTH EXTENSION","VASANT KUNJ","DWARKA","GURUGRAM","NOIDA","PANJIM","PORVORIM","MAPUSA","SIOLIM","ASSAGAO","ANJUNA","VAGATOR","CANDOLIM","CALANGUTE","BAGA","MORJIM","MANDREM","ASHWEM"]
         up=raw.upper()
         locations=[x for x in known if re.search(r"(?<![A-Z])"+re.escape(x)+r"(?![A-Z])",up)]
-    if not asset or asset.upper()=="UNKNOWN":
-        rules=[("BANQUET",r"(?i)\b(banquet|wedding venue|marriage hall|party lawn|wedding lawn|farmhouse)\b"),("WAREHOUSE",r"(?i)\b(warehouse|godown)\b"),("HOTEL",r"(?i)\b(hotel|guest house)\b"),("RESTAURANT",r"(?i)\b(restaurant|cafe|bar\s*&?\s*restaurant)\b"),("RETAIL",r"(?i)\b(retail|shop|showroom)\b"),("OFFICE",r"(?i)\boffice\b"),("LAND",r"(?i)\b(land|plot)\b"),("VILLA",r"(?i)\b(villa|kothi|independent house)\b"),("APARTMENT",r"(?i)\b(flat|apartment|\d\s*bhk|floor)\b")]
-        asset=next((name for name,pat in rules if re.search(pat,raw)),"")
+    # Explicit source wording also overrides obviously generic/misclassified gate assets.
+    evidence_rules=[("BANQUET",r"(?i)\b(banquet|wedding venue|marriage hall|party lawn|wedding lawn|farmhouse)\b"),("WAREHOUSE",r"(?i)\b(warehouse|godown)\b"),("HOTEL",r"(?i)\b(hotel|guest house)\b"),("RESTAURANT",r"(?i)\b(restaurant|cafe|bar\s*&?\s*restaurant)\b"),("RETAIL",r"(?i)\b(retail|shop|showroom)\b"),("OFFICE",r"(?i)\boffice\b"),("LAND",r"(?i)\b(land|plot)\b"),("VILLA",r"(?i)\b(villa|kothi|independent house)\b"),("APARTMENT",r"(?i)\b(flat|apartment|\d\s*bhk|floor)\b")]
+    evidence_asset=next((name for name,pat in evidence_rules if re.search(pat,raw)),"")
+    if evidence_asset and (not asset or asset.upper() in {"UNKNOWN","COMMERCIAL"}):
+        asset=evidence_asset
     # Generic COMMERCIAL in the gate is a family, not a useful subtype. Recover
     # explicit venue intent from the requirement text without changing stored data.
     if asset.upper()=="COMMERCIAL":
