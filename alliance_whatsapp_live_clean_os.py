@@ -1292,6 +1292,34 @@ def audit_snapshot() -> Dict[str, Any]:
 
     live_props = _count(wa, "SELECT COUNT(*) FROM wa_properties") if wa and _table_exists(wa, "wa_properties") else 0
     live_reqs = _count(wa, "SELECT COUNT(*) FROM wa_requirements") if wa and _table_exists(wa, "wa_requirements") else 0
+    latest_live_property_seen = None
+    latest_live_requirement_seen = None
+    if wa and _table_exists(wa, "wa_properties"):
+        try:
+            with wa.connect() as wc:
+                latest_live_property_seen = wc.execute(text("""
+                    SELECT MAX(COALESCE(last_seen_at,created_at))
+                    FROM wa_properties
+                """)).scalar()
+        except Exception:
+            try:
+                with wa.connect() as wc:
+                    latest_live_property_seen = wc.execute(text("SELECT MAX(created_at) FROM wa_properties")).scalar()
+            except Exception:
+                latest_live_property_seen = None
+    if wa and _table_exists(wa, "wa_requirements"):
+        try:
+            with wa.connect() as wc:
+                latest_live_requirement_seen = wc.execute(text("""
+                    SELECT MAX(COALESCE(updated_at,created_at))
+                    FROM wa_requirements
+                """)).scalar()
+        except Exception:
+            try:
+                with wa.connect() as wc:
+                    latest_live_requirement_seen = wc.execute(text("SELECT MAX(created_at) FROM wa_requirements")).scalar()
+            except Exception:
+                latest_live_requirement_seen = None
 
     with main.connect() as c:
         master_accounted = int(c.execute(text(f"""
@@ -1408,6 +1436,8 @@ def audit_snapshot() -> Dict[str, Any]:
             "requirement_backlog": max(live_reqs - req_accounted, 0),
             "projected_live_properties": projected_live_props,
             "staged_requirements": staged_reqs,
+            "latest_live_property_seen": latest_live_property_seen,
+            "latest_live_requirement_seen": latest_live_requirement_seen,
         },
         "safety": {
             "unverified_requirements_matcher_eligible": unsafe_reqs,
