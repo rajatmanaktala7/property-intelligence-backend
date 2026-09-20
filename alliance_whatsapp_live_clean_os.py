@@ -959,6 +959,18 @@ def _sync_live_property(engine, row: Dict[str, Any], normalized: Dict[str, Any],
     return cid
 
 
+def _fetch_recent_rows(engine, table_name: str, limit: int = 2500):
+    cols=_columns(engine,table_name)
+    if not cols:return ([],[])
+    order_col=next((x for x in ("last_seen_at","updated_at","created_at","id","wa_property_id","wa_requirement_id") if x in cols),cols[0])
+    qcols=", ".join('"' + x + '"' for x in cols)
+    with engine.connect() as c:
+        rows=[dict(r) for r in c.execute(text(
+            f'SELECT {qcols} FROM "{table_name}" '
+            f'ORDER BY "{order_col}" DESC NULLS LAST LIMIT :lim'
+        ),{"lim":int(limit)}).mappings().all()]
+    return cols,rows
+
 def _fetch_all_rows(engine, table_name: str, newest_first: bool = False):
     cols = _columns(engine, table_name)
     if not cols:
@@ -993,38 +1005,21 @@ def _sync_live_properties(main_engine, wa_engine, counters: Counter):
         return
 
     accounted=_accounted_snapshot(main_engine,"PROPERTY","wa_properties")
-    for cols, rows in _fetch_all_rows(wa_engine, "wa_properties", newest_first=True):
-        for row in rows:
-            sid = _live_source_id(row)
-            if not sid:
-                counters["live_errors"] += 1
-                continue
-            sh = _hash_payload(row, cols)
+    cols,rows=_fetch_recent_rows(wa_engine,"wa_properties",2500)
+    for row in rows:
+        sid = _live_source_id(row)
+        if not sid:
+            counters["live_errors"] += 1
+            continue
+        sh = _hash_payload(row, cols)
 
-            if (sid,sh) in accounted:
-                counters["live_unchanged"] += 1
-                continue
+        if (sid,sh) in accounted:
+            counters["live_unchanged"] += 1
+            continue
 
-            try:
-                ok, normalized, reason = _live_property_clean(row)
-                if not ok:
-                    _ledger(
-                        main_engine,
-                        entity_type="PROPERTY",
-                        source_table="wa_properties",
-                        source_id=sid,
-                        source_hash=sh,
-                        classification="PROPERTY",
-                        clean_status="NEEDS_REVIEW",
-                        target_table=None,
-                        target_id=None,
-                        reason=reason,
-                        normalized=normalized,
-                    )
-                    counters["live_review"] += 1
-                    continue
-
-                cid = _sync_live_property(main_engine, row, normalized, sh)
+        try:
+            ok, normalized, reason = _live_property_clean(row)
+            if not ok:
                 _ledger(
                     main_engine,
                     entity_type="PROPERTY",
@@ -1032,28 +1027,45 @@ def _sync_live_properties(main_engine, wa_engine, counters: Counter):
                     source_id=sid,
                     source_hash=sh,
                     classification="PROPERTY",
-                    clean_status="SYNCED",
-                    target_table=MASTER_PROPERTIES,
-                    target_id=cid,
-                    reason="VERIFY_FIRST",
-                    normalized=normalized,
-                )
-                counters["live_synced"] += 1
-            except Exception as exc:
-                counters["live_errors"] += 1
-                _ledger(
-                    main_engine,
-                    entity_type="PROPERTY",
-                    source_table="wa_properties",
-                    source_id=sid,
-                    source_hash=sh,
-                    classification="PROPERTY",
-                    clean_status="ERROR",
+                    clean_status="NEEDS_REVIEW",
                     target_table=None,
                     target_id=None,
-                    reason=f"{type(exc).__name__}: {exc}"[:1000],
-                    normalized={"source_id": sid},
+                    reason=reason,
+                    normalized=normalized,
                 )
+                counters["live_review"] += 1
+                continue
+
+            cid = _sync_live_property(main_engine, row, normalized, sh)
+            _ledger(
+                main_engine,
+                entity_type="PROPERTY",
+                source_table="wa_properties",
+                source_id=sid,
+                source_hash=sh,
+                classification="PROPERTY",
+                clean_status="SYNCED",
+                target_table=MASTER_PROPERTIES,
+                target_id=cid,
+                reason="VERIFY_FIRST",
+                normalized=normalized,
+            )
+            counters["live_synced"] += 1
+        except Exception as exc:
+            counters["live_errors"] += 1
+            _ledger(
+                main_engine,
+                entity_type="PROPERTY",
+                source_table="wa_properties",
+                source_id=sid,
+                source_hash=sh,
+                classification="PROPERTY",
+                clean_status="ERROR",
+                target_table=None,
+                target_id=None,
+                reason=f"{type(exc).__name__}: {exc}"[:1000],
+                normalized={"source_id": sid},
+            )
 
 
 def _requirement_source_id(row: Dict[str, Any]) -> str:
@@ -1069,10 +1081,10 @@ def _requirement_clean(row: Dict[str, Any]):
         vals = preferred
     elif preferred:
         try:
-            x = json.loads(str(preferred))
-            vals = x if isinstance(x, list) else [preferred]
+        x = json.loads(str(preferred))
+        vals = x if isinstance(x, list) else [preferred]
         except Exception:
-            vals = re.split(r"[,;/|]+", str(preferred))
+        vals = re.split(r"[,;/|]+", str(preferred))
     else:
         vals = []
 
@@ -1080,10 +1092,10 @@ def _requirement_clean(row: Dict[str, Any]):
     for v in vals:
         x = _norm(v)
         if not x:
-            continue
+        continue
         loc = phase5.candidate_location(x) or x
         if loc not in locs:
-            locs.append(loc)
+        locs.append(loc)
 
     if not locs and raw:
         locs = phase5.canonical_locations(raw)
@@ -1110,7 +1122,7 @@ def _requirement_clean(row: Dict[str, Any]):
     if not raw:
         return False, normalized, "Requirement text missing"
     if not any([tx, locs, normalized["property_type"],
-                normalized["area_min_sqft"], normalized["budget_max"]]):
+            normalized["area_min_sqft"], normalized["budget_max"]]):
         return False, normalized, "Insufficient requirement meaning"
 
     return True, normalized, ""
@@ -1138,76 +1150,76 @@ def _stage_requirement(engine, row: Dict[str, Any], normalized: Dict[str, Any], 
 
     with engine.begin() as c:
         c.execute(text(f"""
-            INSERT INTO {REQ_GATE}(
-                evidence_key,source_type,source_table,source_pk,source_group,
-                source_date,original_message,message_hash,classification,
-                genuine_confidence,rejection_reason,transaction_type,
-                property_category,intended_use,locations,alternate_locations,
-                area_min_sqft,area_max_sqft,budget_min,budget_max,
-                company_brand_person,contact_numbers,extracted_fields,
-                evidence_quality,matcher_eligible,created_at,updated_at
-            )
-            VALUES(
-                :ek,'WHATSAPP_LIVE_CLEAN','wa_requirements',:sid,:sg,
-                NOW(),:msg,:mh,:cl,:conf,NULL,:tx,
-                :pc,:iu,CAST(:locs AS JSONB),'[]'::jsonb,
-                :amin,:amax,:bmin,:bmax,:person,CAST(:phones AS JSONB),
-                CAST(:fields AS JSONB),'LIVE_CLEAN',FALSE,NOW(),NOW()
-            )
-            ON CONFLICT(evidence_key) DO UPDATE SET
-                original_message=EXCLUDED.original_message,
-                message_hash=EXCLUDED.message_hash,
-                genuine_confidence=GREATEST(
-                    {REQ_GATE}.genuine_confidence,EXCLUDED.genuine_confidence
-                ),
-                transaction_type=COALESCE({REQ_GATE}.transaction_type,EXCLUDED.transaction_type),
-                property_category=COALESCE({REQ_GATE}.property_category,EXCLUDED.property_category),
-                intended_use=COALESCE({REQ_GATE}.intended_use,EXCLUDED.intended_use),
-                locations=CASE
-                    WHEN jsonb_array_length({REQ_GATE}.locations)>0
-                    THEN {REQ_GATE}.locations ELSE EXCLUDED.locations END,
-                area_min_sqft=COALESCE({REQ_GATE}.area_min_sqft,EXCLUDED.area_min_sqft),
-                area_max_sqft=COALESCE({REQ_GATE}.area_max_sqft,EXCLUDED.area_max_sqft),
-                budget_min=COALESCE({REQ_GATE}.budget_min,EXCLUDED.budget_min),
-                budget_max=COALESCE({REQ_GATE}.budget_max,EXCLUDED.budget_max),
-                contact_numbers=CASE
-                    WHEN jsonb_array_length({REQ_GATE}.contact_numbers)>0
-                    THEN {REQ_GATE}.contact_numbers ELSE EXCLUDED.contact_numbers END,
-                extracted_fields=COALESCE({REQ_GATE}.extracted_fields,'{{}}'::jsonb)
-                                 || EXCLUDED.extracted_fields,
-                evidence_quality='LIVE_CLEAN',
-                matcher_eligible=CASE
-                    WHEN {REQ_GATE}.classification='VERIFIED ACTIVE'
-                    THEN TRUE ELSE FALSE END,
-                updated_at=NOW()
+        INSERT INTO {REQ_GATE}(
+            evidence_key,source_type,source_table,source_pk,source_group,
+            source_date,original_message,message_hash,classification,
+            genuine_confidence,rejection_reason,transaction_type,
+            property_category,intended_use,locations,alternate_locations,
+            area_min_sqft,area_max_sqft,budget_min,budget_max,
+            company_brand_person,contact_numbers,extracted_fields,
+            evidence_quality,matcher_eligible,created_at,updated_at
+        )
+        VALUES(
+            :ek,'WHATSAPP_LIVE_CLEAN','wa_requirements',:sid,:sg,
+            NOW(),:msg,:mh,:cl,:conf,NULL,:tx,
+            :pc,:iu,CAST(:locs AS JSONB),'[]'::jsonb,
+            :amin,:amax,:bmin,:bmax,:person,CAST(:phones AS JSONB),
+            CAST(:fields AS JSONB),'LIVE_CLEAN',FALSE,NOW(),NOW()
+        )
+        ON CONFLICT(evidence_key) DO UPDATE SET
+            original_message=EXCLUDED.original_message,
+            message_hash=EXCLUDED.message_hash,
+            genuine_confidence=GREATEST(
+                {REQ_GATE}.genuine_confidence,EXCLUDED.genuine_confidence
+            ),
+            transaction_type=COALESCE({REQ_GATE}.transaction_type,EXCLUDED.transaction_type),
+            property_category=COALESCE({REQ_GATE}.property_category,EXCLUDED.property_category),
+            intended_use=COALESCE({REQ_GATE}.intended_use,EXCLUDED.intended_use),
+            locations=CASE
+                WHEN jsonb_array_length({REQ_GATE}.locations)>0
+                THEN {REQ_GATE}.locations ELSE EXCLUDED.locations END,
+            area_min_sqft=COALESCE({REQ_GATE}.area_min_sqft,EXCLUDED.area_min_sqft),
+            area_max_sqft=COALESCE({REQ_GATE}.area_max_sqft,EXCLUDED.area_max_sqft),
+            budget_min=COALESCE({REQ_GATE}.budget_min,EXCLUDED.budget_min),
+            budget_max=COALESCE({REQ_GATE}.budget_max,EXCLUDED.budget_max),
+            contact_numbers=CASE
+                WHEN jsonb_array_length({REQ_GATE}.contact_numbers)>0
+                THEN {REQ_GATE}.contact_numbers ELSE EXCLUDED.contact_numbers END,
+            extracted_fields=COALESCE({REQ_GATE}.extracted_fields,'{{}}'::jsonb)
+                             || EXCLUDED.extracted_fields,
+            evidence_quality='LIVE_CLEAN',
+            matcher_eligible=CASE
+                WHEN {REQ_GATE}.classification='VERIFIED ACTIVE'
+                THEN TRUE ELSE FALSE END,
+            updated_at=NOW()
         """), {
-            "ek": evidence_key,
-            "sid": sid,
-            "sg": _norm(row.get("source_id")) or "WHATSAPP_LIVE",
-            "msg": original,
-            "mh": msg_hash,
-            "cl": classification,
-            "conf": conf,
-            "tx": normalized.get("gate_transaction_type"),
-            "pc": normalized.get("property_type"),
-            "iu": normalized.get("property_type"),
-            "locs": json.dumps(normalized.get("locations") or []),
-            "amin": normalized.get("area_min_sqft"),
-            "amax": normalized.get("area_max_sqft"),
-            "bmin": normalized.get("budget_min"),
-            "bmax": normalized.get("budget_max"),
-            "person": normalized.get("contact_name"),
-            "phones": json.dumps(normalized.get("contact_numbers") or []),
-            "fields": json.dumps({
-                "bridge_version": VERSION,
-                "source_wa_requirement_id": sid,
-                "source_hash": sh,
-                "verification_policy": "HUMAN_GATE_REQUIRED",
-            }),
+        "ek": evidence_key,
+        "sid": sid,
+        "sg": _norm(row.get("source_id")) or "WHATSAPP_LIVE",
+        "msg": original,
+        "mh": msg_hash,
+        "cl": classification,
+        "conf": conf,
+        "tx": normalized.get("gate_transaction_type"),
+        "pc": normalized.get("property_type"),
+        "iu": normalized.get("property_type"),
+        "locs": json.dumps(normalized.get("locations") or []),
+        "amin": normalized.get("area_min_sqft"),
+        "amax": normalized.get("area_max_sqft"),
+        "bmin": normalized.get("budget_min"),
+        "bmax": normalized.get("budget_max"),
+        "person": normalized.get("contact_name"),
+        "phones": json.dumps(normalized.get("contact_numbers") or []),
+        "fields": json.dumps({
+            "bridge_version": VERSION,
+            "source_wa_requirement_id": sid,
+            "source_hash": sh,
+            "verification_policy": "HUMAN_GATE_REQUIRED",
+        }),
         })
 
         return str(c.execute(text(f"""
-            SELECT id FROM {REQ_GATE} WHERE evidence_key=:ek
+        SELECT id FROM {REQ_GATE} WHERE evidence_key=:ek
         """), {"ek": evidence_key}).scalar_one())
 
 
@@ -1216,67 +1228,67 @@ def _sync_requirements(main_engine, wa_engine, counters: Counter):
         return
 
     accounted=_accounted_snapshot(main_engine,"REQUIREMENT","wa_requirements")
-    for cols, rows in _fetch_all_rows(wa_engine, "wa_requirements", newest_first=True):
-        for row in rows:
-            sid = _requirement_source_id(row)
-            if not sid:
-                counters["requirement_errors"] += 1
-                continue
-            sh = _hash_payload(row, cols)
+    cols,rows=_fetch_recent_rows(wa_engine,"wa_requirements",2500)
+    for row in rows:
+        sid = _requirement_source_id(row)
+        if not sid:
+        counters["requirement_errors"] += 1
+        continue
+        sh = _hash_payload(row, cols)
 
-            if (sid,sh) in accounted:
-                counters["requirement_unchanged"] += 1
-                continue
+        if (sid,sh) in accounted:
+        counters["requirement_unchanged"] += 1
+        continue
 
-            try:
-                ok, normalized, reason = _requirement_clean(row)
-                if not ok:
-                    _ledger(
-                        main_engine,
-                        entity_type="REQUIREMENT",
-                        source_table="wa_requirements",
-                        source_id=sid,
-                        source_hash=sh,
-                        classification="REQUIREMENT",
-                        clean_status="NEEDS_REVIEW",
-                        target_table=None,
-                        target_id=None,
-                        reason=reason,
-                        normalized=normalized,
-                    )
-                    counters["requirement_review"] += 1
-                    continue
+        try:
+        ok, normalized, reason = _requirement_clean(row)
+        if not ok:
+            _ledger(
+                main_engine,
+                entity_type="REQUIREMENT",
+                source_table="wa_requirements",
+                source_id=sid,
+                source_hash=sh,
+                classification="REQUIREMENT",
+                clean_status="NEEDS_REVIEW",
+                target_table=None,
+                target_id=None,
+                reason=reason,
+                normalized=normalized,
+            )
+            counters["requirement_review"] += 1
+            continue
 
-                gid = _stage_requirement(main_engine, row, normalized, sh)
-                _ledger(
-                    main_engine,
-                    entity_type="REQUIREMENT",
-                    source_table="wa_requirements",
-                    source_id=sid,
-                    source_hash=sh,
-                    classification="REQUIREMENT",
-                    clean_status="STAGED",
-                    target_table=REQ_GATE,
-                    target_id=gid,
-                    reason="HUMAN_VERIFICATION_REQUIRED",
-                    normalized=normalized,
-                )
-                counters["requirements_staged"] += 1
-            except Exception as exc:
-                counters["requirement_errors"] += 1
-                _ledger(
-                    main_engine,
-                    entity_type="REQUIREMENT",
-                    source_table="wa_requirements",
-                    source_id=sid,
-                    source_hash=sh,
-                    classification="REQUIREMENT",
-                    clean_status="ERROR",
-                    target_table=None,
-                    target_id=None,
-                    reason=f"{type(exc).__name__}: {exc}"[:1000],
-                    normalized={"source_id": sid},
-                )
+        gid = _stage_requirement(main_engine, row, normalized, sh)
+        _ledger(
+            main_engine,
+            entity_type="REQUIREMENT",
+            source_table="wa_requirements",
+            source_id=sid,
+            source_hash=sh,
+            classification="REQUIREMENT",
+            clean_status="STAGED",
+            target_table=REQ_GATE,
+            target_id=gid,
+            reason="HUMAN_VERIFICATION_REQUIRED",
+            normalized=normalized,
+        )
+        counters["requirements_staged"] += 1
+        except Exception as exc:
+        counters["requirement_errors"] += 1
+        _ledger(
+            main_engine,
+            entity_type="REQUIREMENT",
+            source_table="wa_requirements",
+            source_id=sid,
+            source_hash=sh,
+            classification="REQUIREMENT",
+            clean_status="ERROR",
+            target_table=None,
+            target_id=None,
+            reason=f"{type(exc).__name__}: {exc}"[:1000],
+            normalized={"source_id": sid},
+        )
 
 
 def _count(engine, sql: str, params: Optional[dict] = None) -> int:
@@ -1289,14 +1301,14 @@ def _try_job_lock(engine) -> bool:
     conn = engine.connect()
     try:
         ok = bool(
-            conn.execute(
-                text("SELECT pg_try_advisory_lock(:k)"),
-                {"k": JOB_LOCK_KEY},
-            ).scalar()
+        conn.execute(
+        text("SELECT pg_try_advisory_lock(:k)"),
+        {"k": JOB_LOCK_KEY},
+        ).scalar()
         )
         if not ok:
-            conn.close()
-            return False
+        conn.close()
+        return False
         RUNTIME["_lock_connection"] = conn
         return True
     except Exception:
@@ -1310,8 +1322,8 @@ def _release_job_lock():
         return
     try:
         conn.execute(
-            text("SELECT pg_advisory_unlock(:k)"),
-            {"k": JOB_LOCK_KEY},
+        text("SELECT pg_advisory_unlock(:k)"),
+        {"k": JOB_LOCK_KEY},
         )
     except Exception:
         pass
@@ -1334,153 +1346,153 @@ def audit_snapshot() -> Dict[str, Any]:
     latest_live_requirement_seen = None
     if wa and _table_exists(wa, "wa_properties"):
         try:
-            with wa.connect() as wc:
-                latest_live_property_seen = wc.execute(text("""
-                    SELECT MAX(COALESCE(last_seen_at,created_at))
-                    FROM wa_properties
-                """)).scalar()
+        with wa.connect() as wc:
+            latest_live_property_seen = wc.execute(text("""
+                SELECT MAX(COALESCE(last_seen_at,created_at))
+                FROM wa_properties
+            """)).scalar()
         except Exception:
-            try:
-                with wa.connect() as wc:
-                    latest_live_property_seen = wc.execute(text("SELECT MAX(created_at) FROM wa_properties")).scalar()
-            except Exception:
-                latest_live_property_seen = None
-    if wa and _table_exists(wa, "wa_requirements"):
         try:
             with wa.connect() as wc:
-                latest_live_requirement_seen = wc.execute(text("""
-                    SELECT MAX(COALESCE(updated_at,created_at))
-                    FROM wa_requirements
-                """)).scalar()
+                latest_live_property_seen = wc.execute(text("SELECT MAX(created_at) FROM wa_properties")).scalar()
         except Exception:
-            try:
-                with wa.connect() as wc:
-                    latest_live_requirement_seen = wc.execute(text("SELECT MAX(created_at) FROM wa_requirements")).scalar()
-            except Exception:
-                latest_live_requirement_seen = None
+            latest_live_property_seen = None
+    if wa and _table_exists(wa, "wa_requirements"):
+        try:
+        with wa.connect() as wc:
+            latest_live_requirement_seen = wc.execute(text("""
+                SELECT MAX(COALESCE(updated_at,created_at))
+                FROM wa_requirements
+            """)).scalar()
+        except Exception:
+        try:
+            with wa.connect() as wc:
+                latest_live_requirement_seen = wc.execute(text("SELECT MAX(created_at) FROM wa_requirements")).scalar()
+        except Exception:
+            latest_live_requirement_seen = None
 
     with main.connect() as c:
         master_accounted = int(c.execute(text(f"""
-            SELECT COUNT(DISTINCT source_id)
-            FROM {LEDGER_TABLE}
-            WHERE source_entity_type='PROPERTY'
-              AND source_table=:st
+        SELECT COUNT(DISTINCT source_id)
+        FROM {LEDGER_TABLE}
+        WHERE source_entity_type='PROPERTY'
+          AND source_table=:st
         """), {"st": MASTER_TABLE}).scalar() or 0)
 
         master_synced = int(c.execute(text(f"""
-            SELECT COUNT(DISTINCT source_id)
-            FROM {LEDGER_TABLE}
-            WHERE source_entity_type='PROPERTY'
-              AND source_table=:st
-              AND clean_status='SYNCED'
+        SELECT COUNT(DISTINCT source_id)
+        FROM {LEDGER_TABLE}
+        WHERE source_entity_type='PROPERTY'
+          AND source_table=:st
+          AND clean_status='SYNCED'
         """), {"st": MASTER_TABLE}).scalar() or 0)
 
         master_review = int(c.execute(text(f"""
-            SELECT COUNT(DISTINCT source_id)
-            FROM {LEDGER_TABLE}
-            WHERE source_entity_type='PROPERTY'
-              AND source_table=:st
-              AND clean_status='NEEDS_REVIEW'
+        SELECT COUNT(DISTINCT source_id)
+        FROM {LEDGER_TABLE}
+        WHERE source_entity_type='PROPERTY'
+          AND source_table=:st
+          AND clean_status='NEEDS_REVIEW'
         """), {"st": MASTER_TABLE}).scalar() or 0)
 
         live_accounted = int(c.execute(text(f"""
-            SELECT COUNT(DISTINCT source_id)
-            FROM {LEDGER_TABLE}
-            WHERE source_entity_type='PROPERTY'
-              AND source_table='wa_properties'
+        SELECT COUNT(DISTINCT source_id)
+        FROM {LEDGER_TABLE}
+        WHERE source_entity_type='PROPERTY'
+          AND source_table='wa_properties'
         """)).scalar() or 0)
 
         req_accounted = int(c.execute(text(f"""
-            SELECT COUNT(DISTINCT source_id)
-            FROM {LEDGER_TABLE}
-            WHERE source_entity_type='REQUIREMENT'
-              AND source_table='wa_requirements'
+        SELECT COUNT(DISTINCT source_id)
+        FROM {LEDGER_TABLE}
+        WHERE source_entity_type='REQUIREMENT'
+          AND source_table='wa_requirements'
         """)).scalar() or 0)
 
         projected_master_props = int(c.execute(text(f"""
-            SELECT COUNT(*) FROM {MASTER_PROPERTIES}
-            WHERE source_type='WHATSAPP_MASTER_CLEAN'
+        SELECT COUNT(*) FROM {MASTER_PROPERTIES}
+        WHERE source_type='WHATSAPP_MASTER_CLEAN'
         """)).scalar() or 0)
 
         projected_live_props = int(c.execute(text(f"""
-            SELECT COUNT(*) FROM {MASTER_PROPERTIES}
-            WHERE source_type='WHATSAPP_LIVE_CLEAN'
+        SELECT COUNT(*) FROM {MASTER_PROPERTIES}
+        WHERE source_type='WHATSAPP_LIVE_CLEAN'
         """)).scalar() or 0)
 
         staged_reqs = int(c.execute(text(f"""
-            SELECT COUNT(*) FROM {REQ_GATE}
-            WHERE source_type='WHATSAPP_LIVE_CLEAN'
+        SELECT COUNT(*) FROM {REQ_GATE}
+        WHERE source_type='WHATSAPP_LIVE_CLEAN'
         """)).scalar() or 0)
 
         unsafe_reqs = int(c.execute(text(f"""
-            SELECT COUNT(*) FROM {REQ_GATE}
-            WHERE source_type='WHATSAPP_LIVE_CLEAN'
-              AND classification<>'VERIFIED ACTIVE'
-              AND matcher_eligible=TRUE
+        SELECT COUNT(*) FROM {REQ_GATE}
+        WHERE source_type='WHATSAPP_LIVE_CLEAN'
+          AND classification<>'VERIFIED ACTIVE'
+          AND matcher_eligible=TRUE
         """)).scalar() or 0)
 
         unsafe_props = int(c.execute(text(f"""
-            SELECT COUNT(*)
-            FROM {MASTER_PROPERTIES} p
-            JOIN {MASTER_WORKFLOW} w ON w.canonical_id=p.canonical_id
-            WHERE p.source_type IN ('WHATSAPP_MASTER_CLEAN','WHATSAPP_LIVE_CLEAN')
-              AND w.verification_status='VERIFIED'
-              AND w.verified_by IS NULL
+        SELECT COUNT(*)
+        FROM {MASTER_PROPERTIES} p
+        JOIN {MASTER_WORKFLOW} w ON w.canonical_id=p.canonical_id
+        WHERE p.source_type IN ('WHATSAPP_MASTER_CLEAN','WHATSAPP_LIVE_CLEAN')
+          AND w.verification_status='VERIFIED'
+          AND w.verified_by IS NULL
         """)).scalar() or 0)
 
         error_counts = {
-            str(r["source_table"]): int(r["n"])
-            for r in c.execute(text(f"""
-                SELECT source_table,COUNT(*) n
-                FROM {LEDGER_TABLE}
-                WHERE clean_status='ERROR'
-                GROUP BY source_table
-            """)).mappings().all()
+        str(r["source_table"]): int(r["n"])
+        for r in c.execute(text(f"""
+            SELECT source_table,COUNT(*) n
+            FROM {LEDGER_TABLE}
+            WHERE clean_status='ERROR'
+            GROUP BY source_table
+        """)).mappings().all()
         }
 
         review_reasons = [
-            {"reason": str(r["reason"] or "UNKNOWN"), "count": int(r["n"])}
-            for r in c.execute(text(f"""
-                SELECT reason,COUNT(*) n
-                FROM {LEDGER_TABLE}
-                WHERE clean_status='NEEDS_REVIEW'
-                  AND source_table=:st
-                GROUP BY reason
-                ORDER BY n DESC
-                LIMIT 20
-            """), {"st": MASTER_TABLE}).mappings().all()
+        {"reason": str(r["reason"] or "UNKNOWN"), "count": int(r["n"])}
+        for r in c.execute(text(f"""
+            SELECT reason,COUNT(*) n
+            FROM {LEDGER_TABLE}
+            WHERE clean_status='NEEDS_REVIEW'
+              AND source_table=:st
+            GROUP BY reason
+            ORDER BY n DESC
+            LIMIT 20
+        """), {"st": MASTER_TABLE}).mappings().all()
         ]
 
     return {
         "version": VERSION,
         "master_database": {
-            "source_table": MASTER_TABLE,
-            "total_rows": master_total,
-            "max_id": master_max_id,
-            "cursor": master_cursor,
-            "numeric_backlog": max(master_max_id - master_cursor, 0),
-            "accounted_distinct_sources": master_accounted,
-            "synced_distinct_sources": master_synced,
-            "review_distinct_sources": master_review,
-            "projected_operational_properties": projected_master_props,
-            "top_review_reasons": review_reasons,
+        "source_table": MASTER_TABLE,
+        "total_rows": master_total,
+        "max_id": master_max_id,
+        "cursor": master_cursor,
+        "numeric_backlog": max(master_max_id - master_cursor, 0),
+        "accounted_distinct_sources": master_accounted,
+        "synced_distinct_sources": master_synced,
+        "review_distinct_sources": master_review,
+        "projected_operational_properties": projected_master_props,
+        "top_review_reasons": review_reasons,
         },
         "live_database": {
-            "wa_properties": live_props,
-            "property_sources_accounted": live_accounted,
-            "property_backlog": max(live_props - live_accounted, 0),
-            "wa_requirements": live_reqs,
-            "requirement_sources_accounted": req_accounted,
-            "requirement_backlog": max(live_reqs - req_accounted, 0),
-            "projected_live_properties": projected_live_props,
-            "staged_requirements": staged_reqs,
-            "latest_live_property_seen": latest_live_property_seen,
-            "latest_live_requirement_seen": latest_live_requirement_seen,
+        "wa_properties": live_props,
+        "property_sources_accounted": live_accounted,
+        "property_backlog": max(live_props - live_accounted, 0),
+        "wa_requirements": live_reqs,
+        "requirement_sources_accounted": req_accounted,
+        "requirement_backlog": max(live_reqs - req_accounted, 0),
+        "projected_live_properties": projected_live_props,
+        "staged_requirements": staged_reqs,
+        "latest_live_property_seen": latest_live_property_seen,
+        "latest_live_requirement_seen": latest_live_requirement_seen,
         },
         "safety": {
-            "unverified_requirements_matcher_eligible": unsafe_reqs,
-            "properties_auto_verified_without_actor": unsafe_props,
-            "error_counts": error_counts,
+        "unverified_requirements_matcher_eligible": unsafe_reqs,
+        "properties_auto_verified_without_actor": unsafe_props,
+        "error_counts": error_counts,
         },
     }
 
@@ -1494,9 +1506,9 @@ def run_sync(full_master_replay: bool = False, max_master_batches: Optional[int]
 
     if not _try_job_lock(main):
         return {
-            "version": VERSION,
-            "status": "SKIPPED_ALREADY_RUNNING",
-            "automatic_resume": True,
+        "version": VERSION,
+        "status": "SKIPPED_ALREADY_RUNNING",
+        "automatic_resume": True,
         }
 
     try:
@@ -1505,10 +1517,10 @@ def run_sync(full_master_replay: bool = False, max_master_batches: Optional[int]
         _sync_live_properties(main, wa, counters)
         _sync_requirements(main, wa, counters)
         _sync_master_backlog(
-            main,
-            counters,
-            full_replay=full_master_replay,
-            max_batches=max_master_batches,
+        main,
+        counters,
+        full_replay=full_master_replay,
+        max_batches=max_master_batches,
         )
         audit = audit_snapshot()
     finally:
@@ -1518,26 +1530,26 @@ def run_sync(full_master_replay: bool = False, max_master_batches: Optional[int]
         "counters": dict(counters),
         "audit": audit,
         "policy": {
-            "master_database_is_first_class_source": True,
-            "live_database_is_first_class_source": True,
-            "property_projection": "UNVERIFIED_UNKNOWN_VERIFY_FIRST",
-            "requirement_projection": "HUMAN_GATE_MATCHER_FALSE",
-            "source_mutation": False,
-            "matcher_phase5_mutation": False,
-            "automatic_resume": True,
-            "background_cycle_batches": AUTO_MASTER_BATCHES_PER_CYCLE,
-            "background_cycle_seconds": POLL_SECONDS,
-            "ssh_required": False,
+        "master_database_is_first_class_source": True,
+        "live_database_is_first_class_source": True,
+        "property_projection": "UNVERIFIED_UNKNOWN_VERIFY_FIRST",
+        "requirement_projection": "HUMAN_GATE_MATCHER_FALSE",
+        "source_mutation": False,
+        "matcher_phase5_mutation": False,
+        "automatic_resume": True,
+        "background_cycle_batches": AUTO_MASTER_BATCHES_PER_CYCLE,
+        "background_cycle_seconds": POLL_SECONDS,
+        "ssh_required": False,
         },
     }
 
     with main.begin() as c:
         c.execute(text(f"""
-            INSERT INTO {RUN_TABLE}(version,result)
-            VALUES(:v,CAST(:r AS JSONB))
+        INSERT INTO {RUN_TABLE}(version,result)
+        VALUES(:v,CAST(:r AS JSONB))
         """), {
-            "v": VERSION,
-            "r": json.dumps(_safe(result), ensure_ascii=False),
+        "v": VERSION,
+        "r": json.dumps(_safe(result), ensure_ascii=False),
         })
 
     RUNTIME.update(
@@ -1562,23 +1574,23 @@ def _worker():
     while True:
         RUNTIME["status"] = "RUNNING"
         try:
-            result = run_sync(
-                full_master_replay=False,
-                max_master_batches=AUTO_MASTER_BATCHES_PER_CYCLE,
-            )
-            audit = (result or {}).get("audit") or {}
-            master = audit.get("master_database") or {}
-            RUNTIME["master_cursor"] = master.get("cursor")
-            RUNTIME["master_backlog"] = master.get("numeric_backlog")
-            RUNTIME["automatic_resume"] = True
+        result = run_sync(
+            full_master_replay=False,
+            max_master_batches=AUTO_MASTER_BATCHES_PER_CYCLE,
+        )
+        audit = (result or {}).get("audit") or {}
+        master = audit.get("master_database") or {}
+        RUNTIME["master_cursor"] = master.get("cursor")
+        RUNTIME["master_backlog"] = master.get("numeric_backlog")
+        RUNTIME["automatic_resume"] = True
         except Exception as exc:
-            RUNTIME.update(
-                status="ERROR",
-                last_run_at=datetime.now(timezone.utc).isoformat(),
-                last_error=f"{type(exc).__name__}: {exc}",
-                automatic_resume=True,
-            )
-            print("WhatsApp Unified Operational Bridge error:", repr(exc), flush=True)
+        RUNTIME.update(
+            status="ERROR",
+            last_run_at=datetime.now(timezone.utc).isoformat(),
+            last_error=f"{type(exc).__name__}: {exc}",
+            automatic_resume=True,
+        )
+        print("WhatsApp Unified Operational Bridge error:", repr(exc), flush=True)
         time.sleep(POLL_SECONDS)
 
 
@@ -1586,7 +1598,7 @@ def start_worker():
     global _STARTED
     with _LOCK:
         if _STARTED:
-            return False
+        return False
         _STARTED = True
 
     RUNTIME.update(
@@ -1611,23 +1623,23 @@ def register(core):
     @router.get("/api/whatsapp-live-clean-os/status")
     def status():
         try:
-            audit = audit_snapshot()
+        audit = audit_snapshot()
         except Exception as exc:
-            audit = {"error": f"{type(exc).__name__}: {exc}"}
+        audit = {"error": f"{type(exc).__name__}: {exc}"}
 
         # Internal lock connections are deliberately held in RUNTIME while a
         # worker owns the advisory lock. They are not JSON data and must never
         # be exposed by the public status contract.
         public_runtime = {
-            key: _safe(value)
-            for key, value in list(RUNTIME.items())
-            if not str(key).startswith("_")
+        key: _safe(value)
+        for key, value in list(RUNTIME.items())
+        if not str(key).startswith("_")
         }
         return {
-            "status": RUNTIME.get("status"),
-            "version": VERSION,
-            "runtime": public_runtime,
-            "audit": _safe(audit),
+        "status": RUNTIME.get("status"),
+        "version": VERSION,
+        "runtime": public_runtime,
+        "audit": _safe(audit),
         }
 
     @router.post("/api/whatsapp-live-clean-os/run")
