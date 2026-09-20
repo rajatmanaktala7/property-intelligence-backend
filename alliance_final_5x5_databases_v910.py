@@ -272,6 +272,7 @@ nav a,.btn,button,.summarybtn{{background:#0d2238;color:white;text-decoration:no
 .tablebox{{overflow:auto;max-height:76vh;border:1px solid #667085;background:white}}table{{border-collapse:collapse;width:max-content;min-width:100%;font-size:11px;table-layout:auto}}
 th,td{{border:1px solid #98a2b3;padding:6px 7px;text-align:left;vertical-align:top;white-space:normal;overflow-wrap:break-word;word-break:normal;min-width:95px;max-width:240px}}
 th{{background:#e9eef5;position:sticky;top:0;z-index:4;white-space:nowrap;min-width:110px}}
+.manual-unified table{{min-width:1900px;table-layout:auto}}.manual-unified td.desc{{min-width:360px;max-width:520px}}.manual-unified td.loc{{min-width:150px}}.manual-unified th,.manual-unified td{{overflow-wrap:break-word;word-break:normal}}
 tbody tr:nth-child(even) td{{background:#f8fafc}}tbody tr:hover td{{background:#eef4ff}}
 .desc{{min-width:320px!important;max-width:460px!important;white-space:normal!important}}
 .loc{{min-width:160px!important;max-width:260px!important;white-space:normal!important}}
@@ -311,7 +312,22 @@ def _property_table(core,e,req,source,q,location,category,transaction,status,ass
         cr=_dict(r.get("clean_record")); cid=str(r["canonical_id"])
         locality=_clean_location_value(r.get("locality") or _first(cr,"location","locality") or "", cr)
         address=_first(cr,"address","exact_address","property_address") or ""
-        desc=_first(cr,"team_description","description_edit","description","original_description","original_message","raw_line","source_text") or ""
+        desc=_first(cr,"team_description","description_edit","description","property_description","original_description","original_message","raw_line","source_text","details","remarks","additional_points","property_name") or ""
+        if not desc and source=="MANUAL":
+            parts=[]
+            for label,keys in (
+                ("Property",("property_name","project_name","property_type","type")),
+                ("Location",("location","locality","area_name","city")),
+                ("Area",("area","available_area","area_sqft","size","built_up_area")),
+                ("Floor",("floor","floor_no")),
+                ("Rent",("rent","rent_amount","monthly_rent")),
+                ("Sale",("sale_amount","sale_price","price","asking_price")),
+                ("Suitable for",("suitable_for","category","property_category")),
+                ("Remarks",("remarks","additional_points")),
+            ):
+                v=_first(cr,*keys)
+                if v not in (None,"",[],{}): parts.append(f"{label}: {v}")
+            desc=" | ".join(parts)
         if address and address.lower() not in str(desc).lower(): desc=(address+" · "+desc).strip(" ·")
         tx=r.get("transaction_type") or _first(cr,"transaction_type","rent_or_sale") or ""
         pcat=_property_category(cr,tx)
@@ -340,7 +356,8 @@ def _property_table(core,e,req,source,q,location,category,transaction,status,ass
         cls=["nowrap","loc","desc","","","","","nowrap","","","","nowrap","nowrap","","","","","",""]
         trs.append("<tr>"+"".join(f'<td class="{cls[i]}">{x if i in (13,14,17,18) else _e(_shown(x))}</td>' for i,x in enumerate(vals))+"</tr>")
     H=["Property ID","Location","Description / Address","Property Category","Property Type","Area","Floor","Rent/Sale","Amount","Contact Name","Contact No.","Date & Time","Status","Verify","History","Assigned To","Source","Edit","Delete"]
-    return _filter_form(q,location,category,transaction,status,assigned,limit)+f'<div class="dbtools"><b>Table</b><button type="button" onclick="dbCompact()">Compact</button><button type="button" onclick="dbZoom(-1)">−</button><button type="button" onclick="dbZoom(1)">+</button><button type="button" onclick="dbZoomReset()">Reset</button></div><div class="tablebox"><table><thead><tr>{"".join("<th>"+x+"</th>" for x in H)}</tr></thead><tbody>{"".join(trs) if trs else "<tr><td colspan=19>No records found</td></tr>"}</tbody></table></div>'
+    extra_class=" manual-unified" if source=="MANUAL" else ""
+    return _filter_form(q,location,category,transaction,status,assigned,limit)+f'<div class="dbtools"><b>Table</b><button type="button" onclick="dbCompact()">Compact</button><button type="button" onclick="dbZoom(-1)">−</button><button type="button" onclick="dbZoom(1)">+</button><button type="button" onclick="dbZoomReset()">Reset</button></div><div class="tablebox{extra_class}"><table><thead><tr>{"".join("<th>"+x+"</th>" for x in H)}</tr></thead><tbody>{"".join(trs) if trs else "<tr><td colspan=19>No records found</td></tr>"}</tbody></table></div>'
 def _requirement_table(e,source,q,location,category,transaction,status,assigned,limit):
     rows=_requirement_rows(e,source,q,location,category,transaction,status,assigned,limit)
     trs=[]
