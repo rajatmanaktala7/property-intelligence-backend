@@ -366,6 +366,18 @@ def register(core):
     def command_centre(req: Request):
         return _dashboard(core, req)
 
+    if not any(getattr(r,"path",None)=="/api/alliance/team-command-centre/public-status" for r in app.router.routes):
+        @app.get("/api/alliance/team-command-centre/public-status")
+        def team_command_centre_public_status():
+            return {
+                "status":"PASS",
+                "owner":"alliance_team_dashboard_v1220",
+                "version":VERSION,
+                "route":ROUTE,
+                "title":"Alliance CRE · Team Command Centre",
+                "data_exposed":False,
+            }
+
     @app.get("/alliance/primary/day-plan", response_class=HTMLResponse)
     def day_plan(req: Request, staff: str = Query("Yogesh Mehra")):
         _role(core, req)
