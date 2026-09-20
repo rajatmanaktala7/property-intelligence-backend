@@ -5,7 +5,7 @@ from fastapi import Form, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from sqlalchemy import text
 
-VERSION="11.6.0-MANUAL-MEDIA-GOOGLE-PIN-RESTORE"
+VERSION="11.6.1-MANUAL-ASSET-RESTORE-VISUAL-LOCK"
 SOURCES=("MASTER","NEWSPAPER","WHATSAPP","MAGAZINE","MANUAL")
 CATEGORY_OPTIONS=("Residential Sale","Residential Rent","Commercial Sale","Commercial Rent","Industrial Sale","Industrial Rent","Farmhouse Sale","Farmhouse Rent")
 
@@ -314,7 +314,7 @@ nav a,.btn,button,.summarybtn{{background:#0d2238;color:white;text-decoration:no
 .good{{background:#067647!important;border-color:#067647!important}}.light{{background:#475467!important}}.danger{{background:#b42318!important}}
 .wrap{{max-width:2100px;margin:auto;padding:14px}}.card{{background:white;border:1px solid #98a2b3;padding:10px;margin-bottom:10px}}
 .searchgrid{{display:grid;grid-template-columns:2fr repeat(6,minmax(130px,1fr));gap:6px}}input,select{{width:100%;padding:7px;border:1px solid #98a2b3;border-radius:0}}
-.tablebox{{overflow:auto;max-height:76vh;border:1px solid #667085;background:white}}table{{border-collapse:collapse;width:2870px;min-width:2870px;font-size:11px;table-layout:fixed}}
+.tablebox{{overflow:auto;max-height:76vh;border:1px solid #667085;background:white}}table{{border-collapse:collapse;width:3140px;min-width:3140px;font-size:11px;table-layout:fixed}}
 th,td{{border:1px solid #98a2b3;padding:6px 7px;text-align:left;vertical-align:top;white-space:normal;overflow-wrap:anywhere;word-break:normal;overflow:hidden}}
 th{{background:#e9eef5;position:sticky;top:0;z-index:4;white-space:nowrap;min-width:110px}}
 tbody tr:nth-child(even) td{{background:#f8fafc}}tbody tr:hover td{{background:#eef4ff}}
@@ -327,7 +327,7 @@ td:nth-child(14),td:nth-child(15),td:nth-child(18),td:nth-child(19){{min-width:9
 .grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:8px}}.dbcard{{border:1px solid #98a2b3;background:white;padding:12px}}.dbcard h3{{margin:0 0 5px}}
 details.pop{{position:relative}}details.pop>div{{position:absolute;z-index:20;background:white;border:1px solid #667085;padding:9px;min-width:430px}}details.pop summary{{list-style:none}}
 .dbtools{{display:flex;align-items:center;gap:5px;margin:0 0 7px;background:#fff;padding:5px;border:1px solid #d0d5dd;width:max-content;position:sticky;left:0;z-index:6}}.dbtools button{{padding:4px 7px}}
-body.compact table{{font-size:10px}}body.compact th,body.compact td{{padding:4px 5px}}body.compact .desc{{min-width:220px;max-width:330px}}
+body.compact table{{font-size:10px}}body.compact th,body.compact td{{padding:4px 5px}}
 @media(max-width:1000px){{.searchgrid{{grid-template-columns:1fr 1fr}}}}
 </style><script>
 function dbApplyZoom(){{var z=Number(localStorage.getItem('allianceDbZoom')||100);document.querySelectorAll('.tablebox table').forEach(function(t){{t.style.setProperty('font-size',(11*z/100)+'px','important')}});document.querySelectorAll('.tablebox th,.tablebox td').forEach(function(x){{x.style.setProperty('padding',(6*z/100)+'px','important')}})}}
@@ -577,6 +577,23 @@ def register(core, served_app=None):
                     )""") if checks["manual_table_exists"] else -1
                 checks["manual_auto_master_linkage"]=details["manual_unlinked_to_master"]==0
 
+                checks["manual_media_table_exists"]=bool(cx.execute(text("SELECT to_regclass('public.pi_operational_property_media')")).scalar())
+                details["manual_media_files"]=count("SELECT COUNT(*) FROM pi_operational_property_media") if checks["manual_media_table_exists"] else 0
+                details["manual_google_pins"]=count("""SELECT COUNT(*) FROM pi_operational_properties
+                    WHERE COALESCE(entry_source,'MANUAL')='MANUAL'
+                      AND BTRIM(COALESCE(google_location,''))<>''""") if checks["manual_table_exists"] else 0
+                details["master_manual_google_pin_missing"]=count("""SELECT COUNT(DISTINCT p.property_code)
+                    FROM pi_operational_properties p
+                    JOIN pi_master_source_links_v711 l
+                      ON l.master_entity_type='PROPERTY'
+                     AND l.source_table='pi_operational_properties'
+                     AND l.source_pk=p.property_code
+                    JOIN pi_master_properties_v711 m ON m.canonical_id=l.canonical_id
+                    WHERE COALESCE(p.entry_source,'MANUAL')='MANUAL'
+                      AND BTRIM(COALESCE(p.google_location,''))<>''
+                      AND COALESCE(m.clean_record->>'google_location','')<>COALESCE(p.google_location,'')""") if checks["manual_table_exists"] and checks["master_table_exists"] else -1
+                checks["manual_google_pin_master_preserved"]=details["master_manual_google_pin_missing"]==0
+
                 details["magazine_bad_location_rows"]=count("""SELECT COUNT(*) FROM pi_magazine_complete_v860
                     WHERE archived_at IS NULL AND COALESCE(record_status,'ACTIVE')='ACTIVE'
                       AND (
@@ -598,7 +615,7 @@ def register(core, served_app=None):
             },"MANUAL",e).keys())==expected
 
             checks["requirements_not_registered_here"]=True
-            checks["canonical_header_19_columns"]=True
+            checks["canonical_header_21_columns"]=True
         except Exception as ex:
             checks["audit_runtime"]=False
             details["audit_error_type"]=type(ex).__name__
@@ -640,7 +657,7 @@ def register(core, served_app=None):
             if not exists:return HTMLResponse(_shell("Property Media","<div class='card'>No media table found.</div>"))
             rows=cx.execute(text("""SELECT media_type,filename,mime_type,file_size,created_at
                 FROM pi_operational_property_media WHERE property_code=:pc
-                ORDER BY created_at,id"""),{"pc":pc}).mappings().all()
+                ORDER BY created_at,filename"""),{"pc":pc}).mappings().all()
         cards=[]
         for r in rows:
             typ=str(r.get("media_type") or "FILE").upper(); fn=str(r.get("filename") or "file")
