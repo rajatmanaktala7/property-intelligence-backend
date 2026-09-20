@@ -4,7 +4,7 @@ from fastapi import Form, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import text
 
-VERSION="11.4.0-SELF-HEALING-PROPERTY-CONTRACT"
+VERSION="11.5.0-FIXED-COLUMN-VISUAL-CONTRACT"
 SOURCES=("MASTER","NEWSPAPER","WHATSAPP","MAGAZINE","MANUAL")
 CATEGORY_OPTIONS=("Residential Sale","Residential Rent","Commercial Sale","Commercial Rent","Industrial Sale","Industrial Rent","Farmhouse Sale","Farmhouse Rent")
 
@@ -313,13 +313,13 @@ nav a,.btn,button,.summarybtn{{background:#0d2238;color:white;text-decoration:no
 .good{{background:#067647!important;border-color:#067647!important}}.light{{background:#475467!important}}.danger{{background:#b42318!important}}
 .wrap{{max-width:2100px;margin:auto;padding:14px}}.card{{background:white;border:1px solid #98a2b3;padding:10px;margin-bottom:10px}}
 .searchgrid{{display:grid;grid-template-columns:2fr repeat(6,minmax(130px,1fr));gap:6px}}input,select{{width:100%;padding:7px;border:1px solid #98a2b3;border-radius:0}}
-.tablebox{{overflow:auto;max-height:76vh;border:1px solid #667085;background:white}}table{{border-collapse:collapse;width:max-content;min-width:100%;font-size:11px;table-layout:auto}}
-th,td{{border:1px solid #98a2b3;padding:6px 7px;text-align:left;vertical-align:top;white-space:normal;overflow-wrap:break-word;word-break:normal;min-width:95px;max-width:240px}}
+.tablebox{{overflow:auto;max-height:76vh;border:1px solid #667085;background:white}}table{{border-collapse:collapse;width:2570px;min-width:2570px;font-size:11px;table-layout:fixed}}
+th,td{{border:1px solid #98a2b3;padding:6px 7px;text-align:left;vertical-align:top;white-space:normal;overflow-wrap:anywhere;word-break:normal;overflow:hidden}}
 th{{background:#e9eef5;position:sticky;top:0;z-index:4;white-space:nowrap;min-width:110px}}
 tbody tr:nth-child(even) td{{background:#f8fafc}}tbody tr:hover td{{background:#eef4ff}}
-.desc{{min-width:320px!important;max-width:460px!important;white-space:normal!important}}
-.loc{{min-width:160px!important;max-width:260px!important;white-space:normal!important}}
-.nowrap{{white-space:nowrap!important;min-width:120px}}
+.desc{{width:520px!important;min-width:520px!important;max-width:520px!important;white-space:normal!important;overflow-wrap:anywhere!important}}
+.loc{{width:180px!important;min-width:180px!important;max-width:180px!important;white-space:normal!important}}
+.nowrap{{white-space:nowrap!important;overflow:hidden!important;text-overflow:ellipsis}}
 td:nth-child(10),td:nth-child(11){{min-width:140px;max-width:190px}}
 td:nth-child(12){{min-width:150px;max-width:190px}}
 td:nth-child(14),td:nth-child(15),td:nth-child(18),td:nth-child(19){{min-width:90px;max-width:130px}}
@@ -442,7 +442,9 @@ def _property_table(core,e,req,source,q,location,category,transaction,status,ass
         cls=["nowrap","loc","desc","","","","","nowrap","","","","nowrap","nowrap","","","","","",""]
         trs.append("<tr>"+"".join(f'<td class="{cls[i]}">{x if i in (13,14,17,18) else _e(_shown(x))}</td>' for i,x in enumerate(vals))+"</tr>")
     H=["Property ID","Location","Description / Address","Property Category","Property Type","Area","Floor","Rent/Sale","Amount","Contact Name","Contact No.","Date & Time","Status","Verify","History","Assigned To","Source","Edit","Delete"]
-    return _filter_form(q,location,category,transaction,status,assigned,limit)+f'<div class="dbtools"><b>Table</b><button type="button" onclick="dbCompact()">Compact</button><button type="button" onclick="dbZoom(-1)">−</button><button type="button" onclick="dbZoom(1)">+</button><button type="button" onclick="dbZoomReset()">Reset</button></div><div class="tablebox"><table><thead><tr>{"".join("<th>"+x+"</th>" for x in H)}</tr></thead><tbody>{"".join(trs) if trs else "<tr><td colspan=19>No records found</td></tr>"}</tbody></table></div>'
+    widths=[180,180,520,150,170,120,110,100,120,140,140,170,110,100,100,120,130,90,90]
+    colgroup="<colgroup>"+"".join(f'<col style="width:{w}px;min-width:{w}px;max-width:{w}px">' for w in widths)+"</colgroup>"
+    return _filter_form(q,location,category,transaction,status,assigned,limit)+f'<div class="dbtools"><b>Table</b><button type="button" onclick="dbCompact()">Compact</button><button type="button" onclick="dbZoom(-1)">−</button><button type="button" onclick="dbZoom(1)">+</button><button type="button" onclick="dbZoomReset()">Reset</button></div><div class="tablebox"><table>{colgroup}<thead><tr>{"".join("<th>"+x+"</th>" for x in H)}</tr></thead><tbody>{"".join(trs) if trs else "<tr><td colspan=19>No records found</td></tr>"}</tbody></table></div>'
 
 def _requirement_table(e,source,q,location,category,transaction,status,assigned,limit):
     rows=_requirement_rows(e,source,q,location,category,transaction,status,assigned,limit)
@@ -605,6 +607,24 @@ def register(core, served_app=None):
             return property_contract_audit()
         if source.lower()=="__repair":
             return {"status":"REPAIRED","version":VERSION,"repair":_repair_property_contract(),"audit":property_contract_audit()}
+        if source.lower()=="__preview":
+            # Same live production renderer, limited rows and masked contact data.
+            rows=_property_rows(e,"MANUAL","","","","","","",8)
+            for r in rows:
+                cr=_flat_record(r.get("clean_record"))
+                cr["contact_number"]="XXXXXXXXXX"; cr["contact_phone"]="XXXXXXXXXX"; cr["phones"]=[]
+                cr["contact_name"]="Masked"; cr["owner_broker_name"]="Masked"; cr["owner_name"]="Masked"; cr["broker_name"]="Masked"
+                for k in ("remarks","description","original_description","source_text","raw_line","details"):
+                    if cr.get(k): cr[k]=re.sub(r"(?<!\d)[6-9]\d{9}(?!\d)","XXXXXXXXXX",str(cr[k]))
+                r["clean_record"]=cr
+            original=_property_rows
+            def _preview_rows(*args,**kwargs): return rows
+            globals()["_property_rows"]=_preview_rows
+            try:
+                body=_property_table(core,e,req,"MANUAL","","","","","","",8)
+            finally:
+                globals()["_property_rows"]=original
+            return HTMLResponse(_shell("Canonical Property Table Preview",body))
         _login(core,req);src=source.upper()
         if src not in SOURCES:return HTMLResponse("Unknown property database",404)
         return HTMLResponse(_shell(f"{src.title()} Property Database",_property_table(core,e,req,src,q,location,category,transaction,status,assigned,limit)))
