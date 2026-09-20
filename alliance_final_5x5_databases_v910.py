@@ -4,8 +4,10 @@ from fastapi import Form, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import text
 
-VERSION="9.6.1-ALL-PROPERTY-LOCATION-SEMANTIC-GUARD"
-SOURCES=("MASTER","NEWSPAPER","WHATSAPP","MAGAZINE","MANUAL")
+VERSION="10.0.0-CLEAN-DATABASE-FOUNDATION"
+PROPERTY_SOURCES=("MASTER","WHATSAPP","MANUAL","NEWSPAPER","MAGAZINE")
+REQUIREMENT_SOURCES=("MASTER","WHATSAPP","MANUAL")
+SOURCES=PROPERTY_SOURCES
 CATEGORY_OPTIONS=("Residential Sale","Residential Rent","Commercial Sale","Commercial Rent","Industrial Sale","Industrial Rent","Farmhouse Sale","Farmhouse Rent")
 
 def _app(core): return getattr(core,"app",None) or core
@@ -69,8 +71,15 @@ def _clean_location_value(value, cr):
             if cand and str(cand).strip().lower() not in {"tara","royal construction","royal constructions"}:
                 return str(cand).strip()
         return "Needs verification"
-    # Company-form words are not credible standalone locations.
-    if re.search(r"\b(construction|constructions|builder|builders|developer|developers|realty|properties|infra|infrastructure)\b",lo):
+    # Company/property-role labels are not credible standalone locations.
+    bad_words=r"\b(construction|constructions|builder|builders|developer|developers|realty|properties|property|infra|infrastructure|owner|broker|dealer)\b"
+    if re.search(bad_words,lo):
+        for k in ("address","exact_address","property_address","city","micro_market","area_name"):
+            cand=cr.get(k)
+            if cand:
+                cand=str(cand).strip()
+                if cand and not re.search(bad_words,cand.lower()):
+                    return cand
         return "Needs verification"
     return loc
 
@@ -343,7 +352,7 @@ function dbZoom(d){{var z=Number(localStorage.getItem('allianceDbZoom')||100);z=
 function dbZoomReset(){{localStorage.setItem('allianceDbZoom',100);dbApplyZoom()}}
 function dbCompact(){{document.body.classList.toggle('compact');localStorage.setItem('allianceDbCompact',document.body.classList.contains('compact')?'1':'0')}}
 document.addEventListener('DOMContentLoaded',function(){{if(localStorage.getItem('allianceDbCompact')==='1')document.body.classList.add('compact');dbApplyZoom()}})
-</script></head><body><header><b>Alliance CRE Operating System</b><br><small>5 Property Databases + 5 Requirement Databases · Master-only Matcher</small></header>
+</script></head><body><header><b>Alliance CRE Operating System</b><br><small>5 Property Databases + 3 Requirement Databases · Master-only Matcher</small></header>
 <nav><a href="#" onclick="history.back();return false">← Back to Previous Page</a><a href="/team-dashboard-v376">Back to Dashboard</a></nav>
 <div class="wrap"><h2>{_e(title)}</h2>{body}</div></body></html>"""
 def _filter_form(q,location,category,transaction,status,assigned,limit):
@@ -364,7 +373,11 @@ def _property_table(core,e,req,source,q,location,category,transaction,status,ass
         cr=_dict(r.get("clean_record")); cid=str(r["canonical_id"])
         # Apply the semantic location guard to every property source view.\n        # Historical bad projections such as person/company names must never be\n        # presented as a locality merely because they reached a location column.\n        locality=_clean_location_value(r.get("locality") or _first(cr,"location","locality") or "", cr)
         address=_first(cr,"address","exact_address","property_address") or ""
-        desc=_manual_description(cr,r) if source=="MANUAL" else (_first(cr,"team_description","description_edit","description","property_description","original_description","original_message","raw_line","source_text","details","remarks","additional_points","property_name") or "")
+        desc=_first(cr,"team_description","description_edit","description","property_description","original_description","original_message","raw_line","source_text","details","remarks","additional_points","property_name") or ""
+        # One display contract for every source. Structured evidence is turned
+        # into a useful description instead of showing "Not captured".
+        if not desc:
+            desc=_manual_description(cr,r)
         if address and address.lower() not in str(desc).lower(): desc=(address+" · "+desc).strip(" ·")
         tx=r.get("transaction_type") or _first(cr,"transaction_type","rent_or_sale") or ""
         pcat=_property_category(cr,tx)
@@ -433,7 +446,7 @@ def register(core, served_app=None):
             f'<div class="dbcard"><h3>{s.title()} Database</h3>'
             f'<p>{("All verified and canonical properties from every source. This is the only matcher inventory." if s=="MASTER" else "Search and manage this source database; source lineage is retained in Master.")}</p>'
             f'<a class="btn good" href="/alliance/final/database/{s.lower()}">Open & Search</a></div>'
-            for s in SOURCES
+            for s in PROPERTY_SOURCES
         )
         actions = """<div class="card"><b>Add Property by Source</b><br><br>
         <a class="btn good" href="/property-manual">+ Add Manual Property</a>
@@ -451,7 +464,7 @@ def register(core, served_app=None):
     @app.get("/alliance/final/database/{source}",response_class=HTMLResponse)
     def db(req:Request,source:str,q:str=Query(""),location:str=Query(""),category:str=Query(""),transaction:str=Query(""),status:str=Query(""),assigned:str=Query(""),limit:int=Query(500,ge=1,le=1500)):
         _login(core,req);src=source.upper()
-        if src not in SOURCES:return HTMLResponse("Unknown property database",404)
+        if src not in PROPERTY_SOURCES:return HTMLResponse("Unknown property database",404)
         return HTMLResponse(_shell(f"{src.title()} Property Database",_property_table(core,e,req,src,q,location,category,transaction,status,assigned,limit)))
     @app.get("/alliance/primary/requirements-hub")
     def canonical_requirement_databases(req:Request):
@@ -461,11 +474,11 @@ def register(core, served_app=None):
     @app.get("/alliance/final/requirements",response_class=HTMLResponse)
     def rhub(req:Request):
         _login(core,req)
-        cards="".join(f'<div class="dbcard"><h3>{s.title()} Requirements</h3><a class="btn good" href="/alliance/final/requirements/{s.lower()}">Open</a></div>' for s in SOURCES)
-        return HTMLResponse(_shell("5 Requirement Databases",f'<div class="grid">{cards}</div>'))
+        cards="".join(f'<div class="dbcard"><h3>{s.title()} Requirements</h3><a class="btn good" href="/alliance/final/requirements/{s.lower()}">Open</a></div>' for s in REQUIREMENT_SOURCES)
+        return HTMLResponse(_shell("3 Requirement Databases",f'<div class="grid">{cards}</div>'))
     @app.get("/alliance/final/requirements/{source}",response_class=HTMLResponse)
     def rdb(req:Request,source:str,q:str=Query(""),location:str=Query(""),category:str=Query(""),transaction:str=Query(""),status:str=Query(""),assigned:str=Query(""),limit:int=Query(500,ge=1,le=1500)):
         _login(core,req);src=source.upper()
-        if src not in SOURCES:return HTMLResponse("Unknown requirement database",404)
+        if src not in REQUIREMENT_SOURCES:return HTMLResponse("Unknown requirement database",404)
         return HTMLResponse(_shell(f"{src.title()} Requirements",_requirement_table(e,src,q,location,category,transaction,status,assigned,limit)))
     return {"status":"REGISTERED","version":VERSION}
