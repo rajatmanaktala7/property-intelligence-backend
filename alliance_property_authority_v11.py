@@ -5,7 +5,7 @@ from fastapi import Form, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from sqlalchemy import text, bindparam
 
-VERSION="12.6.0-WHATSAPP-EXPLICIT-FIELD-RECOVERY"
+VERSION="12.6.1-WHATSAPP-CLEAN-MISSING-DISPLAY"
 SOURCES=("MASTER","NEWSPAPER","WHATSAPP","MAGAZINE","MANUAL")
 CATEGORY_OPTIONS=("Residential Sale","Residential Rent","Commercial Sale","Commercial Rent","Industrial Sale","Industrial Rent","Farmhouse Sale","Farmhouse Rent")
 
@@ -893,7 +893,9 @@ def _whatsapp_source_table(rows):
         ver=_display_text(r.get("verification_status") or _first(cr,"verification_status","verification") or "UNVERIFIED")
         vals=[dt,desc,loc,tx,area,config,price,cname,cphone,src,ver,rid]
         classes=["nowrap","desc","loc","nowrap","","","","","","","nowrap","nowrap"]
-        trs.append("<tr>"+"".join(f'<td class="{classes[i]}">{_e(_shown(v))}</td>' for i,v in enumerate(vals))+"</tr>")
+        def wa_show(v):
+            return "—" if v in (None,"",[],{}) else str(v)
+        trs.append("<tr>"+"".join(f'<td class="{classes[i]}">{_e(wa_show(v))}</td>' for i,v in enumerate(vals))+"</tr>")
     H=["Date / Time","Description / Address","Location","Rent / Sale","Area","Configuration","Price / Rent","Contact Name","Contact No.","Source","Verification","Record ID"]
     widths=[160,500,170,100,125,175,140,145,145,180,110,175]
     total=sum(widths)
