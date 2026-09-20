@@ -539,7 +539,7 @@ def register(core, served_app=None):
     for route in list(getattr(app.router,"routes",[])):
         if getattr(route,"path",None)==SMART_MATCHER_ROUTE and "GET" in (getattr(route,"methods",set()) or set()):
             app.router.routes.remove(route)
-        if getattr(route,"path",None) in (WORKSPACE_ROUTE,"/api/alliance/master-requirements-v1/status"):
+        if getattr(route,"path",None) in (WORKSPACE_ROUTE,"/api/alliance/master-requirements-v1/status","/api/alliance/master-matcher-selftest"):
             app.router.routes.remove(route)
     @app.get(SMART_MATCHER_ROUTE)
     async def smart_matcher_redirect(request:Request):
@@ -588,6 +588,52 @@ def register(core, served_app=None):
     @app.get("/api/alliance/master-requirements-v1/status")
     async def master_requirement_status(request:Request):
         _auth(core,request); return JSONResponse(_status(core))
+
+    @app.get("/api/alliance/master-matcher-selftest")
+    async def master_matcher_selftest():
+        """Non-sensitive runtime smoke test of the production MASTER_ONLY matcher."""
+        import alliance_master_matcher_contract_v1 as master_matcher
+        from alliance_astra_match_intelligence_v1 import interpret_requirement
+
+        rows=[r for r in _requirements(core)
+              if _norm(r.get("original_message"))
+              and str(r.get("matcher_eligible") or "").upper() not in {"FALSE","NO","0","REJECTED"}][:5]
+        tested=0; succeeded=0; errors=[]; total_matches=0; max_scores=[]
+        for req in rows:
+            tested+=1
+            try:
+                astra=interpret_requirement(req)
+                enriched=astra.get("enriched_text") or _norm(req.get("original_message"))
+                result=master_matcher.run_match(core.engine,enriched,min_score=70.0,limit=30)
+                items=[]
+                for key in ("exact_verified","exact_needs_verification","alternatives"):
+                    items.extend(result.get(key) or [])
+                total_matches+=len(items)
+                scores=[]
+                for item in items:
+                    for k in ("match_score","score","final_score"):
+                        try:
+                            if item.get(k) is not None:
+                                scores.append(float(item.get(k))); break
+                        except Exception:
+                            pass
+                if scores:max_scores.append(max(scores))
+                succeeded+=1
+            except Exception as exc:
+                errors.append(type(exc).__name__+": "+str(exc)[:180])
+        status="PASS" if tested>0 and succeeded==tested and not errors else ("DEGRADED" if succeeded>0 else "FAIL")
+        return JSONResponse({
+            "status":status,
+            "matcher_source_contract":"MASTER_ONLY",
+            "property_authority":MASTER_PROPERTY_TABLE,
+            "requirement_authority":MASTER_REQUIREMENT_TABLE,
+            "requirements_tested":tested,
+            "executions_succeeded":succeeded,
+            "errors":errors[:5],
+            "matches_found_total":total_matches,
+            "highest_score":max(max_scores) if max_scores else None,
+            "data_exposed":False,
+        })
     return {"status":"REGISTERED","version":VERSION,"requirement_authority":MASTER_REQUIREMENT_TABLE,
             "property_authority":MASTER_PROPERTY_TABLE,"matcher_source_contract":"MASTER_ONLY",
             "smart_matcher_takeover":True,"whatsapp_sender_fallback":True,
