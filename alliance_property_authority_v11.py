@@ -5,7 +5,7 @@ from fastapi import Form, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from sqlalchemy import text
 
-VERSION="11.7.0-UNIFIED-GRID-SERIAL-RESTORE"
+VERSION="11.8.0-REQUIREMENT-ALIGNED-PROPERTY-GRID"
 SOURCES=("MASTER","NEWSPAPER","WHATSAPP","MAGAZINE","MANUAL")
 CATEGORY_OPTIONS=("Residential Sale","Residential Rent","Commercial Sale","Commercial Rent","Industrial Sale","Industrial Rent","Farmhouse Sale","Farmhouse Rent")
 
@@ -314,7 +314,7 @@ nav a,.btn,button,.summarybtn{{background:#0d2238;color:white;text-decoration:no
 .good{{background:#067647!important;border-color:#067647!important}}.light{{background:#475467!important}}.danger{{background:#b42318!important}}
 .wrap{{max-width:2100px;margin:auto;padding:14px}}.card{{background:white;border:1px solid #98a2b3;padding:10px;margin-bottom:10px}}
 .searchgrid{{display:grid;grid-template-columns:2fr repeat(6,minmax(130px,1fr));gap:6px}}input,select{{width:100%;padding:7px;border:1px solid #98a2b3;border-radius:0}}
-.tablebox{{overflow:auto;max-height:76vh;border:1px solid #667085;background:white}}table{{border-collapse:collapse;width:3400px;min-width:3400px;font-size:11px;table-layout:fixed}}
+.tablebox{{overflow:auto;max-height:76vh;border:1px solid #667085;background:white}}table{{border-collapse:collapse;width:3740px;min-width:3740px;font-size:11px;table-layout:fixed}}
 th,td{{border:1px solid #98a2b3;padding:6px 7px;text-align:left;vertical-align:top;white-space:normal;overflow-wrap:anywhere;word-break:normal;overflow:hidden}}
 th{{background:#e9eef5;position:sticky;top:0;z-index:4;white-space:nowrap;min-width:110px}}
 tbody tr:nth-child(even) td{{background:#f8fafc}}tbody tr:hover td{{background:#eef4ff}}
@@ -487,15 +487,26 @@ def _property_table(core,e,req,source,q,location,category,transaction,status,ass
         media_label=f'{m.get("images",0)} pics · {m.get("videos",0)} videos · {m.get("brochures",0)} docs'
         media_html=(f'<a class="btn light" href="/alliance/final/database/media/{quote(str(pc),safe="")}">{_e(media_label)}</a>' if pc and m.get("total",0)>0 else _e(media_label if pc else "—"))
 
-        # Canonical serial order for every Property database.
-        vals=[p["id"],p["location"],p["description"],p["remarks"],pin_html,media_html,p["category"],p["type"],p["area"],p["floor"],p["transaction"],p["amount"],p["contact_name"],p["contact_no"],p["date"],p["status"],verify,history,p["assigned_to"],p["source"],edit,delete]
-        cls=["nowrap","loc","desc","remarks","","","","","","","nowrap","","","","nowrap","nowrap","","","","","",""]
-        raw={4,5,16,17,20,21}
+        # Requirement-aligned serial order for every Property database:
+        # Date first, description/evidence next, IDs at the end.
+        vals=[
+            p["date"],p["description"],p["remarks"],p["contact_name"],p["contact_no"],
+            p["location"],p["category"],p["type"],p["area"],p["floor"],
+            p["transaction"],p["amount"],pin_html,media_html,verify,p["status"],history,
+            p["assigned_to"],p["source"],p["source_record_id"],p["id"],edit,delete
+        ]
+        cls=["nowrap","desc","remarks","","","loc","","","","","nowrap","","","","","nowrap","","","","nowrap","nowrap","",""]
+        raw={12,13,14,16,21,22}
         trs.append("<tr>"+"".join(f'<td class="{cls[i]}">{x if i in raw else _e(_shown(x))}</td>' for i,x in enumerate(vals))+"</tr>")
-    H=["Property ID","Location","Description / Address","Remarks","Google Pin","Media","Property Category","Property Type","Area","Floor","Rent/Sale","Amount","Contact Name","Contact No.","Date & Time","Status","Verify","History","Assigned To","Source","Edit","Delete"]
-    widths=[180,180,360,420,110,190,150,170,120,110,100,120,140,140,170,110,100,100,120,130,90,90]
+    H=[
+        "Date / Time","Description / Address","Remarks","Contact Name","Contact No.",
+        "Location","Category / Use","Property Type","Area","Floor","Rent / Sale","Amount",
+        "Google Pin","Media","Action","Verification","History","Assigned To",
+        "Source","Source ID","Property ID","Edit","Delete"
+    ]
+    widths=[170,360,420,140,140,180,150,170,120,110,100,120,110,190,100,110,100,120,130,180,180,90,90]
     colgroup="<colgroup>"+"".join(f'<col style="width:{w}px;min-width:{w}px;max-width:{w}px">' for w in widths)+"</colgroup>"
-    return _filter_form(q,location,category,transaction,status,assigned,limit)+f'<div class="dbtools"><b>Table</b><button type="button" onclick="dbCompact()">Compact</button><button type="button" onclick="dbZoom(-1)">−</button><button type="button" onclick="dbZoom(1)">+</button><button type="button" onclick="dbZoomReset()">Reset</button></div><div class="tablebox"><table>{colgroup}<thead><tr>{"".join("<th>"+x+"</th>" for x in H)}</tr></thead><tbody>{"".join(trs) if trs else "<tr><td colspan=22>No records found</td></tr>"}</tbody></table></div>'
+    return _filter_form(q,location,category,transaction,status,assigned,limit)+f'<div class="dbtools"><b>Table</b><button type="button" onclick="dbCompact()">Compact</button><button type="button" onclick="dbZoom(-1)">−</button><button type="button" onclick="dbZoom(1)">+</button><button type="button" onclick="dbZoomReset()">Reset</button></div><div class="tablebox"><table>{colgroup}<thead><tr>{"".join("<th>"+x+"</th>" for x in H)}</tr></thead><tbody>{"".join(trs) if trs else "<tr><td colspan=23>No records found</td></tr>"}</tbody></table></div>'
 
 def _requirement_table(e,source,q,location,category,transaction,status,assigned,limit):
     rows=_requirement_rows(e,source,q,location,category,transaction,status,assigned,limit)
@@ -635,7 +646,7 @@ def register(core, served_app=None):
             },"MANUAL",e).keys())==expected
 
             checks["requirements_not_registered_here"]=True
-            checks["canonical_header_22_columns"]=True
+            checks["canonical_header_23_columns"]=True
         except Exception as ex:
             checks["audit_runtime"]=False
             details["audit_error_type"]=type(ex).__name__
