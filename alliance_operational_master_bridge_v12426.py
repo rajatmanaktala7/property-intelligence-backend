@@ -115,6 +115,9 @@ def sync_property(engine,property_code,actor='team'):
         cid=_property_cid(property_code); mid='MP-'+_hash(cid)[:16].upper()
         tx=_tx(r.get('transaction_type'))
         phones=[_phone(r.get('contact_number'))] if _phone(r.get('contact_number')) else []
+        # Canonical property display contract.
+        # Keep raw Manual evidence nested, but mirror every display field at the
+        # top level so Manual and Master render identically.
         clean={
             'manual_operational':{
                 'property_code':property_code,'division':r.get('division'),'property_name':r.get('property_name'),
@@ -126,8 +129,31 @@ def sync_property(engine,property_code,actor='team'):
                 'contact_role':r.get('contact_role'),'verification_status':r.get('verification_status'),
                 'remarks':r.get('remarks'),'bridge_version':VERSION,
             },
-            'property_name':r.get('property_name'),'property_type':r.get('property_types'),
-            'description':r.get('remarks'),'floor':r.get('floor'),'suitable_category':r.get('suitable_for'),
+            'source_record_id':property_code,
+            'property_name':r.get('property_name'),
+            'property_type':r.get('property_types'),
+            'location':r.get('location'),
+            'city':r.get('city'),
+            'google_location':r.get('google_location'),
+            'description':r.get('remarks'),
+            'area_text':r.get('area_text'),
+            'area_sqft':r.get('area_sqft'),
+            'floor':r.get('floor'),
+            'transaction_type':tx,
+            'amount_text':r.get('rent_text'),
+            'rent_text':r.get('rent_text'),
+            'frontage':r.get('frontage'),
+            'parking':r.get('parking'),
+            'possession':r.get('possession'),
+            'suitable_for':r.get('suitable_for'),
+            'suitable_category':r.get('suitable_for'),
+            'nearby_brands':r.get('nearby_brands'),
+            'contact_name':r.get('owner_broker_name'),
+            'owner_broker_name':r.get('owner_broker_name'),
+            'contact_number':r.get('contact_number'),
+            'contact_role':r.get('contact_role'),
+            'verification_status':r.get('verification_status'),
+            'remarks':r.get('remarks'),
         }
         data={
             'master_property_id':mid,'canonical_id':cid,'source_type':'MANUAL_OPERATIONAL',
