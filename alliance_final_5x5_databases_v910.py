@@ -4,7 +4,7 @@ from fastapi import Form, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import text
 
-VERSION="9.5.2-UNIFIED-NONOVERLAP-GRID"
+VERSION="9.5.3-MANUAL-DATABASE-COMPLETE-UNION"
 SOURCES=("MASTER","NEWSPAPER","WHATSAPP","MAGAZINE","MANUAL")
 CATEGORY_OPTIONS=("Residential Sale","Residential Rent","Commercial Sale","Commercial Rent","Industrial Sale","Industrial Rent","Farmhouse Sale","Farmhouse Rent")
 
@@ -108,7 +108,7 @@ def _property_rows(e,source,q,location,category,transaction,status,assigned,limi
     # Manual availability/property evidence historically lives in
     # pi_operational_properties. If source-link coverage is absent, keep the
     # settled Manual page useful by reading that existing table read-only.
-    if source=="MANUAL" and not rows:
+    if source=="MANUAL":
         try:
             with e.connect() as c:
                 exists=c.execute(text("SELECT to_regclass('public.pi_operational_properties')")).scalar()
@@ -139,7 +139,7 @@ def _property_rows(e,source,q,location,category,transaction,status,assigned,limi
     # Second compatibility source for historical manual availability/property
     # rows. Some older manual entries were stored in pi_properties rather than
     # pi_operational_properties and never received a Master source link.
-    if source=="MANUAL" and not rows:
+    if source=="MANUAL":
         try:
             with e.connect() as c:
                 exists=c.execute(text("SELECT to_regclass('public.pi_properties')")).scalar()
@@ -169,6 +169,23 @@ def _property_rows(e,source,q,location,category,transaction,status,assigned,limi
                         })
         except Exception:
             pass
+    # Manual DB is a complete source view, not a fallback view.
+    # Merge canonical Manual-linked rows with historical manual tables and dedupe.
+    if source=="MANUAL":
+        deduped=[]
+        seen=set()
+        for r in rows:
+            cr=_dict(r.get("clean_record"))
+            cid=str(r.get("canonical_id") or "").strip()
+            fp=cid or "|".join(str(x or "").strip().lower() for x in (
+                r.get("locality"),r.get("city"),r.get("transaction_type"),
+                r.get("area_sqft"),r.get("price_raw"),
+                _first(cr,"contact_number","contact_phone","owner_contact","broker_contact","phone","mobile"),
+                _first(cr,"description","property_description","original_message","raw_line","details","remarks")
+            ))
+            if fp in seen: continue
+            seen.add(fp); deduped.append(r)
+        rows=deduped
     # ASTRA source-truth search: apply the same evidence search to every
     # returned row, including compatibility/source rows, instead of relying only
     # on Master projection columns.
@@ -187,6 +204,15 @@ def _property_rows(e,source,q,location,category,transaction,status,assigned,limi
     if category.strip():
         want=category.strip().lower()
         rows=[r for r in rows if want in str(_property_category(_dict(r.get("clean_record")),r.get("transaction_type"))).lower()]
+    if transaction.strip():
+        want_tx=transaction.strip().upper()
+        rows=[r for r in rows if str(r.get("transaction_type") or _first(_dict(r.get("clean_record")),"transaction_type","rent_sale","rent_or_sale") or "").upper()==want_tx]
+    if status.strip():
+        want_st=status.strip().upper()
+        rows=[r for r in rows if want_st in {str(r.get("availability_status") or "").upper(),str(r.get("verification_status") or "").upper()}]
+    if assigned.strip():
+        want_asgn=assigned.strip().lower()
+        rows=[r for r in rows if want_asgn in str(r.get("assigned_to") or _first(_dict(r.get("clean_record")),"assigned_to","team_member") or "").lower()]
     return rows
 def _requirement_rows(e,source,q,location,category,transaction,status,assigned,limit):
     pat=_src_pat(source)
@@ -212,7 +238,7 @@ def _requirement_rows(e,source,q,location,category,transaction,status,assigned,l
     # Manual requirements created by the settled manual form are authoritative
     # evidence in the Requirement Gate even when an older Master source link is
     # absent. Surface those existing rows read-only in the Manual database.
-    if source=="MANUAL" and not rows:
+    if source=="MANUAL":
         try:
             with e.connect() as c:
                 exists=c.execute(text("SELECT to_regclass('public.pi_requirement_gate_v1191')")).scalar()
