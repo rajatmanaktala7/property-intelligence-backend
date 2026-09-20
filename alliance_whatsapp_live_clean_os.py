@@ -1516,9 +1516,9 @@ def _worker():
     RUNTIME.update(
         status="WAITING_FOR_STARTUP_DRAIN",
         worker_alive=True,
-        startup_delay_seconds=75,
+        startup_delay_seconds=5,
     )
-    time.sleep(75)
+    time.sleep(5)
     while True:
         RUNTIME["status"] = "RUNNING"
         try:
