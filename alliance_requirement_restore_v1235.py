@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import hashlib
 import html
@@ -188,7 +188,7 @@ def _safe_budget(value, message=""):
     # A mobile-shaped field is never a budget.  Message context is deliberately
     # ignored here: a rental request often contains the word "rent" beside its
     # sender number, which was the original false-positive path.
-    has_money_context = bool(re.search(r"(?:₹|rs\.?|inr|lakh|lac|crore|cr)", raw, re.I))
+    has_money_context = bool(re.search(r"(?:â‚¹|rs\.?|inr|lakh|lac|crore|cr)", raw, re.I))
     return "" if phone_like and not has_money_context else raw
 
 def _transaction_from_evidence(value, message=""):
@@ -551,7 +551,7 @@ def _move_front(app, path):
 def _nav():
     return """
     <nav>
-      <a href="#" onclick="history.back();return false">← Back to Previous Page</a>
+      <a href="#" onclick="history.back();return false">â† Back to Previous Page</a>
       <a href="/team-dashboard-v376">Back to Dashboard</a>
     </nav>
     """
@@ -585,7 +585,7 @@ function reqZoomReset(){{localStorage.setItem('allianceReqZoom',100);reqApplyZoo
 function reqCompact(){{document.body.classList.toggle('compact');localStorage.setItem('allianceReqCompact',document.body.classList.contains('compact')?'1':'0')}}
 document.addEventListener('DOMContentLoaded',function(){{if(localStorage.getItem('allianceReqCompact')==='1')document.body.classList.add('compact');reqApplyZoom()}})
 </script></head><body>
-<header><b>Alliance CRE Intelligence OS 11</b><small>PROPERTY → VERIFY → REQUIREMENT → MATCH → CLIENT → FOLLOW-UP → DEAL</small></header>
+<header><b>Alliance CRE Intelligence OS 11</b><small>PROPERTY â†’ VERIFY â†’ REQUIREMENT â†’ MATCH â†’ CLIENT â†’ FOLLOW-UP â†’ DEAL</small></header>
 {_nav()}<div class="wrap"><h2>{_e(title)}</h2>{body}</div>
 </body></html>"""
 
@@ -761,7 +761,7 @@ def _table(e, source, q, location, transaction, status, assigned, limit):
                 cells.append(f"<td{css}>{_e(_shown(value))}</td>")
         trs.append(f"<tr class='{cls}'>{''.join(cells)}</tr>")
     note = (
-        f"<b>{len(rows)}</b> rows shown. Verified/canonical linked: <b>{meta['master']}</b> · "
+        f"<b>{len(rows)}</b> rows shown. Verified/canonical linked: <b>{meta['master']}</b> Â· "
         f"source evidence awaiting verification: <b>{meta['source_only']}</b>. "
         "Master is the all-source inventory; Smart Matcher continues to use verified canonical requirements only."
     )
@@ -772,7 +772,7 @@ def _table(e, source, q, location, transaction, status, assigned, limit):
         "Source","Source ID","Requirement ID"
     ]
     body = f"""<div class="notice">{note}</div>{filters}
-    <div class="reqtools"><b>Table</b><button type="button" onclick="reqCompact()">Compact</button><button type="button" onclick="reqZoom(-1)">−</button><button type="button" onclick="reqZoom(1)">+</button><button type="button" onclick="reqZoomReset()">Reset</button></div>
+    <div class="reqtools"><b>Table</b><button type="button" onclick="reqCompact()">Compact</button><button type="button" onclick="reqZoom(-1)">âˆ’</button><button type="button" onclick="reqZoom(1)">+</button><button type="button" onclick="reqZoomReset()">Reset</button></div>
     <div class="tablebox"><table><thead><tr>{''.join('<th>'+h+'</th>' for h in headers)}</tr></thead>
     <tbody>{''.join(trs) if trs else '<tr><td colspan="17">No requirements found.</td></tr>'}</tbody></table></div>"""
     return _shell(f"{source.title()} Requirements", body)
@@ -809,8 +809,60 @@ def _ensure_gate_row(e, selected):
     bridge.ensure_schema(e)
 
     message = str(selected.get("message") or "").strip()
+
+    # MANUAL_MATCHER_STRUCTURED_FALLBACK_V1
+    # Historical/manual requirements can legitimately have structured fields
+    # without an original free-text message. Build matcher input from those
+    # existing fields only. Never invent requirement data.
     if not message:
-        raise HTTPException(400, "Source requirement has no original message")
+        parts = []
+
+        company = str(selected.get("company") or "").strip()
+        contact_name = str(selected.get("contact_name") or "").strip()
+        category = str(
+            selected.get("category")
+            or selected.get("intended_use")
+            or selected.get("property_type")
+            or ""
+        ).strip()
+        location = str(selected.get("location") or "").strip()
+        transaction = str(
+            selected.get("transaction")
+            or selected.get("transaction_type")
+            or ""
+        ).strip()
+        area = str(selected.get("area") or "").strip()
+        budget = str(
+            selected.get("budget")
+            or selected.get("budget_max")
+            or selected.get("rent_budget")
+            or selected.get("sale_budget")
+            or ""
+        ).strip()
+
+        if company:
+            parts.append(f"Company/Brand: {company}")
+        elif contact_name:
+            parts.append(f"Client: {contact_name}")
+
+        if category:
+            parts.append(f"Requirement: {category}")
+        if location:
+            parts.append(f"Location: {location}")
+        if transaction:
+            parts.append(f"Transaction: {transaction}")
+        if area:
+            parts.append(f"Area: {area}")
+        if budget:
+            parts.append(f"Budget: {budget}")
+
+        message = " | ".join(parts).strip()
+
+    if not message:
+        raise HTTPException(
+            400,
+            "Source requirement has insufficient requirement details for matching"
+        )
 
     source_table = str(selected.get("source_table") or "").strip()
     source_pk = str(selected.get("source_pk") or "").strip()
@@ -1176,7 +1228,7 @@ def register(core, served_app=None):
             'The existing Requirement Gate and Master Bridge will deduplicate, preserve source evidence, '
             'mark the canonical requirement VERIFIED and then open Smart Matcher.</div>'
             '<div class="card">'
-            f'<p><b>Source:</b> {_e(selected.get("source_table"))} · ID {_e(selected.get("source_pk"))}</p>'
+            f'<p><b>Source:</b> {_e(selected.get("source_table"))} Â· ID {_e(selected.get("source_pk"))}</p>'
             f'<p><b>Original Requirement:</b><br>{_e(selected.get("message"))}</p>'
             '<form method="post" action="/alliance/final/requirements/verify-and-match">'
             f'<input type="hidden" name="gate_id" value="{gid}">'
@@ -1191,7 +1243,7 @@ def register(core, served_app=None):
             f'<label>Use / Category</label><input name="intended_use" value="{_e(gate_row.get("intended_use"))}"><br><br>'
             f'<label>Area Min Sqft</label><input name="area_min_sqft" value="{_e(gate_row.get("area_min_sqft"))}">'
             f'<label>Area Max Sqft</label><input name="area_max_sqft" value="{_e(gate_row.get("area_max_sqft"))}"><br><br>'
-            f'<label>Budget Max ₹</label><input name="budget_max" value="{_e(gate_row.get("budget_max"))}"><br><br>'
+            f'<label>Budget Max â‚¹</label><input name="budget_max" value="{_e(gate_row.get("budget_max"))}"><br><br>'
             f'<label>Notes</label><input name="notes" value="{_e(gate_row.get("verification_notes"))}"><br><br>'
             '<button type="submit">Verify & Run Match</button></form><br>'
             '<form method="post" action="/alliance/final/requirements/reject-source">'
