@@ -1,5 +1,6 @@
 import app as core
 from datetime import datetime, timezone
+import threading
 
 app = core.app
 
@@ -10,11 +11,20 @@ try:
 except Exception as e:
     ALLIANCE_V2_STATUS={"status":"DEGRADED","error":f"{type(e).__name__}: {e}"}
 
-try:
-    import alliance_module_registry as registry
-    OPTIONAL_MODULES=registry.register_all(core)
-except Exception as e:
-    OPTIONAL_MODULES={"registry":{"status":"DEGRADED","error":f"{type(e).__name__}: {e}"}}
+OPTIONAL_MODULES={"registry":{"status":"LOADING_BACKGROUND","error":None}}
+def _load_optional_modules_background():
+    global OPTIONAL_MODULES
+    try:
+        import alliance_module_registry as registry
+        OPTIONAL_MODULES=registry.register_all(core)
+    except Exception as e:
+        OPTIONAL_MODULES={"registry":{"status":"DEGRADED","error":f"{type(e).__name__}: {e}"}}
+
+threading.Thread(
+    target=_load_optional_modules_background,
+    daemon=True,
+    name="alliance-legacy-module-registry",
+).start()
 
 @app.get("/production-health")
 def production_health():
