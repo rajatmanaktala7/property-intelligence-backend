@@ -187,39 +187,55 @@ def register(core):
     app = _app(core)
     eng = _engine(core)
 
-    @app.middleware("http")
-    async def canonical_dashboard_authority(request: Request, call_next):
-        response = await call_next(request)
-        if request.url.path != "/alliance/primary":
-            return response
-        if int(getattr(response, "status_code", 500)) != 200:
-            return response
-        try:
-            counts = _counts(eng)
-            STATE["status"] = "PASS"
-            STATE["last_render_at"] = datetime.now(timezone.utc).isoformat()
-            STATE["last_error"] = None
-            return HTMLResponse(_render(counts), status_code=200, headers={
-                "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
-                "Pragma": "no-cache",
-                "X-Alliance-Dashboard-Authority": MARKER,
-                "X-Alliance-Navigation-Model": "8-AREA-CLEAN-SOURCE-HUB",
-            })
-        except Exception as exc:
-            STATE["status"] = "ERROR"
-            STATE["last_error"] = f"{type(exc).__name__}: {exc}"
-            return response
+    # Canonical dashboard owns /alliance/primary as a real route, not as
+    # response-replacing middleware. Remove every pre-existing GET owner first.
+    kept=[]
+    for route in app.router.routes:
+        methods=set(getattr(route,"methods",set()) or set())
+        if getattr(route,"path",None)=="/alliance/primary" and "GET" in methods:
+            continue
+        kept.append(route)
+    app.router.routes[:] = kept
+
+    @app.get("/alliance/primary", response_class=HTMLResponse)
+    def canonical_dashboard_home(request: Request):
+        core.need_login(request)
+        counts = _counts(eng)
+        STATE["status"] = "PASS"
+        STATE["last_render_at"] = datetime.now(timezone.utc).isoformat()
+        STATE["last_error"] = None
+        return HTMLResponse(_render(counts), status_code=200, headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "X-Alliance-Dashboard-Authority": MARKER,
+            "X-Alliance-Navigation-Model": "8-AREA-CLEAN-SOURCE-HUB",
+        })
 
     existing = {getattr(r, "path", None) for r in app.router.routes}
 
     if "/api/alliance/dashboard-authority-v1/public-status" not in existing:
         @app.get("/api/alliance/dashboard-authority-v1/public-status")
         def dashboard_authority_public_status():
+            matches=[]
+            for r in app.router.routes:
+                methods=set(getattr(r,"methods",set()) or set())
+                if getattr(r,"path",None)=="/alliance/primary" and "GET" in methods:
+                    ep=getattr(r,"endpoint",None)
+                    matches.append({
+                        "module":getattr(ep,"__module__",""),
+                        "name":getattr(ep,"__name__",""),
+                    })
+            active=matches[0] if matches else {}
+            expected=(active.get("module")=="alliance_dashboard_authority_v1" and active.get("name")=="canonical_dashboard_home")
             return {
-                "status": STATE.get("status"),
+                "status":"PASS" if expected else "FAIL",
                 "version": VERSION,
                 "dashboard_marker": MARKER,
-                "legacy_dashboard_replaced": True,
+                "actual_active_owner":active,
+                "matching_route_count":len(matches),
+                "render_title":"Alliance · Command Centre",
+                "render_sections":["Properties","Requirements","Match & Deal","Intelligence","Contacts","Team","System","Quick Add"],
+                "legacy_dashboard_replaced": expected,
                 "navigation_model": "8-AREA-CLEAN-SOURCE-HUB",
                 "matcher_authority": "MASTER_ONLY",
                 "property_authority": "pi_master_properties_v711",
