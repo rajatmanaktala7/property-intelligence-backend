@@ -1,7 +1,7 @@
 from __future__ import annotations
 import html, json, re, time
 from urllib.parse import quote
-from fastapi import HTTPException, Request, Form
+from fastapi import HTTPException, Request, Form, Query
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from sqlalchemy import inspect, text
 
