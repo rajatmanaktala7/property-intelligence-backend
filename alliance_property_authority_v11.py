@@ -4,7 +4,7 @@ from fastapi import Form, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import text
 
-VERSION="11.0.0-KNOWN-GOOD-PROPERTY-AUTHORITY"
+VERSION="11.1.0-SOURCE-PRESENTATION-CONTRACT"
 SOURCES=("MASTER","NEWSPAPER","WHATSAPP","MAGAZINE","MANUAL")
 CATEGORY_OPTIONS=("Residential Sale","Residential Rent","Commercial Sale","Commercial Rent","Industrial Sale","Industrial Rent","Farmhouse Sale","Farmhouse Rent")
 
@@ -43,8 +43,15 @@ def _first(d,*keys):
     return None
 def _fmt_dt(v):
     if not v:return ""
-    try:return v.strftime("%d-%m-%Y %I:%M %p")
-    except Exception:return str(v)
+    try:
+        if hasattr(v,"strftime"):return v.strftime("%d-%m-%Y %I:%M %p")
+        s=str(v).strip().replace("Z","+00:00")
+        from datetime import datetime
+        dt=datetime.fromisoformat(s)
+        return dt.strftime("%d-%m-%Y %I:%M %p")
+    except Exception:
+        s=str(v)
+        return s[:19].replace("T"," ") if len(s)>=19 else s
 def _src_pat(source):
     return {"NEWSPAPER":"%NEWSPAPER%","WHATSAPP":"%WHATSAPP%","MAGAZINE":"%MAGAZINE%","MANUAL":"%MANUAL%"}.get(source)
 def _source_name(e,cid,etype):
@@ -57,18 +64,18 @@ def _source_name(e,cid,etype):
         return a if not b or b==a else f"{a} · {b}"
     except Exception:return ""
 def _contacts(cr):
-    name=_first(cr,"contact_name","owner_name","broker_name","client_name","sender_name","name") or ""
+    name=_first(cr,"contact_name","owner_broker_name","owner_name","broker_name","client_name","sender_name","name") or ""
     vals=[]
-    for k in ("contact_number","contact_phone","owner_contact","owner_phone","broker_contact","broker_phone","phone","mobile"):
+    for k in ("contact_numbers","phones","contact_number","contact_phone","owner_broker_contact","owner_contact","owner_phone","broker_contact","broker_phone","phone","mobile","sender_phone"):
         v=cr.get(k)
-        if v not in (None,"",[],{}): vals.append(str(v))
-    p=cr.get("phones")
-    if isinstance(p,list): vals.extend(str(x) for x in p if x)
+        if isinstance(v,list):vals.extend(str(x) for x in v if x)
+        elif isinstance(v,dict):vals.extend(str(x) for x in v.values() if x)
+        elif v not in (None,"",[],{}):vals.append(str(v))
     blob=" | ".join(vals)
     phones=[]
     for x in re.findall(r"(?<!\d)(?:\+?91[-\s]?)?([6-9]\d{9})(?!\d)",blob):
-        if x not in phones: phones.append(x)
-    return name,", ".join(phones)
+        if x not in phones:phones.append(x)
+    return str(name),", ".join(phones)
 def _clean_location_value(value, cr):
     loc=str(value or "").strip()
     bad_words=r"\b(construction|constructions|builder|builders|developer|developers|realty|properties|property|infra|infrastructure|owner|broker|dealer)\b"
@@ -97,6 +104,53 @@ def _clean_location_value(value, cr):
         m=re.search(p,blob,re.I)
         if m:return re.sub(r"\s+"," ",m.group(1)).strip()
     return "Needs verification"
+
+def _magazine_category(cr,tx):
+    """Never present page-carried category as row fact unless row evidence supports it."""
+    explicit=_first(cr,"property_category","category")
+    source=str(cr.get("category_source") or "").upper()
+    if not explicit:return ""
+    if source.startswith("PAGE_CONTEXT") or source.startswith("PAGE_DIRECT") or source.startswith("ROW_PLUS_PAGE"):
+        blob=" ".join(str(cr.get(k) or "") for k in ("description","original_description","original_section","property_type")).upper()
+        cat=str(explicit).upper()
+        asset=cat.rsplit(" ",1)[0] if " " in cat else cat
+        txword=cat.rsplit(" ",1)[-1] if " " in cat else ""
+        asset_ok={
+            "INDUSTRIAL":bool(re.search(r"\b(INDUSTRIAL|FACTORY|WAREHOUSE|GODOWN)\b",blob)),
+            "COMMERCIAL":bool(re.search(r"\b(COMMERCIAL|OFFICE|SHOWROOM|SHOP|RETAIL|MALL|MARKET|MKT)\b",blob)),
+            "RESIDENTIAL":bool(re.search(r"\b(RESIDENTIAL|BHK|APARTMENT|APT|FLAT|KOTHI|VILLA|\d+BR)\b",blob)),
+            "FARMHOUSE":bool(re.search(r"\b(FARM\s*HOUSE|FARMHOUSE|SAINIK FARM|GADIPUR FARM|DERA MANDI)\b",blob)),
+        }.get(asset,False)
+        tx_ok=(txword=="RENT" and bool(re.search(r"\b(RENT|TO LET|LEASING)\b",blob))) or (txword=="SALE" and bool(re.search(r"\b(SALE|RESALE|SELL|BOOKING|BKG)\b",blob)))
+        if not (asset_ok and tx_ok):return ""
+    return str(explicit)
+
+def _safe_property_type(cr,source):
+    v=_first(cr,"property_type","property_types","asset_type","subtype") or ""
+    if source=="MAGAZINE":
+        cat=str(cr.get("property_category") or "")
+        cat_src=str(cr.get("category_source") or "").upper()
+        # Some historical magazine rows copied an inherited category into type.
+        if str(v).strip().upper()==cat.strip().upper() and (cat_src.startswith("PAGE_") or "PAGE_" in cat_src):
+            return ""
+    return _display_text(v)
+
+def _manual_amount_from_evidence(cr,raw):
+    """Prefer explicit human-readable amount evidence when normalized text is self-contradictory."""
+    s=_display_text(raw)
+    low=s.lower()
+    # Example corruption: '250000 lacs' while source remarks say '2.50 lakh'.
+    bad_combo=bool(re.search(r"\b\d{5,}(?:\.\d+)?\s*(?:lac|lacs|lakh|lakhs|cr|crore|crores)\b",low))
+    if not bad_combo:return s
+    blob=" | ".join(str(cr.get(k) or "") for k in ("remarks","description","original_description","source_text","details"))
+    patterns=[
+        r"(?i)\b(?:rent|rental|asking|demand)\s*[-:@]?\s*(?:rs\.?\s*)?([0-9]+(?:\.[0-9]+)?\s*(?:lakh|lakhs|lac|lacs|cr|crore|crores)(?:\s*(?:pm|per\s*month))?)",
+        r"(?i)\b(?:rs\.?\s*)?([0-9]+(?:\.[0-9]+)?\s*(?:lakh|lakhs|lac|lacs|cr|crore|crores)(?:\s*(?:pm|per\s*month))?)"
+    ]
+    for p in patterns:
+        m=re.search(p,blob)
+        if m:return m.group(1).strip()
+    return s+" · VERIFY AMOUNT"
 
 def _property_category(cr,tx):
     explicit=_first(cr,"property_category","category")
@@ -315,9 +369,8 @@ def _property_table(core,e,req,source,q,location,category,transaction,status,ass
         desc=_display_text(desc)
         if address and address.lower() not in desc.lower():desc=(address+" · "+desc).strip(" ·")
         tx=r.get("transaction_type") or _first(cr,"transaction_type","rent_or_sale") or ""
-        pcat=_property_category(cr,tx)
-        ptype=_first(cr,"property_type","property_types","asset_type","subtype") or ""
-        ptype=_display_text(ptype)
+        pcat=_magazine_category(cr,tx) if source=="MAGAZINE" else _property_category(cr,tx)
+        ptype=_safe_property_type(cr,source)
         area=_first(cr,"area_text","area_display","available_area")
         if not area:
             av=_first(cr,"area_value","area_sqft","area","size") or r.get("area_sqft") or ""
@@ -329,13 +382,14 @@ def _property_table(core,e,req,source,q,location,category,transaction,status,ass
         if not amount:
             amount=_first(cr,"rent","monthly_rent","rent_amount","rent_in_figures") if str(tx).upper() in ("RENT","LEASE") else _first(cr,"sale_price","sale_amount","price","asking_price")
         amount=amount or r.get("price_raw") or ""
+        if source=="MANUAL":amount=_manual_amount_from_evidence(cr,amount)
         cname,cphone=_contacts(cr)
         stat=r.get("availability_status")
         if not stat or stat=="UNKNOWN":stat=r.get("verification_status") or "UNVERIFIED"
-        source_name=_source_name(e,cid,"PROPERTY") or str(_first(cr,"entry_source","source","source_type") or source)
+        source_name=_source_name(e,cid,"PROPERTY") or str(_first(cr,"entry_source","source","source_type") or source).title()
         source_only="-SOURCE-" in cid
         if source_only:
-            verify="Source record";history="Source only";edit="Source source";delete="Source only"
+            verify="Source record";history="—";edit="—";delete="—"
         else:
             verify=f"""<details class="pop"><summary class="summarybtn good">Verify</summary><div><form method="post" action="/alliance/primary/property/{_e(cid)}/verify">
             <select name="status" required><option>AVAILABLE</option><option>NOT_AVAILABLE</option><option>CALL_BACK</option><option>SOLD</option><option>RENTED</option><option>HOLD</option><option>WRONG_NUMBER</option></select>
