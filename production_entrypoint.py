@@ -2430,6 +2430,8 @@ class HealthFirstDispatcher:
         matcher_paths = (
             "/alliance/primary/matcher",
             "/alliance/master-requirement-matcher",
+            "/api/alliance/master-matcher-selftest",
+            "/api/alliance/master-requirements-v1/status",
         )
         if (
             (path in matcher_paths or path.startswith("/alliance/master-requirement-matcher/"))
