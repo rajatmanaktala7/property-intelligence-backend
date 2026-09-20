@@ -1597,6 +1597,74 @@ def _load_core():
             }
             print("[manual-database-restore-v1150] warning:", type(exc).__name__, str(exc))
 
+        # ALLIANCE_FINAL_DATABASE_ROUTE_AUTHORITY_V2
+        # Rebuild the public database authority after every legacy database/manual
+        # registrar. This prevents alliance_manual_database_restore_v1150 or any
+        # older route owner from serving a stale Manual Property page.
+        try:
+            import alliance_final_5x5_databases_v910 as final_database_v910
+
+            final_database_paths = {
+                "/alliance/primary/databases",
+                "/alliance/final/databases",
+                "/alliance/final/database/{source}",
+                "/alliance/final/requirements",
+                "/alliance/final/requirements/{source}",
+            }
+
+            # Remove stale GET owners from the core route table, then install the
+            # exact same current renderer there as a fallback. The outer dispatcher
+            # still serves the isolated app first for /alliance/final/database/*.
+            wrapped.app.router.routes[:] = [
+                r for r in wrapped.app.router.routes
+                if not (
+                    getattr(r, "path", None) in final_database_paths
+                    and "GET" in set(getattr(r, "methods", set()) or set())
+                )
+            ]
+
+            isolated_database_app = FastAPI(
+                title="Alliance Final Database Authority",
+                docs_url=None,
+                redoc_url=None,
+                openapi_url=None,
+            )
+            isolated_result = final_database_v910.register(
+                wrapped.core,
+                served_app=isolated_database_app,
+            )
+            core_result = final_database_v910.register(
+                wrapped.core,
+                served_app=wrapped.app,
+            )
+            DATABASE_APP = isolated_database_app
+
+            stabilization = dict(stabilization or {})
+            stabilization["final_database_route_authority_v2"] = {
+                "status": "READY",
+                "owner": "alliance_final_5x5_databases_v910",
+                "version": getattr(final_database_v910, "VERSION", None),
+                "registered_after_manual_restore": True,
+                "isolated_registration": isolated_result,
+                "core_registration": core_result,
+            }
+            print(
+                "[final-database-route-authority-v2]",
+                stabilization["final_database_route_authority_v2"],
+            )
+        except Exception as exc:
+            stabilization = dict(stabilization or {})
+            stabilization["final_database_route_authority_v2"] = {
+                "status": "ERROR",
+                "error": f"{type(exc).__name__}: {exc}",
+                "fail_safe": True,
+            }
+            print(
+                "[final-database-route-authority-v2] warning:",
+                type(exc).__name__,
+                str(exc),
+            )
+
         # ALLIANCE_FINAL_REQUIREMENT_ROUTE_AUTHORITY_V1
         # Final takeover runs after all legacy requirement route registrars.
         try:
