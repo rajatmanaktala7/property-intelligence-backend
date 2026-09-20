@@ -5,7 +5,7 @@ from fastapi import Form, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from sqlalchemy import text, bindparam
 
-VERSION="12.6.1-WHATSAPP-CLEAN-MISSING-DISPLAY"
+VERSION="12.7.0-MAGAZINE-SHORTHAND-RENT-RECOVERY"
 SOURCES=("MASTER","NEWSPAPER","WHATSAPP","MAGAZINE","MANUAL")
 CATEGORY_OPTIONS=("Residential Sale","Residential Rent","Commercial Sale","Commercial Rent","Industrial Sale","Industrial Rent","Farmhouse Sale","Farmhouse Rent")
 
@@ -224,8 +224,26 @@ def _derive_transaction(cr,current=""):
     blob=" ".join(str(cr.get(k) or "") for k in ("description","original_description","source_text","raw_line","original_message","details","remarks","section_heading","original_section","source","category_source")).upper()
     # Do not treat LEASEHOLD as a rental transaction.
     blob=re.sub(r"\bLEASE[ -]*HOLD\b|\bLEASEHOLD\b"," ",blob)
-    if re.search(r"\b(TO LET|FOR RENT|ON RENT|RENTAL|LEASING)\b",blob):return "LEASE"
-    if re.search(r"\b(FOR SALE|SALE|RESALE|SELLING)\b",blob):return "SALE"
+    sale_ev=bool(re.search(r"\b(FOR SALE|SALE ALSO|FOR SALE ALSO|SALE|RESALE|SELLING)\b",blob))
+    rent_ev=bool(re.search(r"\b(TO LET|FOR RENT|ON RENT|RENTAL|LEASING|RENT\s*[:@-])\b",blob))
+    if sale_ev and not rent_ev:return "SALE"
+    if rent_ev and not sale_ev:return "LEASE"
+
+    # Print-classified shorthand: @35TH / @90K / @1L / @2.80L+GST.
+    # Use as rent evidence only when there is no explicit sale wording.
+    if not sale_ev:
+        if re.search(r"@\s*\d+(?:\.\d+)?\s*(?:TH|K)\b",blob):
+            return "LEASE"
+        ml=re.search(r"@\s*(\d+(?:\.\d+)?)\s*(?:L|LAC|LAKH)\b",blob)
+        if ml:
+            try:
+                amt=float(ml.group(1))
+            except Exception:
+                amt=999.0
+            if amt<=10.0 or re.search(r"\bGST\b|/\s*MONTH|\bPM\b|PER\s*MONTH",blob):
+                return "LEASE"
+    if sale_ev:return "SALE"
+    if rent_ev:return "LEASE"
     return ""
 
 def _magazine_category(cr,tx):
@@ -917,7 +935,7 @@ def _magazine_amounts(cr,tx,amount):
     blob=" ".join(str(cr.get(k) or "") for k in ("description","original_description","raw_line","source_text","details"))
     # Typical magazine shorthand: @35TH, @1.5L, RENT 2.5L, SALE 5CR, PRICE 85000.
     pats=[
-        r"(?i)(?:@|RENT\s*[:@-]?\s*)(\d+(?:\.\d+)?\s*(?:TH|K|L|LAC|LAKH|CR|CRORE)(?:\s*/?\s*(?:MONTH|PM|SQFT|SF))?)",
+        r"(?i)(?:@|RENT\s*[:@-]?\s*)(\d+(?:\.\d+)?\s*(?:TH|K|L|LAC|LAKH|CR|CRORE)(?:\s*\+\s*GST)?(?:\s*/?\s*(?:MONTH|PM|SQFT|SF))?)",
         r"(?i)(?:SALE|PRICE|DEMAND|ASKING)\s*[:@-]?\s*(?:RS\.?\s*)?(\d+(?:\.\d+)?\s*(?:TH|K|L|LAC|LAKH|CR|CRORE)?)",
     ]
     if txu in ("RENT","LEASE") and not rent:
