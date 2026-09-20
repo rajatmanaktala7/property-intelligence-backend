@@ -1152,6 +1152,44 @@ def register(core, served_app=None):
         body+=_property_table(core,e,req,src,q,location,category,transaction,status,assigned,page_size,offset)
         return HTMLResponse(_shell(f"{src.title()} Property Database",body))
 
+    @app.get("/alliance/final/database/__source-status")
+    def source_status():
+        def owner(path):
+            matches=[]
+            for r in app.router.routes:
+                methods=set(getattr(r,"methods",set()) or set())
+                if getattr(r,"path",None)==path and "GET" in methods:
+                    ep=getattr(r,"endpoint",None)
+                    matches.append({
+                        "module":getattr(ep,"__module__",""),
+                        "name":getattr(ep,"__name__",""),
+                    })
+            return {"count":len(matches),"active":matches[0] if matches else {}}
+        wa_total=_property_source_count(e,"WHATSAPP","")
+        mag_total=_property_source_count(e,"MAGAZINE","")
+        page_size=100
+        return {
+            "status":"PASS",
+            "version":VERSION,
+            "whatsapp":{
+                "authority":"MASTER_WHATSAPP_SOURCE_LINKS + pi_whatsapp_property_master contacts",
+                "rows":wa_total,
+                "pages_at_100":max(1,(wa_total+page_size-1)//page_size),
+                "route":"/alliance/final/database/whatsapp",
+                "route_owner":owner("/alliance/final/database/whatsapp"),
+            },
+            "magazine":{
+                "authority":"pi_magazine_complete_v860",
+                "rows":mag_total,
+                "pages_at_100":max(1,(mag_total+page_size-1)//page_size),
+                "route":"/alliance/final/database/magazine",
+                "route_owner":owner("/alliance/final/database/magazine"),
+            },
+            "pagination":{"default_page_size":100,"max_page_size":500,"full_database_browsable":True},
+            "sources_separate":True,
+            "data_exposed":False,
+        }
+
     @app.get("/alliance/final/database/whatsapp",response_class=HTMLResponse)
     def whatsapp_database(req:Request,q:str=Query(""),location:str=Query(""),category:str=Query(""),transaction:str=Query(""),status:str=Query(""),assigned:str=Query(""),page:int=Query(1,ge=1),page_size:int=Query(100,ge=25,le=500)):
         return _source_page(req,"WHATSAPP",q,location,category,transaction,status,assigned,page,page_size)
