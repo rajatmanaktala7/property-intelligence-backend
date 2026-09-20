@@ -793,7 +793,8 @@ def register(core, served_app=None):
             return {"status":"REPAIRED","version":VERSION,"repair":_repair_property_contract(),"audit":property_contract_audit()}
         if source.lower()=="__preview":
             # Same live production renderer, limited rows and masked contact data.
-            rows=_property_rows(e,"MANUAL","","","","","","",8)
+            preview_source=q.strip().upper() if q.strip().upper() in SOURCES else "MANUAL"
+            rows=_property_rows(e,preview_source,"","","","","","",8)
             for r in rows:
                 cr=_flat_record(r.get("clean_record"))
                 cr["contact_number"]="XXXXXXXXXX"; cr["contact_phone"]="XXXXXXXXXX"; cr["phones"]=[]
@@ -805,7 +806,7 @@ def register(core, served_app=None):
             def _preview_rows(*args,**kwargs): return rows
             globals()["_property_rows"]=_preview_rows
             try:
-                body=_property_table(core,e,req,"MANUAL","","","","","","",8)
+                body=_property_table(core,e,req,preview_source,"","","","","","",8)
             finally:
                 globals()["_property_rows"]=original
             return HTMLResponse(_shell("Canonical Property Table Preview",body))
