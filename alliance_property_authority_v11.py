@@ -469,7 +469,6 @@ def _requirement_table(e,source,q,location,category,transaction,status,assigned,
 def register(core, served_app=None):
     app=served_app or _app(core);e=_engine(core)
     if app is None or e is None:raise RuntimeError("Known-good Property Authority requires app + engine")
-    @app.get("/api/alliance/property-contract-audit")
     def property_contract_audit():
         """Public, non-sensitive production certification: counts and booleans only."""
         checks={}
@@ -545,8 +544,10 @@ def register(core, served_app=None):
         <a class="btn good" href="/whatsapp-live">Open WhatsApp Live</a></div>"""
         return HTMLResponse(_shell("5 Property Databases",actions+f'<div class="grid">{cards}</div>'))
 
-    @app.get("/alliance/final/database/{source}",response_class=HTMLResponse)
+    @app.get("/alliance/final/database/{source}")
     def db(req:Request,source:str,q:str=Query(""),location:str=Query(""),category:str=Query(""),transaction:str=Query(""),status:str=Query(""),assigned:str=Query(""),limit:int=Query(500,ge=1,le=1500)):
+        if source.lower()=="__audit":
+            return property_contract_audit()
         _login(core,req);src=source.upper()
         if src not in SOURCES:return HTMLResponse("Unknown property database",404)
         return HTMLResponse(_shell(f"{src.title()} Property Database",_property_table(core,e,req,src,q,location,category,transaction,status,assigned,limit)))
