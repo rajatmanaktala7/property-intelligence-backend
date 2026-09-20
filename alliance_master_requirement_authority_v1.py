@@ -597,8 +597,8 @@ def register(core, served_app=None):
 
         rows=[r for r in _requirements(core)
               if _norm(r.get("original_message"))
-              and str(r.get("matcher_eligible") or "").upper() not in {"FALSE","NO","0","REJECTED"}][:5]
-        tested=0; succeeded=0; errors=[]; total_matches=0; max_scores=[]
+              and str(r.get("matcher_eligible") or "").upper() not in {"FALSE","NO","0","REJECTED"}][:1]
+        started=time.time(); tested=0; succeeded=0; errors=[]; total_matches=0; max_scores=[]
         for req in rows:
             tested+=1
             try:
@@ -632,6 +632,7 @@ def register(core, served_app=None):
             "errors":errors[:5],
             "matches_found_total":total_matches,
             "highest_score":max(max_scores) if max_scores else None,
+            "elapsed_ms":round((time.time()-started)*1000,1),
             "data_exposed":False,
         })
     return {"status":"REGISTERED","version":VERSION,"requirement_authority":MASTER_REQUIREMENT_TABLE,
