@@ -5,7 +5,7 @@ from fastapi import Form, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from sqlalchemy import text, bindparam
 
-VERSION="12.2.0-TRUE-SOURCE-AUTHORITIES"
+VERSION="12.2.1-FAST-TRUE-SOURCE-AUTHORITIES"
 SOURCES=("MASTER","NEWSPAPER","WHATSAPP","MAGAZINE","MANUAL")
 CATEGORY_OPTIONS=("Residential Sale","Residential Rent","Commercial Sale","Commercial Rent","Industrial Sale","Industrial Rent","Farmhouse Sale","Farmhouse Rent")
 
@@ -325,18 +325,24 @@ def _whatsapp_clean_source_rows(e,q,limit,offset):
                 WHERE status='COMPLETED'
                 ORDER BY completed_at DESC NULLS LAST,id DESC LIMIT 1""")).scalar()
             if not gen:return []
-            raw=cx.execute(text("""SELECT to_jsonb(t) FROM pi_whatsapp_property_master t
-                WHERE generation_id=:g
-                  AND (:q='%%'
-                       OR COALESCE(description,'') ILIKE :q
-                       OR COALESCE(configuration_details,'') ILIKE :q
-                       OR COALESCE(contact_name_number,'') ILIKE :q
-                       OR COALESCE(phone_numbers,'') ILIKE :q
-                       OR COALESCE(source,'') ILIKE :q
-                       OR COALESCE(raw_message,'') ILIKE :q)
-                ORDER BY captured_on DESC NULLS LAST,id DESC
-                LIMIT :n OFFSET :off"""),
-                {"g":gen,"q":f"%{q.strip()}%","n":limit,"off":offset}).scalars().all()
+            if q.strip():
+                raw=cx.execute(text("""SELECT to_jsonb(t) FROM pi_whatsapp_property_master t
+                    WHERE generation_id=:g
+                      AND (COALESCE(description,'') ILIKE :q
+                           OR COALESCE(configuration_details,'') ILIKE :q
+                           OR COALESCE(contact_name_number,'') ILIKE :q
+                           OR COALESCE(phone_numbers,'') ILIKE :q
+                           OR COALESCE(source,'') ILIKE :q
+                           OR COALESCE(raw_message,'') ILIKE :q)
+                    ORDER BY captured_on DESC NULLS LAST,id DESC
+                    LIMIT :n OFFSET :off"""),
+                    {"g":gen,"q":f"%{q.strip()}%","n":limit,"off":offset}).scalars().all()
+            else:
+                raw=cx.execute(text("""SELECT to_jsonb(t) FROM pi_whatsapp_property_master t
+                    WHERE generation_id=:g
+                    ORDER BY captured_on DESC NULLS LAST,id DESC
+                    LIMIT :n OFFSET :off"""),
+                    {"g":gen,"n":limit,"off":offset}).scalars().all()
         out=[]
         for x in raw:
             d=x if isinstance(x,dict) else json.loads(x)
@@ -681,7 +687,9 @@ def _canonical_property_projection(r,source,e,contact_batch=None):
     stat=r.get("availability_status")
     if not stat or stat=="UNKNOWN":stat=r.get("verification_status") or _first(cr,"verification_status","status") or "UNVERIFIED"
 
-    source_name=_source_name(e,cid,"PROPERTY") or str(_first(cr,"entry_source","source","source_type") or source).title()
+    source_name=(str(_first(cr,"entry_source","source","source_type") or source).title()
+                 if "-SOURCE-" in cid
+                 else (_source_name(e,cid,"PROPERTY") or str(_first(cr,"entry_source","source","source_type") or source).title()))
     google_pin=_first(cr,"google_location","google_maps","google_pin","map_link") or ""
     media=_manual_media_summary(e,cr)
 
@@ -807,10 +815,12 @@ def _property_source_count(e,source,q=""):
                 gen=cx.execute(text("""SELECT generation_id FROM pi_whatsapp_property_master_generation
                     WHERE status='COMPLETED' ORDER BY completed_at DESC NULLS LAST,id DESC LIMIT 1""")).scalar()
                 if not gen:return 0
+                if not q.strip():
+                    return int(cx.execute(text("""SELECT COUNT(*) FROM pi_whatsapp_property_master
+                        WHERE generation_id=:g"""),{"g":gen}).scalar() or 0)
                 return int(cx.execute(text("""SELECT COUNT(*) FROM pi_whatsapp_property_master
                     WHERE generation_id=:g
-                      AND (:q='%%'
-                           OR COALESCE(description,'') ILIKE :q
+                      AND (COALESCE(description,'') ILIKE :q
                            OR COALESCE(configuration_details,'') ILIKE :q
                            OR COALESCE(contact_name_number,'') ILIKE :q
                            OR COALESCE(phone_numbers,'') ILIKE :q
@@ -1242,8 +1252,10 @@ def register(core, served_app=None):
                         "name":getattr(ep,"__name__",""),
                     })
             return {"count":len(matches),"active":matches[0] if matches else {}}
-        wa_total=_property_source_count(e,"WHATSAPP","")
-        mag_total=_property_source_count(e,"MAGAZINE","")
+        try: wa_total=_property_source_count(e,"WHATSAPP","")
+        except Exception: wa_total=-1
+        try: mag_total=_property_source_count(e,"MAGAZINE","")
+        except Exception: mag_total=-1
         latest_gen_rows=0
         try:
             with e.connect() as cx:
