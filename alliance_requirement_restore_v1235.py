@@ -387,13 +387,11 @@ def _fingerprint(row):
     return "FP:" + hashlib.sha1(seed.encode("utf-8", "ignore")).hexdigest()
 
 def _manual_operational_rows(e, limit=1000):
-    """
-    Settled Manual Requirement source authority.
+    """New-architecture Manual Requirement adapter.
 
-    Read-only.
-    Returns every exact MANUAL row from pi_operational_requirements.
-    Preserve the original operational fields so client/contact/location/
-    transaction data cannot disappear during normalization.
+    Authority stays pi_operational_requirements. The adapter only maps the
+    settled operational schema into the common Requirement UI row contract.
+    It does not promote, duplicate, delete or mutate source records.
     """
     lim = max(1, min(int(limit or 1000), 5000))
 
@@ -407,47 +405,119 @@ def _manual_operational_rows(e, limit=1000):
         """)).mappings().all()
 
     out = []
-
     for raw in raw_rows:
         d = dict(raw)
+        row = _normalize_source_row("pi_operational_requirements", d, int(d.get("id") or 0))
 
-        # Source identity used by requirement UI/actions.
-        d["source"] = "MANUAL"
-        d["source_pk"] = d.get("id")
-        d["source_id"] = d.get("id")
+        # Preserve the exact Manual source identity. This is what Run Matcher
+        # uses to locate the source row before Gate/canonical verification.
+        row["source"] = "MANUAL"
+        row["source_table"] = "pi_operational_requirements"
+        row["source_pk"] = str(d.get("id") or row.get("source_pk") or "")
+        row["source_id"] = row["source_pk"]
 
-        # Preserve canonical operational values.
-        d["client_name"] = d.get("client_name")
-        d["company_name"] = d.get("company_name")
-        d["contact_name"] = (
+        # Map settled operational columns into the common new Requirement UI.
+        row["message"] = (
+            str(d.get("original_message") or "").strip()
+            or str(d.get("requirement") or "").strip()
+            or str(d.get("requirement_text") or "").strip()
+            or str(d.get("description") or "").strip()
+            or str(d.get("additional_points") or "").strip()
+            or str(row.get("message") or "").strip()
+        )
+        row["company"] = (
+            d.get("company_name")
+            or d.get("client_name")
+            or row.get("company")
+            or ""
+        )
+        row["contact_name"] = (
             d.get("contact_name")
             or d.get("client_name")
+            or row.get("contact_name")
+            or ""
         )
-        d["contact_number"] = d.get("contact_number")
-        d["location"] = (
+        row["contact"] = (
+            d.get("contact_number")
+            or d.get("contact_no")
+            or d.get("phone")
+            or d.get("mobile")
+            or row.get("contact")
+            or ""
+        )
+        row["location"] = (
             d.get("preferred_locations")
+            or d.get("preferred_location")
             or d.get("city")
             or d.get("location")
+            or row.get("location")
+            or ""
         )
-        d["transaction"] = (
-            d.get("transaction_type")
-            or d.get("transaction")
+        row["transaction"] = (
+            _transaction_from_evidence(
+                d.get("transaction_type") or d.get("transaction") or "",
+                row.get("message") or "",
+            )
+            or str(d.get("transaction_type") or d.get("transaction") or "").strip().upper()
         )
-        d["verification"] = (
+        row["category"] = (
+            d.get("property_category")
+            or d.get("category")
+            or d.get("intended_use")
+            or row.get("category")
+            or ""
+        )
+        row["property_type"] = (
+            d.get("property_type")
+            or row.get("property_type")
+            or ""
+        )
+
+        amin = d.get("area_min_sqft") or d.get("area_min") or d.get("minimum_area")
+        amax = d.get("area_max_sqft") or d.get("area_max") or d.get("maximum_area")
+        if amin not in (None, "") or amax not in (None, ""):
+            row["area"] = f"{amin or ''}-{amax or ''}".strip("-")
+        else:
+            row["area"] = (
+                d.get("area_sqft")
+                or d.get("required_area")
+                or d.get("area")
+                or row.get("area")
+                or ""
+            )
+
+        row["budget"] = _safe_budget(
+            d.get("budget")
+            or d.get("budget_max")
+            or d.get("rent_budget")
+            or d.get("sale_budget")
+            or row.get("budget")
+            or "",
+            row.get("message") or "",
+        )
+        row["created_at"] = (
+            d.get("created_at")
+            or d.get("timestamp")
+            or row.get("created_at")
+        )
+        row["verification"] = (
             d.get("verification_status")
             or d.get("verification")
             or "RAW"
         )
+        row["assigned_to"] = (
+            d.get("assigned_to")
+            or d.get("team_member")
+            or ""
+        )
+        row["canonical_id"] = str(
+            d.get("canonical_id")
+            or d.get("master_requirement_id")
+            or ""
+        )
+        row["is_master"] = bool(row["canonical_id"])
 
-        # Keep original requirement text where available.
-        if not d.get("description"):
-            d["description"] = (
-                d.get("original_message")
-                or d.get("additional_points")
-                or ""
-            )
-
-        out.append(d)
+        out.append(row)
 
     return out
 
