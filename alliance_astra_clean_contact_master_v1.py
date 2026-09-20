@@ -667,10 +667,23 @@ def audit(engine):
     with engine.connect() as connection:
         recovered = int(connection.execute(text("SELECT COUNT(*) FROM pi_astra_field_recovery_v2 WHERE action='UPDATED'")).scalar() or 0)
         review = int(connection.execute(text("SELECT COUNT(*) FROM pi_astra_field_recovery_v2 WHERE action='REVIEW_REQUIRED'")).scalar() or 0)
+    invalid_locations = {}
+    for table, field in (("pi_master_properties_v711","locality"),("pi_magazine_complete_v860","location"),("pi_operational_properties","location")):
+        try:
+            cols=_table_columns(engine,table)
+            if field not in cols:
+                continue
+            with engine.connect() as connection:
+                values=connection.execute(text(f"SELECT CAST({_qident(field)} AS TEXT) FROM {_qident(table)} WHERE {_qident(field)} IS NOT NULL")).scalars().all()
+            bad=[str(v) for v in values if _location_invalid(v)]
+            invalid_locations[table]={"count":len(bad),"sample":bad[:25]}
+        except Exception as exc:
+            invalid_locations[table]={"error":f"{type(exc).__name__}: {exc}"}
     return {
         "status": "READY", "version": VERSION,
         "quality_score": score, "databases": databases,
         "field_recoveries": recovered, "review_items": review,
+        "invalid_locations": invalid_locations,
         "policy": "EVIDENCE_ONLY_NO_OVERWRITE_NO_GUESSING",
         "database_changed": False,
         "gpt_used": False,
