@@ -5,7 +5,7 @@ from fastapi import Form, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from sqlalchemy import text
 
-VERSION="11.8.0-REQUIREMENT-ALIGNED-PROPERTY-GRID"
+VERSION="11.9.0-REQUIREMENT-STYLE-VERIFY-TRANSACTION-FIX"
 SOURCES=("MASTER","NEWSPAPER","WHATSAPP","MAGAZINE","MANUAL")
 CATEGORY_OPTIONS=("Residential Sale","Residential Rent","Commercial Sale","Commercial Rent","Industrial Sale","Industrial Rent","Farmhouse Sale","Farmhouse Rent")
 
@@ -106,6 +106,20 @@ def _clean_location_value(value, cr):
         if m:return re.sub(r"\s+"," ",m.group(1)).strip()
     return "Needs verification"
 
+def _derive_transaction(cr,current=""):
+    tx=str(current or _first(cr,"transaction_type","rent_sale","rent_or_sale") or "").strip().upper()
+    if tx in ("RENT","LEASE","LEASING"):return "LEASE"
+    if tx in ("SALE","SELL","RESALE","PURCHASE","BUY"):return "SALE"
+    cat=str(_first(cr,"property_category","category") or "").upper()
+    if re.search(r"\bRENT\b|\bLEASE\b",cat):return "LEASE"
+    if re.search(r"\bSALE\b|\bRESALE\b",cat):return "SALE"
+    blob=" ".join(str(cr.get(k) or "") for k in ("description","original_description","source_text","raw_line","original_message","details","remarks")).upper()
+    # Do not treat LEASEHOLD as a rental transaction.
+    blob=re.sub(r"\bLEASE[ -]*HOLD\b|\bLEASEHOLD\b"," ",blob)
+    if re.search(r"\b(TO LET|FOR RENT|ON RENT|RENTAL|LEASING)\b",blob):return "LEASE"
+    if re.search(r"\b(FOR SALE|SALE|RESALE|SELLING)\b",blob):return "SALE"
+    return ""
+
 def _magazine_category(cr,tx):
     """Never present page-carried category as row fact unless row evidence supports it."""
     explicit=_first(cr,"property_category","category")
@@ -178,7 +192,7 @@ def _property_rows(e,source,q,location,category,transaction,status,assigned,limi
                 "canonical_id":source+"-SOURCE-"+sid,
                 "locality":_first(d,"location","locality","city") or "",
                 "city":_first(d,"city") or "",
-                "transaction_type":_first(d,"transaction_type","rent_sale","rent_or_sale") or "",
+                "transaction_type":_derive_transaction(d,_first(d,"transaction_type","rent_sale","rent_or_sale") or ""),
                 "area_sqft":_first(d,"area_sqft","area_value","area","available_area") or "",
                 "price_raw":_first(d,"rent_text","amount","amount_raw","rent_amount","sale_amount","price_raw","price") or "",
                 "created_at":_first(d,"created_at","entry_datetime","entry_date"),
@@ -314,11 +328,11 @@ nav a,.btn,button,.summarybtn{{background:#0d2238;color:white;text-decoration:no
 .good{{background:#067647!important;border-color:#067647!important}}.light{{background:#475467!important}}.danger{{background:#b42318!important}}
 .wrap{{max-width:2100px;margin:auto;padding:14px}}.card{{background:white;border:1px solid #98a2b3;padding:10px;margin-bottom:10px}}
 .searchgrid{{display:grid;grid-template-columns:2fr repeat(6,minmax(130px,1fr));gap:6px}}input,select{{width:100%;padding:7px;border:1px solid #98a2b3;border-radius:0}}
-.tablebox{{overflow:auto;max-height:76vh;border:1px solid #667085;background:white}}table{{border-collapse:collapse;width:3580px;min-width:3580px;font-size:11px;table-layout:fixed}}
-th,td{{border:1px solid #98a2b3;padding:6px 7px;text-align:left;vertical-align:top;white-space:normal;overflow-wrap:anywhere;word-break:normal;overflow:hidden}}
-th{{background:#e9eef5;position:sticky;top:0;z-index:4;white-space:nowrap;min-width:110px}}
+.tablebox{{overflow:auto;max-height:76vh;border:1px solid #667085;background:white}}table{{border-collapse:collapse;width:3890px;min-width:3890px;font-size:11px;table-layout:fixed}}
+th,td{{border:1px solid #98a2b3;padding:7px;text-align:left;vertical-align:top;white-space:normal;overflow-wrap:anywhere;word-break:normal;overflow:hidden;font-weight:600}}
+th{{background:#e9eef5;position:sticky;top:0;z-index:4;white-space:nowrap;min-width:110px;font-weight:800}}
 tbody tr:nth-child(even) td{{background:#f8fafc}}tbody tr:hover td{{background:#eef4ff}}
-.desc{{width:360px!important;min-width:360px!important;max-width:360px!important;white-space:normal!important;overflow-wrap:anywhere!important}}.remarks{{width:420px!important;min-width:420px!important;max-width:420px!important;white-space:normal!important;overflow-wrap:anywhere!important}}
+.desc{{width:520px!important;min-width:520px!important;max-width:520px!important;white-space:normal!important;overflow-wrap:anywhere!important}}.remarks{{width:420px!important;min-width:420px!important;max-width:420px!important;white-space:normal!important;overflow-wrap:anywhere!important}}
 .loc{{width:180px!important;min-width:180px!important;max-width:180px!important;white-space:normal!important}}
 .nowrap{{white-space:nowrap!important;overflow:hidden!important;text-overflow:ellipsis}}
 td:nth-child(10),td:nth-child(11){{min-width:140px;max-width:190px}}
@@ -404,8 +418,10 @@ def _canonical_property_projection(r,source,e):
     if address and address.lower() not in desc.lower():
         desc=(address+" · "+desc).strip(" ·")
     remarks=_display_text(_first(cr,"remarks","additional_points","notes") or "")
+    if manual_origin and remarks and remarks.lower() not in desc.lower():
+        desc=(desc+" · "+remarks).strip(" ·")
 
-    tx=r.get("transaction_type") or _first(cr,"transaction_type","rent_sale","rent_or_sale") or ""
+    tx=_derive_transaction(cr,r.get("transaction_type") or _first(cr,"transaction_type","rent_sale","rent_or_sale") or "")
     pcat=_magazine_category(cr,tx) if source=="MAGAZINE" else _property_category(cr,tx)
     ptype=_safe_property_type(cr,source)
 
@@ -463,8 +479,14 @@ def _property_table(core,e,req,source,q,location,category,transaction,status,ass
         if not p:continue
         cid=p["id"]
         if p["source_only"]:
-            verify="Source record";history="—"
+            history="—"
             sid=p.get("source_record_id") or ""
+            if source in ("MANUAL","MAGAZINE") and sid:
+                verify=f"""<details class="pop"><summary class="summarybtn good">Verify</summary><div><form method="post" action="/alliance/final/database/{source.lower()}/{_e(sid)}/verify-source">
+                <select name="status" required><option>VERIFIED</option><option>UNVERIFIED</option><option>AVAILABLE</option><option>NOT_AVAILABLE</option><option>FOLLOW-UP</option></select>
+                <input name="verified_by" required placeholder="Verified By"><button class="good">Save</button></form></div></details>"""
+            else:
+                verify=f'<a class="btn good" href="/alliance/final/database/{source.lower()}?q={_e(sid or cid)}">Verify</a>'
             if source=="MANUAL" and sid:
                 div=str(_first(_flat_record(r.get("clean_record")),"division") or "DELHI_NCR")
                 edit=f'<a class="btn light" href="/fast-property-entry?division={_e(div)}&edit={_e(sid)}">Edit</a>'
@@ -487,24 +509,23 @@ def _property_table(core,e,req,source,q,location,category,transaction,status,ass
         media_label=f'{m.get("images",0)} pics · {m.get("videos",0)} videos · {m.get("brochures",0)} docs'
         media_html=(f'<a class="btn light" href="/alliance/final/database/media/{quote(str(pc),safe="")}">{_e(media_label)}</a>' if pc and m.get("total",0)>0 else _e(media_label if pc else "—"))
 
-        # Requirement-aligned serial order for every Property database:
-        # Date first, description/evidence next, IDs at the end.
+        # Requirement-style order. Remarks is deliberately the final grid.
         vals=[
-            p["date"],p["description"],p["remarks"],p["contact_name"],p["contact_no"],
-            p["location"],p["category"],p["type"],p["area"],p["floor"],
-            p["transaction"],p["amount"],pin_html,media_html,verify,p["status"],history,
-            p["assigned_to"],p["source"],p["source_record_id"],p["id"],edit,delete
+            p["date"],p["description"],p["contact_name"],p["contact_no"],p["location"],
+            p["category"],p["type"],p["area"],p["floor"],p["transaction"],p["amount"],
+            pin_html,media_html,verify,p["status"],history,p["assigned_to"],p["source"],
+            p["source_record_id"],p["id"],edit,delete,p["remarks"]
         ]
-        cls=["nowrap","desc","remarks","","","loc","","","","","nowrap","","","","","nowrap","","","","nowrap","nowrap","",""]
-        raw={12,13,14,16,21,22}
+        cls=["nowrap","desc","","","loc","","","","","nowrap","","","","","nowrap","","","","nowrap","nowrap","","","remarks"]
+        raw={11,12,13,15,20,21}
         trs.append("<tr>"+"".join(f'<td class="{cls[i]}">{x if i in raw else _e(_shown(x))}</td>' for i,x in enumerate(vals))+"</tr>")
     H=[
-        "Date / Time","Description / Address","Remarks","Contact Name","Contact No.",
-        "Location","Category / Use","Property Type","Area","Floor","Rent / Sale","Amount",
-        "Google Pin","Media","Action","Verification","History","Assigned To",
-        "Source","Source ID","Property ID","Edit","Delete"
+        "Date / Time","Description / Address","Contact Name","Contact No.","Location",
+        "Category / Use","Property Type","Area","Floor","Rent / Sale","Amount",
+        "Google Pin","Media","Verify","Verification","History","Assigned To","Source",
+        "Source ID","Property ID","Edit","Delete","Remarks"
     ]
-    widths=[170,360,420,140,140,180,150,170,120,110,100,120,110,190,100,110,100,120,130,180,180,90,90]
+    widths=[170,520,140,140,180,150,170,120,110,100,120,110,190,100,110,100,120,130,180,180,90,90,360]
     colgroup="<colgroup>"+"".join(f'<col style="width:{w}px;min-width:{w}px;max-width:{w}px">' for w in widths)+"</colgroup>"
     return _filter_form(q,location,category,transaction,status,assigned,limit)+f'<div class="dbtools"><b>Table</b><button type="button" onclick="dbCompact()">Compact</button><button type="button" onclick="dbZoom(-1)">−</button><button type="button" onclick="dbZoom(1)">+</button><button type="button" onclick="dbZoomReset()">Reset</button></div><div class="tablebox"><table>{colgroup}<thead><tr>{"".join("<th>"+x+"</th>" for x in H)}</tr></thead><tbody>{"".join(trs) if trs else "<tr><td colspan=23>No records found</td></tr>"}</tbody></table></div>'
 
@@ -679,6 +700,33 @@ def register(core, served_app=None):
         <a class="btn good" href="/magazine-capture">+ Upload Magazine</a>
         <a class="btn good" href="/whatsapp-live">Open WhatsApp Live</a></div>"""
         return HTMLResponse(_shell("5 Property Databases",actions+f'<div class="grid">{cards}</div>'))
+
+    @app.post("/alliance/final/database/manual/{pc}/verify-source")
+    async def verify_manual_source(pc:str,req:Request):
+        _login(core,req)
+        form=await req.form(); status=str(form.get("status") or "VERIFIED").upper(); actor=str(form.get("verified_by") or "team")
+        normalized="VERIFIED" if status in ("VERIFIED","AVAILABLE") else "UNVERIFIED"
+        with e.begin() as cx:
+            cx.execute(text("""UPDATE pi_operational_properties
+                SET verification_status=:st,updated_at=NOW()
+                WHERE property_code=:pc AND COALESCE(entry_source,'MANUAL')='MANUAL'"""),{"st":normalized,"pc":pc})
+        try:
+            import alliance_operational_master_bridge_v12426 as bridge
+            bridge.sync_property(e,pc,actor)
+        except Exception:
+            pass
+        return RedirectResponse("/alliance/final/database/manual",303)
+
+    @app.post("/alliance/final/database/magazine/{pid}/verify-source")
+    async def verify_magazine_source(pid:str,req:Request):
+        _login(core,req)
+        form=await req.form(); status=str(form.get("status") or "VERIFIED").upper()
+        normalized="VERIFIED" if status in ("VERIFIED","AVAILABLE") else ("NOT AVAILABLE" if status=="NOT_AVAILABLE" else status)
+        with e.begin() as cx:
+            cx.execute(text("""UPDATE pi_magazine_complete_v860
+                SET verification_status=:st,updated_at=NOW()
+                WHERE property_id=:pid AND archived_at IS NULL"""),{"st":normalized,"pid":pid})
+        return RedirectResponse("/alliance/final/database/magazine",303)
 
     @app.post("/alliance/final/database/manual/{pc}/delete-source")
     def delete_manual_source(pc:str,req:Request):
