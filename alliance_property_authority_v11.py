@@ -3,9 +3,9 @@ import html, json, re
 from urllib.parse import quote
 from fastapi import Form, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
-from sqlalchemy import text
+from sqlalchemy import text, bindparam
 
-VERSION="12.0.2-WHATSAPP-BATCH-CONTACT-RESTORE"
+VERSION="12.0.3-FAST-WHATSAPP-CONTACT-AMOUNT-RECOVERY"
 SOURCES=("MASTER","NEWSPAPER","WHATSAPP","MAGAZINE","MANUAL")
 CATEGORY_OPTIONS=("Residential Sale","Residential Rent","Commercial Sale","Commercial Rent","Industrial Sale","Industrial Rent","Farmhouse Sale","Farmhouse Rent")
 
@@ -608,56 +608,91 @@ def _canonical_property_projection(r,source,e,contact_batch=None):
         "source_only":"-SOURCE-" in cid,
     }
 
-def _whatsapp_contact_batch(e):
-    """Fast canonical WhatsApp contact map from settled source links + clean WhatsApp master."""
-    out={}
+def _whatsapp_contact_batch(e,rows):
+    """Fast contact map only for canonical WhatsApp rows currently being rendered."""
+    ids=[str(r.get("canonical_id") or "") for r in rows if r.get("canonical_id")]
+    if not ids:return {}
     try:
         with e.connect() as cx:
-            exists=cx.execute(text("SELECT to_regclass('public.pi_whatsapp_property_master')")).scalar()
-            if not exists:return out
-            rows=cx.execute(text("""
-                SELECT l.canonical_id,l.source_pk,
-                       x.contact_name,x.phone_numbers,x.contact_name_number,x.all_contacts
-                FROM pi_master_source_links_v711 l
-                LEFT JOIN pi_whatsapp_property_master x
-                  ON CAST(x.record_id AS TEXT)=CAST(l.source_pk AS TEXT)
-                  OR CAST(x.id AS TEXT)=CAST(l.source_pk AS TEXT)
-                  OR CAST(x.canonical_key AS TEXT)=CAST(l.source_pk AS TEXT)
-                WHERE l.master_entity_type='PROPERTY'
+            stmt=text("""SELECT canonical_id,source_pk
+                FROM pi_master_source_links_v711
+                WHERE master_entity_type='PROPERTY'
+                  AND canonical_id IN :ids
                   AND (
-                    UPPER(COALESCE(l.source_type,'')) LIKE '%WHATSAPP%'
-                    OR UPPER(COALESCE(l.source_table,'')) LIKE '%WHATSAPP%'
+                    UPPER(COALESCE(source_type,'')) LIKE '%WHATSAPP%'
+                    OR UPPER(COALESCE(source_table,'')) LIKE '%WHATSAPP%'
                   )
-                ORDER BY l.created_at DESC NULLS LAST,l.id DESC
-                LIMIT 20000
-            """)).mappings().all()
-        for r in rows:
-            cid=str(r.get("canonical_id") or "")
-            if not cid or cid in out:continue
+                ORDER BY created_at DESC NULLS LAST,id DESC
+            """).bindparams(bindparam("ids",expanding=True))
+            links=cx.execute(stmt,{"ids":ids}).mappings().all()
+            cid_to_pk={}
+            for r in links:
+                cid=str(r.get("canonical_id") or "");pk=str(r.get("source_pk") or "")
+                if cid and pk and cid not in cid_to_pk:cid_to_pk[cid]=pk
+            pks=list(dict.fromkeys(cid_to_pk.values()))
+            if not pks:return {}
+            exists=cx.execute(text("SELECT to_regclass('public.pi_whatsapp_property_master')")).scalar()
+            if not exists:return {}
+            stmt2=text("""SELECT CAST(record_id AS TEXT) record_id,CAST(id AS TEXT) id_text,
+                       CAST(canonical_key AS TEXT) canonical_key,
+                       contact_name,phone_numbers,contact_name_number,all_contacts
+                FROM pi_whatsapp_property_master
+                WHERE CAST(record_id AS TEXT) IN :p1
+                   OR CAST(id AS TEXT) IN :p2
+                   OR CAST(canonical_key AS TEXT) IN :p3
+            """).bindparams(
+                bindparam("p1",expanding=True),bindparam("p2",expanding=True),bindparam("p3",expanding=True)
+            )
+            contacts=cx.execute(stmt2,{"p1":pks,"p2":pks,"p3":pks}).mappings().all()
+        by_pk={}
+        for r in contacts:
             phone=_phones_from_any({
                 "phone_numbers":r.get("phone_numbers"),
                 "contact_name_number":r.get("contact_name_number"),
                 "all_contacts":r.get("all_contacts"),
             })
-            out[cid]={"name":str(r.get("contact_name") or "").strip(),"phone":phone,"source_pk":str(r.get("source_pk") or "")}
+            rec={"name":str(r.get("contact_name") or "").strip(),"phone":phone}
+            for k in ("record_id","id_text","canonical_key"):
+                v=str(r.get(k) or "")
+                if v:by_pk[v]=rec
+        out={}
+        for cid,pk in cid_to_pk.items():
+            if pk in by_pk:out[cid]=dict(by_pk[pk],source_pk=pk)
+        return out
     except Exception:
-        pass
-    return out
+        return {}
+
 
 def _magazine_amounts(cr,tx,amount):
+    """Show structured amount first; recover only explicit numeric evidence from source line."""
     rent="";sale=""
-    if str(tx).upper() in ("RENT","LEASE"):
+    txu=str(tx or "").upper()
+    if txu in ("RENT","LEASE"):
         rent=_display_text(_first(cr,"rent_text","rent_amount","monthly_rent","rent","asking_rent") or amount)
-    elif str(tx).upper()=="SALE":
+    elif txu=="SALE":
         sale=_display_text(_first(cr,"sale_text","sale_amount","sale_price","asking_price","price") or amount)
     else:
         rent=_display_text(_first(cr,"rent_text","rent_amount","monthly_rent","asking_rent") or "")
         sale=_display_text(_first(cr,"sale_text","sale_amount","sale_price","asking_price") or "")
+
+    blob=" ".join(str(cr.get(k) or "") for k in ("description","original_description","raw_line","source_text","details"))
+    # Typical magazine shorthand: @35TH, @1.5L, RENT 2.5L, SALE 5CR, PRICE 85000.
+    pats=[
+        r"(?i)(?:@|RENT\s*[:@-]?\s*)(\d+(?:\.\d+)?\s*(?:TH|K|L|LAC|LAKH|CR|CRORE)(?:\s*/?\s*(?:MONTH|PM|SQFT|SF))?)",
+        r"(?i)(?:SALE|PRICE|DEMAND|ASKING)\s*[:@-]?\s*(?:RS\.?\s*)?(\d+(?:\.\d+)?\s*(?:TH|K|L|LAC|LAKH|CR|CRORE)?)",
+    ]
+    if txu in ("RENT","LEASE") and not rent:
+        m=re.search(pats[0],blob)
+        if m:rent=m.group(1).strip()
+    if txu=="SALE" and not sale:
+        m=re.search(pats[1],blob)
+        if m:sale=m.group(1).strip()
     return rent,sale
+
 
 def _property_table(core,e,req,source,q,location,category,transaction,status,assigned,limit):
     rows=_property_rows(e,source,q,location,category,transaction,status,assigned,limit)
-    wa_contacts=_whatsapp_contact_batch(e) if source=="WHATSAPP" else {}
+    wa_contacts=_whatsapp_contact_batch(e,rows) if source=="WHATSAPP" else {}
     prepared=[]
     for r in rows:
         p=_canonical_property_projection(r,source,e,wa_contacts)
