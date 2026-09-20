@@ -4,7 +4,7 @@ from fastapi import Form, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import text
 
-VERSION="10.5.0-ASTRA-EVIDENCE-RECOVERY"
+VERSION="10.5.1-ASTRA-EVIDENCE-RECOVERY"
 PROPERTY_SOURCES=("MASTER","WHATSAPP","MANUAL","NEWSPAPER","MAGAZINE")
 REQUIREMENT_SOURCES=("MASTER","WHATSAPP","MANUAL")
 SOURCES=PROPERTY_SOURCES
@@ -126,7 +126,7 @@ def _display_location(value,cr):
     return _evidence_location(cr,loc) or "Needs verification"
 
 def _manual_description(cr,r):
-    direct=_first(cr,"team_description","description_edit","description","property_description","original_description","original_message","raw_line","details","remarks","additional_points","property_name","property_details","notes")
+    direct=_first(cr,"team_description","description_edit","description","property_description","original_description","original_message","raw_line","source_text","details","remarks","additional_points","property_name","property_details","notes")
     if direct not in (None,"",[],{}): return str(direct).strip()
     parts=[]
     for label,keys in (
@@ -217,7 +217,7 @@ def _property_rows(e,source,q,location,category,transaction,status,assigned,limi
                             "price_raw":_first(d,"rent_amount","sale_amount","amount","price") or "",
                             "created_at":_first(d,"created_at","entry_date"),
                             "updated_at":_first(d,"updated_at","created_at","entry_date"),
-                            "verification_status":_first(d,"verification_status","status") or "UNVERIFIED",
+                            "verification_status":_first(d,"verification_status") or "UNVERIFIED",
                             "availability_status":_first(d,"availability_status","status") or "UNKNOWN",
                             "assigned_to":_first(d,"assigned_to","team_member") or "",
                             "clean_record":dict(d,source_table="pi_operational_properties",
