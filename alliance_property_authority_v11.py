@@ -5,7 +5,7 @@ from fastapi import Form, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from sqlalchemy import text
 
-VERSION="12.0.1-WHATSAPP-LINEAGE-CONTACT-RESTORE"
+VERSION="12.0.2-WHATSAPP-BATCH-CONTACT-RESTORE"
 SOURCES=("MASTER","NEWSPAPER","WHATSAPP","MAGAZINE","MANUAL")
 CATEGORY_OPTIONS=("Residential Sale","Residential Rent","Commercial Sale","Commercial Rent","Industrial Sale","Industrial Rent","Farmhouse Sale","Farmhouse Rent")
 
@@ -514,7 +514,7 @@ def _manual_media_summary(e,cr):
         pass
     return out
 
-def _canonical_property_projection(r,source,e):
+def _canonical_property_projection(r,source,e,contact_batch=None):
     """One display schema for Master, Manual, Magazine, Newspaper and WhatsApp."""
     cr=_flat_record(r.get("clean_record"))
     cid=str(r.get("canonical_id") or "")
@@ -571,8 +571,13 @@ def _canonical_property_projection(r,source,e):
     if source=="MANUAL":amount=_manual_amount_from_evidence(cr,amount)
 
     cname,cphone=_contacts(cr)
-    if source=="WHATSAPP" and not cphone:
-        cphone=_whatsapp_sender_contact(e,cid,cr)
+    if source=="WHATSAPP":
+        b=(contact_batch or {}).get(cid,{})
+        if not cname and b.get("name"):cname=b.get("name")
+        if not cphone and b.get("phone"):cphone=b.get("phone")
+        # Last-resort live evidence lookup only when the settled clean master has no contact.
+        if not cphone and not contact_batch:
+            cphone=_whatsapp_sender_contact(e,cid,cr)
     stat=r.get("availability_status")
     if not stat or stat=="UNKNOWN":stat=r.get("verification_status") or _first(cr,"verification_status","status") or "UNVERIFIED"
 
@@ -603,6 +608,42 @@ def _canonical_property_projection(r,source,e):
         "source_only":"-SOURCE-" in cid,
     }
 
+def _whatsapp_contact_batch(e):
+    """Fast canonical WhatsApp contact map from settled source links + clean WhatsApp master."""
+    out={}
+    try:
+        with e.connect() as cx:
+            exists=cx.execute(text("SELECT to_regclass('public.pi_whatsapp_property_master')")).scalar()
+            if not exists:return out
+            rows=cx.execute(text("""
+                SELECT l.canonical_id,l.source_pk,
+                       x.contact_name,x.phone_numbers,x.contact_name_number,x.all_contacts
+                FROM pi_master_source_links_v711 l
+                LEFT JOIN pi_whatsapp_property_master x
+                  ON CAST(x.record_id AS TEXT)=CAST(l.source_pk AS TEXT)
+                  OR CAST(x.id AS TEXT)=CAST(l.source_pk AS TEXT)
+                  OR CAST(x.canonical_key AS TEXT)=CAST(l.source_pk AS TEXT)
+                WHERE l.master_entity_type='PROPERTY'
+                  AND (
+                    UPPER(COALESCE(l.source_type,'')) LIKE '%WHATSAPP%'
+                    OR UPPER(COALESCE(l.source_table,'')) LIKE '%WHATSAPP%'
+                  )
+                ORDER BY l.created_at DESC NULLS LAST,l.id DESC
+                LIMIT 20000
+            """)).mappings().all()
+        for r in rows:
+            cid=str(r.get("canonical_id") or "")
+            if not cid or cid in out:continue
+            phone=_phones_from_any({
+                "phone_numbers":r.get("phone_numbers"),
+                "contact_name_number":r.get("contact_name_number"),
+                "all_contacts":r.get("all_contacts"),
+            })
+            out[cid]={"name":str(r.get("contact_name") or "").strip(),"phone":phone,"source_pk":str(r.get("source_pk") or "")}
+    except Exception:
+        pass
+    return out
+
 def _magazine_amounts(cr,tx,amount):
     rent="";sale=""
     if str(tx).upper() in ("RENT","LEASE"):
@@ -616,9 +657,10 @@ def _magazine_amounts(cr,tx,amount):
 
 def _property_table(core,e,req,source,q,location,category,transaction,status,assigned,limit):
     rows=_property_rows(e,source,q,location,category,transaction,status,assigned,limit)
+    wa_contacts=_whatsapp_contact_batch(e) if source=="WHATSAPP" else {}
     prepared=[]
     for r in rows:
-        p=_canonical_property_projection(r,source,e)
+        p=_canonical_property_projection(r,source,e,wa_contacts)
         if not p:continue
         cid=p["id"]
         if p["source_only"]:
