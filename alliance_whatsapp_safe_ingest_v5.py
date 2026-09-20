@@ -287,8 +287,8 @@ def _worker():
     # ALLIANCE_WHATSAPP_SAFE_QUEUE_STARTUP_COORDINATOR_V1
     STATE["worker_alive"] = True
     STATE["worker_state"] = "WAITING_FOR_STARTUP_DRAIN"
-    STATE["startup_delay_seconds"] = 45
-    _worker_stop.wait(45)
+    STATE["startup_delay_seconds"] = 3
+    _worker_stop.wait(3)
     if _worker_stop.is_set():
         STATE["worker_alive"] = False
         STATE["worker_state"] = "STOPPED"
