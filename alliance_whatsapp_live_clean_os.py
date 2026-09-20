@@ -1232,17 +1232,34 @@ def _sync_requirements(main_engine, wa_engine, counters: Counter):
     for row in rows:
         sid = _requirement_source_id(row)
         if not sid:
-        counters["requirement_errors"] += 1
-        continue
+            counters["requirement_errors"] += 1
+            continue
         sh = _hash_payload(row, cols)
 
         if (sid,sh) in accounted:
-        counters["requirement_unchanged"] += 1
-        continue
+            counters["requirement_unchanged"] += 1
+            continue
 
         try:
-        ok, normalized, reason = _requirement_clean(row)
-        if not ok:
+            ok, normalized, reason = _requirement_clean(row)
+            if not ok:
+                _ledger(
+                    main_engine,
+                    entity_type="REQUIREMENT",
+                    source_table="wa_requirements",
+                    source_id=sid,
+                    source_hash=sh,
+                    classification="REQUIREMENT",
+                    clean_status="NEEDS_REVIEW",
+                    target_table=None,
+                    target_id=None,
+                    reason=reason,
+                    normalized=normalized,
+                )
+                counters["requirement_review"] += 1
+                continue
+
+            gid = _stage_requirement(main_engine, row, normalized, sh)
             _ledger(
                 main_engine,
                 entity_type="REQUIREMENT",
@@ -1250,45 +1267,28 @@ def _sync_requirements(main_engine, wa_engine, counters: Counter):
                 source_id=sid,
                 source_hash=sh,
                 classification="REQUIREMENT",
-                clean_status="NEEDS_REVIEW",
-                target_table=None,
-                target_id=None,
-                reason=reason,
+                clean_status="STAGED",
+                target_table=REQ_GATE,
+                target_id=gid,
+                reason="HUMAN_VERIFICATION_REQUIRED",
                 normalized=normalized,
             )
-            counters["requirement_review"] += 1
-            continue
-
-        gid = _stage_requirement(main_engine, row, normalized, sh)
-        _ledger(
-            main_engine,
-            entity_type="REQUIREMENT",
-            source_table="wa_requirements",
-            source_id=sid,
-            source_hash=sh,
-            classification="REQUIREMENT",
-            clean_status="STAGED",
-            target_table=REQ_GATE,
-            target_id=gid,
-            reason="HUMAN_VERIFICATION_REQUIRED",
-            normalized=normalized,
-        )
-        counters["requirements_staged"] += 1
+            counters["requirements_staged"] += 1
         except Exception as exc:
-        counters["requirement_errors"] += 1
-        _ledger(
-            main_engine,
-            entity_type="REQUIREMENT",
-            source_table="wa_requirements",
-            source_id=sid,
-            source_hash=sh,
-            classification="REQUIREMENT",
-            clean_status="ERROR",
-            target_table=None,
-            target_id=None,
-            reason=f"{type(exc).__name__}: {exc}"[:1000],
-            normalized={"source_id": sid},
-        )
+            counters["requirement_errors"] += 1
+            _ledger(
+                main_engine,
+                entity_type="REQUIREMENT",
+                source_table="wa_requirements",
+                source_id=sid,
+                source_hash=sh,
+                classification="REQUIREMENT",
+                clean_status="ERROR",
+                target_table=None,
+                target_id=None,
+                reason=f"{type(exc).__name__}: {exc}"[:1000],
+                normalized={"source_id": sid},
+            )
 
 
 def _count(engine, sql: str, params: Optional[dict] = None) -> int:
@@ -1302,8 +1302,8 @@ def _try_job_lock(engine) -> bool:
     try:
         ok = bool(
         conn.execute(
-        text("SELECT pg_try_advisory_lock(:k)"),
-        {"k": JOB_LOCK_KEY},
+            text("SELECT pg_try_advisory_lock(:k)"),
+            {"k": JOB_LOCK_KEY},
         ).scalar()
         )
         if not ok:
