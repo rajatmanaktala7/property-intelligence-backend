@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
 
 
 VERSION = "4.1-ISOLATED-DATABASE-MATCHER-AUTHORITY"
@@ -2354,6 +2354,35 @@ class HealthFirstDispatcher:
 
         if path in self.FRESHNESS_PATHS:
             await self._serve_freshness(scope, receive, send)
+            return
+
+        # GLOBAL DASHBOARD CANONICALIZATION
+        # Any historical Dashboard/Home URL must land on the single current
+        # Alliance Command Centre. This is enforced at the outermost ASGI
+        # boundary, before legacy middleware or routes can serve an old UI.
+        legacy_dashboard_paths = {
+            "/workspace",
+            "/team-dashboard",
+            "/team-workspace-clean",
+            "/simple-dashboard",
+            "/v14-dashboard",
+            "/v15-dashboard",
+            "/final-dashboard",
+            "/final-dashboard-v2",
+            "/final-dashboard-v3",
+            "/data-command-center",
+            "/alliance",
+            "/alliance/legacy/team-command-centre",
+            "/alliance/legacy/business-os-command",
+            "/alliance/legacy/production-surface-home",
+        }
+        if path in legacy_dashboard_paths:
+            response = RedirectResponse(
+                url="/alliance/primary",
+                status_code=307,
+                headers={"Cache-Control":"no-store"},
+            )
+            await response(scope, receive, send)
             return
 
         # ALLIANCE_ISOLATED_REQUIREMENT_DISPATCH_V2
