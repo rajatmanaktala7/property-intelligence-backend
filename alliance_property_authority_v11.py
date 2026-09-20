@@ -5,7 +5,7 @@ from fastapi import Form, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from sqlalchemy import text
 
-VERSION="11.9.0-REQUIREMENT-STYLE-VERIFY-TRANSACTION-FIX"
+VERSION="12.0.0-WHATSAPP-CONTACT-MAGAZINE-COMPACT-RESTORE"
 SOURCES=("MASTER","NEWSPAPER","WHATSAPP","MAGAZINE","MANUAL")
 CATEGORY_OPTIONS=("Residential Sale","Residential Rent","Commercial Sale","Commercial Rent","Industrial Sale","Industrial Rent","Farmhouse Sale","Farmhouse Rent")
 
@@ -77,6 +77,68 @@ def _contacts(cr):
     for x in re.findall(r"(?<!\d)(?:\+?91[-\s]?)?([6-9]\d{9})(?!\d)",blob):
         if x not in phones:phones.append(x)
     return str(name),", ".join(phones)
+def _whatsapp_sender_contact(cr):
+    """Evidence-only fallback from the WhatsApp live store. Never guess."""
+    try:
+        import whatsapp_live_bridge as live
+        we=getattr(live,"wa_engine",None)
+        if we is None:return ""
+        mid=str(_first(cr,"message_id","wa_message_id","external_message_id") or "")
+        rid=str(_first(cr,"wa_property_id","source_pk","property_id","record_id","id") or "")
+        raw=str(_first(cr,"original_message","raw_text","message","description","source_text") or "").strip()
+        def phones(v):
+            vals=[]
+            def walk(x):
+                if isinstance(x,dict):
+                    for y in x.values():walk(y)
+                elif isinstance(x,(list,tuple,set)):
+                    for y in x:walk(y)
+                else:
+                    s=str(x or "").replace("@s.whatsapp.net","").replace("@c.us","")
+                    for m in re.findall(r"(?<!\d)(?:\+?91[\s.\-]?)?([6-9](?:[\s.\-]?\d){9})(?!\d)",s):
+                        p=re.sub(r"\D","",m)
+                        if len(p)==10 and p not in vals:vals.append(p)
+            walk(v)
+            return ", ".join(vals)
+        with we.connect() as cx:
+            # 1. Exact property/source record.
+            if rid:
+                for table,idcols in (
+                    ("wa_properties",("wa_property_id","id")),
+                    ("wa_property_master",("wa_property_id","id")),
+                    ("pi_whatsapp_property_master",("wa_property_id","id")),
+                ):
+                    for col in idcols:
+                        try:
+                            d=cx.execute(text(f"SELECT to_jsonb(x) FROM {table} x WHERE CAST({col} AS TEXT)=:r LIMIT 1"),{"r":rid}).scalar()
+                        except Exception:d=None
+                        if isinstance(d,dict):
+                            p=phones({"sender_phone":d.get("sender_phone"),"contact_phone":d.get("contact_phone"),"sender_jid":d.get("sender_jid"),"participant":d.get("participant")})
+                            if p:return p
+                            mid=mid or str(d.get("message_id") or "")
+            # 2. Exact message provenance.
+            if mid:
+                try:d=cx.execute(text("SELECT to_jsonb(x) FROM wa_messages x WHERE CAST(message_id AS TEXT)=:m LIMIT 1"),{"m":mid}).scalar()
+                except Exception:d=None
+                if isinstance(d,dict):
+                    p=phones({"sender_phone":d.get("sender_phone"),"sender_jid":d.get("sender_jid"),"participant":d.get("participant")})
+                    if p:return p
+            # 3. Historical bridge exact raw-text fallback.
+            if raw:
+                for table in ("wa_bridge_events","wa_messages"):
+                    try:
+                        d=cx.execute(text(f"""SELECT to_jsonb(x) FROM {table} x
+                            WHERE (raw_text=:raw OR message=:raw OR original_message=:raw)
+                              AND NULLIF(BTRIM(COALESCE(sender_phone,'')),'') IS NOT NULL
+                            ORDER BY created_at DESC LIMIT 1"""),{"raw":raw}).scalar()
+                    except Exception:d=None
+                    if isinstance(d,dict):
+                        p=phones({"sender_phone":d.get("sender_phone"),"sender_jid":d.get("sender_jid"),"participant":d.get("participant")})
+                        if p:return p
+    except Exception:
+        pass
+    return ""
+
 def _clean_location_value(value, cr):
     loc=str(value or "").strip()
     bad_words=r"\b(construction|constructions|builder|builders|developer|developers|realty|properties|property|infra|infrastructure|owner|broker|dealer)\b"
@@ -121,24 +183,29 @@ def _derive_transaction(cr,current=""):
     return ""
 
 def _magazine_category(cr,tx):
-    """Never present page-carried category as row fact unless row evidence supports it."""
-    explicit=_first(cr,"property_category","category")
-    source=str(cr.get("category_source") or "").upper()
-    if not explicit:return ""
-    if source.startswith("PAGE_CONTEXT") or source.startswith("PAGE_DIRECT") or source.startswith("ROW_PLUS_PAGE"):
-        blob=" ".join(str(cr.get(k) or "") for k in ("description","original_description","original_section","property_type")).upper()
-        cat=str(explicit).upper()
-        asset=cat.rsplit(" ",1)[0] if " " in cat else cat
-        txword=cat.rsplit(" ",1)[-1] if " " in cat else ""
-        asset_ok={
-            "INDUSTRIAL":bool(re.search(r"\b(INDUSTRIAL|FACTORY|WAREHOUSE|GODOWN)\b",blob)),
-            "COMMERCIAL":bool(re.search(r"\b(COMMERCIAL|OFFICE|SHOWROOM|SHOP|RETAIL|MALL|MARKET|MKT)\b",blob)),
-            "RESIDENTIAL":bool(re.search(r"\b(RESIDENTIAL|BHK|APARTMENT|APT|FLAT|KOTHI|VILLA|\d+BR)\b",blob)),
-            "FARMHOUSE":bool(re.search(r"\b(FARM\s*HOUSE|FARMHOUSE|SAINIK FARM|GADIPUR FARM|DERA MANDI)\b",blob)),
-        }.get(asset,False)
-        tx_ok=(txword=="RENT" and bool(re.search(r"\b(RENT|TO LET|LEASING)\b",blob))) or (txword=="SALE" and bool(re.search(r"\b(SALE|RESALE|SELL|BOOKING|BKG)\b",blob)))
-        if not (asset_ok and tx_ok):return ""
-    return str(explicit)
+    """Controlled Magazine category: asset class × Rent/Sale.
+    Row evidence wins; valid magazine section/category is fallback only."""
+    txv=_derive_transaction(cr,tx)
+    suffix="Rent" if txv=="LEASE" else "Sale" if txv=="SALE" else ""
+    row_blob=" ".join(str(cr.get(k) or "") for k in (
+        "description","original_description","raw_line","source_text","details","property_type"
+    )).upper()
+    section_blob=" ".join(str(cr.get(k) or "") for k in (
+        "property_category","category","original_section","section_heading","category_source"
+    )).upper()
+
+    def asset_from(blob):
+        if re.search(r"\b(FARM\s*HOUSE|FARMHOUSE|SAINIK\s+FARM|GADIPUR\s+FARM|DERA\s+MANDI)\b",blob):return "Farmhouse"
+        if re.search(r"\b(BHK|APARTMENT|APT\b|FLAT|KOTHI|VILLA|PENTHOUSE|RESIDENTIAL)\b",blob):return "Residential"
+        if re.search(r"\b(OFFICE|SHOWROOM|SHOP\b|RETAIL|MALL|MARKET|MKT\b|COMMERCIAL)\b",blob):return "Commercial"
+        if re.search(r"\b(INDUSTRIAL|FACTORY|WAREHOUSE|GODOWN|SHED)\b",blob):return "Industrial"
+        return ""
+
+    asset=asset_from(row_blob) or asset_from(section_blob)
+    if asset and suffix:
+        return f"{asset} {suffix}"
+    return asset or ""
+
 
 def _safe_property_type(cr,source):
     v=_first(cr,"property_type","property_types","asset_type","subtype") or ""
@@ -345,7 +412,7 @@ nav a,.btn,button,.summarybtn{{background:#0d2238;color:white;text-decoration:no
 .good{{background:#067647!important;border-color:#067647!important}}.light{{background:#475467!important}}.danger{{background:#b42318!important}}
 .wrap{{max-width:2100px;margin:auto;padding:14px}}.card{{background:white;border:1px solid #98a2b3;padding:10px;margin-bottom:10px}}
 .searchgrid{{display:grid;grid-template-columns:2fr repeat(6,minmax(130px,1fr));gap:6px}}input,select{{width:100%;padding:7px;border:1px solid #98a2b3;border-radius:0}}
-.tablebox{{overflow:auto;max-height:76vh;border:1px solid #667085;background:white}}table{{border-collapse:collapse;width:3680px;min-width:3680px;font-size:11px;table-layout:fixed}}
+.tablebox{{overflow:auto;max-height:76vh;border:1px solid #667085;background:white}}table{{border-collapse:collapse;width:3680px;min-width:3680px;font-size:11px;table-layout:fixed}}.magazinebox{{max-height:82vh}}.magazinebox table{{font-size:10.5px!important}}.magazinebox th,.magazinebox td{{padding:5px 6px!important}}
 th,td{{border:1px solid #98a2b3;padding:7px;text-align:left;vertical-align:top;white-space:normal;overflow-wrap:anywhere;word-break:normal;overflow:hidden;font-weight:600}}
 th{{background:#e9eef5;position:sticky;top:0;z-index:4;white-space:nowrap;min-width:110px;font-weight:800}}
 tbody tr:nth-child(even) td{{background:#f8fafc}}tbody tr:hover td{{background:#eef4ff}}
@@ -458,6 +525,8 @@ def _canonical_property_projection(r,source,e):
     if source=="MANUAL":amount=_manual_amount_from_evidence(cr,amount)
 
     cname,cphone=_contacts(cr)
+    if source=="WHATSAPP" and not cphone:
+        cphone=_whatsapp_sender_contact(cr)
     stat=r.get("availability_status")
     if not stat or stat=="UNKNOWN":stat=r.get("verification_status") or _first(cr,"verification_status","status") or "UNVERIFIED"
 
@@ -488,16 +557,26 @@ def _canonical_property_projection(r,source,e):
         "source_only":"-SOURCE-" in cid,
     }
 
+def _magazine_amounts(cr,tx,amount):
+    rent="";sale=""
+    if str(tx).upper() in ("RENT","LEASE"):
+        rent=_display_text(_first(cr,"rent_text","rent_amount","monthly_rent","rent","asking_rent") or amount)
+    elif str(tx).upper()=="SALE":
+        sale=_display_text(_first(cr,"sale_text","sale_amount","sale_price","asking_price","price") or amount)
+    else:
+        rent=_display_text(_first(cr,"rent_text","rent_amount","monthly_rent","asking_rent") or "")
+        sale=_display_text(_first(cr,"sale_text","sale_amount","sale_price","asking_price") or "")
+    return rent,sale
+
 def _property_table(core,e,req,source,q,location,category,transaction,status,assigned,limit):
     rows=_property_rows(e,source,q,location,category,transaction,status,assigned,limit)
-    trs=[]
+    prepared=[]
     for r in rows:
         p=_canonical_property_projection(r,source,e)
         if not p:continue
         cid=p["id"]
         if p["source_only"]:
-            history="—"
-            sid=p.get("source_record_id") or ""
+            history="—";sid=p.get("source_record_id") or ""
             if source in ("MANUAL","MAGAZINE") and sid:
                 verify=f"""<details class="pop"><summary class="summarybtn good">Verify</summary><div><form method="post" action="/alliance/final/database/{source.lower()}/{_e(sid)}/verify-source">
                 <select name="status" required><option>VERIFIED</option><option>UNVERIFIED</option><option>AVAILABLE</option><option>NOT_AVAILABLE</option><option>FOLLOW-UP</option></select>
@@ -521,12 +600,33 @@ def _property_table(core,e,req,source,q,location,category,transaction,status,ass
             history=f'<a class="btn light" href="/alliance/primary/property/{_e(cid)}">History</a>'
             edit=f'<a class="btn light" href="/alliance/primary/property/{_e(cid)}/edit">Edit</a>'
             delete=f"""<form method="post" action="/alliance/primary/property/{_e(cid)}/delete" onsubmit="return confirm('Archive this property? Original source evidence remains preserved.');"><button class="danger">Delete</button></form>"""
+
         pin_html=(f'<a class="btn light" target="_blank" rel="noopener" href="{_e(p["google_pin"])}">Open Pin</a>' if p["google_pin"] else "—")
-        m=p["media"]; pc=m.get("property_code") or ""
+        m=p["media"];pc=m.get("property_code") or ""
         media_label=f'{m.get("images",0)} pics · {m.get("videos",0)} videos · {m.get("brochures",0)} docs'
         media_html=(f'<a class="btn light" href="/alliance/final/database/media/{quote(str(pc),safe="")}">{_e(media_label)}</a>' if pc and m.get("total",0)>0 else _e(media_label if pc else "—"))
+        prepared.append((r,p,verify,history,edit,delete,pin_html,media_html))
 
-        # Requirement-style order. Remarks is deliberately the final grid.
+    if source=="MAGAZINE":
+        trs=[]
+        for r,p,verify,history,edit,delete,pin_html,media_html in prepared:
+            cr=_flat_record(r.get("clean_record"))
+            rent_amount,sale_amount=_magazine_amounts(cr,p["transaction"],p["amount"])
+            vals=[
+                p["date"],p["description"],p["location"],p["category"],p["transaction"],
+                rent_amount,sale_amount,p["area"],p["floor"],p["contact_name"],p["contact_no"],
+                verify,p["status"],edit,delete,p["remarks"]
+            ]
+            cls=["nowrap","desc","loc","","nowrap","","","","","","","","nowrap","","","remarks"]
+            raw={11,13,14}
+            trs.append("<tr>"+"".join(f'<td class="{cls[i]}">{x if i in raw else _e(_shown(x))}</td>' for i,x in enumerate(vals))+"</tr>")
+        H=["Date / Time","Description / Address","Location","Category","Rent / Sale","Rent Amount","Sale Amount","Area","Floor","Contact Name","Contact No.","Verify","Verification","Edit","Delete","Remarks"]
+        widths=[155,420,150,135,90,120,120,105,90,120,125,90,100,80,80,280]
+        colgroup="<colgroup>"+"".join(f'<col style="width:{w}px;min-width:{w}px;max-width:{w}px">' for w in widths)+"</colgroup>"
+        return _filter_form(q,location,category,transaction,status,assigned,limit)+f'<div class="dbtools"><b>Magazine Compact Table</b><button type="button" onclick="dbCompact()">Compact</button><button type="button" onclick="dbZoom(-1)">−</button><button type="button" onclick="dbZoom(1)">+</button><button type="button" onclick="dbZoomReset()">Reset</button></div><div class="tablebox magazinebox"><table style="width:2280px;min-width:2280px">{colgroup}<thead><tr>{"".join("<th>"+x+"</th>" for x in H)}</tr></thead><tbody>{"".join(trs) if trs else "<tr><td colspan=16>No records found</td></tr>"}</tbody></table></div>'
+
+    trs=[]
+    for r,p,verify,history,edit,delete,pin_html,media_html in prepared:
         vals=[
             p["date"],p["description"],p["contact_name"],p["contact_no"],p["location"],
             p["category"],p["type"],p["area"],p["floor"],p["transaction"],p["amount"],
@@ -544,7 +644,7 @@ def _property_table(core,e,req,source,q,location,category,transaction,status,ass
     ]
     widths=[170,520,140,140,180,150,170,120,110,100,120,110,190,100,110,100,120,130,180,180,90,90,360]
     colgroup="<colgroup>"+"".join(f'<col style="width:{w}px;min-width:{w}px;max-width:{w}px">' for w in widths)+"</colgroup>"
-    return _filter_form(q,location,category,transaction,status,assigned,limit)+f'<div class="dbtools"><b>Table</b><button type="button" onclick="dbCompact()">Compact</button><button type="button" onclick="dbZoom(-1)">−</button><button type="button" onclick="dbZoom(1)">+</button><button type="button" onclick="dbZoomReset()">Reset</button></div><div class="tablebox"><table>{colgroup}<thead><tr>{"".join("<th>"+x+"</th>" for x in H)}</tr></thead><tbody>{"".join(trs) if trs else "<tr><td colspan=23>No records found</td></tr>"}</tbody></table></div>'
+    return _filter_form(q,location,category,transaction,status,assigned,limit)+f'<div class="dbtools"><b>Table</b><button type="button" onclick="dbCompact()">Compact</button><button type="button" onclick="dbZoom(-1)">−</button><button type="button" onclick="dbZoom(1)">+</button><button type="button" onclick="dbZoomReset()">Reset</button></div><div class="tablebox"><table><colgroup>{"".join(f"""<col style='width:{w}px;min-width:{w}px;max-width:{w}px'>""" for w in widths)}</colgroup><thead><tr>{"".join("<th>"+x+"</th>" for x in H)}</tr></thead><tbody>{"".join(trs) if trs else "<tr><td colspan=23>No records found</td></tr>"}</tbody></table></div>'
 
 def _requirement_table(e,source,q,location,category,transaction,status,assigned,limit):
     rows=_requirement_rows(e,source,q,location,category,transaction,status,assigned,limit)
