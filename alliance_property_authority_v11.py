@@ -5,7 +5,7 @@ from fastapi import Form, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from sqlalchemy import text, bindparam
 
-VERSION="12.5.0-DEDICATED-WHATSAPP-RENT-SALE-LIVE"
+VERSION="12.6.0-WHATSAPP-EXPLICIT-FIELD-RECOVERY"
 SOURCES=("MASTER","NEWSPAPER","WHATSAPP","MAGAZINE","MANUAL")
 CATEGORY_OPTIONS=("Residential Sale","Residential Rent","Commercial Sale","Commercial Rent","Industrial Sale","Industrial Rent","Farmhouse Sale","Farmhouse Rent")
 
@@ -800,24 +800,94 @@ def _rent_sale_label(tx):
     if t in ("SALE","SELL","RESALE"): return "Sale"
     return ""
 
+def _wa_explicit_from_text(text_value):
+    """Recover only values explicitly written in WhatsApp source text; never infer/guess."""
+    raw=str(text_value or "")
+    out={"area":"","price":"","configuration":"","property_type":"","phone":""}
+
+    # Area with explicit unit.
+    area_patterns=[
+        r"(?i)\b(\d[\d,]*(?:\.\d+)?)\s*(sq\.?\s*ft|sqft|sft|square\s*feet|sq\.?\s*yds?|sqyds?|square\s*yards?|sq\.?\s*m(?:tr|trs|eters?)?|sqm|acres?)\b",
+        r"(?i)\b(area|size|plot)\s*[:\-]?\s*(\d[\d,]*(?:\.\d+)?)\s*(sq\.?\s*ft|sqft|sft|sq\.?\s*yds?|sqyds?|sq\.?\s*m(?:tr|trs)?|sqm|acres?)\b",
+    ]
+    for pat in area_patterns:
+        m=re.search(pat,raw)
+        if m:
+            if len(m.groups())==2:
+                out["area"]=(m.group(1)+" "+m.group(2)).strip()
+            else:
+                out["area"]=(m.group(2)+" "+m.group(3)).strip()
+            break
+
+    # Configuration / explicit property type.
+    m=re.search(r"(?i)\b(\d+(?:\.5)?\s*BHK|\d+\s*RK|studio\s*apartment)\b",raw)
+    if m: out["configuration"]=m.group(1).strip()
+    type_patterns=[
+        ("Office",r"(?i)\boffice(?:\s+space)?\b"),
+        ("Shop",r"(?i)\bshop\b"),
+        ("Villa",r"(?i)\bvilla\b"),
+        ("Bungalow",r"(?i)\bbungalow\b"),
+        ("Plot",r"(?i)\bplot\b"),
+        ("Land",r"(?i)\bland\b"),
+        ("Restaurant",r"(?i)\brestaurant\b"),
+        ("Hotel",r"(?i)\bhotel\b"),
+        ("Farm House",r"(?i)\bfarm\s*house\b"),
+        ("Apartment",r"(?i)\b(flat|apartment)\b"),
+        ("Warehouse",r"(?i)\bwarehouse\b"),
+        ("Banquet",r"(?i)\bbanquet\b"),
+    ]
+    for label,pat in type_patterns:
+        if re.search(pat,raw):
+            out["property_type"]=label
+            break
+
+    # Explicit monetary evidence. Preserve original unit words.
+    money_patterns=[
+        r"(?i)(?:rent|asking|price|demand)\s*[:@\-]?\s*(?:rs\.?|₹)?\s*(\d[\d,]*(?:\.\d+)?)\s*(crores?|cr|lakhs?|lacs?|lac|l|thousand|k)?(?:\s*/?\s*(?:month|pm|p\.m\.))?",
+        r"(?i)(?:rs\.?|₹)\s*(\d[\d,]*(?:\.\d+)?)\s*(crores?|cr|lakhs?|lacs?|lac|l|thousand|k)?(?:\s*/?\s*(?:month|pm|p\.m\.))?",
+        r"(?i)\b(\d+(?:\.\d+)?)\s*(crores?|cr|lakhs?|lacs?|lac|l)\s*(?:per\s*month|/\s*month|pm|p\.m\.)\b",
+    ]
+    for pat in money_patterns:
+        m=re.search(pat,raw)
+        if m:
+            num=m.group(1)
+            unit=(m.group(2) or "").strip()
+            out["price"]=("₹"+num+(" "+unit if unit else "")).strip()
+            if re.search(r"(?i)per\s*month|/\s*month|\bpm\b|p\.m\.",m.group(0)):
+                out["price"] += "/month"
+            break
+
+    out["phone"]=_phones_from_any(raw)
+    return out
+
 def _whatsapp_source_table(rows):
     trs=[]
     for r in rows:
         cr=_flat_record(r.get("clean_record"))
         rid=_display_text(_first(cr,"record_id","source_record_id","source_id","wa_property_id") or str(r.get("canonical_id") or "").replace("WHATSAPP-SOURCE-","").replace("WHATSAPP-LIVE-",""))
-        desc=_display_text(_first(cr,"description","raw_message","original_message","source_text") or "")
+        desc=_display_text(_first(cr,"description","raw_message","original_message","original_message_text","source_text") or "")
+        evidence=_display_text(_first(cr,"raw_message","original_message","original_message_text","description","source_text") or desc)
+        explicit=_wa_explicit_from_text(evidence)
         loc=_display_text(r.get("locality") or _first(cr,"location","locality","micro_market","city") or "")
         tx=_rent_sale_label(r.get("transaction_type") or _first(cr,"transaction_type","rent_sale","rent_or_sale"))
-        area=_display_text(_first(cr,"area_text","area","available_area","area_sqft") or r.get("area_sqft") or "")
-        config=_display_text(_first(cr,"property_type","configuration_details","asset_class") or "")
-        price=_display_text(_first(cr,"amount_text","price","rent_text","rent_amount","sale_amount","sale_price") or r.get("price_raw") or "")
+        area=_display_text(_first(cr,"area_text","area","available_area","area_sqft") or r.get("area_sqft") or explicit["area"])
+        config=_display_text(_first(cr,"configuration_details","configuration","property_type","asset_class","subtype","family") or explicit["configuration"] or explicit["property_type"])
+        price=_display_text(_first(cr,"amount_text","price","rent_text","rent_amount","rent_inr","sale_amount","sale_price","sale_price_inr") or r.get("price_raw") or explicit["price"])
         cname,cphone=_contacts(cr)
+        if not cname:
+            cname=_display_text(_first(cr,"sender_name","broker_name","owner_name") or "")
         if not cphone:
             cphone=_phones_from_any({
                 "contact_name_number":cr.get("contact_name_number"),
                 "all_contacts":cr.get("all_contacts"),
+                "phones":cr.get("phones"),
+                "sender_phone":cr.get("sender_phone"),
+                "broker_phone":cr.get("broker_phone"),
+                "owner_phone":cr.get("owner_phone"),
                 "raw_message":cr.get("raw_message"),
-            })
+                "original_message":cr.get("original_message"),
+                "description":cr.get("description"),
+            }) or explicit["phone"]
         src=_display_text(_first(cr,"source","source_group","source_type") or "WhatsApp")
         dt=_fmt_dt(r.get("updated_at") or r.get("created_at") or _first(cr,"created_at","captured_on","entry_datetime"))
         ver=_display_text(r.get("verification_status") or _first(cr,"verification_status","verification") or "UNVERIFIED")
