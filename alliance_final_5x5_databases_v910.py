@@ -4,7 +4,7 @@ from fastapi import Form, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import text
 
-VERSION="9.5.3-MANUAL-DATABASE-COMPLETE-UNION"
+VERSION="9.6.0-MANUAL-CLEAN-MASTER-MATCHER-BRIDGE"
 SOURCES=("MASTER","NEWSPAPER","WHATSAPP","MAGAZINE","MANUAL")
 CATEGORY_OPTIONS=("Residential Sale","Residential Rent","Commercial Sale","Commercial Rent","Industrial Sale","Industrial Rent","Farmhouse Sale","Farmhouse Rent")
 
@@ -73,6 +73,32 @@ def _clean_location_value(value, cr):
     if re.search(r"\b(construction|constructions|builder|builders|developer|developers|realty|properties|infra|infrastructure)\b",lo):
         return "Needs verification"
     return loc
+
+def _manual_description(cr,r):
+    direct=_first(cr,"team_description","description_edit","description","property_description","original_description","original_message","raw_line","details","remarks","additional_points","property_name","property_details","notes")
+    if direct not in (None,"",[],{}): return str(direct).strip()
+    parts=[]
+    for label,keys in (
+        ("Property",("property_name","project_name","property_type","type","asset_type")),
+        ("Address",("address","exact_address","property_address")),
+        ("Location",("location","locality","area_name","micro_market","city")),
+        ("Area",("area_display","area","available_area","area_sqft","size","built_up_area","plot_area")),
+        ("Floor",("floor","floor_no","floor_number")),
+        ("Rent",("rent","rent_amount","monthly_rent","rent_in_figures")),
+        ("Sale",("sale_amount","sale_price","price","asking_price")),
+        ("Suitable for",("suitable_for","suitable_category","category","property_category","use_type")),
+        ("Possession",("possession","possession_status")),
+        ("Parking",("parking","parking_details")),
+        ("Remarks",("remarks","additional_points","notes")),
+    ):
+        v=_first(cr,*keys)
+        if v not in (None,"",[],{}):
+            if isinstance(v,(list,tuple)): v=", ".join(map(str,v))
+            parts.append(f"{label}: {v}")
+    if not parts:
+        for label,v in (("Location",r.get("locality") or r.get("city")),("Area",r.get("area_sqft")),("Transaction",r.get("transaction_type")),("Amount",r.get("price_raw"))):
+            if v not in (None,"",[],{}): parts.append(f"{label}: {v}")
+    return " | ".join(parts)
 
 def _property_category(cr,tx):
     explicit=_first(cr,"property_category","category")
@@ -338,22 +364,7 @@ def _property_table(core,e,req,source,q,location,category,transaction,status,ass
         cr=_dict(r.get("clean_record")); cid=str(r["canonical_id"])
         locality=_clean_location_value(r.get("locality") or _first(cr,"location","locality") or "", cr)
         address=_first(cr,"address","exact_address","property_address") or ""
-        desc=_first(cr,"team_description","description_edit","description","property_description","original_description","original_message","raw_line","source_text","details","remarks","additional_points","property_name") or ""
-        if not desc and source=="MANUAL":
-            parts=[]
-            for label,keys in (
-                ("Property",("property_name","project_name","property_type","type")),
-                ("Location",("location","locality","area_name","city")),
-                ("Area",("area","available_area","area_sqft","size","built_up_area")),
-                ("Floor",("floor","floor_no")),
-                ("Rent",("rent","rent_amount","monthly_rent")),
-                ("Sale",("sale_amount","sale_price","price","asking_price")),
-                ("Suitable for",("suitable_for","category","property_category")),
-                ("Remarks",("remarks","additional_points")),
-            ):
-                v=_first(cr,*keys)
-                if v not in (None,"",[],{}): parts.append(f"{label}: {v}")
-            desc=" | ".join(parts)
+        desc=_manual_description(cr,r) if source=="MANUAL" else (_first(cr,"team_description","description_edit","description","property_description","original_description","original_message","raw_line","source_text","details","remarks","additional_points","property_name") or "")
         if address and address.lower() not in str(desc).lower(): desc=(address+" · "+desc).strip(" ·")
         tx=r.get("transaction_type") or _first(cr,"transaction_type","rent_or_sale") or ""
         pcat=_property_category(cr,tx)
@@ -383,7 +394,8 @@ def _property_table(core,e,req,source,q,location,category,transaction,status,ass
         trs.append("<tr>"+"".join(f'<td class="{cls[i]}">{x if i in (13,14,17,18) else _e(_shown(x))}</td>' for i,x in enumerate(vals))+"</tr>")
     H=["Property ID","Location","Description / Address","Property Category","Property Type","Area","Floor","Rent/Sale","Amount","Contact Name","Contact No.","Date & Time","Status","Verify","History","Assigned To","Source","Edit","Delete"]
     extra_class=" manual-unified" if source=="MANUAL" else ""
-    return _filter_form(q,location,category,transaction,status,assigned,limit)+f'<div class="dbtools"><b>Table</b><button type="button" onclick="dbCompact()">Compact</button><button type="button" onclick="dbZoom(-1)">−</button><button type="button" onclick="dbZoom(1)">+</button><button type="button" onclick="dbZoomReset()">Reset</button></div><div class="tablebox{extra_class}"><table><thead><tr>{"".join("<th>"+x+"</th>" for x in H)}</tr></thead><tbody>{"".join(trs) if trs else "<tr><td colspan=19>No records found</td></tr>"}</tbody></table></div>'
+    matcher_bridge=("<div class=\"card\"><b>Manual Property Database cleaned.</b> These properties feed the canonical Master Property inventory. <a class=\"btn good\" href=\"/alliance/master-requirement-matcher\">Open Requirements + Run Matcher</a> <small>Matcher searches MASTER PROPERTIES ONLY.</small></div>") if source=="MANUAL" else ""
+    return matcher_bridge+_filter_form(q,location,category,transaction,status,assigned,limit)+f'<div class="dbtools"><b>Table</b><button type="button" onclick="dbCompact()">Compact</button><button type="button" onclick="dbZoom(-1)">−</button><button type="button" onclick="dbZoom(1)">+</button><button type="button" onclick="dbZoomReset()">Reset</button></div><div class="tablebox{extra_class}"><table><thead><tr>{"".join("<th>"+x+"</th>" for x in H)}</tr></thead><tbody>{"".join(trs) if trs else "<tr><td colspan=19>No records found</td></tr>"}</tbody></table></div>'
 def _requirement_table(e,source,q,location,category,transaction,status,assigned,limit):
     rows=_requirement_rows(e,source,q,location,category,transaction,status,assigned,limit)
     trs=[]
