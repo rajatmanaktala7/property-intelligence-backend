@@ -467,9 +467,9 @@ def _load_core():
         # Serve settled database/search and matcher workspaces from isolated
         # authorities so legacy route ordering cannot intercept them.
         try:
-            import alliance_final_5x5_databases_v910 as database_authority_v910
+            import alliance_property_authority_v11 as property_authority_v11
             isolated_database_app = FastAPI(title="Alliance Database Authority", docs_url=None, redoc_url=None, openapi_url=None)
-            database_authority_v910.register(wrapped.core, served_app=isolated_database_app)
+            property_authority_v11.register(wrapped.core, served_app=isolated_database_app)
             # Keep Manual Property on the same canonical database renderer as
             # Master/WhatsApp/Newspaper/Magazine. The canonical renderer already
             # reads Manual source data; no special table/UI override is needed.
@@ -1613,7 +1613,7 @@ def _load_core():
         # registrar. This prevents alliance_manual_database_restore_v1150 or any
         # older route owner from serving a stale Manual Property page.
         try:
-            import alliance_final_5x5_databases_v910 as final_database_v910
+            import alliance_property_authority_v11 as final_database_v910
 
             final_database_paths = {
                 "/alliance/primary/databases",
@@ -1653,7 +1653,7 @@ def _load_core():
             stabilization = dict(stabilization or {})
             stabilization["final_database_route_authority_v2"] = {
                 "status": "READY",
-                "owner": "alliance_final_5x5_databases_v910",
+                "owner": "alliance_property_authority_v11",
                 "version": getattr(final_database_v910, "VERSION", None),
                 "requirements_touched": False,
                 "registered_after_manual_restore": True,
