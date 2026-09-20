@@ -4,7 +4,7 @@ from fastapi import Form, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import text
 
-VERSION="10.4.0-ASTRA-SOURCE-TRUTH-VIEWS"
+VERSION="10.5.0-ASTRA-EVIDENCE-RECOVERY"
 PROPERTY_SOURCES=("MASTER","WHATSAPP","MANUAL","NEWSPAPER","MAGAZINE")
 REQUIREMENT_SOURCES=("MASTER","WHATSAPP","MANUAL")
 SOURCES=PROPERTY_SOURCES
@@ -55,9 +55,9 @@ def _source_name(e,cid,etype):
         return a if not b or b==a else f"{a} · {b}"
     except Exception:return ""
 def _contacts(cr):
-    name=_first(cr,"contact_name","owner_name","broker_name","client_name","sender_name","name") or ""
+    name=_first(cr,"contact_name","owner_broker_name","owner_name","broker_name","client_name","sender_name","name") or ""
     vals=[]
-    for k in ("contact_number","contact_phone","owner_contact","owner_phone","broker_contact","broker_phone","phone","mobile"):
+    for k in ("contact_number","contact_phone","owner_broker_contact","owner_contact","owner_phone","broker_contact","broker_phone","phone","mobile"):
         v=cr.get(k)
         if v not in (None,"",[],{}): vals.append(str(v))
     p=cr.get("phones")
@@ -92,6 +92,38 @@ def _clean_location_value(value, cr):
                     return cand
         return "Needs verification"
     return loc
+
+def _evidence_location(cr, current=""):
+    """Recover a locality only from explicit source evidence; never guess."""
+    bad=lambda x: (not x) or str(x).strip().lower() in {"tara","royal construction","royal constructions"} or bool(re.search(r"\b(construction|constructions|builder|builders|developer|developers|realty|properties|infra|infrastructure|owner|broker|dealer)\b",str(x).lower()))
+    # Prefer already-structured geographic fields.
+    for k in ("micro_market","area_name","locality","city"):
+        v=cr.get(k)
+        if v and not bad(v) and str(v).strip().lower()!=str(current or "").strip().lower():
+            return str(v).strip()
+    blob=" | ".join(str(cr.get(k) or "") for k in ("address","exact_address","property_address","description","property_description","original_description","original_message","raw_line","source_text","details"))
+    # Explicit Delhi locality/address evidence seen in the source text.
+    patterns=[
+        r"\b(Lajpat\s+Nagar(?:\s*[- ]?\s*[1-4IVX]+)?)\b",
+        r"\b(Amar\s+Colony)\b",r"\b(Dayanand\s+Colony)\b",r"\b(Vikram\s+Vihar)\b",
+        r"\b(Maharani\s+Bagh)\b",r"\b(Mayfair\s+Garden)\b",r"\b(Malviya\s+Nagar)\b",
+        r"\b(Gulmohar\s+Park)\b",r"\b(Green\s+Park)\b",r"\b(Hauz\s+Khas)\b",
+        r"\b(Punjabi\s+Bagh)\b",r"\b(Paschim\s+Vihar)\b",r"\b(Rajouri\s+Garden)\b",
+        r"\b(Janakpuri)\b",r"\b(Patel\s+Nagar)\b",r"\b(Saket)\b",
+        r"\b(Noida(?:\s+Sector[- ]?\d+)?)\b",r"\b(Gurgaon(?:\s+Sector[- ]?\d+)?)\b",
+        r"\b(Faridabad(?:\s+Sector[- ]?\d+)?)\b",
+    ]
+    for p in patterns:
+        m=re.search(p,blob,re.I)
+        if m:return re.sub(r"\s+"," ",m.group(1)).strip()
+    return ""
+
+def _display_location(value,cr):
+    loc=str(value or "").strip()
+    guarded=_clean_location_value(loc,cr)
+    if guarded and guarded!="Needs verification" and guarded.lower() not in {"tara","royal construction","royal constructions"}:
+        return guarded
+    return _evidence_location(cr,loc) or "Needs verification"
 
 def _manual_description(cr,r):
     direct=_first(cr,"team_description","description_edit","description","property_description","original_description","original_message","raw_line","details","remarks","additional_points","property_name","property_details","notes")
@@ -346,7 +378,7 @@ def _property_table(core,e,req,source,q,location,category,transaction,status,ass
     trs=[]
     for r in rows:
         cr=_flat_record(r.get("clean_record")); cid=str(r["canonical_id"])
-        # Apply the semantic location guard to every property source view.\n        # Historical bad projections such as person/company names must never be\n        # presented as a locality merely because they reached a location column.\n        locality=_clean_location_value(r.get("locality") or _first(cr,"location","locality") or "", cr)
+        # Apply the semantic location guard to every property source view.\n        # Historical bad projections such as person/company names must never be\n        # presented as a locality merely because they reached a location column.\n        locality=_display_location(r.get("locality") or _first(cr,"location","locality") or "", cr)
         address=_first(cr,"address","exact_address","property_address") or ""
         desc=_first(cr,"team_description","description_edit","description","property_description","original_description","original_message","raw_line","source_text","details","remarks","additional_points","property_name") or ""
         # One display contract for every source. Structured evidence is turned
