@@ -7,7 +7,7 @@ import re
 from typing import Any
 
 from fastapi import Form, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from sqlalchemy import text
 
 VERSION = "13.5.0-ASTRA-LIVE-HANDLER-PROOF"
