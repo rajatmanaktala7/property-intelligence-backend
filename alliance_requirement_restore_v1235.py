@@ -1153,7 +1153,10 @@ def register(core, served_app=None):
             src = source.upper().strip()
             if src not in SOURCES or src == "MASTER":
                 return HTMLResponse(_shell("Run Match", '<div class="notice">Invalid source requirement.</div>'), status_code=400)
-            rows, _ = _source_rows(e, src)
+            if src == "MANUAL":
+                rows = _manual_operational_rows(e, 1000)
+            else:
+                rows, _ = _source_rows(e, src)
             selected = next((row for row in rows if str(row.get("source_pk") or "") == str(source_pk or "")), None)
             if not selected:
                 return HTMLResponse(_shell("Run Match", '<div class="notice"><b>Requirement not found.</b></div>'), status_code=404)
