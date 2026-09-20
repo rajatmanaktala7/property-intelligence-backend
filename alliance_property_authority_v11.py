@@ -113,7 +113,7 @@ def _derive_transaction(cr,current=""):
     cat=str(_first(cr,"property_category","category") or "").upper()
     if re.search(r"\bRENT\b|\bLEASE\b",cat):return "LEASE"
     if re.search(r"\bSALE\b|\bRESALE\b",cat):return "SALE"
-    blob=" ".join(str(cr.get(k) or "") for k in ("description","original_description","source_text","raw_line","original_message","details","remarks")).upper()
+    blob=" ".join(str(cr.get(k) or "") for k in ("description","original_description","source_text","raw_line","original_message","details","remarks","section_heading","original_section","source","category_source")).upper()
     # Do not treat LEASEHOLD as a rental transaction.
     blob=re.sub(r"\bLEASE[ -]*HOLD\b|\bLEASEHOLD\b"," ",blob)
     if re.search(r"\b(TO LET|FOR RENT|ON RENT|RENTAL|LEASING)\b",blob):return "LEASE"
@@ -184,15 +184,32 @@ def _property_rows(e,source,q,location,category,transaction,status,assigned,limi
             raw=cx.execute(text(f"""SELECT to_jsonb(t) FROM {table} t {where}
                 AND (:q='%%' OR to_jsonb(t)::text ILIKE :q)
                 {order} LIMIT :n"""),{"q":f"%{q.strip()}%","n":limit}).scalars().all()
+        parsed=[x if isinstance(x,dict) else json.loads(x) for x in raw]
+        page_tx={}
+        if source=="MAGAZINE":
+            from collections import Counter,defaultdict
+            votes=defaultdict(Counter)
+            for d in parsed:
+                pg=str(d.get("page_number") or "")
+                tx0=_derive_transaction(d,_first(d,"transaction_type","rent_sale","rent_or_sale") or "")
+                if pg and tx0:votes[pg][tx0]+=1
+            for pg,cnt in votes.items():
+                if cnt:
+                    txv,n=cnt.most_common(1)[0]
+                    total=sum(cnt.values())
+                    if n>=2 or (total==1 and len(cnt)==1):
+                        page_tx[pg]=txv
         out=[]
-        for x in raw:
-            d=x if isinstance(x,dict) else json.loads(x)
+        for d in parsed:
             sid=str(_first(d,"property_code","property_id","source_record_id","id") or "")
+            txv=_derive_transaction(d,_first(d,"transaction_type","rent_sale","rent_or_sale") or "")
+            if source=="MAGAZINE" and not txv:
+                txv=page_tx.get(str(d.get("page_number") or ""), "")
             out.append({
                 "canonical_id":source+"-SOURCE-"+sid,
                 "locality":_first(d,"location","locality","city") or "",
                 "city":_first(d,"city") or "",
-                "transaction_type":_derive_transaction(d,_first(d,"transaction_type","rent_sale","rent_or_sale") or ""),
+                "transaction_type":txv,
                 "area_sqft":_first(d,"area_sqft","area_value","area","available_area") or "",
                 "price_raw":_first(d,"rent_text","amount","amount_raw","rent_amount","sale_amount","price_raw","price") or "",
                 "created_at":_first(d,"created_at","entry_datetime","entry_date"),
@@ -200,7 +217,7 @@ def _property_rows(e,source,q,location,category,transaction,status,assigned,limi
                 "verification_status":_first(d,"verification_status") or "UNVERIFIED",
                 "availability_status":_first(d,"availability_status","status") or "UNKNOWN",
                 "assigned_to":_first(d,"assigned_to","team_member") or "",
-                "clean_record":dict(d,source_table=table,source_pk=sid,source_type=source),
+                "clean_record":dict(d,source_table=table,source_pk=sid,source_type=source,derived_transaction=txv),
             })
         return out
 
