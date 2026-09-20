@@ -470,8 +470,13 @@ def _load_core():
             import alliance_final_5x5_databases_v910 as database_authority_v910
             isolated_database_app = FastAPI(title="Alliance Database Authority", docs_url=None, redoc_url=None, openapi_url=None)
             database_authority_v910.register(wrapped.core, served_app=isolated_database_app)
+            # The outer dispatcher sends every /alliance/final/database/* request
+            # to this isolated app. Therefore the Manual database override must
+            # be registered HERE, not only on wrapped.core.
+            import alliance_manual_database_restore_v1150 as isolated_manual_db_v1150
+            isolated_manual_db_v1150.register(wrapped, served_app=isolated_database_app)
             DATABASE_APP = isolated_database_app
-            print("[early-database-authority-v1] READY")
+            print("[early-database-authority-v1] READY + MANUAL OVERRIDE")
         except Exception as exc:
             print("[early-database-authority-v1] warning:", type(exc).__name__, str(exc))
 
