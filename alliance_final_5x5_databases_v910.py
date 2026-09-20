@@ -4,7 +4,7 @@ from fastapi import Form, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import text
 
-VERSION="10.5.1-ASTRA-EVIDENCE-RECOVERY"
+VERSION="10.5.2-RESTORED-UI-HIDE-UNRESOLVED"
 PROPERTY_SOURCES=("MASTER","WHATSAPP","MANUAL","NEWSPAPER","MAGAZINE")
 REQUIREMENT_SOURCES=("MASTER","WHATSAPP","MANUAL")
 SOURCES=PROPERTY_SOURCES
@@ -379,6 +379,11 @@ def _property_table(core,e,req,source,q,location,category,transaction,status,ass
     for r in rows:
         cr=_flat_record(r.get("clean_record")); cid=str(r["canonical_id"])
         # Apply the semantic location guard to every property source view.\n        # Historical bad projections such as person/company names must never be\n        # presented as a locality merely because they reached a location column.\n        locality=_display_location(r.get("locality") or _first(cr,"location","locality") or "", cr)
+        # Source databases should show actionable property inventory only.
+        # Keep unresolved records in source storage for later review, but do not
+        # clutter operational property pages with an unverified fake locality.
+        if locality=="Needs verification":
+            continue
         address=_first(cr,"address","exact_address","property_address") or ""
         desc=_first(cr,"team_description","description_edit","description","property_description","original_description","original_message","raw_line","source_text","details","remarks","additional_points","property_name") or ""
         # One display contract for every source. Structured evidence is turned
