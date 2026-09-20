@@ -3,9 +3,9 @@ import html, json, re
 from urllib.parse import quote
 from fastapi import Form, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
-from sqlalchemy import text
+from sqlalchemy import text, bindparam
 
-VERSION="12.0.2-WHATSAPP-BATCH-CONTACT-RESTORE"
+VERSION="12.0.4-MAGAZINE-LOCALITY-CATEGORY-COMPACT-GRID"
 SOURCES=("MASTER","NEWSPAPER","WHATSAPP","MAGAZINE","MANUAL")
 CATEGORY_OPTIONS=("Residential Sale","Residential Rent","Commercial Sale","Commercial Rent","Industrial Sale","Industrial Rent","Farmhouse Sale","Farmhouse Rent")
 
@@ -230,7 +230,9 @@ def _derive_transaction(cr,current=""):
 
 def _magazine_category(cr,tx):
     """Controlled Magazine category: asset class × Rent/Sale.
-    Row evidence wins; valid magazine section/category is fallback only."""
+    Priority: row evidence -> locality intelligence -> section fallback.
+    This prevents residential localities such as Vasant Vihar inheriting an
+    Industrial heading from a neighboring/page section."""
     txv=_derive_transaction(cr,tx)
     suffix="Rent" if txv=="LEASE" else "Sale" if txv=="SALE" else ""
     row_blob=" ".join(str(cr.get(k) or "") for k in (
@@ -239,6 +241,7 @@ def _magazine_category(cr,tx):
     section_blob=" ".join(str(cr.get(k) or "") for k in (
         "property_category","category","original_section","section_heading","category_source"
     )).upper()
+    loc=str(_first(cr,"location","locality","area_name","micro_market","city") or "").upper()
 
     def asset_from(blob):
         if re.search(r"\b(FARM\s*HOUSE|FARMHOUSE|SAINIK\s+FARM|GADIPUR\s+FARM|DERA\s+MANDI)\b",blob):return "Farmhouse"
@@ -247,9 +250,22 @@ def _magazine_category(cr,tx):
         if re.search(r"\b(INDUSTRIAL|FACTORY|WAREHOUSE|GODOWN|SHED)\b",blob):return "Industrial"
         return ""
 
-    asset=asset_from(row_blob) or asset_from(section_blob)
-    if asset and suffix:
-        return f"{asset} {suffix}"
+    asset=asset_from(row_blob)
+
+    if not asset:
+        if re.search(r"\b(VASANT\s+VIHAR|VASANT\s+KUNJ|DEFENCE\s+COLONY|GREATER\s+KAILASH|GK\s*[12]?|PANCHSHEEL|HAUZ\s+KHAS|SAFDARJUNG|GREEN\s+PARK|MAHARANI\s+BAGH|JOR\s+BAGH|NEW\s+FRIENDS\s+COLONY|NFC|EAST\s+OF\s+KAILASH|CR\s+PARK|CHITRANJAN\s+PARK|GULMOHAR\s+PARK|UDAY\s+PARK|MAYFAIR\s+GARDEN|PUNJABI\s+BAGH|PASCHIM\s+VIHAR|RAJOURI\s+GARDEN|JANAKPURI|PATEL\s+NAGAR)\b",loc):
+            asset="Residential"
+        elif re.search(r"\b(OKHLA(?:\s+PHASE\s*[123])?|NARAINA(?:\s+INDUSTRIAL\s+AREA)?|WAZIRPUR(?:\s+INDUSTRIAL\s+AREA)?|MUNDKA|BAWANA|NARELA|MAYAPURI(?:\s+INDUSTRIAL\s+AREA)?|KIRTI\s+NAGAR\s+INDUSTRIAL)\b",loc):
+            asset="Industrial"
+        elif re.search(r"\b(CONNAUGHT\s+PLACE|CP\b|NEHRU\s+PLACE|SAKET\s+DISTRICT\s+CENTRE|JANAKPURI\s+DISTRICT\s+CENTRE|BHIKAJI\s+CAMA|NETAJI\s+SUBHASH\s+PLACE|NSP\b|KAROL\s+BAGH|LAJPAT\s+NAGAR|SOUTH\s+EXTENSION|GREATER\s+KAILASH\s+MARKET)\b",loc):
+            asset="Commercial"
+
+    if not asset:
+        # Section fallback is allowed only when it is internally coherent; never
+        # use it to override known locality intelligence.
+        asset=asset_from(section_blob)
+
+    if asset and suffix:return f"{asset} {suffix}"
     return asset or ""
 
 
@@ -458,7 +474,7 @@ nav a,.btn,button,.summarybtn{{background:#0d2238;color:white;text-decoration:no
 .good{{background:#067647!important;border-color:#067647!important}}.light{{background:#475467!important}}.danger{{background:#b42318!important}}
 .wrap{{max-width:2100px;margin:auto;padding:14px}}.card{{background:white;border:1px solid #98a2b3;padding:10px;margin-bottom:10px}}
 .searchgrid{{display:grid;grid-template-columns:2fr repeat(6,minmax(130px,1fr));gap:6px}}input,select{{width:100%;padding:7px;border:1px solid #98a2b3;border-radius:0}}
-.tablebox{{overflow:auto;max-height:76vh;border:1px solid #667085;background:white}}table{{border-collapse:collapse;width:3680px;min-width:3680px;font-size:11px;table-layout:fixed}}.magazinebox{{max-height:82vh}}.magazinebox table{{font-size:10.5px!important}}.magazinebox th,.magazinebox td{{padding:5px 6px!important}}
+.tablebox{{overflow:auto;max-height:76vh;border:1px solid #667085;background:white;scrollbar-gutter:stable both-edges}}table{{border-collapse:collapse;width:3680px;min-width:3680px;font-size:11px;table-layout:fixed}}.magazinebox{{max-height:82vh;overflow-x:scroll!important;overflow-y:auto!important;scrollbar-gutter:stable both-edges}}.magazinebox table{{font-size:10.5px!important}}.magazinebox th,.magazinebox td{{padding:5px 6px!important}}
 th,td{{border:1px solid #98a2b3;padding:7px;text-align:left;vertical-align:top;white-space:normal;overflow-wrap:anywhere;word-break:normal;overflow:hidden;font-weight:600}}
 th{{background:#e9eef5;position:sticky;top:0;z-index:4;white-space:nowrap;min-width:110px;font-weight:800}}
 tbody tr:nth-child(even) td{{background:#f8fafc}}tbody tr:hover td{{background:#eef4ff}}
@@ -608,56 +624,91 @@ def _canonical_property_projection(r,source,e,contact_batch=None):
         "source_only":"-SOURCE-" in cid,
     }
 
-def _whatsapp_contact_batch(e):
-    """Fast canonical WhatsApp contact map from settled source links + clean WhatsApp master."""
-    out={}
+def _whatsapp_contact_batch(e,rows):
+    """Fast contact map only for canonical WhatsApp rows currently being rendered."""
+    ids=[str(r.get("canonical_id") or "") for r in rows if r.get("canonical_id")]
+    if not ids:return {}
     try:
         with e.connect() as cx:
-            exists=cx.execute(text("SELECT to_regclass('public.pi_whatsapp_property_master')")).scalar()
-            if not exists:return out
-            rows=cx.execute(text("""
-                SELECT l.canonical_id,l.source_pk,
-                       x.contact_name,x.phone_numbers,x.contact_name_number,x.all_contacts
-                FROM pi_master_source_links_v711 l
-                LEFT JOIN pi_whatsapp_property_master x
-                  ON CAST(x.record_id AS TEXT)=CAST(l.source_pk AS TEXT)
-                  OR CAST(x.id AS TEXT)=CAST(l.source_pk AS TEXT)
-                  OR CAST(x.canonical_key AS TEXT)=CAST(l.source_pk AS TEXT)
-                WHERE l.master_entity_type='PROPERTY'
+            stmt=text("""SELECT canonical_id,source_pk
+                FROM pi_master_source_links_v711
+                WHERE master_entity_type='PROPERTY'
+                  AND canonical_id IN :ids
                   AND (
-                    UPPER(COALESCE(l.source_type,'')) LIKE '%WHATSAPP%'
-                    OR UPPER(COALESCE(l.source_table,'')) LIKE '%WHATSAPP%'
+                    UPPER(COALESCE(source_type,'')) LIKE '%WHATSAPP%'
+                    OR UPPER(COALESCE(source_table,'')) LIKE '%WHATSAPP%'
                   )
-                ORDER BY l.created_at DESC NULLS LAST,l.id DESC
-                LIMIT 20000
-            """)).mappings().all()
-        for r in rows:
-            cid=str(r.get("canonical_id") or "")
-            if not cid or cid in out:continue
+                ORDER BY created_at DESC NULLS LAST,id DESC
+            """).bindparams(bindparam("ids",expanding=True))
+            links=cx.execute(stmt,{"ids":ids}).mappings().all()
+            cid_to_pk={}
+            for r in links:
+                cid=str(r.get("canonical_id") or "");pk=str(r.get("source_pk") or "")
+                if cid and pk and cid not in cid_to_pk:cid_to_pk[cid]=pk
+            pks=list(dict.fromkeys(cid_to_pk.values()))
+            if not pks:return {}
+            exists=cx.execute(text("SELECT to_regclass('public.pi_whatsapp_property_master')")).scalar()
+            if not exists:return {}
+            stmt2=text("""SELECT CAST(record_id AS TEXT) record_id,CAST(id AS TEXT) id_text,
+                       CAST(canonical_key AS TEXT) canonical_key,
+                       contact_name,phone_numbers,contact_name_number,all_contacts
+                FROM pi_whatsapp_property_master
+                WHERE CAST(record_id AS TEXT) IN :p1
+                   OR CAST(id AS TEXT) IN :p2
+                   OR CAST(canonical_key AS TEXT) IN :p3
+            """).bindparams(
+                bindparam("p1",expanding=True),bindparam("p2",expanding=True),bindparam("p3",expanding=True)
+            )
+            contacts=cx.execute(stmt2,{"p1":pks,"p2":pks,"p3":pks}).mappings().all()
+        by_pk={}
+        for r in contacts:
             phone=_phones_from_any({
                 "phone_numbers":r.get("phone_numbers"),
                 "contact_name_number":r.get("contact_name_number"),
                 "all_contacts":r.get("all_contacts"),
             })
-            out[cid]={"name":str(r.get("contact_name") or "").strip(),"phone":phone,"source_pk":str(r.get("source_pk") or "")}
+            rec={"name":str(r.get("contact_name") or "").strip(),"phone":phone}
+            for k in ("record_id","id_text","canonical_key"):
+                v=str(r.get(k) or "")
+                if v:by_pk[v]=rec
+        out={}
+        for cid,pk in cid_to_pk.items():
+            if pk in by_pk:out[cid]=dict(by_pk[pk],source_pk=pk)
+        return out
     except Exception:
-        pass
-    return out
+        return {}
+
 
 def _magazine_amounts(cr,tx,amount):
+    """Show structured amount first; recover only explicit numeric evidence from source line."""
     rent="";sale=""
-    if str(tx).upper() in ("RENT","LEASE"):
+    txu=str(tx or "").upper()
+    if txu in ("RENT","LEASE"):
         rent=_display_text(_first(cr,"rent_text","rent_amount","monthly_rent","rent","asking_rent") or amount)
-    elif str(tx).upper()=="SALE":
+    elif txu=="SALE":
         sale=_display_text(_first(cr,"sale_text","sale_amount","sale_price","asking_price","price") or amount)
     else:
         rent=_display_text(_first(cr,"rent_text","rent_amount","monthly_rent","asking_rent") or "")
         sale=_display_text(_first(cr,"sale_text","sale_amount","sale_price","asking_price") or "")
+
+    blob=" ".join(str(cr.get(k) or "") for k in ("description","original_description","raw_line","source_text","details"))
+    # Typical magazine shorthand: @35TH, @1.5L, RENT 2.5L, SALE 5CR, PRICE 85000.
+    pats=[
+        r"(?i)(?:@|RENT\s*[:@-]?\s*)(\d+(?:\.\d+)?\s*(?:TH|K|L|LAC|LAKH|CR|CRORE)(?:\s*/?\s*(?:MONTH|PM|SQFT|SF))?)",
+        r"(?i)(?:SALE|PRICE|DEMAND|ASKING)\s*[:@-]?\s*(?:RS\.?\s*)?(\d+(?:\.\d+)?\s*(?:TH|K|L|LAC|LAKH|CR|CRORE)?)",
+    ]
+    if txu in ("RENT","LEASE") and not rent:
+        m=re.search(pats[0],blob)
+        if m:rent=m.group(1).strip()
+    if txu=="SALE" and not sale:
+        m=re.search(pats[1],blob)
+        if m:sale=m.group(1).strip()
     return rent,sale
+
 
 def _property_table(core,e,req,source,q,location,category,transaction,status,assigned,limit):
     rows=_property_rows(e,source,q,location,category,transaction,status,assigned,limit)
-    wa_contacts=_whatsapp_contact_batch(e) if source=="WHATSAPP" else {}
+    wa_contacts=_whatsapp_contact_batch(e,rows) if source=="WHATSAPP" else {}
     prepared=[]
     for r in rows:
         p=_canonical_property_projection(r,source,e,wa_contacts)
@@ -702,16 +753,15 @@ def _property_table(core,e,req,source,q,location,category,transaction,status,ass
             rent_amount,sale_amount=_magazine_amounts(cr,p["transaction"],p["amount"])
             vals=[
                 p["date"],p["description"],p["location"],p["category"],p["transaction"],
-                rent_amount,sale_amount,p["area"],p["floor"],p["contact_name"],p["contact_no"],
-                verify,p["status"],edit,delete,p["remarks"]
+                rent_amount,sale_amount,p["contact_no"],verify,p["status"],edit,delete,p["remarks"]
             ]
-            cls=["nowrap","desc","loc","","nowrap","","","","","","","","nowrap","","","remarks"]
-            raw={11,13,14}
+            cls=["nowrap","desc","loc","","nowrap","","","","","nowrap","","","remarks"]
+            raw={8,10,11}
             trs.append("<tr>"+"".join(f'<td class="{cls[i]}">{x if i in raw else _e(_shown(x))}</td>' for i,x in enumerate(vals))+"</tr>")
-        H=["Date / Time","Description / Address","Location","Category","Rent / Sale","Rent Amount","Sale Amount","Area","Floor","Contact Name","Contact No.","Verify","Verification","Edit","Delete","Remarks"]
-        widths=[155,420,150,135,90,120,120,105,90,120,125,90,100,80,80,280]
+        H=["Date / Time","Description / Address","Location","Category","Rent / Sale","Rent Amount","Sale Amount","Contact No.","Verify","Verification","Edit","Delete","Remarks"]
+        widths=[155,460,150,145,95,125,125,135,90,100,80,80,300]
         colgroup="<colgroup>"+"".join(f'<col style="width:{w}px;min-width:{w}px;max-width:{w}px">' for w in widths)+"</colgroup>"
-        return _filter_form(q,location,category,transaction,status,assigned,limit)+f'<div class="dbtools"><b>Magazine Compact Table</b><button type="button" onclick="dbCompact()">Compact</button><button type="button" onclick="dbZoom(-1)">−</button><button type="button" onclick="dbZoom(1)">+</button><button type="button" onclick="dbZoomReset()">Reset</button></div><div class="tablebox magazinebox"><table style="width:2260px;min-width:2260px">{colgroup}<thead><tr>{"".join("<th>"+x+"</th>" for x in H)}</tr></thead><tbody>{"".join(trs) if trs else "<tr><td colspan=16>No records found</td></tr>"}</tbody></table></div>'
+        return _filter_form(q,location,category,transaction,status,assigned,limit)+f'<div class="dbtools"><b>Magazine Compact Table</b><button type="button" onclick="dbCompact()">Compact</button><button type="button" onclick="dbZoom(-1)">−</button><button type="button" onclick="dbZoom(1)">+</button><button type="button" onclick="dbZoomReset()">Reset</button></div><div class="tablebox magazinebox"><table style="width:2040px;min-width:2040px">{colgroup}<thead><tr>{"".join("<th>"+x+"</th>" for x in H)}</tr></thead><tbody>{"".join(trs) if trs else "<tr><td colspan=13>No records found</td></tr>"}</tbody></table></div>'
 
     trs=[]
     for r,p,verify,history,edit,delete,pin_html,media_html in prepared:
@@ -881,6 +931,10 @@ def register(core, served_app=None):
 
         passed=all(bool(v) for v in checks.values())
         return {"status":"PASS" if passed else "FAIL","version":VERSION,"checks":checks,"details":details}
+
+    @app.on_event("startup")
+    def repair_property_contract_on_startup():
+        _repair_property_contract()
 
     @app.get("/alliance/primary/databases")
     def canonical_property_databases(req:Request):
