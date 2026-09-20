@@ -21,8 +21,8 @@ def remove_get(app,path):
     app.router.routes[:]=[r for r in list(app.router.routes)
         if not (getattr(r,"path",None)==path and "GET" in set(getattr(r,"methods",set()) or set()))]
 
-def register(wrapped):
-    app=wrapped.app
+def register(wrapped, served_app=None):
+    app=served_app or wrapped.app
     core=wrapped.core
     engine=core.engine
     remove_get(app,PATH)
