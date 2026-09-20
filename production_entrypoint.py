@@ -503,6 +503,32 @@ def _load_core():
         except Exception as exc:
             print("[early-matcher-authority-v1] warning:", type(exc).__name__, str(exc))
 
+        # CRITICAL WORKSPACE READY CHECKPOINT
+        # Dashboard + Requirements + Property DB + Matcher are the production
+        # authorities. Legacy/optional registrars below may continue loading,
+        # but they are no longer allowed to determine site availability.
+        critical_ready = (
+            CORE_APP is not None
+            and REQUIREMENT_APP is not None
+            and DATABASE_APP is not None
+            and MATCHER_APP is not None
+        )
+        if critical_ready:
+            BOOT["critical_ready"] = True
+            BOOT["core_loaded"] = True
+            BOOT["state"] = "READY"
+            BOOT["stabilization"] = {
+                "critical_workspace":"READY",
+                "primary_dashboard_owner":"alliance_team_dashboard_v1220",
+                "primary_dashboard_version":"12.3.8-COMMAND-BAR-DAY-PLAN-BOTTOM",
+                "requirement_owner":"alliance_requirement_restore_v1235",
+                "database_owner":"alliance_property_authority_v11",
+                "matcher_owner":"alliance_master_requirement_authority_v1",
+                "legacy_loading":"BACKGROUND_COMPATIBILITY",
+            }
+            BOOT["completed_at"] = _utcnow()
+            print("[critical-workspace] READY: dashboard + requirements + database + matcher")
+
         import alliance_production_surface as production_surface
         stabilization = production_surface.register(wrapped)
 
@@ -2118,25 +2144,34 @@ def _load_core():
         }
 
         BOOT["core_loaded"] = True
-        BOOT["state"] = "READY" if stabilization.get("registered") else "DEGRADED"
+        BOOT["state"] = "READY" if BOOT.get("critical_ready") else ("READY" if stabilization.get("registered") else "DEGRADED")
+        stabilization["critical_workspace"]="READY" if BOOT.get("critical_ready") else "UNKNOWN"
         stabilization["primary_dashboard_owner"]="alliance_team_dashboard_v1220"
         stabilization["primary_dashboard_version"]="12.3.8-COMMAND-BAR-DAY-PLAN-BOTTOM"
+        stabilization["requirement_owner"]="alliance_requirement_restore_v1235"
+        stabilization["database_owner"]="alliance_property_authority_v11"
+        stabilization["matcher_owner"]="alliance_master_requirement_authority_v1"
         BOOT["stabilization"] = stabilization
         BOOT["completed_at"] = _utcnow()
         print("[health-first] Alliance core application loaded successfully")
 
     except Exception as exc:
-        BOOT["core_loaded"] = False
-        BOOT["state"] = "FAILED"
-        BOOT["error"] = f"{type(exc).__name__}: {exc}"
-        BOOT["trace"] = traceback.format_exc(limit=30)
-        BOOT["completed_at"] = _utcnow()
-
-        print(
-            "[health-first] Alliance core failed:",
-            type(exc).__name__,
-            str(exc),
-        )
+        if BOOT.get("critical_ready"):
+            BOOT["core_loaded"] = True
+            BOOT["state"] = "READY"
+            BOOT["error"] = None
+            BOOT["trace"] = None
+            BOOT["legacy_error"] = f"{type(exc).__name__}: {exc}"
+            BOOT["legacy_trace"] = traceback.format_exc(limit=30)
+            BOOT["completed_at"] = _utcnow()
+            print("[legacy-background] degraded after critical READY:", type(exc).__name__, str(exc))
+        else:
+            BOOT["core_loaded"] = False
+            BOOT["state"] = "FAILED"
+            BOOT["error"] = f"{type(exc).__name__}: {exc}"
+            BOOT["trace"] = traceback.format_exc(limit=30)
+            BOOT["completed_at"] = _utcnow()
+            print("[health-first] Alliance core failed:", type(exc).__name__, str(exc))
 
 
 _loader = threading.Thread(
