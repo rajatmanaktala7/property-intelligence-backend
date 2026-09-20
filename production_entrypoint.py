@@ -446,6 +446,15 @@ def _load_core():
         import app as early_core
         CORE_APP = early_core.app
 
+        # WhatsApp ingest is a critical production path. Start the safe queue
+        # worker immediately, before heavy legacy/background registration.
+        try:
+            import alliance_whatsapp_safe_ingest_v5 as early_safe_wa
+            early_safe_wa.start_worker()
+            print("[early-whatsapp-safe-queue] READY")
+        except Exception as exc:
+            print("[early-whatsapp-safe-queue] warning:", type(exc).__name__, str(exc))
+
         # Publish supporting Team routes first, but keep its old dashboard
         # on /alliance/legacy/team-command-centre.
         try:
@@ -2214,6 +2223,7 @@ class HealthFirstDispatcher:
         "/runtime-status",
         "/core-route-status",
         "/api/live-bootstrap-status",
+        "/whatsapp-queue-status",
     }
 
     INGEST_PATHS = {
