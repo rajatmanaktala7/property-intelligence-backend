@@ -5,7 +5,7 @@ from fastapi import Form, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from sqlalchemy import text, bindparam
 
-VERSION="12.4.0-WHATSAPP-LIVE-UNION-TX-GUARD"
+VERSION="12.5.0-DEDICATED-WHATSAPP-RENT-SALE-LIVE"
 SOURCES=("MASTER","NEWSPAPER","WHATSAPP","MAGAZINE","MANUAL")
 CATEGORY_OPTIONS=("Residential Sale","Residential Rent","Commercial Sale","Commercial Rent","Industrial Sale","Industrial Rent","Farmhouse Sale","Farmhouse Rent")
 
@@ -495,7 +495,11 @@ def _property_rows(e,source,q,location,category,transaction,status,assigned,limi
     if category.strip():
         n=category.strip().lower();rows=[r for r in rows if n in str(_property_category(_flat_record(r.get("clean_record")),r.get("transaction_type"))).lower()]
     if transaction.strip():
-        n=transaction.strip().upper();rows=[r for r in rows if str(r.get("transaction_type") or _first(_flat_record(r.get("clean_record")),"transaction_type","rent_sale","rent_or_sale") or "").upper()==n]
+        n=transaction.strip().upper()
+        rows=[r for r in rows if (
+            (n=="RENT" and str(r.get("transaction_type") or _first(_flat_record(r.get("clean_record")),"transaction_type","rent_sale","rent_or_sale") or "").upper() in ("RENT","LEASE"))
+            or (n!="RENT" and str(r.get("transaction_type") or _first(_flat_record(r.get("clean_record")),"transaction_type","rent_sale","rent_or_sale") or "").upper()==n)
+        )]
     if status.strip():
         n=status.strip().upper();rows=[r for r in rows if n in {str(r.get("availability_status") or "").upper(),str(r.get("verification_status") or "").upper()}]
     if assigned.strip():
@@ -790,6 +794,42 @@ def _whatsapp_contact_batch(e,rows):
         return {}
 
 
+def _rent_sale_label(tx):
+    t=str(tx or "").upper()
+    if t in ("RENT","LEASE","LEASING"): return "Rent"
+    if t in ("SALE","SELL","RESALE"): return "Sale"
+    return ""
+
+def _whatsapp_source_table(rows):
+    trs=[]
+    for r in rows:
+        cr=_flat_record(r.get("clean_record"))
+        rid=_display_text(_first(cr,"record_id","source_record_id","source_id","wa_property_id") or str(r.get("canonical_id") or "").replace("WHATSAPP-SOURCE-","").replace("WHATSAPP-LIVE-",""))
+        desc=_display_text(_first(cr,"description","raw_message","original_message","source_text") or "")
+        loc=_display_text(r.get("locality") or _first(cr,"location","locality","micro_market","city") or "")
+        tx=_rent_sale_label(r.get("transaction_type") or _first(cr,"transaction_type","rent_sale","rent_or_sale"))
+        area=_display_text(_first(cr,"area_text","area","available_area","area_sqft") or r.get("area_sqft") or "")
+        config=_display_text(_first(cr,"property_type","configuration_details","asset_class") or "")
+        price=_display_text(_first(cr,"amount_text","price","rent_text","rent_amount","sale_amount","sale_price") or r.get("price_raw") or "")
+        cname,cphone=_contacts(cr)
+        if not cphone:
+            cphone=_phones_from_any({
+                "contact_name_number":cr.get("contact_name_number"),
+                "all_contacts":cr.get("all_contacts"),
+                "raw_message":cr.get("raw_message"),
+            })
+        src=_display_text(_first(cr,"source","source_group","source_type") or "WhatsApp")
+        dt=_fmt_dt(r.get("updated_at") or r.get("created_at") or _first(cr,"created_at","captured_on","entry_datetime"))
+        ver=_display_text(r.get("verification_status") or _first(cr,"verification_status","verification") or "UNVERIFIED")
+        vals=[dt,desc,loc,tx,area,config,price,cname,cphone,src,ver,rid]
+        classes=["nowrap","desc","loc","nowrap","","","","","","","nowrap","nowrap"]
+        trs.append("<tr>"+"".join(f'<td class="{classes[i]}">{_e(_shown(v))}</td>' for i,v in enumerate(vals))+"</tr>")
+    H=["Date / Time","Description / Address","Location","Rent / Sale","Area","Configuration","Price / Rent","Contact Name","Contact No.","Source","Verification","Record ID"]
+    widths=[160,500,170,100,125,175,140,145,145,180,110,175]
+    total=sum(widths)
+    colgroup="<colgroup>"+"".join(f'<col style="width:{w}px;min-width:{w}px;max-width:{w}px">' for w in widths)+"</colgroup>"
+    return f'<div class="dbtools"><b>WhatsApp Clean + Live Property Database</b><button type="button" onclick="dbCompact()">Compact</button><button type="button" onclick="dbZoom(-1)">−</button><button type="button" onclick="dbZoom(1)">+</button><button type="button" onclick="dbZoomReset()">Reset</button></div><div class="tablebox"><table style="width:{total}px;min-width:{total}px">{colgroup}<thead><tr>{"".join("<th>"+x+"</th>" for x in H)}</tr></thead><tbody>{"".join(trs) if trs else "<tr><td colspan=12>No WhatsApp properties found</td></tr>"}</tbody></table></div>'
+
 def _magazine_amounts(cr,tx,amount):
     """Show structured amount first; recover only explicit numeric evidence from source line."""
     rent="";sale=""
@@ -929,7 +969,7 @@ def _property_table(core,e,req,source,q,location,category,transaction,status,ass
             cr=_flat_record(r.get("clean_record"))
             rent_amount,sale_amount=_magazine_amounts(cr,p["transaction"],p["amount"])
             vals=[
-                p["date"],p["description"],p["location"],p["category"],p["transaction"],
+                p["date"],p["description"],p["location"],p["category"],_rent_sale_label(p["transaction"]),
                 rent_amount,sale_amount,p["contact_no"],verify,p["status"],edit,delete,p["remarks"]
             ]
             cls=["nowrap","desc","loc","","nowrap","","","","","nowrap","","","remarks"]
@@ -1259,7 +1299,12 @@ def register(core, served_app=None):
         page=min(page,pages)
         offset=(page-1)*page_size
         body=_pager(src,page,page_size,total,q,location,category,transaction,status,assigned)
-        body+=_property_table(core,e,req,src,q,location,category,transaction,status,assigned,page_size,offset)
+        if src=="WHATSAPP":
+            rows=_property_rows(e,src,q,location,category,transaction,status,assigned,page_size,offset)
+            body+=_filter_form(q,location,category,transaction,status,assigned,page_size)
+            body+=_whatsapp_source_table(rows)
+        else:
+            body+=_property_table(core,e,req,src,q,location,category,transaction,status,assigned,page_size,offset)
         return HTMLResponse(_shell(f"{src.title()} Property Database",body))
 
     @app.get("/alliance/final/database/__source-status")
@@ -1366,7 +1411,7 @@ def register(core, served_app=None):
                 for k in ("remarks","description","original_description","source_text","raw_line","details"):
                     if cr.get(k): cr[k]=re.sub(r"(?<!\d)[6-9]\d{9}(?!\d)","XXXXXXXXXX",str(cr[k]))
                 r["clean_record"]=cr
-            body=_property_table(core,e,req,preview_source,"","","","","","",8,0,rows_override=rows)
+            body=_whatsapp_source_table(rows) if preview_source=="WHATSAPP" else _property_table(core,e,req,preview_source,"","","","","","",8,0,rows_override=rows)
             return HTMLResponse(_shell("Canonical Property Table Preview",body))
         _login(core,req);src=source.upper()
         if src not in SOURCES:return HTMLResponse("Unknown property database",404)
