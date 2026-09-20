@@ -3,7 +3,7 @@ import json,re
 from datetime import datetime,timezone
 from sqlalchemy import text
 
-VERSION="1.0.0-CANONICAL-DATABASE-HYGIENE"
+VERSION="1.1.0-CANONICAL-DATABASE-HYGIENE-LINK-REPAIR"
 STATE={"status":"NOT_RUN","result":None,"error":None}
 
 BAD_EXACT={"tara","royal construction","royal constructions"}
@@ -115,9 +115,17 @@ def repair(engine):
                 c.execute(text("""UPDATE pi_master_workflow_v720 SET verification_status='UNVERIFIED',
                   availability_status='UNKNOWN',updated_at=NOW() WHERE canonical_id=:cid"""),{"cid":r["canonical_id"]})
                 quarantined.append({"canonical_id":r["canonical_id"],"location":r.get("locality")})
+    # Remove orphan source-link rows only. They point to no canonical Master
+    # property and can make source filters lie. Source property rows themselves
+    # remain untouched.
+    with engine.begin() as c:
+        orphan_links_deleted=c.execute(text("""DELETE FROM pi_master_source_links_v711 l
+          WHERE l.master_entity_type='PROPERTY'
+          AND NOT EXISTS(SELECT 1 FROM pi_master_properties_v711 p WHERE p.canonical_id=l.canonical_id)""")).rowcount
     after=audit(engine)
     return {"version":VERSION,"bridged_manual":len(bridged),"bridge_errors":bridge_errors,
       "locations_recovered":len(repaired),"locations_quarantined":len(quarantined),
+      "orphan_links_deleted":int(orphan_links_deleted or 0),
       "repaired_sample":repaired[:100],"quarantined_sample":quarantined[:100],
       "before":before,"after":after,
       "safety":"Raw/source rows are never modified; uncertain Master locations are quarantined from matcher."}
