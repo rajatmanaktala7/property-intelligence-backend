@@ -14,7 +14,7 @@ from fastapi.responses import HTMLResponse
 from sqlalchemy import text
 
 
-VERSION = "2.0.4-ASTRA-PRIMARY-KEY-AWARE-DATABASE-CLEAN"
+VERSION = "2.1.0-ASTRA-INVALID-VALUE-DIAGNOSIS"
 MARKER = "ALLIANCE_ASTRA_DATABASE_CLEAN_V2"
 SOURCE_TOKENS = (
     "whatsapp", "newspaper", "magazine", "hospitality", "retail",
@@ -29,7 +29,7 @@ AREA_RE = re.compile(
 BAD_EMAIL_TOKENS = ("example.", "domain.", "test@", "noreply@", "no-reply@", "web.com")
 BAD_LOCATIONS = {
     "", "unknown", "n/a", "na", "none", "null", "tara", "location",
-    "address", "india", "all india", "test",
+    "address", "india", "all india", "test", "royal construction", "royal constructions",
 }
 BLANK_TEXT = {"", "unknown", "n/a", "na", "none", "null", "[]", "{}", "-"}
 
@@ -461,11 +461,20 @@ def _is_blank(value):
 
 def _clean_location(value):
     clean = re.sub(r"\s+", " ", str(value or "")).strip(" ,;|-")
-    if clean.lower() in BAD_LOCATIONS or len(clean) < 2 or len(clean) > 180:
+    low = clean.lower()
+    if low in BAD_LOCATIONS or len(clean) < 2 or len(clean) > 180:
         return ""
     if re.fullmatch(r"\d+", clean):
         return ""
+    # Person/company/role labels are not geographic localities. Astra treats
+    # them as invalid evidence even when the column is non-blank.
+    if re.search(r"\b(construction|constructions|builder|builders|developer|developers|realty|properties|infra|infrastructure|owner|broker|dealer)\b", low):
+        return ""
     return clean
+
+def _location_invalid(value):
+    raw = re.sub(r"\s+", " ", str(value or "")).strip(" ,;|-")
+    return bool(raw) and not bool(_clean_location(raw))
 
 
 def _all_evidence(obj):
