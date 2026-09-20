@@ -14,7 +14,7 @@ from fastapi.responses import HTMLResponse
 from sqlalchemy import text
 
 
-VERSION = "2.0.4-ASTRA-PRIMARY-KEY-AWARE-DATABASE-CLEAN"
+VERSION = "2.1.0-ASTRA-INVALID-LOCATION-CLEAN"
 MARKER = "ALLIANCE_ASTRA_DATABASE_CLEAN_V2"
 SOURCE_TOKENS = (
     "whatsapp", "newspaper", "magazine", "hospitality", "retail",
@@ -29,7 +29,7 @@ AREA_RE = re.compile(
 BAD_EMAIL_TOKENS = ("example.", "domain.", "test@", "noreply@", "no-reply@", "web.com")
 BAD_LOCATIONS = {
     "", "unknown", "n/a", "na", "none", "null", "tara", "location",
-    "address", "india", "all india", "test",
+    "address", "india", "all india", "test", "royal construction", "royal constructions",
 }
 BLANK_TEXT = {"", "unknown", "n/a", "na", "none", "null", "[]", "{}", "-"}
 
@@ -461,11 +461,18 @@ def _is_blank(value):
 
 def _clean_location(value):
     clean = re.sub(r"\s+", " ", str(value or "")).strip(" ,;|-")
-    if clean.lower() in BAD_LOCATIONS or len(clean) < 2 or len(clean) > 180:
+    low = clean.lower()
+    if low in BAD_LOCATIONS or len(clean) < 2 or len(clean) > 180:
         return ""
     if re.fullmatch(r"\d+", clean):
         return ""
+    if re.search(r"\b(construction|constructions|builder|builders|developer|developers|realty|properties|infra|infrastructure|owner|broker|dealer)\b", low):
+        return ""
     return clean
+
+def _location_invalid(value):
+    raw = re.sub(r"\s+", " ", str(value or "")).strip(" ,;|-")
+    return bool(raw) and not bool(_clean_location(raw))
 
 
 def _all_evidence(obj):
@@ -658,10 +665,22 @@ def audit(engine):
     with engine.connect() as connection:
         recovered = int(connection.execute(text("SELECT COUNT(*) FROM pi_astra_field_recovery_v2 WHERE action='UPDATED'")).scalar() or 0)
         review = int(connection.execute(text("SELECT COUNT(*) FROM pi_astra_field_recovery_v2 WHERE action='REVIEW_REQUIRED'")).scalar() or 0)
+    invalid_locations = {}
+    for table, field in (("pi_master_properties_v711","locality"),("pi_magazine_complete_v860","location"),("pi_operational_properties","location")):
+        try:
+            cols=_table_columns(engine,table)
+            if field not in cols: continue
+            with engine.connect() as connection:
+                values=connection.execute(text(f"SELECT CAST({_qident(field)} AS TEXT) FROM {_qident(table)} WHERE {_qident(field)} IS NOT NULL")).scalars().all()
+            bad=[str(v) for v in values if _location_invalid(v)]
+            invalid_locations[table]={"count":len(bad),"sample":bad[:25]}
+        except Exception as exc:
+            invalid_locations[table]={"error":f"{type(exc).__name__}: {exc}"}
     return {
         "status": "READY", "version": VERSION,
         "quality_score": score, "databases": databases,
         "field_recoveries": recovered, "review_items": review,
+        "invalid_locations": invalid_locations,
         "policy": "EVIDENCE_ONLY_NO_OVERWRITE_NO_GUESSING",
         "database_changed": False,
         "gpt_used": False,
