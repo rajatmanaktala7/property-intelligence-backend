@@ -918,9 +918,43 @@ def register(core, served_app=None):
                       )""") if checks["magazine_table_exists"] else -1
                 checks["magazine_bad_locations_removed"]=details["magazine_bad_location_rows"]==0
 
+                checks["whatsapp_clean_table_exists"]=bool(cx.execute(text("SELECT to_regclass('public.pi_whatsapp_property_master')")).scalar())
+                details["whatsapp_clean_rows"]=count("SELECT COUNT(*) FROM pi_whatsapp_property_master") if checks["whatsapp_clean_table_exists"] else 0
+                details["whatsapp_rows_with_contact"]=count("""SELECT COUNT(*) FROM pi_whatsapp_property_master
+                    WHERE NULLIF(BTRIM(COALESCE(CAST(phone_numbers AS TEXT),'')),'') IS NOT NULL
+                       OR NULLIF(BTRIM(COALESCE(CAST(contact_name_number AS TEXT),'')),'') IS NOT NULL
+                       OR NULLIF(BTRIM(COALESCE(CAST(all_contacts AS TEXT),'')),'') IS NOT NULL""") if checks["whatsapp_clean_table_exists"] else 0
+                details["whatsapp_contact_coverage_pct"]=round(
+                    (details["whatsapp_rows_with_contact"] * 100.0 / details["whatsapp_clean_rows"])
+                    if details["whatsapp_clean_rows"] else 0.0, 2
+                )
+                checks["whatsapp_contact_recovery_present"]=(
+                    details["whatsapp_clean_rows"] == 0 or details["whatsapp_rows_with_contact"] > 0
+                )
+
                 details["master_quarantined_visible"]=count("""SELECT COUNT(*) FROM pi_master_properties_v711
                     WHERE UPPER(COALESCE(promotion_status,'')) IN ('REJECTED','DELETED','DUPLICATE','QUARANTINED','MANUAL_ARCHIVED')""") if checks["master_table_exists"] else -1
                 checks["master_filter_contract_present"]=True
+
+            # Whole-source Magazine classification certification. No contacts or
+            # private row data are exposed, only aggregate counts.
+            mag_rows=_property_rows(e,"MAGAZINE","","","","","","",5000)
+            mag_category_distribution={}
+            mag_transaction_distribution={}
+            for mr in mag_rows:
+                cr=_flat_record(mr.get("clean_record"))
+                tx=_derive_transaction(cr,mr.get("transaction_type") or _first(cr,"transaction_type","rent_sale","rent_or_sale") or "")
+                cat=_magazine_category(cr,tx) or "UNCLASSIFIED"
+                mag_category_distribution[cat]=mag_category_distribution.get(cat,0)+1
+                txk=tx or "UNKNOWN"
+                mag_transaction_distribution[txk]=mag_transaction_distribution.get(txk,0)+1
+            details["magazine_active_rows"]=len(mag_rows)
+            details["magazine_category_distribution"]=dict(sorted(mag_category_distribution.items()))
+            details["magazine_transaction_distribution"]=dict(sorted(mag_transaction_distribution.items()))
+            nonzero_categories=[k for k,v in mag_category_distribution.items() if v>0 and k!="UNCLASSIFIED"]
+            checks["magazine_not_blanket_single_category"]=(
+                len(mag_rows)<2 or len(nonzero_categories)>=2
+            )
 
             # Renderer contract: same projection keys for every property source.
             expected={"id","location","description","remarks","category","type","area","floor","transaction","amount","contact_name","contact_no","date","status","assigned_to","source","google_pin","media","source_record_id","source_only"}
