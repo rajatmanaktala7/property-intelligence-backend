@@ -4,7 +4,7 @@ from fastapi import Form, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import text
 
-VERSION="10.0.0-CLEAN-DATABASE-FOUNDATION"
+VERSION="10.1.0-CANONICAL-RECORD-FLATTENING-SOURCE-SAFE-ACTIONS"
 PROPERTY_SOURCES=("MASTER","WHATSAPP","MANUAL","NEWSPAPER","MAGAZINE")
 REQUIREMENT_SOURCES=("MASTER","WHATSAPP","MANUAL")
 SOURCES=PROPERTY_SOURCES
@@ -29,6 +29,16 @@ def _first(d,*keys):
         v=d.get(k)
         if v not in (None,"",[],{}): return v
     return None
+def _flat_record(d):
+    """Flatten canonical clean_record while preserving top-level normalized fields."""
+    base=_dict(d)
+    for nest in ("manual_operational","magazine","newspaper","whatsapp","source_record","raw_record"):
+        x=base.get(nest)
+        if isinstance(x,dict):
+            for k,v in x.items():
+                if base.get(k) in (None,"",[],{}):
+                    base[k]=v
+    return base
 def _fmt_dt(v):
     if not v:return ""
     try:return v.strftime("%d-%m-%Y %I:%M %p")
@@ -154,20 +164,20 @@ def _property_rows(e,source,q,location,category,transaction,status,assigned,limi
                         {"q":f"%{q.strip()}%","n":limit}).scalars().all()
                     for x in raw:
                         d=x if isinstance(x,dict) else json.loads(x)
-                        cid=str(_first(d,"canonical_id","property_id","id") or "")
+                        cid=str(_first(d,"canonical_id") or ("MANUAL-SOURCE-"+str(_first(d,"property_code","property_id","id") or "")))
                         rows.append({
                             "canonical_id":cid,
                             "locality":_first(d,"location","locality","city") or "",
                             "city":_first(d,"city") or "",
                             "transaction_type":_first(d,"transaction_type","rent_sale") or "",
-                            "area_sqft":_first(d,"area_sqft") or "",
+                            "area_sqft":_first(d,"area_sqft","area","available_area") or "",
                             "price_raw":_first(d,"rent_amount","sale_amount","amount","price") or "",
                             "created_at":_first(d,"created_at","entry_date"),
                             "updated_at":_first(d,"updated_at","created_at","entry_date"),
                             "verification_status":_first(d,"verification_status","status") or "UNVERIFIED",
                             "availability_status":_first(d,"availability_status","status") or "UNKNOWN",
                             "assigned_to":_first(d,"assigned_to","team_member") or "",
-                            "clean_record":d,
+                            "clean_record":dict(d, source_table="pi_operational_properties", source_pk=str(_first(d,"property_code","id") or "")),
                         })
         except Exception:
             pass
@@ -189,7 +199,7 @@ def _property_rows(e,source,q,location,category,transaction,status,assigned,limi
                     for x in raw:
                         d=x if isinstance(x,dict) else json.loads(x)
                         rows.append({
-                            "canonical_id":str(_first(d,"canonical_id","property_id","id") or ""),
+                            "canonical_id":str(_first(d,"canonical_id") or ("MANUAL-SOURCE-"+str(_first(d,"property_code","property_id","id") or ""))),
                             "locality":_first(d,"location","locality","city") or "",
                             "city":_first(d,"city") or "",
                             "transaction_type":_first(d,"transaction_type","rent_sale","rent_or_sale") or "",
@@ -200,7 +210,7 @@ def _property_rows(e,source,q,location,category,transaction,status,assigned,limi
                             "verification_status":_first(d,"verification_status","status") or "UNVERIFIED",
                             "availability_status":_first(d,"availability_status","status") or "UNKNOWN",
                             "assigned_to":_first(d,"assigned_to","team_member") or "",
-                            "clean_record":d,
+                            "clean_record":dict(d, source_table="pi_properties", source_pk=str(_first(d,"property_code","property_id","id") or "")),
                         })
         except Exception:
             pass
@@ -210,7 +220,7 @@ def _property_rows(e,source,q,location,category,transaction,status,assigned,limi
         deduped=[]
         seen=set()
         for r in rows:
-            cr=_dict(r.get("clean_record"))
+            cr=_flat_record(r.get("clean_record"))
             cid=str(r.get("canonical_id") or "").strip()
             fp=cid or "|".join(str(x or "").strip().lower() for x in (
                 r.get("locality"),r.get("city"),r.get("transaction_type"),
@@ -225,7 +235,7 @@ def _property_rows(e,source,q,location,category,transaction,status,assigned,limi
     # returned row, including compatibility/source rows, instead of relying only
     # on Master projection columns.
     def evidence_blob(r):
-        cr=_dict(r.get("clean_record"))
+        cr=_flat_record(r.get("clean_record"))
         return " ".join(str(x or "") for x in (
             r.get("canonical_id"),r.get("locality"),r.get("city"),r.get("transaction_type"),
             r.get("price_raw"),json.dumps(cr,ensure_ascii=False,default=str)
@@ -238,7 +248,7 @@ def _property_rows(e,source,q,location,category,transaction,status,assigned,limi
         rows=[r for r in rows if needle in evidence_blob(r)]
     if category.strip():
         want=category.strip().lower()
-        rows=[r for r in rows if want in str(_property_category(_dict(r.get("clean_record")),r.get("transaction_type"))).lower()]
+        rows=[r for r in rows if want in str(_property_category(_flat_record(r.get("clean_record")),r.get("transaction_type"))).lower()]
     if transaction.strip():
         want_tx=transaction.strip().upper()
         rows=[r for r in rows if str(r.get("transaction_type") or _first(_dict(r.get("clean_record")),"transaction_type","rent_sale","rent_or_sale") or "").upper()==want_tx]
@@ -370,7 +380,7 @@ def _property_table(core,e,req,source,q,location,category,transaction,status,ass
     rows=_property_rows(e,source,q,location,category,transaction,status,assigned,limit)
     trs=[]
     for r in rows:
-        cr=_dict(r.get("clean_record")); cid=str(r["canonical_id"])
+        cr=_flat_record(r.get("clean_record")); cid=str(r["canonical_id"])
         # Apply the semantic location guard to every property source view.\n        # Historical bad projections such as person/company names must never be\n        # presented as a locality merely because they reached a location column.\n        locality=_clean_location_value(r.get("locality") or _first(cr,"location","locality") or "", cr)
         address=_first(cr,"address","exact_address","property_address") or ""
         desc=_first(cr,"team_description","description_edit","description","property_description","original_description","original_message","raw_line","source_text","details","remarks","additional_points","property_name") or ""
@@ -394,15 +404,18 @@ def _property_table(core,e,req,source,q,location,category,transaction,status,ass
         cname,cphone=_contacts(cr)
         stat=r.get("availability_status")
         if not stat or stat=="UNKNOWN":stat=r.get("verification_status") or "UNVERIFIED"
-        source_name=_source_name(e,cid,"PROPERTY")
+        source_name=_source_name(e,cid,"PROPERTY") or str(_first(cr,"entry_source","source","source_type") or source)
+        is_master=not cid.startswith("MANUAL-SOURCE-")
         verify=f"""<details class="pop"><summary class="summarybtn good">Verify</summary><div><form method="post" action="/alliance/primary/property/{_e(cid)}/verify">
         <select name="status" required><option>AVAILABLE</option><option>NOT_AVAILABLE</option><option>CALL_BACK</option><option>SOLD</option><option>RENTED</option><option>HOLD</option><option>WRONG_NUMBER</option></select>
         <select name="verified_with" required><option>OWNER</option><option>BROKER</option><option>OTHER</option></select>
         <input name="verified_by" required placeholder="Verified By team member"><input name="remarks" placeholder="Remarks"><input type="datetime-local" name="next_verification_at"><button class="good">Save</button></form></div></details>"""
-        delete=f"""<form method="post" action="/alliance/primary/property/{_e(cid)}/delete" onsubmit="return confirm('Archive this property? Original source evidence remains preserved.');"><button class="danger">Delete</button></form>"""
+        delete=(f"""<form method="post" action="/alliance/primary/property/{_e(cid)}/delete" onsubmit="return confirm('Archive this property? Original source evidence remains preserved.');"><button class="danger">Delete</button></form>""" if is_master else "Needs promotion")
+        if not is_master:
+            verify="Needs promotion"
         vals=[cid,locality,desc,pcat,ptype,area,floor,tx,amount,cname,cphone,_fmt_dt(r.get("created_at")),stat,verify,
-              f'<a class="btn light" href="/alliance/primary/property/{_e(cid)}">History</a>',r.get("assigned_to") or "",source_name,
-              f'<a class="btn light" href="/alliance/primary/property/{_e(cid)}/edit">Edit</a>',delete]
+              (f'<a class="btn light" href="/alliance/primary/property/{_e(cid)}">History</a>' if is_master else "Source only"),r.get("assigned_to") or "",source_name,
+              (f'<a class="btn light" href="/alliance/primary/property/{_e(cid)}/edit">Edit</a>' if is_master else "Use Add/Edit Manual"),delete]
         cls=["nowrap","loc","desc","","","","","nowrap","","","","nowrap","nowrap","","","","","",""]
         trs.append("<tr>"+"".join(f'<td class="{cls[i]}">{x if i in (13,14,17,18) else _e(_shown(x))}</td>' for i,x in enumerate(vals))+"</tr>")
     H=["Property ID","Location","Description / Address","Property Category","Property Type","Area","Floor","Rent/Sale","Amount","Contact Name","Contact No.","Date & Time","Status","Verify","History","Assigned To","Source","Edit","Delete"]
