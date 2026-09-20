@@ -882,10 +882,6 @@ def register(core, served_app=None):
         passed=all(bool(v) for v in checks.values())
         return {"status":"PASS" if passed else "FAIL","version":VERSION,"checks":checks,"details":details}
 
-    @app.on_event("startup")
-    def repair_property_contract_on_startup():
-        _repair_property_contract()
-
     @app.get("/alliance/primary/databases")
     def canonical_property_databases(req:Request):
         _login(core,req);return RedirectResponse("/alliance/final/databases",307)
