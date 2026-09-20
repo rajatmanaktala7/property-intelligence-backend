@@ -400,13 +400,19 @@ def _late_register_intelligence(wrapped):
 
     # WhatsApp Live Clean Operational Bridge
     try:
-        import alliance_whatsapp_live_clean_os as wa_clean_os
-        wa_clean_result = wa_clean_os.register(core)
-        results["wa_clean_os"] = {
-            "status": "REGISTERED",
-            "error": None,
-            "result": wa_clean_result,
-        }
+        if route_exists("/api/whatsapp-live-clean-os/status"):
+            results["wa_clean_os"] = {
+                "status": "ALREADY_REGISTERED_EARLY",
+                "error": None,
+            }
+        else:
+            import alliance_whatsapp_live_clean_os as wa_clean_os
+            wa_clean_result = wa_clean_os.register(core)
+            results["wa_clean_os"] = {
+                "status": "REGISTERED",
+                "error": None,
+                "result": wa_clean_result,
+            }
     except Exception as exc:
         results["wa_clean_os"] = {
             "status": "ERROR",
@@ -457,6 +463,16 @@ def _load_core():
             print("[early-whatsapp-safe-queue] READY")
         except Exception as exc:
             print("[early-whatsapp-safe-queue] warning:", type(exc).__name__, str(exc))
+
+        # Start the clean live projection during critical boot so fresh WhatsApp
+        # inventory/requirements do not wait behind legacy registrations.
+        try:
+            BOOT["early_stage"]="WHATSAPP_CLEAN_SYNC"
+            import alliance_whatsapp_live_clean_os as early_wa_clean_os
+            early_wa_clean_result = early_wa_clean_os.register(early_core)
+            print("[early-whatsapp-clean-sync] READY", early_wa_clean_result)
+        except Exception as exc:
+            print("[early-whatsapp-clean-sync] warning:", type(exc).__name__, str(exc))
 
         # Publish supporting Team routes first, but keep its old dashboard
         # on /alliance/legacy/team-command-centre.
