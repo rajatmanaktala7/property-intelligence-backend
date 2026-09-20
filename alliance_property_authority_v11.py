@@ -4,7 +4,7 @@ from fastapi import Form, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import text
 
-VERSION="11.1.0-SOURCE-PRESENTATION-CONTRACT"
+VERSION="11.2.0-CANONICAL-PROPERTY-PROJECTION"
 SOURCES=("MASTER","NEWSPAPER","WHATSAPP","MAGAZINE","MANUAL")
 CATEGORY_OPTIONS=("Residential Sale","Residential Rent","Commercial Sale","Commercial Rent","Industrial Sale","Industrial Rent","Farmhouse Sale","Farmhouse Rent")
 
@@ -348,47 +348,87 @@ def _filter_form(q,location,category,transaction,status,assigned,limit):
     <input name="assigned" value="{_e(assigned)}" placeholder="Assigned To">
     <input type="number" name="limit" min="1" max="1500" value="{limit}">
     <button>Search</button></form></div>"""
+def _canonical_property_projection(r,source,e):
+    """One display schema for Master, Manual, Magazine, Newspaper and WhatsApp."""
+    cr=_flat_record(r.get("clean_record"))
+    cid=str(r.get("canonical_id") or "")
+    locality=_clean_location_value(r.get("locality") or _first(cr,"location","locality","micro_market","area_name","city") or "",cr)
+    if locality=="Needs verification":
+        return None
+
+    address=_first(cr,"address","exact_address","property_address","google_location") or ""
+    desc=_first(cr,"description","property_description","original_description","source_text","raw_line","original_message","details","team_description","description_edit")
+    if not desc:
+        parts=[]
+        for label,keys in (
+            ("Property",("property_name","property_type","property_types")),
+            ("Address",("address","exact_address","property_address")),
+            ("Area",("area_text","area_display","area","available_area","area_sqft")),
+            ("Floor",("floor","floors")),
+            ("Suitable",("suitable_for","suitable_category","property_category","category")),
+            ("Parking",("parking","parking_details")),
+            ("Possession",("possession","possession_status")),
+            ("Remarks",("remarks","additional_points")),
+        ):
+            v=_first(cr,*keys)
+            if v not in (None,"",[],{}):parts.append(label+": "+_display_text(v))
+        desc=" | ".join(parts)
+    desc=_display_text(desc)
+    if address and address.lower() not in desc.lower():
+        desc=(address+" · "+desc).strip(" ·")
+
+    tx=r.get("transaction_type") or _first(cr,"transaction_type","rent_sale","rent_or_sale") or ""
+    pcat=_magazine_category(cr,tx) if source=="MAGAZINE" else _property_category(cr,tx)
+    ptype=_safe_property_type(cr,source)
+
+    area=_first(cr,"area_text","area_display","available_area")
+    if not area:
+        av=_first(cr,"area_value","area_sqft","area","size") or r.get("area_value") or r.get("area_sqft") or ""
+        au=_first(cr,"area_unit") or r.get("area_unit") or ("SQFT" if r.get("area_sqft") else "")
+        area=f"{_display_text(av)} {_display_text(au)}".strip()
+
+    floor=_first(cr,"floor","floors","floor_codes") or ""
+    if isinstance(floor,list):floor=", ".join(map(str,floor))
+
+    amount=_first(cr,"amount_text","rent_text","amount","amount_raw","price_raw")
+    if not amount:
+        amount=_first(cr,"rent","monthly_rent","rent_amount","rent_in_figures") if str(tx).upper() in ("RENT","LEASE") else _first(cr,"sale_price","sale_amount","price","asking_price")
+    amount=amount or r.get("price_raw") or ""
+    if source=="MANUAL":amount=_manual_amount_from_evidence(cr,amount)
+
+    cname,cphone=_contacts(cr)
+    stat=r.get("availability_status")
+    if not stat or stat=="UNKNOWN":stat=r.get("verification_status") or _first(cr,"verification_status","status") or "UNVERIFIED"
+
+    source_name=_source_name(e,cid,"PROPERTY") or str(_first(cr,"entry_source","source","source_type") or source).title()
+
+    return {
+        "id":cid,
+        "location":locality,
+        "description":desc,
+        "category":pcat,
+        "type":ptype,
+        "area":area,
+        "floor":floor,
+        "transaction":tx,
+        "amount":amount,
+        "contact_name":cname,
+        "contact_no":cphone,
+        "date":_fmt_dt(r.get("created_at") or _first(cr,"created_at","entry_datetime","entry_date")),
+        "status":stat,
+        "assigned_to":r.get("assigned_to") or _first(cr,"assigned_to","team_member") or "",
+        "source":source_name,
+        "source_only":"-SOURCE-" in cid,
+    }
+
 def _property_table(core,e,req,source,q,location,category,transaction,status,assigned,limit):
     rows=_property_rows(e,source,q,location,category,transaction,status,assigned,limit)
     trs=[]
     for r in rows:
-        cr=_flat_record(r.get("clean_record"));cid=str(r["canonical_id"])
-        locality=_clean_location_value(r.get("locality") or _first(cr,"location","locality") or "",cr)
-        if locality=="Needs verification":continue
-        address=_first(cr,"address","exact_address","property_address") or ""
-        desc=_first(cr,"description","property_description","original_description","source_text","raw_line","original_message","details","team_description","description_edit")
-        if not desc:
-            parts=[]
-            for label,keys in (("Property",("property_name","property_type","property_types")),("Address",("address","exact_address","property_address")),
-                ("Area",("area_text","area_display","area","available_area","area_sqft")),("Floor",("floor","floors")),
-                ("Suitable",("suitable_for","property_category","category")),("Parking",("parking","parking_details")),
-                ("Possession",("possession","possession_status")),("Remarks",("remarks","additional_points"))):
-                v=_first(cr,*keys)
-                if v not in (None,"",[],{}):parts.append(label+": "+_display_text(v))
-            desc=" | ".join(parts)
-        desc=_display_text(desc)
-        if address and address.lower() not in desc.lower():desc=(address+" · "+desc).strip(" ·")
-        tx=r.get("transaction_type") or _first(cr,"transaction_type","rent_or_sale") or ""
-        pcat=_magazine_category(cr,tx) if source=="MAGAZINE" else _property_category(cr,tx)
-        ptype=_safe_property_type(cr,source)
-        area=_first(cr,"area_text","area_display","available_area")
-        if not area:
-            av=_first(cr,"area_value","area_sqft","area","size") or r.get("area_sqft") or ""
-            au=_first(cr,"area_unit") or ("SQFT" if r.get("area_sqft") else "")
-            area=f"{av} {au}".strip()
-        floor=_first(cr,"floor","floors","floor_codes") or ""
-        if isinstance(floor,list):floor=", ".join(map(str,floor))
-        amount=_first(cr,"rent_text","amount","amount_raw","price_raw")
-        if not amount:
-            amount=_first(cr,"rent","monthly_rent","rent_amount","rent_in_figures") if str(tx).upper() in ("RENT","LEASE") else _first(cr,"sale_price","sale_amount","price","asking_price")
-        amount=amount or r.get("price_raw") or ""
-        if source=="MANUAL":amount=_manual_amount_from_evidence(cr,amount)
-        cname,cphone=_contacts(cr)
-        stat=r.get("availability_status")
-        if not stat or stat=="UNKNOWN":stat=r.get("verification_status") or "UNVERIFIED"
-        source_name=_source_name(e,cid,"PROPERTY") or str(_first(cr,"entry_source","source","source_type") or source).title()
-        source_only="-SOURCE-" in cid
-        if source_only:
+        p=_canonical_property_projection(r,source,e)
+        if not p:continue
+        cid=p["id"]
+        if p["source_only"]:
             verify="Source record";history="—";edit="—";delete="—"
         else:
             verify=f"""<details class="pop"><summary class="summarybtn good">Verify</summary><div><form method="post" action="/alliance/primary/property/{_e(cid)}/verify">
@@ -398,7 +438,7 @@ def _property_table(core,e,req,source,q,location,category,transaction,status,ass
             history=f'<a class="btn light" href="/alliance/primary/property/{_e(cid)}">History</a>'
             edit=f'<a class="btn light" href="/alliance/primary/property/{_e(cid)}/edit">Edit</a>'
             delete=f"""<form method="post" action="/alliance/primary/property/{_e(cid)}/delete" onsubmit="return confirm('Archive this property? Original source evidence remains preserved.');"><button class="danger">Delete</button></form>"""
-        vals=[cid,locality,desc,pcat,ptype,area,floor,tx,amount,cname,cphone,_fmt_dt(r.get("created_at")),stat,verify,history,r.get("assigned_to") or "",source_name,edit,delete]
+        vals=[p["id"],p["location"],p["description"],p["category"],p["type"],p["area"],p["floor"],p["transaction"],p["amount"],p["contact_name"],p["contact_no"],p["date"],p["status"],verify,history,p["assigned_to"],p["source"],edit,delete]
         cls=["nowrap","loc","desc","","","","","nowrap","","","","nowrap","nowrap","","","","","",""]
         trs.append("<tr>"+"".join(f'<td class="{cls[i]}">{x if i in (13,14,17,18) else _e(_shown(x))}</td>' for i,x in enumerate(vals))+"</tr>")
     H=["Property ID","Location","Description / Address","Property Category","Property Type","Area","Floor","Rent/Sale","Amount","Contact Name","Contact No.","Date & Time","Status","Verify","History","Assigned To","Source","Edit","Delete"]
