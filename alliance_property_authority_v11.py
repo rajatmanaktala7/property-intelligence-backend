@@ -872,6 +872,48 @@ def register(core, served_app=None):
                 checks["master_table_exists"]=bool(cx.execute(text("SELECT to_regclass('public.pi_master_properties_v711')")).scalar())
                 checks["manual_table_exists"]=bool(cx.execute(text("SELECT to_regclass('public.pi_operational_properties')")).scalar())
                 checks["magazine_table_exists"]=bool(cx.execute(text("SELECT to_regclass('public.pi_magazine_complete_v860')")).scalar())
+                checks["whatsapp_clean_table_exists"]=bool(cx.execute(text("SELECT to_regclass('public.pi_whatsapp_property_master')")).scalar())
+                details["whatsapp_master_rows"]=count("""SELECT COUNT(DISTINCT p.canonical_id)
+                    FROM pi_master_properties_v711 p
+                    WHERE EXISTS(
+                        SELECT 1 FROM pi_master_source_links_v711 l
+                        WHERE l.canonical_id=p.canonical_id AND l.master_entity_type='PROPERTY'
+                          AND (UPPER(COALESCE(l.source_type,'')) LIKE '%WHATSAPP%'
+                               OR UPPER(COALESCE(l.source_table,'')) LIKE '%WHATSAPP%')
+                    )""") if checks["master_table_exists"] else 0
+                details["whatsapp_source_links"]=count("""SELECT COUNT(*) FROM pi_master_source_links_v711 l
+                    WHERE l.master_entity_type='PROPERTY'
+                      AND (UPPER(COALESCE(l.source_type,'')) LIKE '%WHATSAPP%'
+                           OR UPPER(COALESCE(l.source_table,'')) LIKE '%WHATSAPP%')""")
+                details["whatsapp_links_with_source_pk"]=count("""SELECT COUNT(*) FROM pi_master_source_links_v711 l
+                    WHERE l.master_entity_type='PROPERTY'
+                      AND (UPPER(COALESCE(l.source_type,'')) LIKE '%WHATSAPP%'
+                           OR UPPER(COALESCE(l.source_table,'')) LIKE '%WHATSAPP%')
+                      AND NULLIF(BTRIM(COALESCE(l.source_pk,'')),'') IS NOT NULL""")
+                if checks["whatsapp_clean_table_exists"]:
+                    details["whatsapp_clean_rows"]=count("SELECT COUNT(*) FROM pi_whatsapp_property_master")
+                    details["whatsapp_clean_rows_with_phone"]=count("""SELECT COUNT(*) FROM pi_whatsapp_property_master
+                        WHERE NULLIF(BTRIM(COALESCE(phone_numbers,'')),'') IS NOT NULL
+                           OR NULLIF(BTRIM(COALESCE(contact_name_number,'')),'') IS NOT NULL
+                           OR NULLIF(BTRIM(COALESCE(all_contacts,'')),'') IS NOT NULL""")
+                    details["whatsapp_link_joined_contacts"]=count("""SELECT COUNT(DISTINCT l.canonical_id)
+                        FROM pi_master_source_links_v711 l
+                        JOIN pi_whatsapp_property_master x
+                          ON CAST(x.record_id AS TEXT)=CAST(l.source_pk AS TEXT)
+                          OR CAST(x.id AS TEXT)=CAST(l.source_pk AS TEXT)
+                          OR CAST(x.canonical_key AS TEXT)=CAST(l.source_pk AS TEXT)
+                        WHERE l.master_entity_type='PROPERTY'
+                          AND (UPPER(COALESCE(l.source_type,'')) LIKE '%WHATSAPP%'
+                               OR UPPER(COALESCE(l.source_table,'')) LIKE '%WHATSAPP%')
+                          AND (
+                            NULLIF(BTRIM(COALESCE(x.phone_numbers,'')),'') IS NOT NULL
+                            OR NULLIF(BTRIM(COALESCE(x.contact_name_number,'')),'') IS NOT NULL
+                            OR NULLIF(BTRIM(COALESCE(x.all_contacts,'')),'') IS NOT NULL
+                          )""")
+                else:
+                    details["whatsapp_clean_rows"]=0
+                    details["whatsapp_clean_rows_with_phone"]=0
+                    details["whatsapp_link_joined_contacts"]=0
 
                 details["manual_rows"]=count("SELECT COUNT(*) FROM pi_operational_properties WHERE COALESCE(entry_source,'MANUAL')='MANUAL'") if checks["manual_table_exists"] else 0
                 details["manual_unlinked_to_master"]=count("""SELECT COUNT(*) FROM pi_operational_properties p
