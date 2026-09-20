@@ -497,6 +497,8 @@ _IDENTITY_REGISTRY_STATE={"status":"IDLE","version":"1.0.0-DETERMINISTIC-LID-PHO
 def _start_identity_registry_refresh():
     if _IDENTITY_REGISTRY_STATE.get("status") in ("RUNNING","PASS"):
         return _IDENTITY_REGISTRY_STATE
+    if _IDENTITY_REGISTRY_STATE.get("status")=="STARTING":
+        _IDENTITY_REGISTRY_STATE["status"]="IDLE"
     try:
         import threading
         from alliance_whatsapp_sender_identity_registry_v1 import apply_registry
@@ -644,9 +646,20 @@ def register(core, served_app=None):
             "elapsed_ms":round((time.time()-started)*1000,1),
             "data_exposed":False,
         })
+    try:
+        import threading as _threading
+        if _IDENTITY_REGISTRY_STATE.get("status") not in ("RUNNING","PASS","STARTING"):
+            _IDENTITY_REGISTRY_STATE.update({"status":"STARTING"})
+            _threading.Thread(
+                target=_start_identity_registry_refresh,
+                name="alliance-wa-identity-refresh-starter",
+                daemon=True,
+            ).start()
+    except Exception as exc:
+        _IDENTITY_REGISTRY_STATE.update({"status":"ERROR","error":type(exc).__name__+": "+str(exc)[:240]})
     return {"status":"REGISTERED","version":VERSION,"requirement_authority":MASTER_REQUIREMENT_TABLE,
             "property_authority":MASTER_PROPERTY_TABLE,"matcher_source_contract":"MASTER_ONLY",
             "smart_matcher_takeover":True,"whatsapp_sender_fallback":True,
-            "sender_identity_registry":_start_identity_registry_refresh(),
+            "sender_identity_registry":{"status":_IDENTITY_REGISTRY_STATE.get("status")},
             "contacts_scope":"AUTHENTICATED_STAFF_ONLY",
-            "routes":[WORKSPACE_ROUTE,"/api/alliance/master-requirements-v1/status",SMART_MATCHER_ROUTE]}
+            "routes":[WORKSPACE_ROUTE,"/api/alliance/master-requirements-v1/status",SMART_MATCHER_ROUTE,"/api/alliance/master-matcher-selftest"]}
