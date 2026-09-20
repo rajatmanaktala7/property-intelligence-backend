@@ -5,7 +5,7 @@ from fastapi import Form, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from sqlalchemy import text, bindparam
 
-VERSION="12.0.4-MAGAZINE-LOCALITY-CATEGORY-COMPACT-GRID"
+VERSION="12.0.5-MAGAZINE-ROW-LOCALITY-CATEGORY-GUARD"
 SOURCES=("MASTER","NEWSPAPER","WHATSAPP","MAGAZINE","MANUAL")
 CATEGORY_OPTIONS=("Residential Sale","Residential Rent","Commercial Sale","Commercial Rent","Industrial Sale","Industrial Rent","Farmhouse Sale","Farmhouse Rent")
 
@@ -235,9 +235,13 @@ def _magazine_category(cr,tx):
     Industrial heading from a neighboring/page section."""
     txv=_derive_transaction(cr,tx)
     suffix="Rent" if txv=="LEASE" else "Sale" if txv=="SALE" else ""
+    # Row evidence must come from the row's own textual description.
+    # Do NOT include structured property_type here because historical magazine
+    # property_type values can be inherited from page/section context.
     row_blob=" ".join(str(cr.get(k) or "") for k in (
-        "description","original_description","raw_line","source_text","details","property_type"
+        "description","original_description","raw_line","source_text","details"
     )).upper()
+    structured_type=str(_first(cr,"property_type","property_types","asset_type","subtype") or "").upper()
     section_blob=" ".join(str(cr.get(k) or "") for k in (
         "property_category","category","original_section","section_heading","category_source"
     )).upper()
@@ -250,8 +254,10 @@ def _magazine_category(cr,tx):
         if re.search(r"\b(INDUSTRIAL|FACTORY|WAREHOUSE|GODOWN|SHED)\b",blob):return "Industrial"
         return ""
 
+    # 1. Explicit terms in the individual classified row.
     asset=asset_from(row_blob)
 
+    # 2. Known locality intelligence outranks inherited structured/page fields.
     if not asset:
         if re.search(r"\b(VASANT\s+VIHAR|VASANT\s+KUNJ|DEFENCE\s+COLONY|GREATER\s+KAILASH|GK\s*[12]?|PANCHSHEEL|HAUZ\s+KHAS|SAFDARJUNG|GREEN\s+PARK|MAHARANI\s+BAGH|JOR\s+BAGH|NEW\s+FRIENDS\s+COLONY|NFC|EAST\s+OF\s+KAILASH|CR\s+PARK|CHITRANJAN\s+PARK|GULMOHAR\s+PARK|UDAY\s+PARK|MAYFAIR\s+GARDEN|PUNJABI\s+BAGH|PASCHIM\s+VIHAR|RAJOURI\s+GARDEN|JANAKPURI|PATEL\s+NAGAR)\b",loc):
             asset="Residential"
@@ -260,9 +266,12 @@ def _magazine_category(cr,tx):
         elif re.search(r"\b(CONNAUGHT\s+PLACE|CP\b|NEHRU\s+PLACE|SAKET\s+DISTRICT\s+CENTRE|JANAKPURI\s+DISTRICT\s+CENTRE|BHIKAJI\s+CAMA|NETAJI\s+SUBHASH\s+PLACE|NSP\b|KAROL\s+BAGH|LAJPAT\s+NAGAR|SOUTH\s+EXTENSION|GREATER\s+KAILASH\s+MARKET)\b",loc):
             asset="Commercial"
 
+    # 3. Structured type is fallback only, never allowed to override locality.
     if not asset:
-        # Section fallback is allowed only when it is internally coherent; never
-        # use it to override known locality intelligence.
+        asset=asset_from(structured_type)
+
+    # 4. Page/section context is the final fallback only.
+    if not asset:
         asset=asset_from(section_blob)
 
     if asset and suffix:return f"{asset} {suffix}"
