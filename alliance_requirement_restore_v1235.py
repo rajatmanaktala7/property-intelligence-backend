@@ -10,7 +10,7 @@ from fastapi import Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from sqlalchemy import text
 
-VERSION = "13.5.0-ASTRA-LIVE-HANDLER-PROOF"
+VERSION = "13.5.1-MANUAL-DESCRIPTION-RECOVERY"
 SOURCES = ("MASTER", "NEWSPAPER", "MANUAL", "MAGAZINE", "WHATSAPP", "SOCIAL")
 
 EXCLUDE_TOKENS = (
@@ -425,6 +425,36 @@ def _manual_operational_rows(e, limit=1000):
             or str(d.get("additional_points") or "").strip()
             or str(row.get("message") or "").strip()
         )
+        # Historical Manual rows often stored structured requirement fields
+        # but no free-text description. Display an evidence-only clean description
+        # assembled from those stored fields; never invent missing information.
+        if not row["message"]:
+            desc_parts = []
+            req_types = d.get("requirement_types") or d.get("property_types") or d.get("property_type")
+            if isinstance(req_types, str):
+                try:
+                    parsed = json.loads(req_types)
+                    req_types = parsed if isinstance(parsed, list) else req_types
+                except Exception:
+                    pass
+            if isinstance(req_types, (list, tuple)):
+                req_types = ", ".join(str(x) for x in req_types if str(x).strip())
+            loc_text = d.get("preferred_locations") or d.get("preferred_location") or d.get("city") or d.get("location")
+            amin_text = d.get("minimum_area_text") or d.get("area_min_sqft") or d.get("minimum_area")
+            amax_text = d.get("maximum_area_text") or d.get("area_max_sqft") or d.get("maximum_area")
+            money_text = d.get("maximum_rent_text") or d.get("budget") or d.get("budget_max") or d.get("maximum_rent") or d.get("rent_budget") or d.get("sale_budget")
+            tx_text = d.get("transaction_type") or d.get("transaction")
+            extra_text = d.get("additional_points") or d.get("remarks")
+            if req_types: desc_parts.append(f"Required: {req_types}")
+            if loc_text: desc_parts.append(f"Location: {loc_text}")
+            if amin_text or amax_text:
+                if amin_text and amax_text: desc_parts.append(f"Area: {amin_text} to {amax_text}")
+                else: desc_parts.append(f"Area: {amin_text or amax_text}")
+            if tx_text: desc_parts.append(f"Transaction: {tx_text}")
+            if money_text: desc_parts.append(f"Budget/Rent: {money_text}")
+            if extra_text: desc_parts.append(str(extra_text).strip())
+            row["message"] = " | ".join(x for x in desc_parts if x)
+
         row["company"] = (
             d.get("company_name")
             or d.get("client_name")
