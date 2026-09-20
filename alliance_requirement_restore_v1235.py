@@ -388,65 +388,69 @@ def _fingerprint(row):
 
 def _manual_operational_rows(e, limit=1000):
     """
-    Astra-style source truth with schema-safe projection.
-    Read the settled operational table directly. SELECT * deliberately avoids
-    assuming optional columns that differ across historical deployments.
+    Settled Manual Requirement source authority.
+
+    Read-only.
+    Returns every exact MANUAL row from pi_operational_requirements.
+    Preserve the original operational fields so client/contact/location/
+    transaction data cannot disappear during normalization.
     """
-    sql = text("""
-        SELECT *
-        FROM pi_operational_requirements
-        WHERE UPPER(COALESCE(entry_source, 'MANUAL')) = 'MANUAL'
-        ORDER BY id DESC
-        LIMIT :n
-    """)
+    lim = max(1, min(int(limit or 1000), 5000))
+
     with e.connect() as conn:
-        raw = conn.execute(sql, {"n": int(limit)}).mappings().all()
+        raw_rows = conn.execute(text(f"""
+            SELECT *
+            FROM pi_operational_requirements
+            WHERE UPPER(COALESCE(entry_source, 'MANUAL')) = 'MANUAL'
+            ORDER BY id DESC
+            LIMIT {lim}
+        """)).mappings().all()
 
     out = []
-    for i, row in enumerate(raw, 1):
-        d = dict(row)
-        types = d.get("requirement_types") or []
-        if isinstance(types, str):
-            try:
-                types = json.loads(types)
-            except Exception:
-                types = [types]
-        ptype = ", ".join(str(v) for v in types if str(v).strip()) if isinstance(types, list) else str(types or "")
-        amin = str(d.get("minimum_area_text") or d.get("minimum_area_sqft") or "").strip()
-        amax = str(d.get("maximum_area_text") or d.get("maximum_area_sqft") or "").strip()
-        area = (amin + " - " + amax).strip(" -")
-        tx = str(d.get("transaction_type") or "").strip().upper()
-        if tx in {"LEASE", "RENT"}:
-            budget = d.get("maximum_rent_text") or d.get("maximum_rent") or ""
-        else:
-            budget = d.get("sale_input_text") or d.get("sale_budget") or d.get("maximum_rent_text") or d.get("maximum_rent") or ""
-        message = str(d.get("additional_points") or d.get("original_message") or d.get("description") or "").strip()
-        location = d.get("preferred_locations") or d.get("location") or d.get("city") or ""
-        if not message:
-            message = " | ".join(v for v in [
-                ptype, str(location).strip(), tx, area, str(budget or "").strip()
-            ] if v)
-        out.append({
-            "canonical_id": "",
-            "source_pk": str(d.get("id") or d.get("requirement_code") or i),
-            "source_table": "pi_operational_requirements",
-            "source": "MANUAL",
-            "message": message,
-            "company": d.get("company_name") or d.get("company") or "",
-            "contact_name": d.get("client_name") or d.get("contact_name") or "",
-            "contact": d.get("contact_number") or d.get("contact_numbers") or d.get("phone") or "",
-            "location": location,
-            "transaction": tx,
-            "category": ptype,
-            "property_type": ptype,
-            "area": area,
-            "budget": budget,
-            "created_at": d.get("created_at") or d.get("entry_date") or d.get("updated_at"),
-            "verification": d.get("verification_status") or d.get("status") or "UNVERIFIED",
-            "assigned_to": d.get("entered_by") or d.get("created_by") or d.get("assigned_to") or "",
-            "is_master": False,
-        })
+
+    for raw in raw_rows:
+        d = dict(raw)
+
+        # Source identity used by requirement UI/actions.
+        d["source"] = "MANUAL"
+        d["source_pk"] = d.get("id")
+        d["source_id"] = d.get("id")
+
+        # Preserve canonical operational values.
+        d["client_name"] = d.get("client_name")
+        d["company_name"] = d.get("company_name")
+        d["contact_name"] = (
+            d.get("contact_name")
+            or d.get("client_name")
+        )
+        d["contact_number"] = d.get("contact_number")
+        d["location"] = (
+            d.get("preferred_locations")
+            or d.get("city")
+            or d.get("location")
+        )
+        d["transaction"] = (
+            d.get("transaction_type")
+            or d.get("transaction")
+        )
+        d["verification"] = (
+            d.get("verification_status")
+            or d.get("verification")
+            or "RAW"
+        )
+
+        # Keep original requirement text where available.
+        if not d.get("description"):
+            d["description"] = (
+                d.get("original_message")
+                or d.get("additional_points")
+                or ""
+            )
+
+        out.append(d)
+
     return out
+
 
 def _combined(e, source):
     # Manual form authority is pi_operational_requirements. Do this before any
@@ -1301,7 +1305,15 @@ def register(core, served_app=None):
         found = _discover_tables(e)
         counts = {}
         for src in SOURCES:
-            rows, meta = _combined(e, src)
+            if src == "MANUAL":
+                rows = _manual_operational_rows(e, 1000)
+                meta = {
+                    "master": 0,
+                    "source_only": len(rows),
+                    "tables": ["pi_operational_requirements"],
+                }
+            else:
+                rows, meta = _combined(e, src)
             counts[src] = {
                 "visible": len(rows),
                 "master_linked": meta["master"],
