@@ -613,6 +613,23 @@ def _already_accounted(engine, entity_type: str, source_table: str,
         }).first())
 
 
+def _accounted_snapshot(engine, entity_type: str, source_table: str):
+    """One ledger read per sync cycle instead of one query per source row."""
+    out=set()
+    try:
+        with engine.connect() as c:
+            for r in c.execute(text(f"""
+                SELECT source_id,source_hash
+                FROM {LEDGER_TABLE}
+                WHERE source_entity_type=:et
+                  AND source_table=:st
+                  AND clean_status IN ('SYNCED','STAGED','NEEDS_REVIEW')
+            """),{"et":entity_type,"st":source_table}).mappings():
+                out.add((str(r.get("source_id") or ""),str(r.get("source_hash") or "")))
+    except Exception:
+        pass
+    return out
+
 def _get_cursor(engine, source_table: str) -> int:
     with engine.connect() as c:
         return int(c.execute(text(f"""
@@ -942,7 +959,7 @@ def _sync_live_property(engine, row: Dict[str, Any], normalized: Dict[str, Any],
     return cid
 
 
-def _fetch_all_rows(engine, table_name: str):
+def _fetch_all_rows(engine, table_name: str, newest_first: bool = False):
     cols = _columns(engine, table_name)
     if not cols:
         return
@@ -959,7 +976,7 @@ def _fetch_all_rows(engine, table_name: str):
                 dict(r)
                 for r in c.execute(text(
                     f'SELECT {qcols} FROM "{table_name}" '
-                    f'ORDER BY "{order_col}" ASC NULLS LAST '
+                    f'ORDER BY "{order_col}" {"DESC" if newest_first else "ASC"} NULLS LAST '
                     'OFFSET :off LIMIT :lim'
                 ), {"off": offset, "lim": BATCH_SIZE}).mappings().all()
             ]
@@ -975,7 +992,8 @@ def _sync_live_properties(main_engine, wa_engine, counters: Counter):
     if wa_engine is None or not _table_exists(wa_engine, "wa_properties"):
         return
 
-    for cols, rows in _fetch_all_rows(wa_engine, "wa_properties"):
+    accounted=_accounted_snapshot(main_engine,"PROPERTY","wa_properties")
+    for cols, rows in _fetch_all_rows(wa_engine, "wa_properties", newest_first=True):
         for row in rows:
             sid = _live_source_id(row)
             if not sid:
@@ -983,7 +1001,7 @@ def _sync_live_properties(main_engine, wa_engine, counters: Counter):
                 continue
             sh = _hash_payload(row, cols)
 
-            if _already_accounted(main_engine, "PROPERTY", "wa_properties", sid, sh):
+            if (sid,sh) in accounted:
                 counters["live_unchanged"] += 1
                 continue
 
@@ -1197,7 +1215,8 @@ def _sync_requirements(main_engine, wa_engine, counters: Counter):
     if wa_engine is None or not _table_exists(wa_engine, "wa_requirements"):
         return
 
-    for cols, rows in _fetch_all_rows(wa_engine, "wa_requirements"):
+    accounted=_accounted_snapshot(main_engine,"REQUIREMENT","wa_requirements")
+    for cols, rows in _fetch_all_rows(wa_engine, "wa_requirements", newest_first=True):
         for row in rows:
             sid = _requirement_source_id(row)
             if not sid:
@@ -1205,7 +1224,7 @@ def _sync_requirements(main_engine, wa_engine, counters: Counter):
                 continue
             sh = _hash_payload(row, cols)
 
-            if _already_accounted(main_engine, "REQUIREMENT", "wa_requirements", sid, sh):
+            if (sid,sh) in accounted:
                 counters["requirement_unchanged"] += 1
                 continue
 
