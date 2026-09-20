@@ -1894,6 +1894,32 @@ def _load_core():
             stabilization["alliance_ai_doctor_v21"] = {"status":"ERROR","error":f"{type(_doctor_v21_exc).__name__}: {_doctor_v21_exc}","fail_safe":True}
             print("[alliance-ai-doctor-v21] ERROR", type(_doctor_v21_exc).__name__, str(_doctor_v21_exc))
 
+        # ALLIANCE_PROMOTION_INTEGRITY_V711_STARTUP_RESTORE
+        # Restore existing validated source -> Master promotion lifecycle.
+        # No database/schema/data/link changes are made here.
+        try:
+            import alliance_promotion_integrity_v711 as promotion_integrity_v711
+            stabilization = dict(stabilization or {})
+            stabilization["promotion_integrity_v711"] = (
+                promotion_integrity_v711.start(wrapped.core)
+            )
+            print(
+                "[promotion-integrity-v711]",
+                stabilization["promotion_integrity_v711"],
+            )
+        except Exception as exc:
+            stabilization = dict(stabilization or {})
+            stabilization["promotion_integrity_v711"] = {
+                "status": "ERROR",
+                "error": f"{type(exc).__name__}: {exc}",
+                "fail_safe": True,
+            }
+            print(
+                "[promotion-integrity-v711] warning:",
+                type(exc).__name__,
+                str(exc),
+            )
+
         # ALLIANCE_RELEASE_STABILITY_V1
         # Runs last. A critical route-owner regression blocks the new release.
         try:
