@@ -346,9 +346,11 @@ def register(core):
         c.execute(text("""CREATE TABLE IF NOT EXISTS pi_property_archive_v801(id BIGSERIAL PRIMARY KEY,canonical_id TEXT NOT NULL,archived_by TEXT,reason TEXT,archived_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),restored_at TIMESTAMPTZ)"""))
         c.execute(text("INSERT INTO pi_business_os_v800_audit(action,actor,details) VALUES('REGISTERED','SYSTEM',CAST(:d AS JSONB))"),{'d':json.dumps({'version':VERSION,'mode':MODE})})
     _v810_magazine_detail_recovery(e)
-    removed={p:_remove_get(app,p) for p in ['/alliance/primary','/alliance/primary/properties','/alliance/primary/requirements','/alliance/primary/reports']}
+    # Preserve the settled Team Command Centre at /alliance/primary.
+    # Business OS keeps its feature routes but may not replace the primary dashboard.
+    removed={p:_remove_get(app,p) for p in ['/alliance/primary/properties','/alliance/primary/requirements','/alliance/primary/reports']}
 
-    @app.get('/alliance/primary',response_class=HTMLResponse)
+    @app.get('/alliance/legacy/business-os-command',response_class=HTMLResponse)
     def command(req:Request):
         _role(core,req)
         c=_counts(e); pc=_v810_source_counts(e,'PROPERTY'); rc=_v810_source_counts(e,'REQUIREMENT')
