@@ -1,7 +1,7 @@
 from __future__ import annotations
 import re
 
-VERSION="1.2.0-STRUCTURED-MATCH-HANDOFF"
+VERSION="1.3.0-COMMERCIAL-VENUE-ASSET-HANDOFF"
 
 def _norm(v):
     return re.sub(r"\s+"," ",str(v or "").replace("\u00a0"," ")).strip()
@@ -25,8 +25,13 @@ def interpret_requirement(req):
         up=raw.upper()
         locations=[x for x in known if re.search(r"(?<![A-Z])"+re.escape(x)+r"(?![A-Z])",up)]
     if not asset or asset.upper()=="UNKNOWN":
-        rules=[("WAREHOUSE",r"(?i)\b(warehouse|godown)\b"),("HOTEL",r"(?i)\b(hotel|guest house)\b"),("RESTAURANT",r"(?i)\b(restaurant|cafe|bar\s*&?\s*restaurant)\b"),("RETAIL",r"(?i)\b(retail|shop|showroom)\b"),("OFFICE",r"(?i)\boffice\b"),("LAND",r"(?i)\b(land|plot)\b"),("VILLA",r"(?i)\b(villa|kothi|independent house)\b"),("APARTMENT",r"(?i)\b(flat|apartment|\d\s*bhk|floor)\b")]
+        rules=[("BANQUET",r"(?i)\b(banquet|wedding venue|marriage hall|party lawn|wedding lawn|farmhouse)\b"),("WAREHOUSE",r"(?i)\b(warehouse|godown)\b"),("HOTEL",r"(?i)\b(hotel|guest house)\b"),("RESTAURANT",r"(?i)\b(restaurant|cafe|bar\s*&?\s*restaurant)\b"),("RETAIL",r"(?i)\b(retail|shop|showroom)\b"),("OFFICE",r"(?i)\boffice\b"),("LAND",r"(?i)\b(land|plot)\b"),("VILLA",r"(?i)\b(villa|kothi|independent house)\b"),("APARTMENT",r"(?i)\b(flat|apartment|\d\s*bhk|floor)\b")]
         asset=next((name for name,pat in rules if re.search(pat,raw)),"")
+    # Generic COMMERCIAL in the gate is a family, not a useful subtype. Recover
+    # explicit venue intent from the requirement text without changing stored data.
+    if asset.upper()=="COMMERCIAL":
+        venue_rules=[("BANQUET",r"(?i)\b(banquet|wedding venue|marriage hall|party lawn|wedding lawn|farmhouse)\b"),("RESTAURANT",r"(?i)\b(restaurant|cafe|bar\s*&?\s*restaurant)\b"),("RETAIL",r"(?i)\b(retail|shop|showroom)\b"),("OFFICE",r"(?i)\boffice\b"),("HOTEL",r"(?i)\b(hotel|guest house)\b")]
+        asset=next((name for name,pat in venue_rules if re.search(pat,raw)),asset)
     hints=[]
     if transaction: hints.append("TRANSACTION "+transaction)
     if locations: hints.append("LOCATION "+", ".join(locations))
