@@ -4,7 +4,7 @@ from fastapi import Form, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import text
 
-VERSION="9.5.0-ASTRA-SOURCE-TRUTH-SEARCH"
+VERSION="9.5.1-SEMANTIC-LOCATION-GUARD"
 SOURCES=("MASTER","NEWSPAPER","WHATSAPP","MAGAZINE","MANUAL")
 CATEGORY_OPTIONS=("Residential Sale","Residential Rent","Commercial Sale","Commercial Rent","Industrial Sale","Industrial Rent","Farmhouse Sale","Farmhouse Rent")
 
@@ -55,6 +55,25 @@ def _contacts(cr):
     for x in re.findall(r"(?<!\d)(?:\+?91[-\s]?)?([6-9]\d{9})(?!\d)",blob):
         if x not in phones: phones.append(x)
     return name,", ".join(phones)
+def _clean_location_value(value, cr):
+    """Display-only semantic guard: reject obvious person/company tokens as locality.
+    Original source evidence remains untouched."""
+    loc=str(value or "").strip()
+    if not loc:return ""
+    lo=loc.lower()
+    # Explicitly confirmed bad historical projections.
+    if lo in {"tara","royal construction","royal constructions"}:
+        # Recover only from stronger address/locality evidence when available.
+        for k in ("address","exact_address","property_address","city","micro_market","area_name"):
+            cand=cr.get(k)
+            if cand and str(cand).strip().lower() not in {"tara","royal construction","royal constructions"}:
+                return str(cand).strip()
+        return "Needs verification"
+    # Company-form words are not credible standalone locations.
+    if re.search(r"\b(construction|constructions|builder|builders|developer|developers|realty|properties|infra|infrastructure)\b",lo):
+        return "Needs verification"
+    return loc
+
 def _property_category(cr,tx):
     explicit=_first(cr,"property_category","category")
     if explicit and str(explicit).strip() in CATEGORY_OPTIONS:return str(explicit).strip()
@@ -283,7 +302,7 @@ def _property_table(core,e,req,source,q,location,category,transaction,status,ass
     trs=[]
     for r in rows:
         cr=_dict(r.get("clean_record")); cid=str(r["canonical_id"])
-        locality=r.get("locality") or _first(cr,"location","locality") or ""
+        locality=_clean_location_value(r.get("locality") or _first(cr,"location","locality") or "", cr)
         address=_first(cr,"address","exact_address","property_address") or ""
         desc=_first(cr,"team_description","description_edit","description","original_description","original_message","raw_line","source_text") or ""
         if address and address.lower() not in str(desc).lower(): desc=(address+" · "+desc).strip(" ·")
