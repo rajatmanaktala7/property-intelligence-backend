@@ -7,7 +7,7 @@ from alliance_phase5_canonical_matcher import *
 
 # This exact marker is consumed by the live System Doctor.  It is not a
 # cosmetic label: this module is the only candidate loader used by v60.
-VERSION = "1.0.6-DATABASE-HYGIENE-QUARANTINE-GUARD"
+VERSION = "1.1.0-MASTER-PREFILTER-PERFORMANCE"
 MASTER_TABLE = "pi_master_properties_v711"
 WORKFLOW_TABLE = "pi_master_workflow_v720"
 MATCHER_SOURCE_CONTRACT = "MASTER_ONLY"
@@ -47,7 +47,32 @@ def _master_workflow(engine):
         return {}
     return out
 
-def load_master_properties(engine, limit: int = 50000) -> List[Dict[str, Any]]:
+def _inventory_location_candidates(engine, transaction=None):
+    """Lightweight location list used only to resolve an unlisted locality from requirement text."""
+    if not base.table_exists(engine, MASTER_TABLE):
+        return []
+    where=["COALESCE(p.promotion_status,'') NOT IN ('REJECTED','DELETED','DUPLICATE','QUARANTINED','MANUAL_ARCHIVED')"]
+    params={}
+    if transaction in {"SALE","RENT"}:
+        where.append("UPPER(COALESCE(p.transaction_type,''))=:tx")
+        params["tx"]=transaction
+    q=f"""SELECT DISTINCT p.locality,p.city
+          FROM {MASTER_TABLE} p
+          WHERE {' AND '.join(where)}
+          AND COALESCE(p.locality,p.city,'')<>''"""
+    out=[]; seen=set()
+    try:
+        with engine.connect() as conn:
+            for r in conn.execute(text(q),params).mappings():
+                raw=str(r.get("locality") or r.get("city") or "").strip()
+                loc=base.canonical_location(raw) or base.candidate_location(raw) or base.norm(raw) or None
+                if loc and loc not in seen:
+                    seen.add(loc); out.append({"location":loc})
+    except Exception:
+        pass
+    return out
+
+def load_master_properties(engine, limit: int = 50000, transaction=None, allowed_locations=None) -> List[Dict[str, Any]]:
     if not base.table_exists(engine, MASTER_TABLE):
         raise RuntimeError(f"MASTER_SOURCE_MISSING:{MASTER_TABLE}")
     cols = base.table_columns(engine, MASTER_TABLE)
@@ -59,87 +84,81 @@ def load_master_properties(engine, limit: int = 50000) -> List[Dict[str, Any]]:
     ) if x in cols]
     if "canonical_id" not in wanted and "master_property_id" not in wanted:
         raise RuntimeError("MASTER_ID_COLUMN_MISSING")
-    q = "SELECT " + ",".join(f'"{x}"' for x in wanted) + f" FROM {MASTER_TABLE}"
+
+    select_cols=",".join(f'p."{x}"' for x in wanted)
+    q=f"""SELECT {select_cols},
+                 COALESCE(w.verification_status,'UNVERIFIED') AS _verification_status,
+                 COALESCE(w.availability_status,'UNKNOWN') AS _availability_status,
+                 w.updated_at AS _workflow_updated_at
+          FROM {MASTER_TABLE} p
+          LEFT JOIN {WORKFLOW_TABLE} w ON w.canonical_id=p.canonical_id
+          WHERE 1=1"""
+    params={"lim":int(max(1,min(limit,100000)))}
     if "promotion_status" in cols:
-        q += " WHERE COALESCE(promotion_status,'') NOT IN ('REJECTED','DELETED','DUPLICATE','QUARANTINED','MANUAL_ARCHIVED')"
+        q += " AND COALESCE(p.promotion_status,'') NOT IN ('REJECTED','DELETED','DUPLICATE','QUARANTINED','MANUAL_ARCHIVED')"
+    if transaction in {"SALE","RENT"}:
+        q += " AND UPPER(COALESCE(p.transaction_type,''))=:tx"
+        params["tx"]=transaction
+    q += " AND UPPER(COALESCE(w.availability_status,'UNKNOWN')) NOT IN ('UNAVAILABLE','REMOVED','CLOSED','SOLD','LEASED')"
     if "updated_at" in cols:
-        q += " ORDER BY updated_at DESC NULLS LAST"
+        q += " ORDER BY p.updated_at DESC NULLS LAST"
     elif "created_at" in cols:
-        q += " ORDER BY created_at DESC NULLS LAST"
+        q += " ORDER BY p.created_at DESC NULLS LAST"
     q += " LIMIT :lim"
-    with engine.connect() as c:
-        rows = [dict(r) for r in c.execute(text(q), {"lim": int(max(1,min(limit,100000)))}).mappings().all()]
-    wf = _master_workflow(engine)
-    out = []
+
+    with engine.connect() as conn:
+        rows=[dict(r) for r in conn.execute(text(q),params).mappings().all()]
+
+    allowed=set(allowed_locations or [])
+    out=[]
     for d in rows:
-        cid = str(d.get("canonical_id") or d.get("master_property_id") or "").strip()
-        if not cid:
-            continue
-        flow = wf.get(cid, {})
-        if str(flow.get("availability_status") or "").upper() in {"UNAVAILABLE","REMOVED","CLOSED","SOLD","LEASED"}:
-            continue
-        clean = _json(d.get("clean_record"))
-        wa = clean.get("whatsapp_live_clean") if isinstance(clean.get("whatsapp_live_clean"), dict) else {}
-        # Master clean_record schemas vary by source/version. Matching must use
-        # the best available property text/type instead of silently reducing
-        # candidates to location + transaction only.
+        cid=str(d.get("canonical_id") or d.get("master_property_id") or "").strip()
+        if not cid: continue
+
+        loc_raw=str(d.get("locality") or d.get("city") or "").strip()
+        loc=base.canonical_location(loc_raw) or base.candidate_location(loc_raw) or base.norm(loc_raw) or None
+        tx=base.norm(d.get("transaction_type"))
+        if tx not in {"SALE","RENT"} or not loc: continue
+        # Cheap prefilter before JSON parsing/type extraction.
+        if allowed and loc not in allowed: continue
+
+        clean=_json(d.get("clean_record"))
+        wa=clean.get("whatsapp_live_clean") if isinstance(clean.get("whatsapp_live_clean"),dict) else {}
         def _pick(*keys):
             for key in keys:
-                v = clean.get(key)
-                if v not in (None, "", [], {}):
-                    return v
+                v=clean.get(key)
+                if v not in (None,"",[],{}): return v
             return ""
-        raw = str(_pick("original_message","team_description","description_edit","description",
-                        "original_description","raw_line","source_text","property_name","details","remarks")).strip()
-        ptype = str(_pick("property_type","asset_type","subtype","category","property_category","intended_use")).strip()
-        loc_raw = str(d.get("locality") or d.get("city") or "").strip()
-        loc = base.canonical_location(loc_raw) or base.candidate_location(loc_raw) or base.norm(loc_raw) or None
-        tx = base.norm(d.get("transaction_type"))
-        if tx not in {"SALE","RENT"} or not loc:
-            continue
-        fam, sub = base.family_subtype(ptype, raw)
-        area = _float(d.get("area_sqft"))
-        if area is None:
-            area = base.area_to_sqft(d.get("area_value"), d.get("area_unit"))
-        price = _float(d.get("price_raw"))
+        raw=str(_pick("original_message","team_description","description_edit","description",
+                      "original_description","raw_line","source_text","property_name","details","remarks")).strip()
+        ptype=str(_pick("property_type","asset_type","subtype","category","property_category","intended_use")).strip()
+        fam,sub=base.family_subtype(ptype,raw)
+        area=_float(d.get("area_sqft"))
+        if area is None: area=base.area_to_sqft(d.get("area_value"),d.get("area_unit"))
+        price=_float(d.get("price_raw"))
         if price is None:
-            try:
-                price = base.money_value(d.get("price_raw"))
-            except Exception:
-                price = None
-        kind = base.norm(d.get("price_kind"))
-        comparable = price is not None and (not kind or "AMOUNT" in kind or tx in kind)
-        ver = str(flow.get("verification_status") or "UNVERIFIED").upper()
-        promotion = str(d.get("promotion_status") or "").upper()
-        strict_ready = promotion in {"PROMOTED_VALIDATED","ACTIVE","READY","VERIFIED"}
-        captured = d.get("updated_at") or d.get("created_at") or flow.get("updated_at")
-        desc = raw or " ".join(x for x in (ptype, loc_raw, tx) if x)
-        completeness = sum(bool(x) for x in (loc, tx, fam, sub, area, price, desc))
+            try: price=base.money_value(d.get("price_raw"))
+            except Exception: price=None
+        kind=base.norm(d.get("price_kind"))
+        comparable=price is not None and (not kind or "AMOUNT" in kind or tx in kind)
+        ver=str(d.get("_verification_status") or "UNVERIFIED").upper()
+        promotion=str(d.get("promotion_status") or "").upper()
+        strict_ready=promotion in {"PROMOTED_VALIDATED","ACTIVE","READY","VERIFIED"}
+        captured=d.get("updated_at") or d.get("created_at") or d.get("_workflow_updated_at")
+        desc=raw or " ".join(x for x in (ptype,loc_raw,tx) if x)
+        completeness=sum(bool(x) for x in (loc,tx,fam,sub,area,price,desc))
         out.append({
-            "record_id": cid,
-            "source_bucket": "MASTER_DATABASE",
-            "source_table": MASTER_TABLE,
-            "description": base.sanitize_text(desc),
-            "location": loc,
-            "transaction": tx,
-            "family": fam,
-            "subtype": sub,
-            "area_sqft": area,
-            "area_unit_verified": bool(area is not None),
-            "price": price if comparable else None,
-            "price_text": base.sanitize_text(d.get("price_raw")),
-            "price_comparable": comparable,
-            "quality": "READY" if strict_ready else "REVIEW",
-            "verification": ver,
-            "captured_on": captured,
-            "source_name": base.sanitize_text(d.get("source_type") or "Master Property Database"),
-            "review_reasons": None,
-            "detail_url": f"/alliance/primary/property/{cid}",
-            "source_count": int(d.get("source_count") or 1),
-            "data_completeness": completeness,
-            "master_property_id": d.get("master_property_id"),
-            "canonical_id": cid,
-            "whatsapp_source_id": wa.get("source_id") if wa else None,
+            "record_id":cid,"source_bucket":"MASTER_DATABASE","source_table":MASTER_TABLE,
+            "description":base.sanitize_text(desc),"location":loc,"transaction":tx,
+            "family":fam,"subtype":sub,"area_sqft":area,"area_unit_verified":bool(area is not None),
+            "price":price if comparable else None,"price_text":base.sanitize_text(d.get("price_raw")),
+            "price_comparable":comparable,"quality":"READY" if strict_ready else "REVIEW",
+            "verification":ver,"captured_on":captured,
+            "source_name":base.sanitize_text(d.get("source_type") or "Master Property Database"),
+            "review_reasons":None,"detail_url":f"/alliance/primary/property/{cid}",
+            "source_count":int(d.get("source_count") or 1),"data_completeness":completeness,
+            "master_property_id":d.get("master_property_id"),"canonical_id":cid,
+            "whatsapp_source_id":wa.get("source_id") if wa else None,
         })
     return out
 
@@ -152,8 +171,8 @@ def _count(engine, table: str) -> int:
     except Exception:
         return 0
 
-def load_candidates(engine, pi_limit: int = 50000, wa_limit: int = 0) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-    rows = load_master_properties(engine, pi_limit)
+def load_candidates(engine, pi_limit: int = 50000, wa_limit: int = 0, transaction=None, allowed_locations=None) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    rows = load_master_properties(engine, pi_limit, transaction=transaction, allowed_locations=allowed_locations)
     promoted_wa = 0
     try:
         with engine.connect() as c:
@@ -198,12 +217,26 @@ def _sort_key(x):
 
 def run_match(engine, requirement_text: str, min_score: float = 70.0, limit: int = 50) -> Dict[str, Any]:
     req = base.parse_requirement(requirement_text)
-    raw, source_counts = load_candidates(engine)
+    # Resolve unlisted localities from a lightweight distinct Master location list
+    # before loading full property records.
+    if not req.get("primary_locations"):
+        loc_candidates=_inventory_location_candidates(engine,req.get("transaction"))
+        req=base.enrich_requirement_with_inventory_locations(req,requirement_text,loc_candidates)
+
+    requested=set(req.get("primary_locations") or [])
+    if req.get("location"): requested.add(req.get("location"))
+    allowed=set(requested)
+    if "NORTH GOA" in requested:
+        allowed.update(getattr(base,"NORTH_GOA_LOCALITIES",set()) or set())
+        allowed.add("NORTH GOA")
+    allowed.update(base.approved_alternatives(req) or [])
+
+    raw, source_counts = load_candidates(
+        engine,
+        transaction=req.get("transaction"),
+        allowed_locations=allowed or None,
+    )
     candidates = base.dedupe_candidates(raw)
-    # Resolve localities that are present in the requirement and in current Master
-    # inventory even when they are not yet in the static alias dictionary.
-    # This keeps Master Properties authoritative and avoids guessing localities.
-    req = base.enrich_requirement_with_inventory_locations(req, requirement_text, candidates)
     # Astra appends an explicit PROPERTY TYPE hint when the raw requirement names
     # a concrete asset. Re-assert that explicit asset after generic intended-use
     # words (for example AIRBNB/HOSPITALITY) have been parsed, so "villa for
