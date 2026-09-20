@@ -441,6 +441,10 @@ def _load_core():
 
     try:
         import newspaper_wrapper as wrapped
+        # Publish the already-created core app immediately. Essential routes such
+        # as login/dashboard remain available while the long optional registrar
+        # chain continues in this background loader thread.
+        CORE_APP = wrapped.app
 
         # ALLIANCE_EARLY_REQUIREMENT_AUTHORITY_V2
         # Requirement authority must become public before the broader production
@@ -2182,7 +2186,7 @@ class HealthFirstDispatcher:
         await response(scope, receive, send)
 
     async def _serve_core(self, scope: dict[str, Any], receive, send):
-        if CORE_APP is None or not BOOT["core_loaded"]:
+        if CORE_APP is None:
             await health_app(scope, receive, send)
             return
 
