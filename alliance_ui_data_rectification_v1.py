@@ -209,6 +209,12 @@ def _action(r,source):
     # creates/reuses Gate evidence, verifies, bridges and then opens Master Matcher.
     sid=str(r.get('source_id') or '').strip()
     src=str(r.get('source') or source).upper()
+    if src=='MANUAL' and sid:
+        # New Manual architecture: source rows match directly through the
+        # canonical matcher route. The matcher authority resolves/promotes the
+        # Manual source identity; do not send users through the legacy
+        # "Verify & Run Match" review form.
+        return f"<a class='btn' href='/alliance/primary/matcher?source=MANUAL&source_pk={_e(sid)}'>Run Matcher</a>"
     if src in SOURCES and src!='MASTER' and sid:
         return f"<a class='btn' href='/alliance/final/requirements/run-match?source={_e(src)}&source_pk={_e(sid)}'>Run Matcher</a>"
     return 'Review'
