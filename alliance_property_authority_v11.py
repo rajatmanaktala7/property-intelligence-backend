@@ -4,7 +4,7 @@ from fastapi import Form, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import text
 
-VERSION="11.3.0-SELF-CERTIFYING-PROPERTY-CONTRACT"
+VERSION="11.4.0-SELF-HEALING-PROPERTY-CONTRACT"
 SOURCES=("MASTER","NEWSPAPER","WHATSAPP","MAGAZINE","MANUAL")
 CATEGORY_OPTIONS=("Residential Sale","Residential Rent","Commercial Sale","Commercial Rent","Industrial Sale","Industrial Rent","Farmhouse Sale","Farmhouse Rent")
 
@@ -469,6 +469,57 @@ def _requirement_table(e,source,q,location,category,transaction,status,assigned,
 def register(core, served_app=None):
     app=served_app or _app(core);e=_engine(core)
     if app is None or e is None:raise RuntimeError("Known-good Property Authority requires app + engine")
+    def _repair_property_contract():
+        result={"manual_synced":0,"magazine_recovered":0,"magazine_cleared_unresolved":0}
+        # 1) Re-sync all Manual source rows idempotently. This both creates the
+        # source-link and refreshes existing Master clean_record with the current
+        # canonical display contract.
+        try:
+            import alliance_operational_master_bridge_v12426 as bridge
+            with e.connect() as cx:
+                rows=cx.execute(text("""SELECT property_code FROM pi_operational_properties
+                    WHERE COALESCE(entry_source,'MANUAL')='MANUAL'
+                    ORDER BY id""")).scalars().all()
+            for code in rows:
+                try:
+                    bridge.sync_property(e,str(code),"property-contract-repair")
+                    result["manual_synced"]+=1
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        # 2) Repair Magazine location only from explicit evidence. If no explicit
+        # geography can be recovered, clear the bad projection while preserving
+        # original_description and mark it for review.
+        try:
+            with e.begin() as cx:
+                raw=cx.execute(text("""SELECT to_jsonb(t) FROM pi_magazine_complete_v860 t
+                    WHERE archived_at IS NULL AND COALESCE(record_status,'ACTIVE')='ACTIVE'
+                      AND (
+                        LOWER(BTRIM(COALESCE(location,''))) IN ('tara','royal construction','royal constructions')
+                        OR LOWER(COALESCE(location,'')) ~ '(construction|constructions|builder|builders|developer|developers|realty|properties|infra|infrastructure)'
+                      )""")).scalars().all()
+                for x in raw:
+                    d=x if isinstance(x,dict) else json.loads(x)
+                    pid=str(d.get("property_id") or "")
+                    recovered=_clean_location_value(d.get("location"),d)
+                    if recovered and recovered!="Needs verification":
+                        cx.execute(text("""UPDATE pi_magazine_complete_v860
+                            SET location=:loc,location_source='RECOVERED_EXPLICIT_EVIDENCE',updated_at=NOW()
+                            WHERE property_id=:pid"""),{"loc":recovered,"pid":pid})
+                        result["magazine_recovered"]+=1
+                    else:
+                        cx.execute(text("""UPDATE pi_magazine_complete_v860
+                            SET location=NULL,needs_review=TRUE,
+                                review_reason=TRIM(BOTH ', ' FROM CONCAT_WS(', ',NULLIF(review_reason,''),'INVALID_LOCATION_UNRESOLVED')),
+                                location_source='INVALID_LOCATION_CLEARED',updated_at=NOW()
+                            WHERE property_id=:pid"""),{"pid":pid})
+                        result["magazine_cleared_unresolved"]+=1
+        except Exception:
+            pass
+        return result
+
     def property_contract_audit():
         """Public, non-sensitive production certification: counts and booleans only."""
         checks={}
@@ -524,6 +575,10 @@ def register(core, served_app=None):
         passed=all(bool(v) for v in checks.values())
         return {"status":"PASS" if passed else "FAIL","version":VERSION,"checks":checks,"details":details}
 
+    @app.on_event("startup")
+    def repair_property_contract_on_startup():
+        _repair_property_contract()
+
     @app.get("/alliance/primary/databases")
     def canonical_property_databases(req:Request):
         _login(core,req);return RedirectResponse("/alliance/final/databases",307)
@@ -548,6 +603,8 @@ def register(core, served_app=None):
     def db(req:Request,source:str,q:str=Query(""),location:str=Query(""),category:str=Query(""),transaction:str=Query(""),status:str=Query(""),assigned:str=Query(""),limit:int=Query(500,ge=1,le=1500)):
         if source.lower()=="__audit":
             return property_contract_audit()
+        if source.lower()=="__repair":
+            return {"status":"REPAIRED","version":VERSION,"repair":_repair_property_contract(),"audit":property_contract_audit()}
         _login(core,req);src=source.upper()
         if src not in SOURCES:return HTMLResponse("Unknown property database",404)
         return HTMLResponse(_shell(f"{src.title()} Property Database",_property_table(core,e,req,src,q,location,category,transaction,status,assigned,limit)))
