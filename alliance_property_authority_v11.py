@@ -5,7 +5,7 @@ from fastapi import Form, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from sqlalchemy import text, bindparam
 
-VERSION="12.1.1-SOURCE-ISOLATION-NO-GLOBAL-PREVIEW"
+VERSION="12.2.0-TRUE-SOURCE-AUTHORITIES"
 SOURCES=("MASTER","NEWSPAPER","WHATSAPP","MAGAZINE","MANUAL")
 CATEGORY_OPTIONS=("Residential Sale","Residential Rent","Commercial Sale","Commercial Rent","Industrial Sale","Industrial Rent","Farmhouse Sale","Farmhouse Rent")
 
@@ -314,6 +314,79 @@ def _property_category(cr,tx):
         cand=f"{a} {t}".strip()
         if cand in CATEGORY_OPTIONS:return cand
     return explicit or ""
+def _whatsapp_clean_source_rows(e,q,limit,offset):
+    """Latest completed deduplicated WhatsApp Property Master generation only."""
+    try:
+        with e.connect() as cx:
+            exists=cx.execute(text("SELECT to_regclass('public.pi_whatsapp_property_master')")).scalar()
+            gens=cx.execute(text("SELECT to_regclass('public.pi_whatsapp_property_master_generation')")).scalar()
+            if not exists or not gens:return []
+            gen=cx.execute(text("""SELECT generation_id FROM pi_whatsapp_property_master_generation
+                WHERE status='COMPLETED'
+                ORDER BY completed_at DESC NULLS LAST,id DESC LIMIT 1""")).scalar()
+            if not gen:return []
+            raw=cx.execute(text("""SELECT to_jsonb(t) FROM pi_whatsapp_property_master t
+                WHERE generation_id=:g
+                  AND (:q='%%'
+                       OR COALESCE(description,'') ILIKE :q
+                       OR COALESCE(configuration_details,'') ILIKE :q
+                       OR COALESCE(contact_name_number,'') ILIKE :q
+                       OR COALESCE(phone_numbers,'') ILIKE :q
+                       OR COALESCE(source,'') ILIKE :q
+                       OR COALESCE(raw_message,'') ILIKE :q)
+                ORDER BY captured_on DESC NULLS LAST,id DESC
+                LIMIT :n OFFSET :off"""),
+                {"g":gen,"q":f"%{q.strip()}%","n":limit,"off":offset}).scalars().all()
+        out=[]
+        for x in raw:
+            d=x if isinstance(x,dict) else json.loads(x)
+            rid=str(d.get("record_id") or d.get("id") or "")
+            lead=str(d.get("lead_type") or "").upper()
+            tx="SALE" if lead=="SALE" else "LEASE" if lead in ("RENT","LEASE") else ""
+            desc=str(d.get("description") or "")
+            locality=str(d.get("locality") or d.get("project_name") or "").strip()
+            if not locality and desc:
+                locality=desc.split("|",1)[0].strip()
+            clean={
+                "source_type":"WHATSAPP",
+                "source_table":"pi_whatsapp_property_master",
+                "source_record_id":rid,
+                "record_id":rid,
+                "description":desc,
+                "raw_message":d.get("raw_message") or "",
+                "location":locality,
+                "property_type":d.get("configuration_details") or "",
+                "area_text":d.get("area") or "",
+                "floor":d.get("floor") or "",
+                "transaction_type":tx,
+                "amount_text":d.get("price") or "",
+                "contact_name":d.get("contact_name") or "",
+                "contact_number":d.get("phone_numbers") or "",
+                "contact_name_number":d.get("contact_name_number") or "",
+                "phones":d.get("phone_numbers") or "",
+                "all_contacts":d.get("all_contacts") or "",
+                "source":d.get("source") or "WhatsApp",
+                "verification_status":d.get("verification") or "UNVERIFIED",
+                "created_at":d.get("captured_on") or d.get("created_at"),
+            }
+            out.append({
+                "canonical_id":"WHATSAPP-SOURCE-"+rid,
+                "locality":locality,
+                "city":"",
+                "transaction_type":tx,
+                "area_sqft":"",
+                "price_raw":d.get("price") or "",
+                "created_at":d.get("captured_on") or d.get("created_at"),
+                "updated_at":d.get("captured_on") or d.get("created_at"),
+                "verification_status":d.get("verification") or "UNVERIFIED",
+                "availability_status":"UNKNOWN",
+                "assigned_to":"",
+                "clean_record":clean,
+            })
+        return out
+    except Exception:
+        return []
+
 def _property_rows(e,source,q,location,category,transaction,status,assigned,limit,offset=0):
     def source_rows(table,where,order):
         with e.connect() as cx:
@@ -363,6 +436,8 @@ def _property_rows(e,source,q,location,category,transaction,status,assigned,limi
         rows=source_rows("pi_operational_properties","WHERE COALESCE(entry_source,'MANUAL')='MANUAL'","ORDER BY COALESCE(updated_at,created_at) DESC NULLS LAST")
     elif source=="MAGAZINE":
         rows=source_rows("pi_magazine_complete_v860","WHERE archived_at IS NULL AND COALESCE(record_status,'ACTIVE')='ACTIVE'","ORDER BY COALESCE(updated_at,created_at) DESC NULLS LAST,id DESC")
+    elif source=="WHATSAPP":
+        rows=_whatsapp_clean_source_rows(e,q,limit,offset)
     else:
         pat=_src_pat(source);sc=""
         if pat:
@@ -629,7 +704,7 @@ def _canonical_property_projection(r,source,e,contact_batch=None):
         "source":source_name,
         "google_pin":_display_text(google_pin),
         "media":media,
-        "source_record_id":_display_text(_first(cr,"property_code","property_id","source_record_id") or ""),
+        "source_record_id":_display_text(_first(cr,"property_code","property_id","source_record_id","record_id") or ""),
         "source_only":"-SOURCE-" in cid,
     }
 
@@ -729,17 +804,19 @@ def _property_source_count(e,source,q=""):
                       AND (:q='%%' OR to_jsonb(pi_operational_properties)::text ILIKE :q)"""),
                     {"q":f"%{q.strip()}%"}).scalar() or 0)
             if source=="WHATSAPP":
-                return int(cx.execute(text("""SELECT COUNT(DISTINCT p.canonical_id)
-                    FROM pi_master_properties_v711 p
-                    WHERE UPPER(COALESCE(p.promotion_status,'')) NOT IN ('REJECTED','DELETED','DUPLICATE','QUARANTINED','MANUAL_ARCHIVED')
-                      AND EXISTS(
-                        SELECT 1 FROM pi_master_source_links_v711 l
-                        WHERE l.canonical_id=p.canonical_id AND l.master_entity_type='PROPERTY'
-                          AND (UPPER(COALESCE(l.source_type,'')) LIKE '%WHATSAPP%'
-                               OR UPPER(COALESCE(l.source_table,'')) LIKE '%WHATSAPP%')
-                      )
-                      AND (:q='%%' OR p.canonical_id ILIKE :q OR COALESCE(p.locality,'') ILIKE :q OR COALESCE(p.city,'') ILIKE :q OR COALESCE(p.clean_record::text,'') ILIKE :q)"""),
-                    {"q":f"%{q.strip()}%"}).scalar() or 0)
+                gen=cx.execute(text("""SELECT generation_id FROM pi_whatsapp_property_master_generation
+                    WHERE status='COMPLETED' ORDER BY completed_at DESC NULLS LAST,id DESC LIMIT 1""")).scalar()
+                if not gen:return 0
+                return int(cx.execute(text("""SELECT COUNT(*) FROM pi_whatsapp_property_master
+                    WHERE generation_id=:g
+                      AND (:q='%%'
+                           OR COALESCE(description,'') ILIKE :q
+                           OR COALESCE(configuration_details,'') ILIKE :q
+                           OR COALESCE(contact_name_number,'') ILIKE :q
+                           OR COALESCE(phone_numbers,'') ILIKE :q
+                           OR COALESCE(source,'') ILIKE :q
+                           OR COALESCE(raw_message,'') ILIKE :q)"""),
+                    {"g":gen,"q":f"%{q.strip()}%"}).scalar() or 0)
             pat=_src_pat(source)
             if pat:
                 return int(cx.execute(text("""SELECT COUNT(DISTINCT p.canonical_id)
@@ -775,7 +852,7 @@ def _pager(source,page,page_size,total,q,location,category,transaction,status,as
 
 def _property_table(core,e,req,source,q,location,category,transaction,status,assigned,limit,offset=0,rows_override=None):
     rows=rows_override if rows_override is not None else _property_rows(e,source,q,location,category,transaction,status,assigned,limit,offset)
-    wa_contacts=_whatsapp_contact_batch(e,rows) if source=="WHATSAPP" else {}
+    wa_contacts={} if source=="WHATSAPP" and all("-SOURCE-" in str(r.get("canonical_id") or "") for r in rows) else (_whatsapp_contact_batch(e,rows) if source=="WHATSAPP" else {})
     prepared=[]
     for r in rows:
         p=_canonical_property_projection(r,source,e,wa_contacts)
@@ -1182,9 +1259,10 @@ def register(core, served_app=None):
             "status":"PASS",
             "version":VERSION,
             "whatsapp":{
-                "authority":"MASTER_WHATSAPP_SOURCE_LINKS + pi_whatsapp_property_master contacts",
+                "authority":"LATEST_COMPLETED pi_whatsapp_property_master GENERATION",
                 "rows":wa_total,
                 "latest_clean_generation_rows":latest_gen_rows,
+                "master_linked_subset_not_used_for_source_page":true,
                 "pages_at_100":max(1,(wa_total+page_size-1)//page_size),
                 "route":"/alliance/final/database/whatsapp",
                 "route_owner":owner("/alliance/final/database/whatsapp"),
