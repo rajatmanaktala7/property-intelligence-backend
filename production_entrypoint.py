@@ -443,12 +443,15 @@ def _load_core():
         # Publish the lightweight base app BEFORE importing newspaper_wrapper.
         # newspaper_wrapper performs substantial legacy registration at import
         # time; login/core routes must remain available while that work runs.
+        BOOT["early_stage"]="IMPORT_BASE_APP"
         import app as early_core
         CORE_APP = early_core.app
+        BOOT["early_stage"]="BASE_APP_READY"
 
         # WhatsApp ingest is a critical production path. Start the safe queue
         # worker immediately, before heavy legacy/background registration.
         try:
+            BOOT["early_stage"]="WHATSAPP_QUEUE"
             import alliance_whatsapp_safe_ingest_v5 as early_safe_wa
             early_safe_wa.start_worker()
             print("[early-whatsapp-safe-queue] READY")
@@ -458,6 +461,7 @@ def _load_core():
         # Publish supporting Team routes first, but keep its old dashboard
         # on /alliance/legacy/team-command-centre.
         try:
+            BOOT["early_stage"]="TEAM_SUPPORT"
             import alliance_team_dashboard_v1220 as early_team_dashboard_v1220
             early_team_dashboard_v1220.register(early_core)
             print("[early-team-support-v1220] READY")
@@ -466,20 +470,24 @@ def _load_core():
 
         # Primary dashboard authority: latest clean canonical dashboard.
         try:
+            BOOT["early_stage"]="DASHBOARD_AUTHORITY"
             import alliance_dashboard_authority_v1 as early_dashboard_authority_v1
             early_dashboard_authority_v1.register(early_core)
             print("[early-canonical-dashboard-v1] READY")
         except Exception as exc:
             print("[early-canonical-dashboard-v1] warning:", type(exc).__name__, str(exc))
 
+        BOOT["early_stage"]="NEWSPAPER_WRAPPER"
         import newspaper_wrapper as wrapped
         CORE_APP = wrapped.app
+        BOOT["early_stage"]="WRAPPER_READY"
 
         # ALLIANCE_EARLY_REQUIREMENT_AUTHORITY_V2
         # Requirement authority must become public before the broader production
         # surface registration begins. production_surface.register() can be a
         # long-running bootstrap and previously left REQUIREMENT_APP unset.
         try:
+            BOOT["early_stage"]="REQUIREMENT_AUTHORITY"
             import alliance_requirement_restore_v1235 as earliest_reqrestore_v1235
             earliest_requirement_app = FastAPI(
                 title="Alliance Requirement Authority",
@@ -500,6 +508,7 @@ def _load_core():
         # Serve settled database/search and matcher workspaces from isolated
         # authorities so legacy route ordering cannot intercept them.
         try:
+            BOOT["early_stage"]="DATABASE_AUTHORITY"
             import alliance_property_authority_v11 as property_authority_v11
             isolated_database_app = FastAPI(title="Alliance Database Authority", docs_url=None, redoc_url=None, openapi_url=None)
             property_authority_v11.register(wrapped.core, served_app=isolated_database_app)
@@ -512,6 +521,7 @@ def _load_core():
             print("[early-database-authority-v1] warning:", type(exc).__name__, str(exc))
 
         try:
+            BOOT["early_stage"]="MATCHER_AUTHORITY"
             import alliance_master_requirement_authority_v1 as matcher_authority_v1
             isolated_matcher_app = FastAPI(title="Alliance Matcher Authority", docs_url=None, redoc_url=None, openapi_url=None)
             matcher_authority_v1.register(wrapped.core, served_app=isolated_matcher_app)
@@ -531,6 +541,7 @@ def _load_core():
             and MATCHER_APP is not None
         )
         if critical_ready:
+            BOOT["early_stage"]="CRITICAL_READY"
             BOOT["critical_ready"] = True
             BOOT["core_loaded"] = True
             BOOT["state"] = "READY"
