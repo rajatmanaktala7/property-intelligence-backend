@@ -707,8 +707,15 @@ def _load_core():
             }
             print("[business-os-v820] warning:", type(exc).__name__, str(exc))
 
-        import alliance_live_feed_purity as live_feed_purity
-        live_feed_purity.register(wrapped)
+        if not BOOT.get("critical_ready"):
+            import alliance_live_feed_purity as live_feed_purity
+            live_feed_purity.register(wrapped)
+        else:
+            stabilization = dict(stabilization or {})
+            stabilization["live_feed_purity"] = {
+                "status":"DISABLED_LATE_MIDDLEWARE",
+                "reason":"Middleware cannot be added after critical workspace starts serving."
+            }
 
         # ALLIANCE_BABY_V6_REQUIREMENT_ANSWER_MACHINE
         try:
