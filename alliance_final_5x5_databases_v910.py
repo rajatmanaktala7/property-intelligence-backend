@@ -4,7 +4,7 @@ from fastapi import Form, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import text
 
-VERSION="10.2.0-CANONICAL-MASTER-ONLY-SOURCE-VIEWS"
+VERSION="10.3.0-SOURCE-LINK-FALLBACK-QUARANTINE-HIDE"
 PROPERTY_SOURCES=("MASTER","WHATSAPP","MANUAL","NEWSPAPER","MAGAZINE")
 REQUIREMENT_SOURCES=("MASTER","WHATSAPP","MANUAL")
 SOURCES=PROPERTY_SOURCES
@@ -132,14 +132,19 @@ def _property_rows(e,source,q,location,category,transaction,status,assigned,limi
     pat=_src_pat(source)
     sc=""
     if pat:
-        sc="""AND EXISTS(SELECT 1 FROM pi_master_source_links_v711 l WHERE l.canonical_id=p.canonical_id
-        AND l.master_entity_type='PROPERTY' AND (UPPER(COALESCE(l.source_type,'')) LIKE :pat OR UPPER(COALESCE(l.source_table,'')) LIKE :pat))"""
+        sc="""AND (
+        UPPER(COALESCE(p.source_type,'')) LIKE :pat
+        OR EXISTS(SELECT 1 FROM pi_master_source_links_v711 l WHERE l.canonical_id=p.canonical_id
+          AND l.master_entity_type='PROPERTY'
+          AND (UPPER(COALESCE(l.source_type,'')) LIKE :pat OR UPPER(COALESCE(l.source_table,'')) LIKE :pat))
+        )"""
     sql=f"""SELECT p.*,COALESCE(w.verification_status,'UNVERIFIED') verification_status,
     COALESCE(w.availability_status,'UNKNOWN') availability_status,COALESCE(w.assigned_to,a.assigned_to) assigned_to
     FROM pi_master_properties_v711 p
     LEFT JOIN pi_master_workflow_v720 w ON w.canonical_id=p.canonical_id
     LEFT JOIN pi_master_action_state_v730 a ON a.canonical_id=p.canonical_id
     WHERE NOT EXISTS(SELECT 1 FROM pi_property_archive_v801 ar WHERE ar.canonical_id=p.canonical_id AND ar.restored_at IS NULL)
+    AND UPPER(COALESCE(p.promotion_status,'')) NOT IN ('REJECTED','DELETED','DUPLICATE','QUARANTINED','MANUAL_ARCHIVED')
     {sc}
     AND (:q='%%' OR p.canonical_id ILIKE :q OR COALESCE(p.locality,'') ILIKE :q OR COALESCE(p.city,'') ILIKE :q OR COALESCE(p.clean_record::text,'') ILIKE :q)
     AND (:loc='%%' OR COALESCE(p.locality,'') ILIKE :loc OR COALESCE(p.city,'') ILIKE :loc OR COALESCE(p.clean_record::text,'') ILIKE :loc)
