@@ -590,21 +590,27 @@ def register(core, served_app=None):
         _auth(core,request); return JSONResponse(_status(core))
 
     @app.get("/api/alliance/master-matcher-selftest")
-    async def master_matcher_selftest():
+    async def master_matcher_selftest(offset:int=Query(0,ge=0,le=25)):
         """Non-sensitive runtime smoke test of the production MASTER_ONLY matcher."""
         import alliance_master_matcher_contract_v1 as master_matcher
         from alliance_astra_match_intelligence_v1 import interpret_requirement
 
         rows=[r for r in _requirements(core)
               if _norm(r.get("original_message"))
-              and str(r.get("matcher_eligible") or "").upper() not in {"FALSE","NO","0","REJECTED"}][:1]
-        started=time.time(); tested=0; succeeded=0; errors=[]; total_matches=0; max_scores=[]
+              and str(r.get("matcher_eligible") or "").upper() not in {"FALSE","NO","0","REJECTED"}]
+        rows=rows[offset:offset+1]
+        started=time.time(); tested=0; succeeded=0; errors=[]; total_matches=0; max_scores=[]; rejection_reasons={}; inventory_gaps=0
         for req in rows:
             tested+=1
             try:
                 astra=interpret_requirement(req)
                 enriched=astra.get("enriched_text") or _norm(req.get("original_message"))
                 result=master_matcher.run_match(core.engine,enriched,min_score=70.0,limit=30)
+                if (result.get("summary") or {}).get("inventory_gap"):
+                    inventory_gaps+=1
+                for rej in result.get("rejected_sample") or []:
+                    reason=str(rej.get("reason") or "UNKNOWN")
+                    rejection_reasons[reason]=rejection_reasons.get(reason,0)+1
                 items=[]
                 for key in ("exact_verified","exact_needs_verification","alternatives"):
                     items.extend(result.get(key) or [])
@@ -630,8 +636,11 @@ def register(core, served_app=None):
             "requirements_tested":tested,
             "executions_succeeded":succeeded,
             "errors":errors[:5],
+            "sample_offset":offset,
             "matches_found_total":total_matches,
             "highest_score":max(max_scores) if max_scores else None,
+            "inventory_gaps":inventory_gaps,
+            "rejection_reasons":dict(sorted(rejection_reasons.items(), key=lambda kv:(-kv[1],kv[0]))[:8]),
             "elapsed_ms":round((time.time()-started)*1000,1),
             "data_exposed":False,
         })
