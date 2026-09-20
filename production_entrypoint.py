@@ -446,6 +446,16 @@ def _load_core():
         import app as early_core
         CORE_APP = early_core.app
 
+        # Install the current Command Centre immediately so successful login
+        # never falls back to the legacy base dashboard while optional modules
+        # continue loading in the background.
+        try:
+            import alliance_clean_core_v2 as early_clean_core_v2
+            early_clean_core_v2.register(early_core)
+            print("[early-clean-core-v2] READY")
+        except Exception as exc:
+            print("[early-clean-core-v2] warning:", type(exc).__name__, str(exc))
+
         import newspaper_wrapper as wrapped
         CORE_APP = wrapped.app
 
