@@ -5,7 +5,7 @@ from fastapi import Form, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from sqlalchemy import text, bindparam
 
-VERSION="12.1.0-SOURCE-SEPARATION-PAGINATION"
+VERSION="12.1.1-SOURCE-ISOLATION-NO-GLOBAL-PREVIEW"
 SOURCES=("MASTER","NEWSPAPER","WHATSAPP","MAGAZINE","MANUAL")
 CATEGORY_OPTIONS=("Residential Sale","Residential Rent","Commercial Sale","Commercial Rent","Industrial Sale","Industrial Rent","Farmhouse Sale","Farmhouse Rent")
 
@@ -773,8 +773,8 @@ def _pager(source,page,page_size,total,q,location,category,transaction,status,as
     nxt=f'<a class="btn light" href="{_e(href(page+1))}">Next →</a>' if page<pages else ""
     return f'<div class="card"><b>Total:</b> {total:,} · <b>Page:</b> {page:,} of {pages:,} · <b>Rows/page:</b> {page_size} &nbsp; {prev} {nxt}</div>'
 
-def _property_table(core,e,req,source,q,location,category,transaction,status,assigned,limit,offset=0):
-    rows=_property_rows(e,source,q,location,category,transaction,status,assigned,limit,offset)
+def _property_table(core,e,req,source,q,location,category,transaction,status,assigned,limit,offset=0,rows_override=None):
+    rows=rows_override if rows_override is not None else _property_rows(e,source,q,location,category,transaction,status,assigned,limit,offset)
     wa_contacts=_whatsapp_contact_batch(e,rows) if source=="WHATSAPP" else {}
     prepared=[]
     for r in rows:
@@ -1167,6 +1167,16 @@ def register(core, served_app=None):
             return {"count":len(matches),"active":matches[0] if matches else {}}
         wa_total=_property_source_count(e,"WHATSAPP","")
         mag_total=_property_source_count(e,"MAGAZINE","")
+        latest_gen_rows=0
+        try:
+            with e.connect() as cx:
+                gen=cx.execute(text("""SELECT generation_id FROM pi_whatsapp_property_master_generation
+                    WHERE status='COMPLETED' ORDER BY completed_at DESC NULLS LAST,id DESC LIMIT 1""")).scalar()
+                if gen:
+                    latest_gen_rows=int(cx.execute(text("""SELECT COUNT(*) FROM pi_whatsapp_property_master
+                        WHERE generation_id=:g"""),{"g":gen}).scalar() or 0)
+        except Exception:
+            latest_gen_rows=0
         page_size=100
         return {
             "status":"PASS",
@@ -1174,6 +1184,7 @@ def register(core, served_app=None):
             "whatsapp":{
                 "authority":"MASTER_WHATSAPP_SOURCE_LINKS + pi_whatsapp_property_master contacts",
                 "rows":wa_total,
+                "latest_clean_generation_rows":latest_gen_rows,
                 "pages_at_100":max(1,(wa_total+page_size-1)//page_size),
                 "route":"/alliance/final/database/whatsapp",
                 "route_owner":owner("/alliance/final/database/whatsapp"),
@@ -1227,13 +1238,7 @@ def register(core, served_app=None):
                 for k in ("remarks","description","original_description","source_text","raw_line","details"):
                     if cr.get(k): cr[k]=re.sub(r"(?<!\d)[6-9]\d{9}(?!\d)","XXXXXXXXXX",str(cr[k]))
                 r["clean_record"]=cr
-            original=_property_rows
-            def _preview_rows(*args,**kwargs): return rows
-            globals()["_property_rows"]=_preview_rows
-            try:
-                body=_property_table(core,e,req,preview_source,"","","","","","",8)
-            finally:
-                globals()["_property_rows"]=original
+            body=_property_table(core,e,req,preview_source,"","","","","","",8,0,rows_override=rows)
             return HTMLResponse(_shell("Canonical Property Table Preview",body))
         _login(core,req);src=source.upper()
         if src not in SOURCES:return HTMLResponse("Unknown property database",404)
