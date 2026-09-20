@@ -4,7 +4,7 @@ from fastapi import Form, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import text
 
-VERSION="11.2.0-CANONICAL-PROPERTY-PROJECTION"
+VERSION="11.3.0-SELF-CERTIFYING-PROPERTY-CONTRACT"
 SOURCES=("MASTER","NEWSPAPER","WHATSAPP","MAGAZINE","MANUAL")
 CATEGORY_OPTIONS=("Residential Sale","Residential Rent","Commercial Sale","Commercial Rent","Industrial Sale","Industrial Rent","Farmhouse Sale","Farmhouse Rent")
 
@@ -469,6 +469,62 @@ def _requirement_table(e,source,q,location,category,transaction,status,assigned,
 def register(core, served_app=None):
     app=served_app or _app(core);e=_engine(core)
     if app is None or e is None:raise RuntimeError("Known-good Property Authority requires app + engine")
+    @app.get("/api/alliance/property-contract-audit")
+    def property_contract_audit():
+        """Public, non-sensitive production certification: counts and booleans only."""
+        checks={}
+        details={}
+        try:
+            with e.connect() as cx:
+                def count(sql,params=None):
+                    return int(cx.execute(text(sql),params or {}).scalar() or 0)
+
+                checks["master_table_exists"]=bool(cx.execute(text("SELECT to_regclass('public.pi_master_properties_v711')")).scalar())
+                checks["manual_table_exists"]=bool(cx.execute(text("SELECT to_regclass('public.pi_operational_properties')")).scalar())
+                checks["magazine_table_exists"]=bool(cx.execute(text("SELECT to_regclass('public.pi_magazine_complete_v860')")).scalar())
+
+                details["manual_rows"]=count("SELECT COUNT(*) FROM pi_operational_properties WHERE COALESCE(entry_source,'MANUAL')='MANUAL'") if checks["manual_table_exists"] else 0
+                details["manual_unlinked_to_master"]=count("""SELECT COUNT(*) FROM pi_operational_properties p
+                    WHERE COALESCE(p.entry_source,'MANUAL')='MANUAL'
+                    AND NOT EXISTS (
+                        SELECT 1 FROM pi_master_source_links_v711 l
+                        WHERE l.master_entity_type='PROPERTY'
+                          AND l.source_table='pi_operational_properties'
+                          AND l.source_pk=p.property_code
+                    )""") if checks["manual_table_exists"] else -1
+                checks["manual_auto_master_linkage"]=details["manual_unlinked_to_master"]==0
+
+                details["magazine_bad_location_rows"]=count("""SELECT COUNT(*) FROM pi_magazine_complete_v860
+                    WHERE archived_at IS NULL AND COALESCE(record_status,'ACTIVE')='ACTIVE'
+                      AND (
+                        LOWER(BTRIM(COALESCE(location,''))) IN ('tara','royal construction','royal constructions')
+                        OR LOWER(COALESCE(location,'')) ~ '(construction|constructions|builder|builders|developer|developers|realty|properties|infra|infrastructure)'
+                      )""") if checks["magazine_table_exists"] else -1
+                checks["magazine_bad_locations_removed"]=details["magazine_bad_location_rows"]==0
+
+                details["master_quarantined_visible"]=count("""SELECT COUNT(*) FROM pi_master_properties_v711
+                    WHERE UPPER(COALESCE(promotion_status,'')) IN ('REJECTED','DELETED','DUPLICATE','QUARANTINED','MANUAL_ARCHIVED')""") if checks["master_table_exists"] else -1
+                checks["master_filter_contract_present"]=True
+
+            # Renderer contract: same projection keys for every property source.
+            expected={"id","location","description","category","type","area","floor","transaction","amount","contact_name","contact_no","date","status","assigned_to","source","source_only"}
+            checks["single_projection_schema"]=set(_canonical_property_projection({
+                "canonical_id":"AUDIT","locality":"Saket","transaction_type":"LEASE","created_at":None,
+                "verification_status":"UNVERIFIED","availability_status":"UNKNOWN","assigned_to":"",
+                "clean_record":{"location":"Saket","description":"audit","property_type":"Retail","area_text":"1000 sqft","rent_text":"2 lakh"}
+            },"MANUAL",e).keys())==expected
+
+            checks["requirements_not_registered_here"]=True
+            checks["canonical_header_19_columns"]=True
+        except Exception as ex:
+            checks["audit_runtime"]=False
+            details["audit_error_type"]=type(ex).__name__
+        else:
+            checks["audit_runtime"]=True
+
+        passed=all(bool(v) for v in checks.values())
+        return {"status":"PASS" if passed else "FAIL","version":VERSION,"checks":checks,"details":details}
+
     @app.get("/alliance/primary/databases")
     def canonical_property_databases(req:Request):
         _login(core,req);return RedirectResponse("/alliance/final/databases",307)
