@@ -4,7 +4,7 @@ from fastapi import Form, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import text
 
-VERSION="10.3.0-SOURCE-LINK-FALLBACK-QUARANTINE-HIDE"
+VERSION="10.4.0-ASTRA-SOURCE-TRUTH-VIEWS"
 PROPERTY_SOURCES=("MASTER","WHATSAPP","MANUAL","NEWSPAPER","MAGAZINE")
 REQUIREMENT_SOURCES=("MASTER","WHATSAPP","MANUAL")
 SOURCES=PROPERTY_SOURCES
@@ -159,6 +159,43 @@ def _property_rows(e,source,q,location,category,transaction,status,assigned,limi
     # Historical Manual rows are repaired/promoted by the canonical hygiene
     # bridge; reading raw legacy tables here created duplicate/stale results
     # and made Manual appear identical to other source views.
+    # ASTRA source-truth contract: Manual Database is a SOURCE database.
+    # Render the operational source rows themselves; Master remains the matcher
+    # authority. This avoids an empty Manual page when historical source-link
+    # coverage is incomplete, without pretending source IDs are Master IDs.
+    if source=="MANUAL":
+        source_rows=[]
+        try:
+            with e.connect() as c:
+                exists=c.execute(text("SELECT to_regclass('public.pi_operational_properties')")).scalar()
+                if exists:
+                    raw=c.execute(text("""SELECT to_jsonb(t) AS d FROM pi_operational_properties t
+                        WHERE COALESCE(entry_source,'MANUAL')='MANUAL'
+                          AND (:q='%%' OR to_jsonb(t)::text ILIKE :q)
+                        ORDER BY COALESCE(updated_at,created_at) DESC NULLS LAST LIMIT :n"""),
+                        {"q":f"%{q.strip()}%","n":limit}).scalars().all()
+                    for x in raw:
+                        d=x if isinstance(x,dict) else json.loads(x)
+                        source_rows.append({
+                            "canonical_id":"MANUAL-SOURCE-"+str(_first(d,"property_code","property_id","id") or ""),
+                            "locality":_first(d,"location","locality","city") or "",
+                            "city":_first(d,"city") or "",
+                            "transaction_type":_first(d,"transaction_type","rent_sale","rent_or_sale") or "",
+                            "area_sqft":_first(d,"area_sqft","area","available_area") or "",
+                            "price_raw":_first(d,"rent_amount","sale_amount","amount","price") or "",
+                            "created_at":_first(d,"created_at","entry_date"),
+                            "updated_at":_first(d,"updated_at","created_at","entry_date"),
+                            "verification_status":_first(d,"verification_status","status") or "UNVERIFIED",
+                            "availability_status":_first(d,"availability_status","status") or "UNKNOWN",
+                            "assigned_to":_first(d,"assigned_to","team_member") or "",
+                            "clean_record":dict(d,source_table="pi_operational_properties",
+                                                source_pk=str(_first(d,"property_code","id") or ""),
+                                                source_type="MANUAL"),
+                        })
+        except Exception:
+            source_rows=[]
+        rows=source_rows
+
     # ASTRA source-truth search: apply the same evidence search to every
     # returned row, including compatibility/source rows, instead of relying only
     # on Master projection columns.
