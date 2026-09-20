@@ -1314,6 +1314,17 @@ def _load_core():
             stabilization["canonical_bridge_v12426a"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","fail_safe":True}
             print("[canonical-bridge-v12426a] warning:",type(exc).__name__,str(exc))
 
+        # ALLIANCE_CANONICAL_DATABASE_HYGIENE_V1
+        try:
+            import alliance_canonical_database_hygiene_v1 as database_hygiene_v1
+            stabilization = dict(stabilization or {})
+            stabilization["canonical_database_hygiene_v1"] = database_hygiene_v1.register(wrapped.core)
+            print("[canonical-database-hygiene-v1]", stabilization["canonical_database_hygiene_v1"])
+        except Exception as exc:
+            stabilization = dict(stabilization or {})
+            stabilization["canonical_database_hygiene_v1"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","fail_safe":True}
+            print("[canonical-database-hygiene-v1] warning:",type(exc).__name__,str(exc))
+
         # ALLIANCE_TEAM_READINESS_GUARD_V12426C
         try:
             import alliance_team_readiness_v12426c as readiness_v12426c
