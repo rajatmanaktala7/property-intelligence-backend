@@ -1614,7 +1614,6 @@ def _load_core():
         # older route owner from serving a stale Manual Property page.
         try:
             import alliance_final_5x5_databases_v910 as final_database_v910
-            import alliance_property_core_v3 as property_core_v3
 
             final_database_paths = {
                 "/alliance/primary/databases",
@@ -1641,13 +1640,10 @@ def _load_core():
                 redoc_url=None,
                 openapi_url=None,
             )
-            # Property pages now have a dedicated isolated authority.
-            # Requirements stay on REQUIREMENT_APP and are not registered here.
-            isolated_result = property_core_v3.register(
+            isolated_result = final_database_v910.register(
                 wrapped.core,
                 served_app=isolated_database_app,
             )
-            # Keep legacy core fallback routes for old internal links only.
             core_result = final_database_v910.register(
                 wrapped.core,
                 served_app=wrapped.app,
@@ -1657,8 +1653,8 @@ def _load_core():
             stabilization = dict(stabilization or {})
             stabilization["final_database_route_authority_v2"] = {
                 "status": "READY",
-                "owner": "alliance_property_core_v3",
-                "version": getattr(property_core_v3, "VERSION", None),
+                "owner": "alliance_final_5x5_databases_v910",
+                "version": getattr(final_database_v910, "VERSION", None),
                 "requirements_touched": False,
                 "registered_after_manual_restore": True,
                 "isolated_registration": isolated_result,
