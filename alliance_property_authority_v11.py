@@ -1,10 +1,11 @@
 from __future__ import annotations
 import html, json, re
+from urllib.parse import quote
 from fastapi import Form, Query, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from sqlalchemy import text
 
-VERSION="11.5.0-FIXED-COLUMN-VISUAL-CONTRACT"
+VERSION="11.6.0-MANUAL-MEDIA-GOOGLE-PIN-RESTORE"
 SOURCES=("MASTER","NEWSPAPER","WHATSAPP","MAGAZINE","MANUAL")
 CATEGORY_OPTIONS=("Residential Sale","Residential Rent","Commercial Sale","Commercial Rent","Industrial Sale","Industrial Rent","Farmhouse Sale","Farmhouse Rent")
 
@@ -313,7 +314,7 @@ nav a,.btn,button,.summarybtn{{background:#0d2238;color:white;text-decoration:no
 .good{{background:#067647!important;border-color:#067647!important}}.light{{background:#475467!important}}.danger{{background:#b42318!important}}
 .wrap{{max-width:2100px;margin:auto;padding:14px}}.card{{background:white;border:1px solid #98a2b3;padding:10px;margin-bottom:10px}}
 .searchgrid{{display:grid;grid-template-columns:2fr repeat(6,minmax(130px,1fr));gap:6px}}input,select{{width:100%;padding:7px;border:1px solid #98a2b3;border-radius:0}}
-.tablebox{{overflow:auto;max-height:76vh;border:1px solid #667085;background:white}}table{{border-collapse:collapse;width:2570px;min-width:2570px;font-size:11px;table-layout:fixed}}
+.tablebox{{overflow:auto;max-height:76vh;border:1px solid #667085;background:white}}table{{border-collapse:collapse;width:2870px;min-width:2870px;font-size:11px;table-layout:fixed}}
 th,td{{border:1px solid #98a2b3;padding:6px 7px;text-align:left;vertical-align:top;white-space:normal;overflow-wrap:anywhere;word-break:normal;overflow:hidden}}
 th{{background:#e9eef5;position:sticky;top:0;z-index:4;white-space:nowrap;min-width:110px}}
 tbody tr:nth-child(even) td{{background:#f8fafc}}tbody tr:hover td{{background:#eef4ff}}
@@ -348,6 +349,27 @@ def _filter_form(q,location,category,transaction,status,assigned,limit):
     <input name="assigned" value="{_e(assigned)}" placeholder="Assigned To">
     <input type="number" name="limit" min="1" max="1500" value="{limit}">
     <button>Search</button></form></div>"""
+def _manual_media_summary(e,cr):
+    pc=_first(cr,"property_code","source_record_id")
+    if not pc:return {"property_code":"","images":0,"videos":0,"brochures":0,"total":0}
+    out={"property_code":str(pc),"images":0,"videos":0,"brochures":0,"total":0}
+    try:
+        with e.connect() as cx:
+            exists=cx.execute(text("SELECT to_regclass('public.pi_operational_property_media')")).scalar()
+            if not exists:return out
+            rows=cx.execute(text("""SELECT UPPER(COALESCE(media_type,'')) media_type,COUNT(*) n
+                FROM pi_operational_property_media WHERE property_code=:pc
+                GROUP BY UPPER(COALESCE(media_type,''))"""),{"pc":str(pc)}).mappings().all()
+        for row in rows:
+            typ=str(row.get("media_type") or "").upper(); n=int(row.get("n") or 0)
+            out["total"]+=n
+            if typ=="IMAGE":out["images"]+=n
+            elif typ=="VIDEO":out["videos"]+=n
+            elif typ in ("BROCHURE","PDF","DOCUMENT"):out["brochures"]+=n
+    except Exception:
+        pass
+    return out
+
 def _canonical_property_projection(r,source,e):
     """One display schema for Master, Manual, Magazine, Newspaper and WhatsApp."""
     cr=_flat_record(r.get("clean_record"))
@@ -356,7 +378,7 @@ def _canonical_property_projection(r,source,e):
     if locality=="Needs verification":
         return None
 
-    address=_first(cr,"address","exact_address","property_address","google_location") or ""
+    address=_first(cr,"address","exact_address","property_address") or ""
     desc=_first(cr,"description","property_description","original_description","source_text","raw_line","original_message","details","team_description","description_edit")
     if not desc:
         parts=[]
@@ -401,6 +423,8 @@ def _canonical_property_projection(r,source,e):
     if not stat or stat=="UNKNOWN":stat=r.get("verification_status") or _first(cr,"verification_status","status") or "UNVERIFIED"
 
     source_name=_source_name(e,cid,"PROPERTY") or str(_first(cr,"entry_source","source","source_type") or source).title()
+    google_pin=_first(cr,"google_location","google_maps","google_pin","map_link") or ""
+    media=_manual_media_summary(e,cr)
 
     return {
         "id":cid,
@@ -418,6 +442,8 @@ def _canonical_property_projection(r,source,e):
         "status":stat,
         "assigned_to":r.get("assigned_to") or _first(cr,"assigned_to","team_member") or "",
         "source":source_name,
+        "google_pin":_display_text(google_pin),
+        "media":media,
         "source_only":"-SOURCE-" in cid,
     }
 
@@ -438,13 +464,18 @@ def _property_table(core,e,req,source,q,location,category,transaction,status,ass
             history=f'<a class="btn light" href="/alliance/primary/property/{_e(cid)}">History</a>'
             edit=f'<a class="btn light" href="/alliance/primary/property/{_e(cid)}/edit">Edit</a>'
             delete=f"""<form method="post" action="/alliance/primary/property/{_e(cid)}/delete" onsubmit="return confirm('Archive this property? Original source evidence remains preserved.');"><button class="danger">Delete</button></form>"""
-        vals=[p["id"],p["location"],p["description"],p["category"],p["type"],p["area"],p["floor"],p["transaction"],p["amount"],p["contact_name"],p["contact_no"],p["date"],p["status"],verify,history,p["assigned_to"],p["source"],edit,delete]
-        cls=["nowrap","loc","desc","","","","","nowrap","","","","nowrap","nowrap","","","","","",""]
-        trs.append("<tr>"+"".join(f'<td class="{cls[i]}">{x if i in (13,14,17,18) else _e(_shown(x))}</td>' for i,x in enumerate(vals))+"</tr>")
-    H=["Property ID","Location","Description / Address","Property Category","Property Type","Area","Floor","Rent/Sale","Amount","Contact Name","Contact No.","Date & Time","Status","Verify","History","Assigned To","Source","Edit","Delete"]
-    widths=[180,180,520,150,170,120,110,100,120,140,140,170,110,100,100,120,130,90,90]
+        pin_html=(f'<a class="btn light" target="_blank" rel="noopener" href="{_e(p["google_pin"])}">Open Pin</a>' if p["google_pin"] else "—")
+        m=p["media"]; pc=m.get("property_code") or ""
+        media_label=f'{m.get("images",0)} pics · {m.get("videos",0)} videos · {m.get("brochures",0)} docs'
+        media_html=(f'<a class="btn light" href="/alliance/final/database/media/{quote(str(pc),safe="")}">{_e(media_label)}</a>' if pc and m.get("total",0)>0 else _e(media_label if pc else "—"))
+        vals=[p["id"],p["location"],p["description"],p["category"],p["type"],p["area"],p["floor"],p["transaction"],p["amount"],p["contact_name"],p["contact_no"],pin_html,media_html,p["date"],p["status"],verify,history,p["assigned_to"],p["source"],edit,delete]
+        cls=["nowrap","loc","desc","","","","","nowrap","","","","","","nowrap","nowrap","","","","","",""]
+        raw={11,12,15,16,19,20}
+        trs.append("<tr>"+"".join(f'<td class="{cls[i]}">{x if i in raw else _e(_shown(x))}</td>' for i,x in enumerate(vals))+"</tr>")
+    H=["Property ID","Location","Description / Address","Property Category","Property Type","Area","Floor","Rent/Sale","Amount","Contact Name","Contact No.","Google Pin","Media","Date & Time","Status","Verify","History","Assigned To","Source","Edit","Delete"]
+    widths=[180,180,520,150,170,120,110,100,120,140,140,110,190,170,110,100,100,120,130,90,90]
     colgroup="<colgroup>"+"".join(f'<col style="width:{w}px;min-width:{w}px;max-width:{w}px">' for w in widths)+"</colgroup>"
-    return _filter_form(q,location,category,transaction,status,assigned,limit)+f'<div class="dbtools"><b>Table</b><button type="button" onclick="dbCompact()">Compact</button><button type="button" onclick="dbZoom(-1)">−</button><button type="button" onclick="dbZoom(1)">+</button><button type="button" onclick="dbZoomReset()">Reset</button></div><div class="tablebox"><table>{colgroup}<thead><tr>{"".join("<th>"+x+"</th>" for x in H)}</tr></thead><tbody>{"".join(trs) if trs else "<tr><td colspan=19>No records found</td></tr>"}</tbody></table></div>'
+    return _filter_form(q,location,category,transaction,status,assigned,limit)+f'<div class="dbtools"><b>Table</b><button type="button" onclick="dbCompact()">Compact</button><button type="button" onclick="dbZoom(-1)">−</button><button type="button" onclick="dbZoom(1)">+</button><button type="button" onclick="dbZoomReset()">Reset</button></div><div class="tablebox"><table>{colgroup}<thead><tr>{"".join("<th>"+x+"</th>" for x in H)}</tr></thead><tbody>{"".join(trs) if trs else "<tr><td colspan=21>No records found</td></tr>"}</tbody></table></div>'
 
 def _requirement_table(e,source,q,location,category,transaction,status,assigned,limit):
     rows=_requirement_rows(e,source,q,location,category,transaction,status,assigned,limit)
@@ -559,7 +590,7 @@ def register(core, served_app=None):
                 checks["master_filter_contract_present"]=True
 
             # Renderer contract: same projection keys for every property source.
-            expected={"id","location","description","category","type","area","floor","transaction","amount","contact_name","contact_no","date","status","assigned_to","source","source_only"}
+            expected={"id","location","description","category","type","area","floor","transaction","amount","contact_name","contact_no","date","status","assigned_to","source","google_pin","media","source_only"}
             checks["single_projection_schema"]=set(_canonical_property_projection({
                 "canonical_id":"AUDIT","locality":"Saket","transaction_type":"LEASE","created_at":None,
                 "verification_status":"UNVERIFIED","availability_status":"UNKNOWN","assigned_to":"",
@@ -600,6 +631,41 @@ def register(core, served_app=None):
         <a class="btn good" href="/magazine-capture">+ Upload Magazine</a>
         <a class="btn good" href="/whatsapp-live">Open WhatsApp Live</a></div>"""
         return HTMLResponse(_shell("5 Property Databases",actions+f'<div class="grid">{cards}</div>'))
+
+    @app.get("/alliance/final/database/media/{pc}",response_class=HTMLResponse)
+    def manual_media_gallery(pc:str,req:Request):
+        _login(core,req)
+        with e.connect() as cx:
+            exists=cx.execute(text("SELECT to_regclass('public.pi_operational_property_media')")).scalar()
+            if not exists:return HTMLResponse(_shell("Property Media","<div class='card'>No media table found.</div>"))
+            rows=cx.execute(text("""SELECT media_type,filename,mime_type,file_size,created_at
+                FROM pi_operational_property_media WHERE property_code=:pc
+                ORDER BY created_at,id"""),{"pc":pc}).mappings().all()
+        cards=[]
+        for r in rows:
+            typ=str(r.get("media_type") or "FILE").upper(); fn=str(r.get("filename") or "file")
+            href=f'/alliance/final/database/media/{quote(pc,safe="")}/file?name={quote(fn,safe="")}&type={quote(typ,safe="")}'
+            if typ=="IMAGE":
+                body=f'<img src="{href}" style="max-width:260px;max-height:180px;object-fit:contain;display:block;margin-bottom:6px">'
+            elif typ=="VIDEO":
+                body=f'<video controls preload="metadata" src="{href}" style="max-width:320px;max-height:220px;display:block;margin-bottom:6px"></video>'
+            else:
+                body=""
+            cards.append(f'<div class="dbcard"><b>{_e(typ)}</b><br>{body}<a class="btn light" target="_blank" href="{href}">{_e(fn)}</a></div>')
+        body=f'<div class="card"><b>Property:</b> {_e(pc)} · <b>Files:</b> {len(rows)}</div><div class="grid">{"".join(cards) if cards else "<div class=card>No media saved.</div>"}</div>'
+        return HTMLResponse(_shell("Manual Property Media",body))
+
+    @app.get("/alliance/final/database/media/{pc}/file")
+    def manual_media_file(pc:str,req:Request,name:str=Query(...),type:str=Query("")):
+        _login(core,req)
+        with e.connect() as cx:
+            r=cx.execute(text("""SELECT content,mime_type,filename FROM pi_operational_property_media
+                WHERE property_code=:pc AND filename=:fn
+                  AND (:typ='' OR UPPER(COALESCE(media_type,''))=UPPER(:typ))
+                ORDER BY created_at DESC LIMIT 1"""),{"pc":pc,"fn":name,"typ":type}).mappings().first()
+        if not r:return Response(status_code=404)
+        return Response(content=bytes(r["content"]),media_type=str(r.get("mime_type") or "application/octet-stream"),
+                        headers={"Content-Disposition":f'inline; filename="{str(r.get("filename") or "file").replace(chr(34),"")}"'})
 
     @app.get("/alliance/final/database/{source}")
     def db(req:Request,source:str,q:str=Query(""),location:str=Query(""),category:str=Query(""),transaction:str=Query(""),status:str=Query(""),assigned:str=Query(""),limit:int=Query(500,ge=1,le=1500)):
