@@ -4,11 +4,11 @@ This router exposes genuine WhatsApp Live property evidence for the V2
 cleaning/review experiment. It never writes to the V1 WhatsApp database.
 """
 import os
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Header
 from sqlalchemy import create_engine, text
 
 router = APIRouter(prefix="/whatsapp-v2-export", tags=["WhatsApp V2 Read Only"])
-WA_DATABASE_URL = os.getenv("WHATSAPP_DATABASE_URL", "").strip()
+WA_DATABASE_URL = os.getenv("WHATSAPP_DATABASE_URL", "").strip()\nEXPORT_TOKEN = os.getenv("WHATSAPP_V2_EXPORT_TOKEN", "").strip()
 
 def _db_url(url: str) -> str:
     if url.startswith("postgres://"):
