@@ -2422,6 +2422,27 @@ class HealthFirstDispatcher:
             await response(scope, receive, send)
             return
 
+        # PRIMARY DASHBOARD AUTHORITY GUARD
+        # Force /alliance/primary to the early canonical dashboard authority.
+        # Data, requirement and matcher authorities remain unchanged.
+        if path == "/alliance/primary" and CORE_APP is not None:
+            routes = list(getattr(getattr(CORE_APP, "router", None), "routes", []) or [])
+            chosen = None
+            for route in routes:
+                methods = set(getattr(route, "methods", set()) or set())
+                endpoint = getattr(route, "endpoint", None)
+                if (
+                    getattr(route, "path", None) == "/alliance/primary"
+                    and "GET" in methods
+                    and getattr(endpoint, "__module__", "") == "alliance_dashboard_authority_v1"
+                    and getattr(endpoint, "__name__", "") == "canonical_dashboard_home"
+                ):
+                    chosen = route
+                    break
+            if chosen is not None:
+                await chosen.handle(scope, receive, send)
+                return
+
         # ALLIANCE_ISOLATED_REQUIREMENT_DISPATCH_V2
         # Preserve the original ASGI scope and pi_session cookie. Match the
         # settled requirement namespace even when an upstream proxy supplies a
