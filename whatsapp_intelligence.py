@@ -1823,3 +1823,57 @@ def health():
         return {"ok":True,"database":"connected","ai_enabled":bool(wa_client),"model":WA_GEMINI_MODEL if wa_client else None}
     except Exception as e:
         return JSONResponse({"ok":False,"database":"error","detail":str(e)},status_code=503)
+
+
+# Alliance V2 historical recovery bridge.
+# READ ONLY by design: this route performs SELECT queries only.
+@router.get("/v2-recovery/export")
+def v2_recovery_export(request: Request, after_id: int = 0, limit: int = 500):
+    require_wa_db()
+    token=os.getenv("V2_RECOVERY_TOKEN","").strip()
+    supplied=request.headers.get("X-Alliance-Recovery-Token","").strip()
+    if not token or supplied != token:
+        raise HTTPException(401,"Unauthorized")
+    limit=max(1,min(int(limit),1000))
+    with wa_engine.connect() as c:
+        counts={}
+        for name in ("wa_messages","wa_properties","wa_requirements","wa_contacts","wa_review_queue","wa_rejected"):
+            try:
+                counts[name]=int(c.execute(text(f"SELECT COUNT(*) FROM {name}")).scalar() or 0)
+            except Exception:
+                counts[name]=None
+        rows=c.execute(text("""
+          SELECT id,message_id,source_id,message_timestamp,sender_name,sender_phone,
+                 raw_text,classification,confidence,rejection_reason,processing_status,created_at
+          FROM wa_messages
+          WHERE id>:after_id ORDER BY id ASC LIMIT :limit
+        """),{"after_id":after_id,"limit":limit}).mappings().all()
+        source_ids=list({str(r["source_id"]) for r in rows if r.get("source_id")})
+        sources={}
+        if source_ids:
+            sr=c.execute(text("""
+              SELECT source_id,source_name,original_filename,group_name,created_at,processed_at
+              FROM wa_sources WHERE source_id::text = ANY(:ids)
+            """),{"ids":source_ids}).mappings().all()
+            sources={str(x["source_id"]):dict(x) for x in sr}
+    out=[]
+    for r in rows:
+        d=dict(r); sid=str(d.get("source_id") or "")
+        d["message_id"]=str(d.get("message_id") or "")
+        d["source_id"]=sid
+        d["source"]=sources.get(sid,{})
+        for k,v in list(d.items()):
+            if hasattr(v,"isoformat"): d[k]=v.isoformat()
+        for k,v in list(d["source"].items()):
+            if hasattr(v,"isoformat"): d["source"][k]=v.isoformat()
+        out.append(d)
+    return JSONResponse({
+      "mode":"READ_ONLY",
+      "source":"Alliance V1 WhatsApp",
+      "counts":counts,
+      "after_id":after_id,
+      "returned":len(out),
+      "next_after_id":out[-1]["id"] if out else after_id,
+      "has_more":len(out)==limit,
+      "messages":out
+    })
