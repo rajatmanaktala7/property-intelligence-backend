@@ -1,5 +1,6 @@
 import os, re, io, csv, json, hashlib, uuid
 from datetime import datetime, timezone
+from decimal import Decimal
 from difflib import SequenceMatcher
 from typing import Optional
 from urllib.parse import quote_plus
@@ -1864,8 +1865,12 @@ def v2_recovery_export(request: Request, after_id: int = 0, limit: int = 500):
         d["source"]=sources.get(sid,{})
         for k,v in list(d.items()):
             if hasattr(v,"isoformat"): d[k]=v.isoformat()
+            elif isinstance(v, Decimal): d[k]=float(v)
+            elif isinstance(v, uuid.UUID): d[k]=str(v)
         for k,v in list(d["source"].items()):
             if hasattr(v,"isoformat"): d["source"][k]=v.isoformat()
+            elif isinstance(v, Decimal): d["source"][k]=float(v)
+            elif isinstance(v, uuid.UUID): d["source"][k]=str(v)
         out.append(d)
     return JSONResponse({
       "mode":"READ_ONLY",
