@@ -2426,8 +2426,15 @@ class HealthFirstDispatcher:
         # Force /alliance/primary to the early canonical dashboard authority.
         # Data, requirement and matcher authorities remain unchanged.
         if path == "/alliance/primary" and CORE_APP is not None:
+            # Re-register the canonical authority at request time. Its register()
+            # function removes every competing GET owner before adding itself,
+            # so late legacy dashboard registrars cannot win after boot.
+            try:
+                import alliance_dashboard_authority_v1 as canonical_dashboard_v1
+                canonical_dashboard_v1.register(wrapped.core)
+            except Exception as exc:
+                print("[primary-dashboard-authority-guard] warning:", type(exc).__name__, str(exc))
             routes = list(getattr(getattr(CORE_APP, "router", None), "routes", []) or [])
-            chosen = None
             for route in routes:
                 methods = set(getattr(route, "methods", set()) or set())
                 endpoint = getattr(route, "endpoint", None)
@@ -2437,11 +2444,8 @@ class HealthFirstDispatcher:
                     and getattr(endpoint, "__module__", "") == "alliance_dashboard_authority_v1"
                     and getattr(endpoint, "__name__", "") == "canonical_dashboard_home"
                 ):
-                    chosen = route
-                    break
-            if chosen is not None:
-                await chosen.handle(scope, receive, send)
-                return
+                    await route.handle(scope, receive, send)
+                    return
 
         # ALLIANCE_ISOLATED_REQUIREMENT_DISPATCH_V2
         # Preserve the original ASGI scope and pi_session cookie. Match the
