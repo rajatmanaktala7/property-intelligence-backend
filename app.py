@@ -17284,3 +17284,86 @@ except Exception as _v730_exc:
 # Property and requirement details now surface original source and WhatsApp evidence.
 
 # ALLIANCE_APP_RECTIFIER_V402
+
+# V2 FREE PUBLIC MARKETING SEARCH PROXY
+# Uses the existing LangSearch free plan; Jina Reader is called anonymously,
+# so the V1 stored Jina key is never used and cannot incur token charges here.
+@app.post("/api/internal/v2/marketing-search")
+def v2_marketing_search_proxy(payload: dict, request: Request):
+    expected = _v179_key("V2_PROVIDER_PROXY_TOKEN")
+    auth = (request.headers.get("Authorization") or "").strip()
+    supplied = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
+    if not expected:
+        return JSONResponse(status_code=503, content={"error": "provider_proxy_not_configured"})
+    if not supplied or not hmac.compare_digest(supplied, expected):
+        return JSONResponse(status_code=401, content={"error": "provider_proxy_authentication_required"})
+
+    import hashlib as _v2_hashlib
+    from urllib.parse import urlparse as _v2_urlparse
+    category = str(payload.get("category") or "GENERAL").strip().upper()
+    if category not in ("RETAIL", "HOSPITALITY", "GENERAL"):
+        return JSONResponse(status_code=400, content={"error": "invalid_category"})
+    term = str(payload.get("query") or "").strip()[:180]
+    location = str(payload.get("location") or "").strip()[:120]
+    try:
+        limit = max(1, min(int(payload.get("limit") or 5), 10))
+    except (TypeError, ValueError):
+        limit = 5
+    if not term:
+        return JSONResponse(status_code=400, content={"error": "query_required"})
+
+    query = " ".join(part for part in (term, location, "India public business contact phone number") if part)
+    try:
+        results = _v179_search_lang(query, max(5, limit))
+    except Exception:
+        return JSONResponse(status_code=502, content={"error": "langsearch_unavailable"})
+
+    items = []
+    anonymous_reader_used = False
+    for result in results or []:
+        title = str(result.get("title") or "").strip()[:220]
+        url = str(result.get("link") or "").strip()
+        parsed = _v2_urlparse(url)
+        if parsed.scheme not in ("http", "https") or not parsed.netloc:
+            continue
+        snippet = str(result.get("snippet") or "").strip()
+        phones, emails = _extract_public_contacts(title + " " + snippet)
+        page_text = ""
+        if not phones and not anonymous_reader_used:
+            anonymous_reader_used = True
+            try:
+                # Anonymous Jina Reader basic access is free; no stored paid-key header is sent.
+                response = _v179_httpx().get("https://r.jina.ai/" + url, timeout=12.0)
+                if response.status_code < 400:
+                    page_text = (response.text or "")[:50000]
+                    p2, e2 = _extract_public_contacts(page_text)
+                    phones.extend(x for x in p2 if x not in phones)
+                    emails.extend(x for x in e2 if x not in emails)
+            except Exception:
+                pass
+        if not phones:
+            continue
+        name = title or parsed.netloc
+        items.append({
+            "place_id": "lang:" + _v2_hashlib.sha256(url.encode("utf-8")).hexdigest()[:28],
+            "name": name,
+            "address": "",
+            "phone": phones[0],
+            "website": url,
+            "source_url": url,
+            "source_title": title or name,
+            "source_excerpt": (snippet or page_text[:600])[:600],
+            "email": emails[0] if emails else "",
+            "types": [],
+            "primary_type": category.lower(),
+            "primary_type_label": category.title(),
+            "provider": "V1_LANGSEARCH_JINA_FREE"
+        })
+        if len(items) >= limit:
+            break
+    return JSONResponse(content={
+        "provider": "V1_LANGSEARCH_JINA_FREE",
+        "category": category,
+        "items": items,
+        "results": len(items)
+    })
