@@ -17387,3 +17387,23 @@ def v2_marketing_contacts_archive_proxy(request: Request, limit: int = Query(100
             ORDER BY created_at DESC LIMIT :n"""), {"n": limit}).fetchall()
     return JSONResponse(content={"provider":"V1_STORED_GOOGLE_PLACES","items":_json_rows(rows),"results":len(rows)})
 
+@app.get("/api/internal/v2/marketing-contacts")
+def v2_marketing_contacts_archive_proxy(request: Request, limit: int = Query(1000, ge=1, le=1000)):
+    """Read previously saved V1 Google Places hospitality contacts for the authenticated V2 service."""
+    expected = _v179_key("V2_PROVIDER_PROXY_TOKEN")
+    auth = (request.headers.get("Authorization") or "").strip()
+    supplied = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
+    if not expected:
+        return JSONResponse(status_code=503, content={"error": "provider_proxy_not_configured"})
+    if not supplied or not hmac.compare_digest(supplied, expected):
+        return JSONResponse(status_code=401, content={"error": "provider_proxy_authentication_required"})
+    with engine.connect() as c:
+        rows = c.execute(text("""SELECT business_type,brand_name,contact_name,phone,email,website,location,city,
+            source_name,source_url,consent_status,verification_status,created_at
+            FROM ai_marketing_contacts
+            WHERE nullif(trim(coalesce(phone,'')),'') IS NOT NULL
+              AND lower(coalesce(source_name,'')) LIKE '%google%'
+              AND lower(coalesce(business_type,'')) ~ '(restaurant|cafe|lounge|club|bar|banquet|hotel|guest|wedding|farmhouse)'
+            ORDER BY created_at DESC LIMIT :n"""), {"n": limit}).fetchall()
+    return JSONResponse(content={"provider":"V1_STORED_GOOGLE_PLACES","items":_json_rows(rows),"results":len(rows)})
+
