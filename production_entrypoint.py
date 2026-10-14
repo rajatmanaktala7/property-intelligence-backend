@@ -1385,6 +1385,17 @@ def _load_core():
             stabilization["hospitality_auto_v12425"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","fail_safe":True}
             print("[hospitality-auto-v12425] warning:",type(exc).__name__,str(exc))
 
+        # ALLIANCE_MAPS_CONTACT_LOOP_V1
+        try:
+            import alliance_maps_contact_loop_v1 as maps_loop_v1
+            stabilization = dict(stabilization or {})
+            stabilization["maps_contact_loop_v1"] = maps_loop_v1.register(wrapped.core)
+            print("[maps-contact-loop-v1]", stabilization["maps_contact_loop_v1"])
+        except Exception as exc:
+            stabilization = dict(stabilization or {})
+            stabilization["maps_contact_loop_v1"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","fail_safe":True}
+            print("[maps-contact-loop-v1] warning:",type(exc).__name__,str(exc))
+
         # ALLIANCE_TEAM_WORKFLOW_REPAIR_V12424
         try:
             import alliance_team_workflow_repair_v12424 as workflow_v12424
