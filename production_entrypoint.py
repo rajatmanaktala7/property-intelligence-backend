@@ -27,6 +27,7 @@ CORE_APP = None
 REQUIREMENT_APP = None
 DATABASE_APP = None
 MATCHER_APP = None
+TEAM_APP = None
 
 LATE_REGISTRATION = {
     "v383": {"status": "NOT_RUN", "error": None},
@@ -441,7 +442,7 @@ def _late_register_intelligence(wrapped):
     }
 
 def _load_core():
-    global CORE_APP, REQUIREMENT_APP, DATABASE_APP, MATCHER_APP
+    global CORE_APP, REQUIREMENT_APP, DATABASE_APP, MATCHER_APP, TEAM_APP
 
     BOOT["state"] = "LOADING_CORE"
 
@@ -572,6 +573,22 @@ def _load_core():
             }
             BOOT["completed_at"] = _utcnow()
             print("[critical-workspace] READY: dashboard + requirements + database + matcher")
+
+        # ALLIANCE_TEAM_PANEL_V1
+        # Separate daily-task panel for the sales team at /team-panel. Served
+        # from its own isolated app (like the matcher/database authorities), so
+        # legacy route ordering cannot touch it and it cannot touch them.
+        # Writes only to tp_* tables. Fail-safe: never blocks boot.
+        try:
+            BOOT["early_stage"]="TEAM_PANEL"
+            import alliance_team_panel_v1 as team_panel_v1
+            isolated_team_app = FastAPI(title="Alliance Team Panel", docs_url=None, redoc_url=None, openapi_url=None)
+            BOOT["team_panel_v1"] = team_panel_v1.register(wrapped.core, isolated_team_app)
+            TEAM_APP = isolated_team_app
+            print("[team-panel-v1] READY", BOOT["team_panel_v1"])
+        except Exception as exc:
+            BOOT["team_panel_v1"] = {"status":"ERROR","error":f"{type(exc).__name__}: {exc}","fail_safe":True}
+            print("[team-panel-v1] warning:", type(exc).__name__, str(exc))
 
         import alliance_production_surface as production_surface
         stabilization = production_surface.register(wrapped)
@@ -2501,6 +2518,11 @@ class HealthFirstDispatcher:
             and MATCHER_APP is not None
         ):
             await MATCHER_APP(scope, receive, send)
+            return
+
+        # ALLIANCE_TEAM_PANEL_V1 DISPATCH
+        if (path == "/team-panel" or path.startswith("/team-panel/")) and TEAM_APP is not None:
+            await TEAM_APP(scope, receive, send)
             return
 
         await self._serve_core(scope, receive, send)
